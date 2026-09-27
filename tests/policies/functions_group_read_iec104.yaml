@@ -1,0 +1,21 @@
+# Exercises the reserved 'read' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for IEC 104. 'functions: [read]' expands at parse time to
+# every Read-classified ASDU short name (iec104_read_asdu_short_names(), see iec104.hpp/.cpp) --
+# this includes the three Monitor-direction-like read-TRIGGER exceptions in Control direction,
+# C_IC_NA_1/C_CI_NA_1/C_RD_NA_1, alongside every M_* monitor-direction type (see the
+# Iec104FunctionAccess comment in iec104.cpp). Against tests/sample_iec104_modbus_precedence.pcap,
+# whose one flow carries only a single C_IC_NA_1 (Interrogation command) ASDU, this must report
+# Result: COMPLIANT (matched conduit).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "iec104 reads only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [iec104]
+    ports: [2404]
+    functions: [read]

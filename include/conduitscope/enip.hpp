@@ -290,6 +290,16 @@ std::string cip_service_name(uint8_t base, bool have_path, bool is_symbolic, boo
 // but not alphabetized.
 std::vector<std::string> enip_known_cip_service_names();
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): the subset
+// of enip_known_cip_service_names() this decoder classifies as a data READ (or, for the second
+// function, a data WRITE) -- see enip.cpp's own EnipFunctionAccess comment for the full
+// classification (connection-management services like Forward_Open, the bundling
+// Multiple_Service_Packet, and the two reply-side-ambiguous names all land in neither list). Used
+// by policy.cpp to expand an enip-restricted conduit's 'functions: [read]'/'[write]' reserved group
+// keyword into this decoder's own concrete CIP service names.
+std::vector<std::string> enip_read_cip_service_names();
+std::vector<std::string> enip_write_cip_service_names();
+
 // Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
 // EtherNet/IP TCP call site dual-writes into DecodedPacket, gathered from however many
 // encapsulation messages were coalesced in one TCP payload (see EnipTcpDecoder::decode below) --

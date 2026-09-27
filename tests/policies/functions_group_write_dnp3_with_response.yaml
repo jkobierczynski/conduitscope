@@ -1,0 +1,21 @@
+# Demonstrates the recommended combined usage for DNP3's 'write' group keyword: 'functions:
+# [write, "Response"]' -- the group keyword expanded PLUS an explicit literal covering the
+# Response frame that every real bidirectional exchange carries (see functions_group_write_dnp3.yaml
+# for the bare-keyword caveat this fixes). Against tests/sample_dnp3.pcap: client port 51501
+# carries only "Direct Operate" and remains ALLOWED; client port 51500 carries "Read", "Response",
+# and "Direct Operate" -- with "Response" now explicitly permitted, this must report a Violation
+# naming ONLY "Read" as the disallowed function observed (both "Response" and "Direct Operate" are
+# now permitted there).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "dnp3 writes plus response via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [dnp3]
+    ports: [20000]
+    functions: [write, "Response"]

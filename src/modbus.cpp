@@ -43,29 +43,59 @@ enum FunctionCode : uint8_t {
     FC_ENCAPSULATED_INTERFACE_TRANSPORT = 0x2B,
 };
 
-std::string function_name(uint8_t fc) {
-    switch (fc) {
-        case FC_READ_COILS: return "Read Coils";
-        case FC_READ_DISCRETE_INPUTS: return "Read Discrete Inputs";
-        case FC_READ_HOLDING_REGISTERS: return "Read Holding Registers";
-        case FC_READ_INPUT_REGISTERS: return "Read Input Registers";
-        case FC_WRITE_SINGLE_COIL: return "Write Single Coil";
-        case FC_WRITE_SINGLE_REGISTER: return "Write Single Register";
-        case FC_READ_EXCEPTION_STATUS: return "Read Exception Status";
-        case FC_DIAGNOSTICS: return "Diagnostics";
-        case FC_WRITE_MULTIPLE_COILS: return "Write Multiple Coils";
-        case FC_WRITE_MULTIPLE_REGISTERS: return "Write Multiple Registers";
-        case FC_REPORT_SERVER_ID: return "Report Server ID";
-        case FC_MASK_WRITE_REGISTER: return "Mask Write Register";
-        case FC_READ_WRITE_MULTIPLE_REGISTERS: return "Read/Write Multiple Registers";
-        case FC_READ_FIFO_QUEUE: return "Read FIFO Queue";
-        case FC_ENCAPSULATED_INTERFACE_TRANSPORT: return "Encapsulated Interface Transport";
-        default: {
-            std::ostringstream out;
-            out << "Unknown (0x" << std::hex << static_cast<unsigned>(fc) << ")";
-            return out.str();
-        }
+// Read/Write/Other classification for docs/design/policy-engine-zoning.md's Phase 4 (operation-
+// level read/write direction): backs modbus_read_function_names()/modbus_write_function_names(),
+// which Policy::parse_policy_text expands a conduit's 'functions: [read]'/'[write]' group keyword
+// into (see policy.cpp). Other means "genuinely not a clean read or write, or no data-plane effect
+// at all" -- deliberately left out of BOTH groups so a functions:-restricted conduit never silently
+// permits or forbids it via the keyword shortcut; it can still be permitted by naming it literally.
+// Diagnostics (0x08) mixes read-only sub-functions (Return Query Data, read counters) with ones
+// that change device state (Restart Communications Option, Clear Counters, Force Listen Only Mode)
+// -- this decoder doesn't distinguish sub-functions (see this file's header comment), so the
+// function as a whole can't be honestly called either. Read/Write Multiple Registers (0x17) is
+// Other for the same reason at the message level: it reads one register range and writes a
+// SEPARATE one in the same request, so "this flow only reads" or "this flow only writes" is neither
+// true nor false for it. Mask Write Register (0x16) stays Write despite its own read-modify-write
+// implementation: unlike 0x17, the read and write halves target the exact same register, so the
+// net, policy-relevant effect is a single write.
+enum class ModbusFunctionAccess { Read, Write, Other };
+
+struct ModbusFunctionEntry {
+    uint8_t code;
+    const char* name;
+    ModbusFunctionAccess access;
+};
+
+constexpr ModbusFunctionEntry kModbusFunctions[] = {
+    {FC_READ_COILS, "Read Coils", ModbusFunctionAccess::Read},
+    {FC_READ_DISCRETE_INPUTS, "Read Discrete Inputs", ModbusFunctionAccess::Read},
+    {FC_READ_HOLDING_REGISTERS, "Read Holding Registers", ModbusFunctionAccess::Read},
+    {FC_READ_INPUT_REGISTERS, "Read Input Registers", ModbusFunctionAccess::Read},
+    {FC_WRITE_SINGLE_COIL, "Write Single Coil", ModbusFunctionAccess::Write},
+    {FC_WRITE_SINGLE_REGISTER, "Write Single Register", ModbusFunctionAccess::Write},
+    {FC_READ_EXCEPTION_STATUS, "Read Exception Status", ModbusFunctionAccess::Read},
+    {FC_DIAGNOSTICS, "Diagnostics", ModbusFunctionAccess::Other},
+    {FC_WRITE_MULTIPLE_COILS, "Write Multiple Coils", ModbusFunctionAccess::Write},
+    {FC_WRITE_MULTIPLE_REGISTERS, "Write Multiple Registers", ModbusFunctionAccess::Write},
+    {FC_REPORT_SERVER_ID, "Report Server ID", ModbusFunctionAccess::Read},
+    {FC_MASK_WRITE_REGISTER, "Mask Write Register", ModbusFunctionAccess::Write},
+    {FC_READ_WRITE_MULTIPLE_REGISTERS, "Read/Write Multiple Registers", ModbusFunctionAccess::Other},
+    {FC_READ_FIFO_QUEUE, "Read FIFO Queue", ModbusFunctionAccess::Read},
+    {FC_ENCAPSULATED_INTERFACE_TRANSPORT, "Encapsulated Interface Transport", ModbusFunctionAccess::Read},
+};
+
+const ModbusFunctionEntry* find_modbus_function(uint8_t fc) {
+    for (const auto& entry : kModbusFunctions) {
+        if (entry.code == fc) return &entry;
     }
+    return nullptr;
+}
+
+std::string function_name(uint8_t fc) {
+    if (const auto* entry = find_modbus_function(fc)) return entry->name;
+    std::ostringstream out;
+    out << "Unknown (0x" << std::hex << static_cast<unsigned>(fc) << ")";
+    return out.str();
 }
 
 // Decodes the two-register-field "read" family (coils/discrete inputs/holding/input
@@ -176,14 +206,34 @@ void decode_write_multiple(ModbusFrame& frame, ByteSpan data, const char* unit_n
 }  // namespace
 
 std::vector<std::string> modbus_known_function_names() {
-    // Calls the same function_name(fc) switch above for every possible byte value and keeps only
-    // the ones that resolved to a real name rather than the dynamic "Unknown (0x.." fallback --
-    // see modbus.hpp's own comment on this function for why this reuses function_name() instead of
-    // a second, separately-maintained list of names.
+    // Reads straight from kModbusFunctions now (see this file's own header comment on that table) --
+    // previously iterated function_name(fc) over every possible byte value and kept the non-
+    // "Unknown (0x.." results, which worked but meant "every known code" was only implicit in what
+    // the switch happened to handle. The table makes it explicit, and is also what backs
+    // modbus_read_function_names()/modbus_write_function_names() below (Phase 4).
     std::vector<std::string> out;
-    for (int fc = 0; fc <= 0xFF; ++fc) {
-        std::string name = function_name(static_cast<uint8_t>(fc));
-        if (name.rfind("Unknown (0x", 0) != 0) out.push_back(std::move(name));
+    out.reserve(sizeof(kModbusFunctions) / sizeof(kModbusFunctions[0]));
+    for (const auto& entry : kModbusFunctions) out.push_back(entry.name);
+    return out;
+}
+
+// docs/design/policy-engine-zoning.md's Phase 4: the subset of modbus_known_function_names() this
+// decoder classifies as Read (or Write) -- see kModbusFunctions' own access field and this file's
+// header comment on ModbusFunctionAccess for exactly which functions land in neither group and why.
+// Used by policy.cpp to expand a modbus-restricted conduit's 'functions: [read]'/'[write]' group
+// keyword; order matches kModbusFunctions' own declaration order.
+std::vector<std::string> modbus_read_function_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kModbusFunctions) {
+        if (entry.access == ModbusFunctionAccess::Read) out.push_back(entry.name);
+    }
+    return out;
+}
+
+std::vector<std::string> modbus_write_function_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kModbusFunctions) {
+        if (entry.access == ModbusFunctionAccess::Write) out.push_back(entry.name);
     }
     return out;
 }

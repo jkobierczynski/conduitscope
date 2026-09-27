@@ -98,6 +98,29 @@ std::vector<std::string> known_function_names_for(const std::string& protocol) {
     return {};
 }
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): the
+// per-protocol Read/Write group-keyword expansions for a conduit's 'functions: [read]'/'[write]'
+// entries (see parse_policy_text's own handling below) -- one pair of sibling functions to
+// known_function_names_for's own dispatch above, same five protocols, same reasoning for why this
+// is a per-protocol table rather than one shared list.
+std::vector<std::string> read_function_names_for(const std::string& protocol) {
+    if (protocol == "modbus") return modbus_read_function_names();
+    if (protocol == "dnp3") return dnp3_read_function_names();
+    if (protocol == "s7comm") return s7comm_read_function_names();
+    if (protocol == "iec104") return iec104_read_asdu_short_names();
+    if (protocol == "enip") return enip_read_cip_service_names();
+    return {};
+}
+
+std::vector<std::string> write_function_names_for(const std::string& protocol) {
+    if (protocol == "modbus") return modbus_write_function_names();
+    if (protocol == "dnp3") return dnp3_write_function_names();
+    if (protocol == "s7comm") return s7comm_write_function_names();
+    if (protocol == "iec104") return iec104_write_asdu_short_names();
+    if (protocol == "enip") return enip_write_cip_service_names();
+    return {};
+}
+
 // True for exactly the five protocols known_function_names_for above returns a non-empty table
 // for -- used to give 'functions' on any other protocol (including the six 'protocols' was more
 // recently widened to accept -- see parse_policy_text's own validation loop) a clear, specific
@@ -620,7 +643,43 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                              "without 'functions' for now");
                 }
                 std::vector<std::string> known = known_function_names_for(proto);
+                auto add_function_once = [&](const std::string& name) {
+                    if (std::find(c.functions.begin(), c.functions.end(), name) == c.functions.end()) {
+                        c.functions.push_back(name);
+                    }
+                };
                 for (const auto& f : func_list) {
+                    // Reserved group keywords, case-insensitive (docs/design/policy-engine-zoning.md's
+                    // Phase 4): 'read'/'write' expand into that protocol's own read/write-classified
+                    // function names (see *_read_function_names/*_write_function_names above),
+                    // combinable in the same list with literal function names ('functions: [read,
+                    // "Diagnostics"]'). These take priority over a literal match -- DNP3 happens to
+                    // have its own literal function codes named "Read"/"Write" (0x01/0x02), and the
+                    // reserved keyword wins that collision rather than the literal name, so
+                    // 'functions: [read]' on a dnp3 conduit means "every DNP3 function this decoder
+                    // classifies as a read" (Read + Get File Info), not just the one literal function
+                    // called "Read" -- see dnp3.hpp's own comment on dnp3_read_function_names for this
+                    // specific, accepted trade-off, and docs/USER_GUIDE.md for the user-facing callout.
+                    if (equal_ci(f.text, "read") || equal_ci(f.text, "write")) {
+                        bool is_read = equal_ci(f.text, "read");
+                        std::vector<std::string> group =
+                            is_read ? read_function_names_for(proto) : write_function_names_for(proto);
+                        // Defensive, not reachable for today's five protocols (each has at least one
+                        // Read- and one Write-classified function) -- but 'functions:' empty means
+                        // UNRESTRICTED (see Conduit::functions' own comment), so a keyword that
+                        // silently expanded to nothing would leave a 'functions: [read]' conduit
+                        // wide open instead of read-only, exactly backwards from what the policy
+                        // author wrote. Fail loudly instead of letting that happen silently.
+                        if (group.empty()) {
+                            fail(source_name, f.line,
+                                 "conduit '" + c.name + "': '" + f.text + "' matches no known " + proto +
+                                     " function -- this would leave the conduit unrestricted instead "
+                                     "of " + (is_read ? "read-only" : "write-only") +
+                                     ", so it's rejected rather than silently doing that");
+                        }
+                        for (const auto& name : group) add_function_once(name);
+                        continue;
+                    }
                     const std::string* canonical = nullptr;
                     for (const auto& k : known) {
                         if (equal_ci(k, f.text)) {
@@ -635,7 +694,7 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                         if (!suggestion.empty()) msg += " -- did you mean '" + suggestion + "'?";
                         fail(source_name, f.line, msg);
                     }
-                    c.functions.push_back(*canonical);
+                    add_function_once(*canonical);
                 }
             }
         }  // absent/empty 'functions'/'function' means "no restriction" -- c.functions stays empty

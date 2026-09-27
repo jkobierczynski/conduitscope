@@ -1,0 +1,23 @@
+# Exercises the reserved 'write' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for S7comm. 'functions: [write]' expands at parse time to
+# every Write-classified S7comm function name (s7comm_write_function_names(), see
+# s7comm.hpp/.cpp) -- "Write Var", the Download family (Request Download/Download Block/Download
+# Ended -- S7comm's "Download" means the engineering station sends a block TO the PLC, i.e. a
+# write, despite sounding read-like), and PLC Control/PLC Stop -- but NOT "Setup Communication"
+# (Other) or "Read Var"/the Upload family (Read). Against tests/sample_s7comm.pcap, whose one flow
+# carries "Setup Communication", "Read Var", AND "Write Var", this must report a Violation naming
+# "Read Var" and "Setup Communication" as the disallowed functions observed (Write Var, also
+# observed there, IS permitted).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "s7comm writes only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [s7comm]
+    ports: [102]
+    functions: [write]

@@ -24,27 +24,41 @@ std::string s7comm_rosctr_name(uint8_t rosctr) {
 
 namespace {
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): Other is
+// used for a function with no clean data-plane read/write effect, left out of BOTH
+// s7comm_read_function_names()/s7comm_write_function_names() so the 'functions: [read]'/'[write]'
+// group keyword never silently mispermits it -- it can still be named literally. "CPU services"
+// bundles several sub-services (diagnostics, block info, and more) this decoder doesn't
+// distinguish, so like Modbus's Diagnostics it can't be honestly called either. "Setup
+// Communication" is connection-parameter negotiation, not a data operation. S7's own vocabulary is
+// inverted from what it sounds like: "Download" means the ENGINEERING STATION sends a block TO the
+// PLC (a program-block write -- one of the most security-relevant operations in this whole table),
+// while "Upload" means the PLC sends a block back OUT to the engineering station (a read of the
+// PLC's own program).
+enum class S7CommFunctionAccess { Read, Write, Other };
+
 // The single table backing both s7comm_function_name(uint8_t) and s7comm_known_function_names()
 // -- see s7comm.hpp's own comment on s7comm_known_function_names() for why this was refactored
 // out of a plain switch: one place ("code N means this name") asserts the mapping, not two.
 struct S7CommFunctionEntry {
     uint8_t code;
     const char* name;
+    S7CommFunctionAccess access;
 };
 
 constexpr S7CommFunctionEntry kS7CommFunctions[] = {
-    {0x00, "CPU services"},
-    {0x04, "Read Var"},
-    {0x05, "Write Var"},
-    {0x1A, "Request Download"},
-    {0x1B, "Download Block"},
-    {0x1C, "Download Ended"},
-    {0x1D, "Start Upload"},
-    {0x1E, "Upload"},
-    {0x1F, "End Upload"},
-    {0x28, "PLC Control"},
-    {0x29, "PLC Stop"},
-    {0xF0, "Setup Communication"},
+    {0x00, "CPU services", S7CommFunctionAccess::Other},
+    {0x04, "Read Var", S7CommFunctionAccess::Read},
+    {0x05, "Write Var", S7CommFunctionAccess::Write},
+    {0x1A, "Request Download", S7CommFunctionAccess::Write},
+    {0x1B, "Download Block", S7CommFunctionAccess::Write},
+    {0x1C, "Download Ended", S7CommFunctionAccess::Write},
+    {0x1D, "Start Upload", S7CommFunctionAccess::Read},
+    {0x1E, "Upload", S7CommFunctionAccess::Read},
+    {0x1F, "End Upload", S7CommFunctionAccess::Read},
+    {0x28, "PLC Control", S7CommFunctionAccess::Write},
+    {0x29, "PLC Stop", S7CommFunctionAccess::Write},
+    {0xF0, "Setup Communication", S7CommFunctionAccess::Other},
 };
 
 }  // namespace
@@ -62,6 +76,27 @@ std::vector<std::string> s7comm_known_function_names() {
     std::vector<std::string> out;
     out.reserve(sizeof(kS7CommFunctions) / sizeof(kS7CommFunctions[0]));
     for (const auto& entry : kS7CommFunctions) out.push_back(entry.name);
+    return out;
+}
+
+// docs/design/policy-engine-zoning.md's Phase 4: the subset of s7comm_known_function_names() this
+// decoder classifies as Read (or Write) -- see kS7CommFunctions' own access field and this file's
+// header comment on S7CommFunctionAccess for exactly which functions land in neither group and
+// why. Used by policy.cpp to expand an s7comm-restricted conduit's 'functions: [read]'/'[write]'
+// group keyword.
+std::vector<std::string> s7comm_read_function_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kS7CommFunctions) {
+        if (entry.access == S7CommFunctionAccess::Read) out.push_back(entry.name);
+    }
+    return out;
+}
+
+std::vector<std::string> s7comm_write_function_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kS7CommFunctions) {
+        if (entry.access == S7CommFunctionAccess::Write) out.push_back(entry.name);
+    }
     return out;
 }
 

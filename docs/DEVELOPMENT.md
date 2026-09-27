@@ -11045,14 +11045,15 @@ it done as its own patch.
     gating reuses the pre-existing `--resolve`/`--hosts` flags).
 
     Phase 3 (BACnet/IP + CIP I/O UDP flow evaluation) shipped next -- see
-    item 71 below. Phases 4-6 -- operation-level read/write function
-    classification (all five function-table protocols), source-MAC
-    restriction on VLAN conduits (GOOSE/SV/PROFINET-RT/EtherCAT publisher
-    restriction via `from_macs:`), and multi-homed assets/jump hosts as a
-    new optional `assets:` section -- remain approved and scoped in the
-    original plan but not yet implemented. QinQ zones remain explicitly
-    deferred pending the decoder-layer double-tag unwrap tracked under item
-    15's continuation, not part of this item.
+    item 71 below, and Phase 4 (operation-level read/write function
+    classification, all five function-table protocols) after that -- see
+    item 72 below. Phases 5-6 -- source-MAC restriction on VLAN conduits
+    (GOOSE/SV/PROFINET-RT/EtherCAT publisher restriction via `from_macs:`)
+    and multi-homed assets/jump hosts as a new optional `assets:` section --
+    remain approved and scoped in the original plan but not yet
+    implemented. QinQ zones remain explicitly deferred pending the
+    decoder-layer double-tag unwrap tracked under item 15's continuation,
+    not part of this item.
 
 71. **Policy engine: match how plants are zoned -- Grok gap #1, second
     increment (Phase 3: BACnet/IP + CIP I/O UDP flow evaluation).**
@@ -11142,6 +11143,111 @@ it done as its own patch.
     the policy-wide-not-per-protocol gating nuance and the CIP-I/O
     functions quirk). No new CLI flags were needed -- the opt-in lives
     entirely in the policy file's existing `protocols:` field.
+
+72. **Policy engine: match how plants are zoned -- Grok gap #1, third
+    increment (Phase 4: operation-level read/write direction).** Continues
+    items 70-71 above. Until now a conduit's `functions:` allow-list had to
+    spell out every permitted function/service name by hand -- workable, but
+    tedious and error-prone for the common case of "this conduit may only
+    read, never write" (or vice versa). This phase adds two reserved,
+    case-insensitive group keywords, `read` and `write`, that expand at
+    policy-load time into that protocol's full Read- or Write-classified
+    function/service name set, for all five function-table protocols
+    (modbus, dnp3, s7comm, iec104, enip) -- not just the two Grok's original
+    review named as examples.
+
+    **Classification.** Each protocol's known-function table (modbus.hpp/
+    .cpp, dnp3.hpp/.cpp, s7comm.hpp/.cpp, iec104.hpp/.cpp, enip.hpp/.cpp)
+    gained a parallel `{Read, Write, Other}` access classification per
+    entry, sourced from that protocol's own spec (this project's standard
+    sourcing convention) -- Modbus and DNP3 refactored from a plain
+    `switch`-based `function_name()` to a table-driven approach to carry it
+    (S7comm and IEC104's tables were already table-driven and just gained
+    an `access` field; ENIP got a separate name-keyed lookup table, since
+    `cip_service_name()`'s code-to-name mapping is context-dependent, not a
+    stable code->name relationship a code-keyed table could use). `Other`
+    covers any function that mixes read-and-write semantics (Modbus
+    Diagnostics, Read/Write Multiple Registers), has no data-plane effect of
+    its own (DNP3 Select, IEC104's C_CD_NA_1/C_TS_TA_1), or is connection/
+    protocol housekeeping (ENIP's Forward_Open/Forward_Close/
+    Large_Forward_Open/Unconnected_Send) -- deliberately excluded from BOTH
+    group keywords, so `write` can never silently permit something
+    ambiguous; an `Other` function remains permittable, but only by naming
+    it explicitly. Three borderline classification calls were put in front
+    of Jurgen for a sanity check before implementation (via `AskUserQuestion`)
+    rather than decided unilaterally, since a wrong Read/Write/Other call is
+    a compliance-correctness bug, not a style choice: DNP3 Select -> Other
+    (confirmed), IEC104's three read-trigger Control-direction commands
+    (C_IC_NA_1/C_CI_NA_1/C_RD_NA_1) -> Read despite the `C_` prefix
+    (confirmed), and EtherNet/IP connection-management services -> Other
+    (confirmed). A subtlety worth calling out explicitly: S7comm's
+    "Download" means the engineering station sends a block *to* the PLC
+    (Write -- one of the most security-relevant operations here, program
+    manipulation) and "Upload" means the PLC sends a block back *out*
+    (Read) -- the opposite of what the names might suggest at a glance.
+
+    **Parsing.** `parse_policy_text`'s `functions:`-parsing loop
+    (policy.cpp) now checks each entry against the reserved keywords
+    (case-insensitive exact match, via `read_function_names_for()`/
+    `write_function_names_for()` -- new dispatch functions mirroring the
+    pre-existing `known_function_names_for()`) *before* the literal-name
+    lookup, so the keyword always wins any naming collision. A new
+    `add_function_once` dedup guard ensures a literal name already covered
+    by the expanded group (or a repeated literal, or a repeated keyword)
+    never appears twice in `Conduit::functions`. A defensive fail-loudly
+    check rejects a keyword expansion that comes back empty (unreachable
+    today -- all five protocols have non-empty Read and Write sets -- but
+    guards against a future protocol silently turning a `functions: [read]`
+    conduit fully unrestricted, since an empty `functions` list means "no
+    restriction" everywhere else in the engine). A near-miss string that
+    merely resembles a keyword (e.g. `reads`) is not treated as one and
+    falls straight through to the ordinary unknown-function-name/typo-
+    suggestion handling, pinned by
+    `tests/policies/bad_functions_group_keyword_near_miss.yaml`.
+
+    **DNP3's literal-name collision.** DNP3's own function codes 0x01/0x02
+    are themselves literally named "Read"/"Write" -- colliding with the new
+    reserved keywords. Resolved by keyword-always-wins semantics: `functions:
+    [read]` on a DNP3 conduit always means the group expansion, never the
+    literal "Read" function code in isolation; there is no longer a way to
+    select DNP3's bare Read/Write function code alone via this field.
+    Confirmed safe against the entire pre-existing test suite (no fixture
+    relied on the old literal-only behavior for DNP3's bare "Read"/"Write").
+    Separately, and more practically: real bidirectional DNP3 exchanges
+    always carry a "Response" (or "Confirm") on the reply side, which is
+    Other-classified (a Response frame's payload can't say whether it
+    answered a read or a write) -- so a `read`/`write`-restricted DNP3
+    conduit typically also needs `"Response"` (and/or `"Confirm"`) named
+    explicitly alongside the keyword to avoid every real exchange violating
+    on that alone. Pinned by two fixtures side by side:
+    `tests/policies/functions_group_write_dnp3.yaml` (bare keyword, flags
+    the Response) and `functions_group_write_dnp3_with_response.yaml`
+    (`functions: [write, "Response"]`, doesn't).
+
+    **Testing.** 11 new CTest cases: one read/write pair each for Modbus,
+    IEC104, and S7comm (violation and COMPLIANT sides, reusing each
+    protocol's existing sample captures already confirmed pure-read or
+    mixed via `decode`), a read-only case for EtherNet/IP (ENIP uses the
+    identical service name on both request and response sides, unlike DNP3,
+    so a clean single-service flow reaches full COMPLIANT with just the bare
+    keyword), the DNP3 bare-keyword-vs-combined-with-literal pair above, a
+    parse-level JSON-shape test confirming combinability with a literal
+    plus the dedup guard (`functions: [write, "Diagnostics", "Write Single
+    Coil"]` parses to six entries, not seven), and the near-miss-keyword
+    bad path. Full CTest suite: 2023/2023 (default GCC build, zero
+    regressions against the prior 2012); ASan/UBSan, no-live-capture, and
+    MinGW-w64-cross-compile configs, plus a clean-room extract-rebuild-test,
+    all re-verified before delivery. `docs/USER_GUIDE.md` gained a new
+    "Reserved group keywords: `read` and `write`" subsection under
+    "Function-level restrictions" (full per-protocol classification
+    tables, the DNP3 collision/Response caveats, the near-miss behavior)
+    and two new "Validation errors" entries; `include/conduitscope/
+    policy.hpp`'s `Conduit::functions` and `parse_policy_text` doc comments
+    updated to match. No new CLI flags were needed -- the keywords live
+    entirely in the policy file's existing `functions:` field. Phases 5-6
+    (source-MAC restriction on VLAN conduits, multi-homed assets/jump
+    hosts) remain approved and scoped in the original plan but not yet
+    implemented.
 
 ### Protocols not covered at all
 

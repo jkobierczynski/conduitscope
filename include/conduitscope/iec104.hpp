@@ -196,6 +196,16 @@ std::string iec104_type_short_name(uint8_t type_id);
 // table's own declaration order) but not alphabetized.
 std::vector<std::string> iec104_known_asdu_short_names();
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): the subset
+// of iec104_known_asdu_short_names() this decoder classifies as a data READ (or, for the second
+// function, a data WRITE) -- see iec104.cpp's own Iec104FunctionAccess comment for the full
+// classification (the Monitor-direction "M_*" vs. Control-direction "C_*"/"P_*" split, and the
+// three C_* read-trigger exceptions) and which ASDU types land in neither list. Used by policy.cpp
+// to expand an iec104-restricted conduit's 'functions: [read]'/'[write]' reserved group keyword
+// into this decoder's own concrete ASDU short names.
+std::vector<std::string> iec104_read_asdu_short_names();
+std::vector<std::string> iec104_write_asdu_short_names();
+
 // Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
 // IEC 104 call site dual-writes into DecodedPacket, gathered from however many APDUs were
 // coalesced in one TCP payload (see Iec104Decoder::decode below) -- mirrors exactly what the

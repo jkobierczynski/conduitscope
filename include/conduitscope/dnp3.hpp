@@ -136,6 +136,16 @@ std::optional<Dnp3LinkFrame> try_parse_dnp3_link_layer(ByteSpan tcp_payload, std
 // Order is stable across calls (the table's own declaration order) but not alphabetized.
 std::vector<std::string> dnp3_known_function_names();
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): the subset
+// of dnp3_known_function_names() this decoder classifies as a data READ (or, for the second
+// function, a data WRITE) -- see dnp3.cpp's own Dnp3FunctionAccess comment for the full
+// classification, which functions land in neither list, and a specific naming collision this
+// creates (DNP3's own literal function codes 0x01/0x02 are themselves named "Read"/"Write"). Used
+// by policy.cpp to expand a dnp3-restricted conduit's 'functions: [read]'/'[write]' reserved group
+// keyword into this decoder's own concrete function names.
+std::vector<std::string> dnp3_read_function_names();
+std::vector<std::string> dnp3_write_function_names();
+
 // Total on-the-wire size of one DNP3 data-link frame: the fixed 10-byte header, plus its user
 // data broken into <=16-byte blocks, each followed by its own 2-byte block CRC. Used to find
 // where the *next* data-link frame (if any) starts within the same TCP payload (Decoder's

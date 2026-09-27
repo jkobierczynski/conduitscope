@@ -298,6 +298,17 @@ std::string s7_range_notation(const std::string& area_letter, uint16_t db_number
 // own declaration order) but not alphabetized.
 std::vector<std::string> s7comm_known_function_names();
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): the subset
+// of s7comm_known_function_names() this decoder classifies as a data READ (or, for the second
+// function, a data WRITE) -- see s7comm.cpp's own S7CommFunctionAccess comment for the full
+// classification and which functions land in neither list. Note S7's "Download"
+// (engineering-station-to-PLC) functions are Write and its "Upload" (PLC-to-engineering-station)
+// functions are Read -- the opposite of what the names might suggest at a glance. Used by
+// policy.cpp to expand an s7comm-restricted conduit's 'functions: [read]'/'[write]' reserved group
+// keyword into this decoder's own concrete function names.
+std::vector<std::string> s7comm_read_function_names();
+std::vector<std::string> s7comm_write_function_names();
+
 // Attempts to interpret `cotp_user_data` (the payload of a COTP Data frame) as a CLASSIC S7comm
 // header. Returns std::nullopt (never throws) if the payload is empty or its first byte isn't
 // S7COMM_PROTOCOL_ID (0x32) -- the standard signal that this COTP Data frame is carrying

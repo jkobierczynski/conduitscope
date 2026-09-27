@@ -1174,6 +1174,92 @@ std::vector<std::string> enip_known_cip_service_names() {
     return out;
 }
 
+namespace {
+
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): classified
+// by NAME (via enip_known_cip_service_names()' own output), not by service code -- cip_service_name
+// resolves the same numeric code to different names depending on (have_path, is_symbolic,
+// is_conn_mgr), so a code-keyed table can't express this classification honestly. Other is used for
+// connection management (Unconnected_Send/Forward_Open/Forward_Close/Large_Forward_Open -- these
+// establish or tear down a session, they don't read or write tag data themselves), the bundling
+// service Multiple_Service_Packet (its own embedded services can be a mix of reads and writes),
+// No_Op (does nothing, by definition neither), and the two genuinely reply-side-ambiguous names
+// (see enip.hpp's own KNOWN LIMITATION comment on enip_known_cip_service_names) -- none of these
+// land in either enip_read_cip_service_names()/enip_write_cip_service_names() below, so the
+// 'functions: [read]'/'[write]' group keyword never silently mispermits them; any can still be
+// named literally. Read_Modify_Write_Tag is Write: unlike Multiple_Service_Packet's independent
+// embedded services, its read and write halves both target the exact same tag, so its net,
+// policy-relevant effect is a single write (mirrors Modbus's Mask Write Register).
+enum class EnipFunctionAccess { Read, Write, Other };
+
+struct EnipFunctionEntry {
+    const char* name;
+    EnipFunctionAccess access;
+};
+
+constexpr EnipFunctionEntry kEnipFunctionAccess[] = {
+    {"Read_Tag", EnipFunctionAccess::Read},
+    {"Write_Tag", EnipFunctionAccess::Write},
+    {"Read_Modify_Write_Tag", EnipFunctionAccess::Write},
+    {"Read_Tag_Fragmented", EnipFunctionAccess::Read},
+    {"Write_Tag_Fragmented", EnipFunctionAccess::Write},
+    {"Get_Instance_Attribute_List", EnipFunctionAccess::Read},
+    {"Unconnected_Send", EnipFunctionAccess::Other},
+    {"Forward_Open", EnipFunctionAccess::Other},
+    {"Forward_Close", EnipFunctionAccess::Other},
+    {"Large_Forward_Open", EnipFunctionAccess::Other},
+    {"Unconnected_Send/Read_Tag_Fragmented (reply)", EnipFunctionAccess::Other},
+    {"Forward_Close/Read_Modify_Write_Tag (reply)", EnipFunctionAccess::Other},
+    {"Get_Attributes_All", EnipFunctionAccess::Read},
+    {"Set_Attributes_All", EnipFunctionAccess::Write},
+    {"Get_Attribute_List", EnipFunctionAccess::Read},
+    {"Set_Attribute_List", EnipFunctionAccess::Write},
+    {"Reset", EnipFunctionAccess::Write},
+    {"Start", EnipFunctionAccess::Write},
+    {"Stop", EnipFunctionAccess::Write},
+    {"Create", EnipFunctionAccess::Write},
+    {"Delete", EnipFunctionAccess::Write},
+    {"Multiple_Service_Packet", EnipFunctionAccess::Other},
+    {"Apply_Attributes", EnipFunctionAccess::Write},
+    {"Get_Attribute_Single", EnipFunctionAccess::Read},
+    {"Set_Attribute_Single", EnipFunctionAccess::Write},
+    {"Find_Next_Object_Instance", EnipFunctionAccess::Read},
+    {"Restore", EnipFunctionAccess::Write},
+    {"Save", EnipFunctionAccess::Write},
+    {"No_Op", EnipFunctionAccess::Other},
+    {"Get_Member", EnipFunctionAccess::Read},
+    {"Set_Member", EnipFunctionAccess::Write},
+};
+
+EnipFunctionAccess enip_access_for_name(const std::string& name) {
+    for (const auto& entry : kEnipFunctionAccess) {
+        if (name == entry.name) return entry.access;
+    }
+    return EnipFunctionAccess::Other;  // any name enip_known_cip_service_names() didn't list above
+}
+
+}  // namespace
+
+// docs/design/policy-engine-zoning.md's Phase 4: the subset of enip_known_cip_service_names() this
+// decoder classifies as Read (or Write) -- see kEnipFunctionAccess above and this file's own
+// EnipFunctionAccess comment for exactly which service names land in neither group and why. Used
+// by policy.cpp to expand an enip-restricted conduit's 'functions: [read]'/'[write]' group keyword.
+std::vector<std::string> enip_read_cip_service_names() {
+    std::vector<std::string> out;
+    for (const auto& name : enip_known_cip_service_names()) {
+        if (enip_access_for_name(name) == EnipFunctionAccess::Read) out.push_back(name);
+    }
+    return out;
+}
+
+std::vector<std::string> enip_write_cip_service_names() {
+    std::vector<std::string> out;
+    for (const auto& name : enip_known_cip_service_names()) {
+        if (enip_access_for_name(name) == EnipFunctionAccess::Write) out.push_back(name);
+    }
+    return out;
+}
+
 std::optional<size_t> enip_declared_length(ByteSpan payload) {
     if (payload.size() < 4) {
         return std::nullopt;

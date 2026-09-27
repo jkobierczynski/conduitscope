@@ -1,0 +1,21 @@
+# Exercises the reserved 'read' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for S7comm. 'functions: [read]' expands at parse time to
+# every Read-classified S7comm function name (s7comm_read_function_names(), see s7comm.hpp/.cpp)
+# -- this includes "Read Var" and the Upload-family functions (Start Upload/Upload/End Upload --
+# S7comm's "Upload" means the PLC sends a block OUT, i.e. a read, despite the name; see the
+# S7CommFunctionAccess comment in s7comm.cpp), but NOT "Setup Communication" (Other) or "Write
+# Var"/the Download family (Write). Against tests/sample_s7comm_items.pcap, whose one flow
+# carries only "Read Var", this must report Result: COMPLIANT (matched conduit).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "s7comm reads only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [s7comm]
+    ports: [102]
+    functions: [read]

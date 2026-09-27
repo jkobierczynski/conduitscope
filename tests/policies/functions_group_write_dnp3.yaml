@@ -1,0 +1,28 @@
+# Exercises the reserved 'write' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for DNP3. 'functions: [write]' expands at parse time to
+# every Write-classified DNP3 function name (dnp3_write_function_names(), see dnp3.hpp/.cpp),
+# which includes "Direct Operate" -- but deliberately NOT "Response"/"Unsolicited Response"/
+# "Confirm", since those carry no read-or-write semantics of their own (see the Dnp3FunctionAccess
+# comment in dnp3.cpp). Against tests/sample_dnp3.pcap: client port 51501 carries ONLY "Direct
+# Operate" and must report ALLOWED (matched conduit); client port 51500 carries "Read", "Response",
+# AND "Direct Operate", and must report a Violation naming "Read" and "Response" as the disallowed
+# functions observed (Direct Operate, also observed there, IS permitted).
+#
+# This is the practical caveat every 'write'/'read' group-keyword user of DNP3 needs to know: real
+# bidirectional DNP3 exchanges always carry a Response (or Confirm) function alongside the
+# request-side operation, so a bare 'functions: [write]' will flag every real two-way exchange
+# unless "Response" (and/or "Confirm") is added explicitly as a literal alongside the keyword --
+# see functions_group_write_dnp3_with_response.yaml for that combined usage.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "dnp3 writes only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [dnp3]
+    ports: [20000]
+    functions: [write]

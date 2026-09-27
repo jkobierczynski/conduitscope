@@ -155,6 +155,16 @@ std::string modbus_exception_name(uint8_t exception_code);
 // calls (the table's own declaration order) but not alphabetized.
 std::vector<std::string> modbus_known_function_names();
 
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): the subset
+// of modbus_known_function_names() this decoder classifies as a data READ (or, for the second
+// function, a data WRITE) -- see modbus.cpp's own ModbusFunctionAccess comment for the full
+// classification and which functions land in neither list (Diagnostics, Read/Write Multiple
+// Registers) because they don't cleanly fit one side. Used by policy.cpp to expand a
+// modbus-restricted conduit's 'functions: [read]'/'[write]' reserved group keyword into this
+// decoder's own concrete function names, rather than a second, separately-maintained list.
+std::vector<std::string> modbus_read_function_names();
+std::vector<std::string> modbus_write_function_names();
+
 // registration-model pilot (Stage 2 -- see protocol_decoder.hpp/protocol_registry.hpp). One
 // outstanding Modbus request, tracked per TCP SESSION (both directions -- see ModbusFlowState
 // below) and keyed further by its MBAP transaction ID, so a later packet on the SAME session

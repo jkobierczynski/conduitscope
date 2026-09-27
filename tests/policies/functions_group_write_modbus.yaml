@@ -1,0 +1,22 @@
+# Exercises the reserved 'write' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for Modbus. 'functions: [write]' expands at parse time to
+# every Write-classified Modbus function name (modbus_write_function_names(), see
+# modbus.hpp/.cpp) -- here that's enough to permit "Write Single Register" but NOT "Read Holding
+# Registers". Against tests/sample_modbus_pairing.pcap (client port 51700 -- Write Single Register
+# only -- and client port 51701 -- Read Holding Registers only), this must report the 51700 flow
+# ALLOWED (matched conduit) and the 51701 flow a Violation naming "Read Holding Registers" as the
+# disallowed function observed. Compare against functions_group_read_modbus.yaml, which permits
+# the opposite function.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "modbus writes only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+    functions: [write]

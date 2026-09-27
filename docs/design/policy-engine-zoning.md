@@ -164,22 +164,52 @@ MinGW-w64-cross-compile configurations. `docs/USER_GUIDE.md`, `docs/DEVELOPMENT.
 including correcting every stale "`policy validate` does not yet evaluate any UDP traffic" claim
 left over from before this phase.
 
-## Phase 4 -- Operation-level read/write direction
+## Phase 4 -- Operation-level read/write direction -- IMPLEMENTED
 
-- Add a per-protocol function-access classification (`Read`/`Write`/`Other`) alongside each
-  protocol's own known-function table (modbus.hpp, dnp3.hpp, s7comm.hpp, iec104.hpp, enip.hpp --
-  same file each table already lives in), for all five function-table protocols.
-- Extend `Conduit::functions` parsing to accept two new reserved, case-insensitive group keywords,
-  `read`/`write`, combinable with literal function names (e.g. `functions: [read, "Diagnostics"]`),
-  expanded at parse time into that protocol's full matching function set. `write` intentionally does
+- Added a per-protocol function-access classification (`{Modbus,Dnp3,S7Comm,Iec104,Enip}FunctionAccess`
+  -- `Read`/`Write`/`Other`) alongside each protocol's own known-function table (modbus.cpp,
+  dnp3.cpp, s7comm.cpp, iec104.cpp, enip.cpp -- Modbus/DNP3 refactored from a plain `switch` to a
+  table to carry it, S7comm/IEC104's existing tables extended in place with an `access` field,
+  ENIP given a separate name-keyed table since its service names are context-dependent, not
+  code-keyed). Each protocol gained `*_read_function_names()`/`*_write_function_names()` (ENIP:
+  `enip_read_cip_service_names()`/`enip_write_cip_service_names()`; IEC104:
+  `iec104_read_asdu_short_names()`/`iec104_write_asdu_short_names()`), dispatched by
+  `policy.cpp`'s new `read_function_names_for()`/`write_function_names_for()`.
+- Extended `Conduit::functions` parsing (`parse_policy_text`'s functions-parsing loop) to accept
+  two new reserved, case-insensitive group keywords, `read`/`write`, checked *before* the existing
+  literal-name lookup so the keyword always wins any naming collision, combinable with literal
+  function names in the same list (e.g. `functions: [read, "Diagnostics"]`), expanded at parse time
+  into that protocol's full matching function set. A new `add_function_once` dedup guard ensures a
+  literal already covered by the expanded group is never stored twice. `write` intentionally does
   NOT implicitly include `Other`-classified functions -- those still need to be named explicitly,
   since silently overlooking an ambiguous function on a "flag writes" policy would be a real,
-  security-relevant surprise, not a formatting nicety.
-- **The classification table itself is the sensitive part** -- a wrong Read/Write/Other call is a
-  compliance-correctness bug, not a style choice. Draft it from each protocol's own spec/RFC
-  (already this project's standard sourcing method) and put it in front of Jurgen for a sanity check
-  before this phase ships, the same way protocol-detection collisions get a pinning test before
-  being "fixed."
+  security-relevant surprise, not a formatting nicety. A defensive fail-loudly check rejects a
+  keyword that would expand to an empty set (unreachable today -- all five protocols have non-empty
+  Read and Write sets -- but guards against an empty `functions` silently meaning "unrestricted").
+- **DNP3's own literal function names collide with the keywords** (its function codes 0x01/0x02 are
+  themselves literally named "Read"/"Write"): resolved by keyword-always-wins semantics, confirmed
+  safe against every pre-existing fixture (none relied on selecting DNP3's bare literal
+  Read/Write in isolation). Separately, real bidirectional DNP3 exchanges always carry a
+  "Response"/"Confirm" on the reply side (Other-classified, since a Response frame's payload can't
+  say whether it answered a read or a write) -- documented explicitly, with
+  `tests/policies/functions_group_write_dnp3.yaml` pinning the bare-keyword caveat and
+  `functions_group_write_dnp3_with_response.yaml` pinning the combined-usage fix
+  (`functions: [write, "Response"]`).
+- **The classification table itself was the sensitive part** -- a wrong Read/Write/Other call is a
+  compliance-correctness bug, not a style choice. Drafted from each protocol's own spec/RFC (this
+  project's standard sourcing method), with three borderline calls put in front of Jurgen for a
+  sanity check before implementation began: DNP3 Select -> Other (no effect without a following
+  Operate); IEC104 read-trigger commands (C_IC_NA_1/C_CI_NA_1/C_RD_NA_1) -> Read despite their `C_`
+  prefix; EtherNet/IP connection-management services (Forward_Open/Forward_Close/
+  Large_Forward_Open/Unconnected_Send) -> Other. All three confirmed as proposed.
+
+**Verification bar met for Phase 4**: 2023/2023 (default GCC build, 11 new tests, zero regression
+against the prior 2012), covering all five protocols' `read`/`write` group keywords, the
+combined-literal + dedup parse-level JSON shape, and the near-miss-keyword-falls-through bad path.
+`docs/USER_GUIDE.md` (new "Reserved group keywords" subsection under "Function-level restrictions",
+full per-protocol classification tables, two new validation-error entries), `docs/DEVELOPMENT.md`
+(ROADMAP item 72), and `include/conduitscope/policy.hpp` (`Conduit::functions` and
+`parse_policy_text` doc comments) all updated in the same increment.
 
 ## Phase 5 -- MAC-source restriction on VLAN conduits (GOOSE/SV/etc.)
 

@@ -97,47 +97,79 @@ static_assert(dnp3_crc16(kDnp3CrcTestVector, sizeof(kDnp3CrcTestVector)) == 0xEA
               "(CRC of ASCII \"123456789\" must be 0xEA82) -- check kDnp3CrcTable's transcription, "
               "the seed, the per-byte update step, or the final complement");
 
-std::string dnp3_function_name(uint8_t fc) {
-    switch (fc) {
-        case 0x00: return "Confirm";
-        case 0x01: return "Read";
-        case 0x02: return "Write";
-        case 0x03: return "Select";
-        case 0x04: return "Operate";
-        case 0x05: return "Direct Operate";
-        case 0x06: return "Direct Operate No Ack";
-        case 0x07: return "Immediate Freeze";
-        case 0x08: return "Immediate Freeze No Ack";
-        case 0x09: return "Freeze Clear";
-        case 0x0A: return "Freeze Clear No Ack";
-        case 0x0B: return "Freeze At Time";
-        case 0x0C: return "Freeze At Time No Ack";
-        case 0x0D: return "Cold Restart";
-        case 0x0E: return "Warm Restart";
-        case 0x0F: return "Initialize Data";
-        case 0x10: return "Initialize Application";
-        case 0x11: return "Start Application";
-        case 0x12: return "Stop Application";
-        case 0x13: return "Save Configuration";
-        case 0x14: return "Enable Unsolicited Responses";
-        case 0x15: return "Disable Unsolicited Responses";
-        case 0x16: return "Assign Classes";
-        case 0x17: return "Delay Measurement";
-        case 0x18: return "Record Current Time";
-        case 0x19: return "Open File";
-        case 0x1A: return "Close File";
-        case 0x1B: return "Delete File";
-        case 0x1C: return "Get File Info";
-        case 0x1D: return "Authenticate File";
-        case 0x1E: return "Abort File";
-        case 0x1F: return "Activate Config";
-        case 0x20: return "Authentication Request";
-        case 0x21: return "Authentication Error";
-        case 0x81: return "Response";
-        case 0x82: return "Unsolicited Response";
-        case 0x83: return "Authentication Response";
-        default: return "Unknown (" + hex8(fc) + ")";
+// Read/Write/Other classification for docs/design/policy-engine-zoning.md's Phase 4 (operation-
+// level read/write direction): backs dnp3_read_function_names()/dnp3_write_function_names(), which
+// Policy::parse_policy_text expands a conduit's 'functions: [read]'/'[write]' group keyword into
+// (see policy.cpp). Other is deliberately used for anything that isn't cleanly one or the other --
+// left out of BOTH groups so the keyword shortcut never silently mispermits it; it can still be
+// named literally. Confirm/Authentication*/Response* are protocol-layer acks, not data operations.
+// Select arms a control point for a subsequent Operate but changes nothing on its own -- a Select
+// with no following Operate has zero effect on the process, so it isn't a Write. The six Freeze*
+// functions snapshot/reset internal counter state rather than reading process data or writing a
+// process output, so they're Other too, same reasoning as Modbus's Diagnostics. Delay Measurement
+// and the file-transfer handshake steps (Open/Close/Authenticate/Abort File) have no read/write
+// data-plane effect either. Get File Info is a read-only metadata query, so it's Read despite being
+// part of the file family. Every function below this that changes device/application state (the
+// restart/init/start/stop/save/enable/disable/assign/record-time/delete-file/activate-config
+// family, plus the control-execution functions Operate/Direct Operate*) is Write.
+enum class Dnp3FunctionAccess { Read, Write, Other };
+
+struct Dnp3FunctionEntry {
+    uint8_t code;
+    const char* name;
+    Dnp3FunctionAccess access;
+};
+
+constexpr Dnp3FunctionEntry kDnp3Functions[] = {
+    {0x00, "Confirm", Dnp3FunctionAccess::Other},
+    {0x01, "Read", Dnp3FunctionAccess::Read},
+    {0x02, "Write", Dnp3FunctionAccess::Write},
+    {0x03, "Select", Dnp3FunctionAccess::Other},
+    {0x04, "Operate", Dnp3FunctionAccess::Write},
+    {0x05, "Direct Operate", Dnp3FunctionAccess::Write},
+    {0x06, "Direct Operate No Ack", Dnp3FunctionAccess::Write},
+    {0x07, "Immediate Freeze", Dnp3FunctionAccess::Other},
+    {0x08, "Immediate Freeze No Ack", Dnp3FunctionAccess::Other},
+    {0x09, "Freeze Clear", Dnp3FunctionAccess::Other},
+    {0x0A, "Freeze Clear No Ack", Dnp3FunctionAccess::Other},
+    {0x0B, "Freeze At Time", Dnp3FunctionAccess::Other},
+    {0x0C, "Freeze At Time No Ack", Dnp3FunctionAccess::Other},
+    {0x0D, "Cold Restart", Dnp3FunctionAccess::Write},
+    {0x0E, "Warm Restart", Dnp3FunctionAccess::Write},
+    {0x0F, "Initialize Data", Dnp3FunctionAccess::Write},
+    {0x10, "Initialize Application", Dnp3FunctionAccess::Write},
+    {0x11, "Start Application", Dnp3FunctionAccess::Write},
+    {0x12, "Stop Application", Dnp3FunctionAccess::Write},
+    {0x13, "Save Configuration", Dnp3FunctionAccess::Write},
+    {0x14, "Enable Unsolicited Responses", Dnp3FunctionAccess::Write},
+    {0x15, "Disable Unsolicited Responses", Dnp3FunctionAccess::Write},
+    {0x16, "Assign Classes", Dnp3FunctionAccess::Write},
+    {0x17, "Delay Measurement", Dnp3FunctionAccess::Other},
+    {0x18, "Record Current Time", Dnp3FunctionAccess::Write},
+    {0x19, "Open File", Dnp3FunctionAccess::Other},
+    {0x1A, "Close File", Dnp3FunctionAccess::Other},
+    {0x1B, "Delete File", Dnp3FunctionAccess::Write},
+    {0x1C, "Get File Info", Dnp3FunctionAccess::Read},
+    {0x1D, "Authenticate File", Dnp3FunctionAccess::Other},
+    {0x1E, "Abort File", Dnp3FunctionAccess::Other},
+    {0x1F, "Activate Config", Dnp3FunctionAccess::Write},
+    {0x20, "Authentication Request", Dnp3FunctionAccess::Other},
+    {0x21, "Authentication Error", Dnp3FunctionAccess::Other},
+    {0x81, "Response", Dnp3FunctionAccess::Other},
+    {0x82, "Unsolicited Response", Dnp3FunctionAccess::Other},
+    {0x83, "Authentication Response", Dnp3FunctionAccess::Other},
+};
+
+const Dnp3FunctionEntry* find_dnp3_function(uint8_t fc) {
+    for (const auto& entry : kDnp3Functions) {
+        if (entry.code == fc) return &entry;
     }
+    return nullptr;
+}
+
+std::string dnp3_function_name(uint8_t fc) {
+    if (const auto* entry = find_dnp3_function(fc)) return entry->name;
+    return "Unknown (" + hex8(fc) + ")";
 }
 
 bool is_response_function(uint8_t fc) { return fc == 0x81 || fc == 0x82 || fc == 0x83; }
@@ -564,14 +596,36 @@ std::vector<uint8_t> reassemble_user_data(ByteSpan after_header, size_t logical_
 }  // namespace
 
 std::vector<std::string> dnp3_known_function_names() {
-    // Calls the same dnp3_function_name(fc) switch above for every possible byte value and keeps
-    // only the ones that resolved to a real name rather than the dynamic "Unknown (0x.." fallback
-    // -- see dnp3.hpp's own comment on this function for why this reuses dnp3_function_name()
-    // instead of a second, separately-maintained list of names.
+    // Reads straight from kDnp3Functions now (see this file's own header comment on that table) --
+    // this also backs dnp3_read_function_names()/dnp3_write_function_names() below (Phase 4).
     std::vector<std::string> out;
-    for (int fc = 0; fc <= 0xFF; ++fc) {
-        std::string name = dnp3_function_name(static_cast<uint8_t>(fc));
-        if (name.rfind("Unknown (0x", 0) != 0) out.push_back(std::move(name));
+    out.reserve(sizeof(kDnp3Functions) / sizeof(kDnp3Functions[0]));
+    for (const auto& entry : kDnp3Functions) out.push_back(entry.name);
+    return out;
+}
+
+// docs/design/policy-engine-zoning.md's Phase 4: the subset of dnp3_known_function_names() this
+// decoder classifies as Read (or Write) -- see kDnp3Functions' own access field and this file's
+// header comment on Dnp3FunctionAccess for exactly which functions land in neither group and why.
+// Used by policy.cpp to expand a dnp3-restricted conduit's 'functions: [read]'/'[write]' group
+// keyword. NOTE: DNP3 happens to have its own literal function codes named "Read" (0x01) and
+// "Write" (0x02) -- policy.cpp's reserved group keywords take priority over these literal names
+// (see its own comment on this collision), so 'functions: [read]' on a dnp3 conduit expands to
+// {Read, Get File Info}, not just the literal "Read" function code alone. There is deliberately no
+// way to write a 'functions:' list meaning "only DNP3's literal Read function code, and nothing
+// else" any more -- see docs/USER_GUIDE.md's own callout on this specific, accepted trade-off.
+std::vector<std::string> dnp3_read_function_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kDnp3Functions) {
+        if (entry.access == Dnp3FunctionAccess::Read) out.push_back(entry.name);
+    }
+    return out;
+}
+
+std::vector<std::string> dnp3_write_function_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kDnp3Functions) {
+        if (entry.access == Dnp3FunctionAccess::Write) out.push_back(entry.name);
     }
     return out;
 }

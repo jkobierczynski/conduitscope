@@ -777,7 +777,7 @@ conduits:
     protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | profinet | goose | sv | ethercat | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4/hostname-zone conduits only
     bidirectional: <true | false>           # default: false; IPv4/hostname-zone conduits only
-    functions: [<function/service name>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
+    functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
 ```
 
 **Zones.** Each zone name maps to EXACTLY ONE of: one or more IPv4 CIDR
@@ -1323,6 +1323,105 @@ for a given conduit, either capture from session start (so the original
 request is seen and the reply resolves unambiguously) or list the compound
 name itself in `functions`.
 
+**Reserved group keywords: `read` and `write`.** Writing out every function
+name a "flag writes" or "read-only" conduit should permit is tedious and
+easy to get subtly wrong, so `functions` also accepts two reserved,
+case-insensitive keywords -- `read` and `write` -- that expand at policy-load
+time into that protocol's full Read- or Write-classified function/service
+name set. They're freely combinable with literal names in the same list:
+
+```yaml
+functions: [read, "Diagnostics"]
+```
+
+expands to every Read-classified Modbus function *plus* the (Other-
+classified) `Diagnostics`. A literal name already covered by the expanded
+group (e.g. `functions: [write, "Write Single Coil"]`, where `Write Single
+Coil` is itself Write-classified) is silently deduplicated, never listed
+twice.
+
+Each function/service name is classified `Read`, `Write`, or `Other` from
+that protocol's own spec, alongside its existing known-function table
+(`modbus_read_function_names()`/`modbus_write_function_names()`, and each
+protocol's equivalent -- see `modbus.hpp`/`dnp3.hpp`/`s7comm.hpp`/
+`iec104.hpp`/`enip.hpp`). `Other` means the function mixes read-and-write
+semantics, has no data-plane effect of its own, or is connection/protocol
+housekeeping -- it is deliberately excluded from BOTH keywords, so `write`
+never silently permits something ambiguous; an `Other` function can still be
+permitted, but only by naming it explicitly as a literal. The current
+classification:
+
+- **Modbus** -- Read (8): Read Coils, Read Discrete Inputs, Read Holding
+  Registers, Read Input Registers, Read Exception Status, Report Server ID,
+  Read FIFO Queue, Encapsulated Interface Transport. Write (5): Write Single
+  Coil, Write Single Register, Write Multiple Coils, Write Multiple
+  Registers, Mask Write Register. Other (2): Diagnostics (bundles
+  sub-functions with mixed read/reset semantics), Read/Write Multiple
+  Registers (performs an independent read and write in one message) --
+  contrast `Mask Write Register`, which despite also being read-modify-write
+  internally targets the *same* register both times, so its net effect is a
+  single Write.
+- **DNP3** -- Read (2): Read, Get File Info. Write (17): Write, Operate,
+  Direct Operate, Direct Operate No Ack, Cold Restart, Warm Restart,
+  Initialize Data, Initialize Application, Start Application, Stop
+  Application, Save Configuration, Enable Unsolicited Responses, Disable
+  Unsolicited Responses, Assign Classes, Record Current Time, Delete File,
+  Activate Config. Other (18, everything else): Confirm, Select (no effect
+  without a following Operate), Immediate Freeze(/No Ack), Freeze Clear(/No
+  Ack), Freeze At Time(/No Ack), Delay Measurement, Open File, Close File,
+  Authenticate File, Abort File, Authentication Request, Authentication
+  Error, Response, Unsolicited Response, Authentication Response. **DNP3's
+  own literal function names collide with the keywords**: function codes
+  0x01/0x02 are themselves literally named "Read"/"Write". The reserved
+  keyword always wins -- `functions: [read]` always means the group
+  expansion, never the literal "Read" function in isolation; there's no way
+  to select DNP3's bare Read/Write function code alone via this field
+  anymore. More practically: real bidirectional DNP3 exchanges always carry
+  a "Response" (or "Confirm") on the reply side, which is Other-classified
+  (a Response frame's payload doesn't say whether it answered a read or a
+  write) -- so a `read`/`write`-restricted DNP3 conduit typically also needs
+  `"Response"` (and/or `"Confirm"`) named explicitly alongside the keyword to
+  avoid every real exchange violating on that alone. Compare
+  `tests/policies/functions_group_write_dnp3.yaml` (bare keyword, flags
+  Response) against `functions_group_write_dnp3_with_response.yaml`
+  (`functions: [write, "Response"]`, doesn't).
+- **S7comm** -- Read (4): Read Var, Start Upload, Upload, End Upload
+  ("Upload" means the PLC sends a block back *out* -- a read, despite the
+  name). Write (6): Write Var, Request Download, Download Block, Download
+  Ended, PLC Control, PLC Stop ("Download" means the engineering station
+  sends a block *to* the PLC -- a write, and one of the most
+  security-relevant operations here: program manipulation). Other (2): CPU
+  services, Setup Communication.
+- **IEC 60870-5-104** -- classified primarily by the Monitor- (`M_*`, read)
+  vs. Control-direction (`C_*`/`P_*`, write) convention. Read (29): every
+  `M_*` type (26) plus three Control-direction read-*triggers* that don't
+  change process state themselves -- C_IC_NA_1 (Interrogation command),
+  C_CI_NA_1 (Counter interrogation command), C_RD_NA_1 (Read command).
+  Write (20): C_SC_NA_1, C_SC_TA_1, C_DC_NA_1, C_DC_TA_1, C_RC_NA_1,
+  C_RC_TA_1, C_SE_NA_1, C_SE_TA_1, C_SE_NB_1, C_SE_TB_1, C_SE_NC_1,
+  C_SE_TC_1, C_BO_NA_1, C_BO_TA_1, C_CS_NA_1, C_RP_NA_1, P_ME_NA_1,
+  P_ME_NB_1, P_ME_NC_1, P_AC_NA_1. Other (2): C_CD_NA_1 (delay measurement),
+  C_TS_TA_1 (test command) -- neither has a data-plane effect.
+- **EtherNet/IP** -- Read (8): Read_Tag, Read_Tag_Fragmented,
+  Get_Instance_Attribute_List, Get_Attributes_All, Get_Attribute_List,
+  Get_Attribute_Single, Find_Next_Object_Instance, Get_Member. Write (15):
+  Write_Tag, Read_Modify_Write_Tag, Write_Tag_Fragmented, Set_Attributes_All,
+  Set_Attribute_List, Reset, Start, Stop, Create, Delete, Apply_Attributes,
+  Set_Attribute_Single, Restore, Save, Set_Member. Other (8): connection
+  management and multi-service wrappers with no single read/write meaning of
+  their own -- Unconnected_Send, Forward_Open, Forward_Close,
+  Large_Forward_Open, the two ambiguous compound reply names (see "A known,
+  deliberate limitation" above), Multiple_Service_Packet, No_Op. Unlike
+  DNP3, ENIP uses the *same* service name on both the request and response
+  side of an exchange, so a clean single-service ENIP flow can become fully
+  compliant with just the bare keyword -- no extra literal needed (see
+  `tests/policies/functions_group_read_enip.yaml`).
+
+A near-miss string that merely resembles a keyword (e.g. `reads`, not the
+exact case-insensitive `read`) is not treated as one -- it falls straight
+through to the ordinary unknown-function-name/typo-suggestion handling
+described above.
+
 ### Validation errors
 
 Every rule below is checked when the policy file is loaded, before any
@@ -1382,6 +1481,14 @@ error (see EXIT STATUS):
   protocol's own known function/service names (case-insensitively) -- the
   error names the closest known name ("did you mean '...'?") when one is a
   plausible typo, and omits the suggestion when nothing is close enough
+  (the reserved `read`/`write` group keywords are checked before this
+  lookup and never reach it -- a near-miss like `reads` is not a keyword
+  and falls straight through to this same handling)
+- a conduit's `read`/`write` functions-group keyword that expands to an
+  empty set for its protocol -- unreachable today (all five function-table
+  protocols have a non-empty Read and Write set), but rejected rather than
+  silently leaving the conduit fully unrestricted, since an empty
+  `functions` list means "no restriction" everywhere else in the engine
 
 ### Unsupported YAML constructs
 

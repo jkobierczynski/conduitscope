@@ -230,6 +230,26 @@ struct Conduit {
     // the decoder's own casing. See docs/MANUAL.md's POLICY FILE FORMAT section for the full
     // schema and PolicyEngine::finish (policy_engine.cpp) for exactly how a flow's observed
     // functions are checked against this list.
+    //
+    // Two reserved, case-insensitive group keywords are also accepted here: "read" and "write".
+    // Each expands at parse time (parse_policy_text) into that protocol's full Read- or
+    // Write-classified function/service name set (modbus_read_function_names()/
+    // *_write_function_names(), and each protocol's equivalent -- see the *FunctionAccess enum
+    // alongside each protocol's own known-function table in modbus/dnp3/s7comm/iec104/enip
+    // .hpp/.cpp) and is freely combinable with literal names in the same list, e.g.
+    // `functions: [read, "Diagnostics"]`. A literal name already covered by the expanded group is
+    // silently deduplicated, never double-stored. The keyword always wins any naming collision
+    // with a literal function name (relevant for DNP3, whose own function codes 0x01/0x02 are
+    // themselves literally named "Read"/"Write" -- see dnp3.hpp) -- there is no way to select
+    // DNP3's literal Read/Write function code alone via this field once its protocol is DNP3;
+    // name it as part of a wider `functions:` list only via other means (it can't be isolated).
+    // Deliberately NOT expanded into either group: any function/service classified `Other` (has
+    // no clean read-or-write data-plane effect, or mixes both) -- it must still be named
+    // explicitly if a conduit needs to permit it. For DNP3 specifically, a `read`/`write`-
+    // restricted conduit typically also needs "Response" (and/or "Confirm") named explicitly
+    // alongside the keyword, since real bidirectional DNP3 exchanges always carry one of those on
+    // the reply side and both are Other-classified (no way to tell, from the frame alone, whether
+    // a Response answered a read or a write) -- see functions_group_write_dnp3_with_response.yaml.
     std::vector<std::string> functions;
 
     int line = 0;
@@ -356,6 +376,13 @@ struct PolicyError : std::runtime_error {
 //   - a conduit's 'functions'/'function' entry that isn't one of its protocol's own known function/
 //     service names (case-insensitively) -- the error names the closest known name ("did you mean
 //     '...'?") when one is a plausible typo, and omits the suggestion when nothing is close enough
+//     (the reserved 'read'/'write' group keywords, see Conduit::functions's own comment, are
+//     checked before this lookup and never reach it; a near-miss like "reads" is NOT a keyword and
+//     falls straight through to this same unknown-name/suggestion handling)
+//   - a conduit's 'read'/'write' functions-group keyword that expands to an empty set for its
+//     protocol -- unreachable today (all five function-table protocols have a non-empty Read and
+//     Write set), but rejected rather than silently leaving the conduit fully unrestricted, since
+//     an empty Conduit::functions list means "no restriction" everywhere else in the engine
 Policy parse_policy_text(const std::string& text, const std::string& source_name);
 
 // Reads `path` and calls parse_policy_text with its contents. Throws

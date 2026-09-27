@@ -1,0 +1,24 @@
+# Exercises the reserved 'read' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for EtherNet/IP. 'functions: [read]' expands at parse time
+# to every Read-classified CIP service name (enip_read_cip_service_names(), see enip.hpp/.cpp).
+# Unlike DNP3, ENIP uses the SAME service name on both the request and response side of an
+# exchange (e.g. "Read_Tag" appears unchanged in both directions -- see enip.cpp's
+# cip_service_name()), so a clean single-service flow can become fully COMPLIANT with just the
+# bare keyword, no extra literal name needed. Against tests/sample_policy_functions_enip.pcap
+# (client port 53000 -- Read_Tag request/response only -- and client port 53001 -- Write_Tag
+# request/response only), this must report the 53000 flow ALLOWED (matched conduit "enip reads
+# only via group keyword") and the 53001 flow a Violation naming "Write_Tag" as the disallowed
+# function observed.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "enip reads only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [enip]
+    ports: [44818]
+    functions: [read]

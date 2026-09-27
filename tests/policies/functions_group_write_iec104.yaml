@@ -1,0 +1,22 @@
+# Exercises the reserved 'write' function-group keyword (Phase 4, see
+# docs/design/policy-engine-zoning.md) for IEC 104. 'functions: [write]' expands at parse time to
+# every Write-classified ASDU short name (iec104_write_asdu_short_names(), see iec104.hpp/.cpp) --
+# the Control-direction C_*/P_* command types, EXCLUDING the three read-trigger exceptions
+# (C_IC_NA_1/C_CI_NA_1/C_RD_NA_1, which are Read-classified) and the no-data-plane-effect Other
+# types (C_CD_NA_1, C_TS_TA_1). Against tests/sample_iec104.pcap, whose one flow carries
+# C_IC_NA_1, M_SP_NA_1, M_ME_TD_1, AND C_DC_NA_1, this must report a Violation naming "C_IC_NA_1",
+# "M_ME_TD_1", and "M_SP_NA_1" as the disallowed functions observed (C_DC_NA_1, a Write-classified
+# double command, IS permitted there).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "iec104 writes only via group keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [iec104]
+    ports: [2404]
+    functions: [write]

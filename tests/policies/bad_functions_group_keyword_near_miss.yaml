@@ -1,0 +1,18 @@
+# Confirms a near-miss string that merely LOOKS like a reserved group keyword ("reads", not the
+# exact case-insensitive "read"/"write") does NOT trigger group expansion, and instead falls
+# through to the ordinary unknown-function-name handling (see bad_functions_unknown_name.yaml /
+# bad_functions_typo.yaml). This guards against the reserved-keyword check ever becoming an
+# accidental prefix/substring match instead of an exact (case-insensitive) one.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "modbus near-miss keyword"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+    functions: [reads]

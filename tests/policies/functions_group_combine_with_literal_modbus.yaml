@@ -1,0 +1,21 @@
+# Parse-level test (JSON shape only, no real Diagnostics/Write traffic needed) confirming that the
+# 'write' group keyword is combinable with literal function names in the same 'functions:' list,
+# and that the dedup guard (policy.cpp's add_function_once) prevents a literal that's already part
+# of the expanded group -- "Write Single Coil" here -- from appearing twice. Expected parsed
+# 'functions' array, in expansion order (group first, in kModbusFunctions table order, then any
+# literal not already present): ["Write Single Coil", "Write Single Register", "Write Multiple
+# Coils", "Write Multiple Registers", "Mask Write Register", "Diagnostics"] -- six entries, not
+# seven, because the literal "Write Single Coil" is a no-op dedup rather than a duplicate.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "modbus write group plus literal extras"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+    functions: [write, "Diagnostics", "Write Single Coil"]

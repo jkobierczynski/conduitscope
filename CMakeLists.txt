@@ -8889,6 +8889,69 @@ set_tests_properties(policy_error_functions_unknown_name_with_suggestion PROPERT
 # feature existed -- already covered by every pre-existing policy_* test above (none of them use
 # 'functions:'), so no new fixture is needed here; this comment just records that coverage exists.
 
+# ---------------------------------------------------------------------------------------------
+# Reserved 'read'/'write' function-group keywords (Phase 4 of the policy-engine zoning work, see
+# docs/design/policy-engine-zoning.md). 'functions: [read]'/'[write]' expand at parse time into
+# that protocol's full Read-/Write-classified function/service name set (see
+# modbus/dnp3/s7comm/iec104/enip .hpp/.cpp), combinable with literal names in the same list.
+# Fixtures: tests/policies/functions_group_*.yaml and bad_functions_group_keyword_near_miss.yaml.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME policy_functions_group_read_modbus
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --policy "${POLICY_DIR}/functions_group_read_modbus.yaml")
+set_tests_properties(policy_functions_group_read_modbus PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"modbus reads only via group keyword\".*function 'Write Single Register' observed; conduit 'modbus reads only via group keyword' permits only: Read Coils, Read Discrete Inputs, Read Holding Registers, Read Input Registers, Read Exception Status, Report Server ID, Read FIFO Queue, Encapsulated Interface Transport")
+
+add_test(NAME policy_functions_group_write_modbus
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --policy "${POLICY_DIR}/functions_group_write_modbus.yaml")
+set_tests_properties(policy_functions_group_write_modbus PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"modbus writes only via group keyword\".*function 'Read Holding Registers' observed; conduit 'modbus writes only via group keyword' permits only: Write Single Coil, Write Single Register, Write Multiple Coils, Write Multiple Registers, Mask Write Register")
+
+add_test(NAME policy_functions_group_read_enip
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_functions_enip.pcap" --policy "${POLICY_DIR}/functions_group_read_enip.yaml")
+set_tests_properties(policy_functions_group_read_enip PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"enip reads only via group keyword\".*function 'Write_Tag' observed; conduit 'enip reads only via group keyword' permits only: Read_Tag, Read_Tag_Fragmented, Get_Instance_Attribute_List, Get_Attributes_All, Get_Attribute_List, Get_Attribute_Single, Find_Next_Object_Instance, Get_Member")
+
+add_test(NAME policy_functions_group_write_dnp3
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/functions_group_write_dnp3.yaml")
+set_tests_properties(policy_functions_group_write_dnp3 PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"dnp3 writes only via group keyword\".*functions 'Read', 'Response' observed; conduit 'dnp3 writes only via group keyword' permits only: Write, Operate, Direct Operate, Direct Operate No Ack, Cold Restart, Warm Restart, Initialize Data, Initialize Application, Start Application, Stop Application, Save Configuration, Enable Unsolicited Responses, Disable Unsolicited Responses, Assign Classes, Record Current Time, Delete File, Activate Config")
+
+add_test(NAME policy_functions_group_write_dnp3_with_response
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --policy "${POLICY_DIR}/functions_group_write_dnp3_with_response.yaml")
+set_tests_properties(policy_functions_group_write_dnp3_with_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "matched conduit \"dnp3 writes plus response via group keyword\".*function 'Read' observed; conduit 'dnp3 writes plus response via group keyword' permits only: Write, Operate, Direct Operate, Direct Operate No Ack, Cold Restart, Warm Restart, Initialize Data, Initialize Application, Start Application, Stop Application, Save Configuration, Enable Unsolicited Responses, Disable Unsolicited Responses, Assign Classes, Record Current Time, Delete File, Activate Config, Response")
+
+add_test(NAME policy_functions_group_read_iec104
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104_modbus_precedence.pcap" --policy "${POLICY_DIR}/functions_group_read_iec104.yaml")
+set_tests_properties(policy_functions_group_read_iec104 PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"iec104 reads only via group keyword\"")
+
+add_test(NAME policy_functions_group_write_iec104
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --policy "${POLICY_DIR}/functions_group_write_iec104.yaml")
+set_tests_properties(policy_functions_group_write_iec104 PROPERTIES
+  PASS_REGULAR_EXPRESSION "functions 'C_IC_NA_1', 'M_ME_TD_1', 'M_SP_NA_1' observed; conduit 'iec104 writes only via group keyword' permits only: C_SC_NA_1, C_SC_TA_1, C_DC_NA_1, C_DC_TA_1, C_RC_NA_1, C_RC_TA_1, C_SE_NA_1, C_SE_TA_1, C_SE_NB_1, C_SE_TB_1, C_SE_NC_1, C_SE_TC_1, C_BO_NA_1, C_BO_TA_1, C_CS_NA_1, C_RP_NA_1, P_ME_NA_1, P_ME_NB_1, P_ME_NC_1, P_AC_NA_1")
+
+add_test(NAME policy_functions_group_read_s7comm
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_items.pcap" --policy "${POLICY_DIR}/functions_group_read_s7comm.yaml")
+set_tests_properties(policy_functions_group_read_s7comm PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*matched conduit \"s7comm reads only via group keyword\"")
+
+add_test(NAME policy_functions_group_write_s7comm
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --policy "${POLICY_DIR}/functions_group_write_s7comm.yaml")
+set_tests_properties(policy_functions_group_write_s7comm PROPERTIES
+  PASS_REGULAR_EXPRESSION "functions 'Read Var', 'Setup Communication' observed; conduit 's7comm writes only via group keyword' permits only: Write Var, Request Download, Download Block, Download Ended, PLC Control, PLC Stop")
+
+add_test(NAME policy_functions_group_combine_with_literal_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/functions_group_combine_with_literal_modbus.yaml" --format json)
+set_tests_properties(policy_functions_group_combine_with_literal_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"functions\": \\[\"Write Single Coil\", \"Write Single Register\", \"Write Multiple Coils\", \"Write Multiple Registers\", \"Mask Write Register\", \"Diagnostics\"\\]")
+
+add_test(NAME policy_error_functions_group_keyword_near_miss_falls_through
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_functions_group_keyword_near_miss.yaml")
+set_tests_properties(policy_error_functions_group_keyword_near_miss_falls_through PROPERTIES
+  PASS_REGULAR_EXPRESSION "unknown modbus function 'reads' -- did you mean 'Read Coils'\\?")
+
 # --------------------------------------------------------------------------
 # Widened `protocols` enum (ROADMAP item 14): bacnet/hartip/opcua/mms/mqtt/ffhse, in addition to
 # the original modbus/dnp3/s7comm/iec104/enip/any -- see tests/policies/widened_protocols.yaml's

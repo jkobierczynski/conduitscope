@@ -37,64 +37,78 @@ std::string u_function_name(uint8_t c0) {
 // the mnemonic conduitscope's policy-matching feature (policy.cpp/PolicyEngine) matches a
 // 'functions:' entry against; `description` is only ever shown composed into type_name's
 // parenthetical, never on its own.
+// docs/design/policy-engine-zoning.md's Phase 4 (operation-level read/write direction): classified
+// along IEC 60870-5-101/104's own Monitor-direction ("M_*", RTU-to-master reports -- Read: process
+// data flowing out of the field device) vs. Control-direction ("C_*"/"P_*", master-to-RTU commands
+// -- Write: a command or parameter change acting on the field device) split. Three C_* functions
+// are the exception: C_IC_NA_1/C_CI_NA_1/C_RD_NA_1 are themselves read-TRIGGERS -- the master
+// asking the RTU to (re)send its data, not a command that changes the process -- so they're Read
+// despite the C_ prefix. C_CD_NA_1 (round-trip delay measurement) and C_TS_TA_1 (a link test) have
+// no process-data-plane effect at all and are Other, left out of both
+// iec104_read_asdu_short_names()/iec104_write_asdu_short_names() so the 'functions:
+// [read]'/'[write]' group keyword never silently mispermits them -- either can still be named
+// literally.
+enum class Iec104FunctionAccess { Read, Write, Other };
+
 struct Iec104TypeEntry {
     uint8_t type_id;
     const char* short_name;
     const char* description;
+    Iec104FunctionAccess access;
 };
 
 constexpr Iec104TypeEntry kIec104Types[] = {
-    {1, "M_SP_NA_1", "Single-point information"},
-    {2, "M_SP_TA_1", "Single-point information with time tag"},
-    {30, "M_SP_TB_1", "Single-point information with time tag CP56Time2a"},
-    {3, "M_DP_NA_1", "Double-point information"},
-    {4, "M_DP_TA_1", "Double-point information with time tag"},
-    {31, "M_DP_TB_1", "Double-point information with time tag CP56Time2a"},
-    {5, "M_ST_NA_1", "Step position information"},
-    {6, "M_ST_TA_1", "Step position information with time tag"},
-    {32, "M_ST_TB_1", "Step position information with time tag CP56Time2a"},
-    {7, "M_BO_NA_1", "Bitstring of 32 bit"},
-    {8, "M_BO_TA_1", "Bitstring of 32 bit with time tag"},
-    {33, "M_BO_TB_1", "Bitstring of 32 bit with time tag CP56Time2a"},
-    {9, "M_ME_NA_1", "Measured value, normalized value"},
-    {34, "M_ME_TD_1", "Measured value, normalized value with time tag CP56Time2a"},
-    {10, "M_ME_TA_1", "Measured value, normalized value with time tag"},
-    {11, "M_ME_NB_1", "Measured value, scaled value"},
-    {35, "M_ME_TE_1", "Measured value, scaled value with time tag CP56Time2a"},
-    {12, "M_ME_TB_1", "Measured value, scaled value with time tag"},
-    {13, "M_ME_NC_1", "Measured value, short floating point"},
-    {36, "M_ME_TF_1", "Measured value, short floating point with time tag CP56Time2a"},
-    {14, "M_ME_TC_1", "Measured value, short floating point with time tag"},
-    {21, "M_ME_ND_1", "Measured value, normalized value without quality descriptor"},
-    {15, "M_IT_NA_1", "Integrated totals"},
-    {37, "M_IT_TB_1", "Integrated totals with time tag CP56Time2a"},
-    {16, "M_IT_TA_1", "Integrated totals with time tag"},
-    {45, "C_SC_NA_1", "Single command"},
-    {58, "C_SC_TA_1", "Single command with time tag CP56Time2a"},
-    {46, "C_DC_NA_1", "Double command"},
-    {59, "C_DC_TA_1", "Double command with time tag CP56Time2a"},
-    {47, "C_RC_NA_1", "Regulating step command"},
-    {60, "C_RC_TA_1", "Regulating step command with time tag CP56Time2a"},
-    {48, "C_SE_NA_1", "Set point command, normalized value"},
-    {61, "C_SE_TA_1", "Set point command, normalized value with time tag CP56Time2a"},
-    {49, "C_SE_NB_1", "Set point command, scaled value"},
-    {62, "C_SE_TB_1", "Set point command, scaled value with time tag CP56Time2a"},
-    {50, "C_SE_NC_1", "Set point command, short floating point"},
-    {63, "C_SE_TC_1", "Set point command, short floating point with time tag CP56Time2a"},
-    {51, "C_BO_NA_1", "Bitstring of 32 bit command"},
-    {64, "C_BO_TA_1", "Bitstring of 32 bit command with time tag CP56Time2a"},
-    {70, "M_EI_NA_1", "End of initialization"},
-    {100, "C_IC_NA_1", "Interrogation command"},
-    {101, "C_CI_NA_1", "Counter interrogation command"},
-    {102, "C_RD_NA_1", "Read command"},
-    {103, "C_CS_NA_1", "Clock synchronization command"},
-    {105, "C_RP_NA_1", "Reset process command"},
-    {106, "C_CD_NA_1", "Delay acquisition command"},
-    {107, "C_TS_TA_1", "Test command with time tag CP56Time2a"},
-    {110, "P_ME_NA_1", "Parameter of measured value, normalized value"},
-    {111, "P_ME_NB_1", "Parameter of measured value, scaled value"},
-    {112, "P_ME_NC_1", "Parameter of measured value, short floating point"},
-    {113, "P_AC_NA_1", "Parameter activation"},
+    {1, "M_SP_NA_1", "Single-point information", Iec104FunctionAccess::Read},
+    {2, "M_SP_TA_1", "Single-point information with time tag", Iec104FunctionAccess::Read},
+    {30, "M_SP_TB_1", "Single-point information with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {3, "M_DP_NA_1", "Double-point information", Iec104FunctionAccess::Read},
+    {4, "M_DP_TA_1", "Double-point information with time tag", Iec104FunctionAccess::Read},
+    {31, "M_DP_TB_1", "Double-point information with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {5, "M_ST_NA_1", "Step position information", Iec104FunctionAccess::Read},
+    {6, "M_ST_TA_1", "Step position information with time tag", Iec104FunctionAccess::Read},
+    {32, "M_ST_TB_1", "Step position information with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {7, "M_BO_NA_1", "Bitstring of 32 bit", Iec104FunctionAccess::Read},
+    {8, "M_BO_TA_1", "Bitstring of 32 bit with time tag", Iec104FunctionAccess::Read},
+    {33, "M_BO_TB_1", "Bitstring of 32 bit with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {9, "M_ME_NA_1", "Measured value, normalized value", Iec104FunctionAccess::Read},
+    {34, "M_ME_TD_1", "Measured value, normalized value with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {10, "M_ME_TA_1", "Measured value, normalized value with time tag", Iec104FunctionAccess::Read},
+    {11, "M_ME_NB_1", "Measured value, scaled value", Iec104FunctionAccess::Read},
+    {35, "M_ME_TE_1", "Measured value, scaled value with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {12, "M_ME_TB_1", "Measured value, scaled value with time tag", Iec104FunctionAccess::Read},
+    {13, "M_ME_NC_1", "Measured value, short floating point", Iec104FunctionAccess::Read},
+    {36, "M_ME_TF_1", "Measured value, short floating point with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {14, "M_ME_TC_1", "Measured value, short floating point with time tag", Iec104FunctionAccess::Read},
+    {21, "M_ME_ND_1", "Measured value, normalized value without quality descriptor", Iec104FunctionAccess::Read},
+    {15, "M_IT_NA_1", "Integrated totals", Iec104FunctionAccess::Read},
+    {37, "M_IT_TB_1", "Integrated totals with time tag CP56Time2a", Iec104FunctionAccess::Read},
+    {16, "M_IT_TA_1", "Integrated totals with time tag", Iec104FunctionAccess::Read},
+    {45, "C_SC_NA_1", "Single command", Iec104FunctionAccess::Write},
+    {58, "C_SC_TA_1", "Single command with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {46, "C_DC_NA_1", "Double command", Iec104FunctionAccess::Write},
+    {59, "C_DC_TA_1", "Double command with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {47, "C_RC_NA_1", "Regulating step command", Iec104FunctionAccess::Write},
+    {60, "C_RC_TA_1", "Regulating step command with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {48, "C_SE_NA_1", "Set point command, normalized value", Iec104FunctionAccess::Write},
+    {61, "C_SE_TA_1", "Set point command, normalized value with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {49, "C_SE_NB_1", "Set point command, scaled value", Iec104FunctionAccess::Write},
+    {62, "C_SE_TB_1", "Set point command, scaled value with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {50, "C_SE_NC_1", "Set point command, short floating point", Iec104FunctionAccess::Write},
+    {63, "C_SE_TC_1", "Set point command, short floating point with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {51, "C_BO_NA_1", "Bitstring of 32 bit command", Iec104FunctionAccess::Write},
+    {64, "C_BO_TA_1", "Bitstring of 32 bit command with time tag CP56Time2a", Iec104FunctionAccess::Write},
+    {70, "M_EI_NA_1", "End of initialization", Iec104FunctionAccess::Read},
+    {100, "C_IC_NA_1", "Interrogation command", Iec104FunctionAccess::Read},
+    {101, "C_CI_NA_1", "Counter interrogation command", Iec104FunctionAccess::Read},
+    {102, "C_RD_NA_1", "Read command", Iec104FunctionAccess::Read},
+    {103, "C_CS_NA_1", "Clock synchronization command", Iec104FunctionAccess::Write},
+    {105, "C_RP_NA_1", "Reset process command", Iec104FunctionAccess::Write},
+    {106, "C_CD_NA_1", "Delay acquisition command", Iec104FunctionAccess::Other},
+    {107, "C_TS_TA_1", "Test command with time tag CP56Time2a", Iec104FunctionAccess::Other},
+    {110, "P_ME_NA_1", "Parameter of measured value, normalized value", Iec104FunctionAccess::Write},
+    {111, "P_ME_NB_1", "Parameter of measured value, scaled value", Iec104FunctionAccess::Write},
+    {112, "P_ME_NC_1", "Parameter of measured value, short floating point", Iec104FunctionAccess::Write},
+    {113, "P_AC_NA_1", "Parameter activation", Iec104FunctionAccess::Write},
 };
 
 const Iec104TypeEntry* find_iec104_type(uint8_t type_id) {
@@ -614,6 +628,27 @@ std::vector<std::string> iec104_known_asdu_short_names() {
     std::vector<std::string> out;
     out.reserve(sizeof(kIec104Types) / sizeof(kIec104Types[0]));
     for (const auto& entry : kIec104Types) out.push_back(entry.short_name);
+    return out;
+}
+
+// docs/design/policy-engine-zoning.md's Phase 4: the subset of iec104_known_asdu_short_names()
+// this decoder classifies as Read (or Write) -- see kIec104Types' own access field and this file's
+// header comment on Iec104FunctionAccess for exactly which ASDU types land in neither group and
+// why. Used by policy.cpp to expand an iec104-restricted conduit's 'functions: [read]'/'[write]'
+// group keyword.
+std::vector<std::string> iec104_read_asdu_short_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kIec104Types) {
+        if (entry.access == Iec104FunctionAccess::Read) out.push_back(entry.short_name);
+    }
+    return out;
+}
+
+std::vector<std::string> iec104_write_asdu_short_names() {
+    std::vector<std::string> out;
+    for (const auto& entry : kIec104Types) {
+        if (entry.access == Iec104FunctionAccess::Write) out.push_back(entry.short_name);
+    }
     return out;
 }
 
