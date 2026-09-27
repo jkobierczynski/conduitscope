@@ -1,10 +1,10 @@
 # Asset inventory: a real OT asset record -- design document
 
-Status: **Phases 0-4 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
+Status: **Phases 0-5 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
 dispatch, OPC UA identity promotion, S7comm SZL decode + wiring, BACnet ReadPropertyMultiple decode +
-Device-object identity correlation) implemented and shipped.** Phases 5-10 (DNP3 Device Attributes
-decode, role classification, tag/point/DB touch summarization, CSV/CMDB export, STIX/TAXII-lite
-export, firewall-ACL-draft export) are scoped below but not yet started. Written in response to
+Device-object identity correlation, DNP3 Device Attributes decode + identity correlation) implemented
+and shipped.** Phases 6-10 (role classification, tag/point/DB touch summarization, CSV/CMDB export,
+STIX/TAXII-lite export, firewall-ACL-draft export) are scoped below but not yet started. Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
 fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76,
@@ -293,24 +293,105 @@ corpus-regression target clean; no-live-capture 2058/2058; plus a clean-room ext
 all re-verified before delivery; MinGW-w64 cross-compile confirmed to still compile and link
 cleanly (same standing no-Wine-here limitation as every prior phase).
 
-**Not yet done, tracked for a following increment**: DNP3 Device Attributes decode, role
-classification, tag/point/DB touch summarization, and CSV/CMDB, STIX/TAXII-lite, and
-firewall-ACL-draft export -- unchanged from Phase 3's own list, minus BACnet ReadPropertyMultiple,
-which this phase completed. WritePropertyMultiple remains explicitly out of scope even though
-ReadPropertyMultiple is now decoded -- see `bacnet.hpp`'s own "Explicitly out of scope" paragraph
-for why sharing ReadPropertyMultiple-Request's object-list framing wasn't reason enough to add a
-third repeated-record shape (WritePropertyMultiple's own PropertyValue-per-property, plus optional
-Priority) to this first pass.
+**Not yet done, tracked for a following increment**: role classification, tag/point/DB touch
+summarization, and CSV/CMDB, STIX/TAXII-lite, and firewall-ACL-draft export -- unchanged from Phase
+3's own list, minus BACnet ReadPropertyMultiple, which Phase 4 completed. WritePropertyMultiple
+remains explicitly out of scope even though ReadPropertyMultiple is now decoded -- see
+`bacnet.hpp`'s own "Explicitly out of scope" paragraph for why sharing ReadPropertyMultiple-
+Request's object-list framing wasn't reason enough to add a third repeated-record shape
+(WritePropertyMultiple's own PropertyValue-per-property, plus optional Priority) to this first
+pass.
 
-## Phase 5 -- DNP3 Device Attributes (group 0) decode + wiring
+## Phase 5 -- DNP3 Device Attributes (group 0) decode + wiring (shipped)
 
-Decode Device Attributes objects (IEEE 1815 group/variation 0): Device Manufacturer's Name, Device
-Serial Number, Product Name and Model, Firmware Version -- confirm exact variation numbers against the
-spec before implementing, don't guess. Wire into `InventoryAsset`.
+Decodes IEEE 1815 Device Attributes (group 0) object headers in `dnp3.hpp`/`dnp3.cpp`: variation
+numbers confirmed against Wireshark's `packet-dnp.c` `AL_OBJ_DA_*` definitions (fetched directly,
+not guessed) -- Device Manufacturer's Name (variation 252), Device Product Name and Model
+(variation 250), Device Serial Number (variation 248), Device Manufacturer's Software Version
+(variation 242), Device Manufacturer's Hardware Version (variation 243). Group 0's wire format is
+fundamentally different from every other group this decoder already handles: a point's byte width
+isn't implied by its group/variation at all -- each point instead carries its own inline 1-byte
+Data Type Code (VSTR/UINT/INT/FLT/OSTR/BSTR/TIME/UNCD/...) followed by a 1-byte length and that
+many bytes of value (cross-checked against `packet-dnp.c`'s own `dnp3_al_process_object`'s
+`AL_OBJ_GROUP(al_obj) == 0x0` branch), so it's decoded via a new, separate
+`decode_device_attribute_point` function rather than an entry in the existing
+`point_format()`/`bits_per_point` table every other group uses. NONE/VSTR/UINT/INT/FLT are fully
+decoded (every data type the five promoted attributes, and the large majority of other real-world
+attributes, actually use); OSTR/BSTR/TIME/UNCD and the two list types (U8BS8LIST/U8BS8EXLIST) are
+recognized but not decoded further -- Wireshark's own dissector has the identical gap for these (it
+reads the Data Type Code byte but never advances past it for any of them either), and rather than
+guess a length this decoder doesn't actually know, parsing stops with a note, same "never guess"
+posture as every other unsupported shape in this codebase. Also explicitly out of scope: variation
+0 (the bare null-variation placeholder), 254 (non-specific "all attributes" request), and 255 (List
+of Attribute Variations, whose index-prefixed bundle format packs a *different* attribute's
+variation number into each list entry's own index prefix rather than naming one attribute in the
+object header itself) -- a real single-attribute read/response (e.g. "read g0v252") is by far the
+dominant real-world shape and the only one decoded here. One correction worth flagging: a plain
+Read (function code 0x01) request never carries object data on the wire for *any* group (only the
+object header naming which points to read) -- an asymmetry none of the other groups'
+`point_format()`-table path accounts for (their own fixtures simply avoid exercising it). This
+decoder applies that rule narrowly to group 0 only, leaving every other group's existing behavior
+untouched, since fixing it generally is a separate, unscoped change this phase does not attempt.
+
+Device attribute identity correlation, DNP3's analog of BACnet's own Device-object identity
+correlation (Phase 4): when a Device Attributes response's object data resolves to one of the five
+recognized variations above as a VSTR (Visible ASCII String) value, its text is promoted onto new
+`Dnp3ApplicationFragment` fields (`has_device_identity` + `device_manufacturer_name`/
+`device_product_name`/`device_serial_number`/`device_software_version`/`device_hardware_version`)
+-- additive, nothing renamed or removed, same "widen the existing result struct" convention every
+prior phase established. A non-VSTR value on one of these five variations (legal on the wire,
+essentially never seen in practice) still decodes and appears in `dnp3_point_values` like any other
+attribute, but is never promoted. Merged across every data-link frame coalesced into one TCP
+payload onto `Dnp3Result` (`dnp3_has_device_identity` + the five `dnp3_device_*` fields),
+first-seen-wins per field, same convention `dnp3_object_headers`/`dnp3_point_values` already use.
+Wired into `InventoryAsset` in `asset_inventory.cpp`: `device_manufacturer_name` -> `vendor`,
+`device_product_name` -> `product`, `device_serial_number` -> `serial_number`,
+`device_software_version` -> `firmware_revision` -- bound to `dp.src_ip` (the response's sender,
+i.e. the outstation actually being queried), mirroring the ENIP/OPC UA/S7comm/BACnet
+identity-binding precedent exactly. `device_hardware_version` has no `InventoryAsset` field of its
+own and is deliberately not promoted there -- decoded and available in
+`dnp3_device_hardware_version`/`dnp3_point_values` regardless -- same "decode it, but don't invent
+a narrow new field for a secondary fact" posture as S7comm's own module-type-code/version (Phase
+3). Also surfaced directly on `decode --format json`'s own DNP3 output (`dnp3_has_device_identity`
++ the five `dnp3_device_*` fields in `write_dnp3_json_fields`, `src/output.cpp`) and in `decode`'s
+own one-line text summary (a trailing `device-identity(manufacturer=... product=... ...)` segment,
+mirroring BACnet's own `apdu_summary()` suffix), independent of `inventory`'s own wiring -- same
+"both inventory wiring AND standalone decode fields" pattern every prior phase established.
 
 (This phase no longer also carries "add S7comm-Plus dispatch," as originally planned here -- that
 turned out to be pure wiring and shipped in Phase 1 instead once `src/asset_inventory.cpp` was read
-directly; see this doc's own "Context" section.)
+directly; see this doc's own "Context" section. Re-confirmed while implementing this phase:
+`asset_inventory.cpp`'s `observe()` already dispatches on `protocol == "s7comm-plus"` for both
+asset tracking and function-name classification -- nothing further needed there.)
+
+**Testing.** 8 new packets appended to `tests/sample_dnp3.pcap` (`build_dnp3_sample` in
+`tools/make_sample_pcap.py`, using new `dnp3_device_attribute_header`/`dnp3_device_attribute_vstr`
+helpers): a Read request for a single attribute confirming it carries zero object data; the
+matching single-attribute Response (the identity correlation's simplest positive case); a Response
+bundling all five recognized identity attributes in one fragment (also the inventory-wiring
+fixture -- DNP3's own TCP addressing is already genuinely unicast, unlike BACnet's broadcast-heavy
+UDP fixture, so no special-casing was needed there); an unsupported data type (OSTR) on an identity
+variation, confirming it is noted but never promoted; a non-identity variation decoded generically
+as UINT, confirming the generic (non-promoted) path also works for numeric types, not just VSTR; a
+non-zero index prefix (the "List of Attribute Variations" bundling format) correctly bailing out;
+a truncated VSTR (declared length exceeds what's actually present); and variation 0 (the bare
+null-variation placeholder) correctly bailing out distinctly from the index-prefix case. 14 new
+CTest cases (`decode` text/JSON for every scenario above, `inventory` text/JSON confirming the
+`InventoryAsset` wiring) plus two updated (`baseline_check_dnp3_unmodified_zero_findings`/
+`baseline_check_dnp3_empty_baseline_finds_new_conduit`'s distinct-operation/finding counts, which
+grew from 6 to 15 now that `extract_dnp3_operations` -- unmodified -- naturally picks up the new
+Device Attributes object headers as their own baseline operations, using the same
+attribute-specific `group_name` rendering, e.g. "Read/Device Manufacturer's Name/v252", this phase
+already needed for `decode`'s own object-header text) -- all verified against the real binary's own
+output, never hand-written expected text. Fuzz corpus for `fuzz/corpus/dnp3/` regenerated from the
+updated fixture via `tools/extract_fuzz_corpus.py` (l4/tcp), adding 22 fresh seeds alongside the
+corpus's existing libFuzzer-discovered (hash-named) entries; a ~45-second/1.2M-execution standalone
+libFuzzer run plus the `fuzz_dnp3_corpus_regression` CTest case, both clean under ASan/UBSan (zero
+crashes, zero sanitizer findings). Full CTest suite: 2082/2082 (default GCC build, up from Phase
+4's 2070); ASan/UBSan 2082/2082 (non-fuzz-labeled) plus the DNP3 fuzz corpus-regression target
+clean; no-live-capture 2070/2070; plus a clean-room extract-rebuild-test, all re-verified before
+delivery; MinGW-w64 cross-compile confirmed to still compile and link cleanly (same standing
+no-Wine-here limitation as every prior phase).
 
 ## Phase 6 -- Role classification (heuristic, informational only)
 
@@ -391,7 +472,9 @@ message types) all updated in the same phase as the code, per this project's sta
 - `include/conduitscope/bacnet.hpp` / `src/bacnet.cpp` -- Phase 4's new ReadPropertyMultiple decode
   and Device object identity correlation (shipped); `src/asset_inventory.cpp`'s `observe()` and
   `src/output.cpp`'s `write_bacnet_json_fields` also gained the corresponding wiring/fields.
-- `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode.
+- `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode and
+  device attribute identity correlation (shipped); `src/asset_inventory.cpp`'s `observe()` and
+  `src/output.cpp`'s `write_dnp3_json_fields` also gained the corresponding wiring/fields.
 - `src/cli_main.cpp` -- Phase 8's `--format csv` CLI plumbing for `inventory`.
 - `tools/make_sample_pcap.py`, `tools/extract_fuzz_corpus.py`, `CMakeLists.txt`, `fuzz/fuzz_*.cpp`.
 - `docs/USER_GUIDE.md`, `docs/DEVELOPMENT.md`, `docs/PROTOCOL_COVERAGE.md`.

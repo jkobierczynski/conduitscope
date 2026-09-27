@@ -366,7 +366,7 @@ public:
     //
     // Passively-inferred device identity (InventoryAsset::vendor/product/firmware_revision/
     // serial_number/security_posture/plant_identification -- Grok gap #2): currently populated for
-    // three protocols, all bound to DecodedPacket::src_ip on the specific packet carrying the
+    // five protocols, all bound to DecodedPacket::src_ip on the specific packet carrying the
     // identity-bearing response (not simply "whichever side this session's handshake/port-heuristic
     // called the server," since that exchange is itself the thing deciding which side is the real
     // device):
@@ -385,9 +385,21 @@ public:
     //     number; `plant_identification` (a new, S7-specific field -- see its own comment) gets
     //     0x001C's own plant tag; `vendor`/`security_posture` stay unset (S7comm's SZL exchange
     //     carries neither a vendor name nor a security-posture-equivalent fact).
+    //   - BACnet, from a ReadProperty/ReadPropertyMultiple ACK carrying one or more Device-object
+    //     identity properties (BacnetApdu::has_device_identity, see bacnet.hpp's "Device object
+    //     identity correlation" paragraph) -- `vendor`/`product`/`serial_number` get Vendor-Name/
+    //     Model-Name/Serial-Number directly; `firmware_revision` prefers Firmware-Revision, falling
+    //     back to Application-Software-Version only when Firmware-Revision itself wasn't read in
+    //     this exchange; `security_posture`/`plant_identification` stay unset.
+    //   - DNP3, from a Device Attributes response carrying one or more of five recognized
+    //     attributes (Dnp3Result::dnp3_has_device_identity, see dnp3.hpp's "Device attribute
+    //     identity correlation" paragraph) -- `vendor` gets Device Manufacturer's Name,
+    //     `product` gets Device Product Name and Model, `serial_number` gets Device Serial Number,
+    //     `firmware_revision` gets Device Manufacturer's Software Version (Device Manufacturer's
+    //     Hardware Version has no field of its own here -- see dnp3.hpp's own comment on that);
+    //     `security_posture`/`plant_identification` stay unset.
     // First-identity-seen wins for every field above, per asset. Every other protocol leaves these
-    // fields empty for now -- see docs/DEVELOPMENT.md's ROADMAP for the remaining phases (BACnet
-    // ReadPropertyMultiple, DNP3 Device Attributes) that will populate them further.
+    // fields empty for now.
     void observe(const DecodedPacket& packet);
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.

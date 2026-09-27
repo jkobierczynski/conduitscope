@@ -3721,7 +3721,10 @@ void write_hartip_json_fields(std::ostream& out, const HartIpFrame& frame) {
 // above. Reproduces the exact same four-tier gating the old JsonWriter block had: the link-layer
 // fields (source/destination/crc/block counts) print unconditionally for any "dnp3" packet,
 // dnp3_function prints only when dr.dnp3_has_function, and dnp3_object_headers/dnp3_point_values
-// each print independently whenever non-empty -- unchanged from before this migration.
+// each print independently whenever non-empty -- unchanged from before this migration. Phase 5
+// adds a fifth tier, mirroring write_bacnet_json_fields's own bacnet_has_device_identity block:
+// dnp3_has_device_identity prints unconditionally (same tier as the link-layer fields), and each
+// individual dnp3_device_* name field prints only when it's actually non-empty.
 void write_dnp3_json_fields(std::ostream& out, const Dnp3Result& dr) {
     out << "    \"dnp3_source_address\": " << dr.source_address << ",\n";
     out << "    \"dnp3_destination_address\": " << dr.destination_address << ",\n";
@@ -3747,6 +3750,25 @@ void write_dnp3_json_fields(std::ostream& out, const Dnp3Result& dr) {
             out << "\"" << json_escape(dr.dnp3_point_values[i]) << "\"";
         }
         out << "],\n";
+    }
+    // Device attribute identity correlation (Phase 5) -- see Dnp3Result::dnp3_has_device_identity's
+    // own comment (dnp3.hpp). Mirrors write_bacnet_json_fields's own bacnet_has_device_identity
+    // block below in shape.
+    out << "    \"dnp3_has_device_identity\": " << (dr.dnp3_has_device_identity ? "true" : "false") << ",\n";
+    if (dr.dnp3_has_device_identity) {
+        if (!dr.dnp3_device_manufacturer_name.empty())
+            out << "    \"dnp3_device_manufacturer_name\": \"" << json_escape(dr.dnp3_device_manufacturer_name)
+                << "\",\n";
+        if (!dr.dnp3_device_product_name.empty())
+            out << "    \"dnp3_device_product_name\": \"" << json_escape(dr.dnp3_device_product_name) << "\",\n";
+        if (!dr.dnp3_device_serial_number.empty())
+            out << "    \"dnp3_device_serial_number\": \"" << json_escape(dr.dnp3_device_serial_number) << "\",\n";
+        if (!dr.dnp3_device_software_version.empty())
+            out << "    \"dnp3_device_software_version\": \"" << json_escape(dr.dnp3_device_software_version)
+                << "\",\n";
+        if (!dr.dnp3_device_hardware_version.empty())
+            out << "    \"dnp3_device_hardware_version\": \"" << json_escape(dr.dnp3_device_hardware_version)
+                << "\",\n";
     }
 }
 

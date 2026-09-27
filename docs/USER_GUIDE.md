@@ -455,7 +455,7 @@ passively-inferred **vendor**/**product**/**firmware revision**/**serial
 number** fields, plus an OPC UA-specific **security posture** note and an
 S7comm-specific **plant identification** field (Grok gap #2's "turn
 inventory into a real OT asset record" ask) -- currently wired for
-**EtherNet/IP**, **OPC UA**, **S7comm**, and **BACnet/IP**. EtherNet/IP's
+**EtherNet/IP**, **OPC UA**, **S7comm**, **BACnet/IP**, and **DNP3**. EtherNet/IP's
 comes from a decoded CIP Identity `ListIdentity` response (`vendor` is a
 raw numeric CIP Vendor ID, e.g. `Vendor ID 1`, since this project has no
 CIP Vendor ID -> name table -- ODVA's registry runs to several thousand
@@ -470,11 +470,17 @@ List) exchange's SZL-ID `0x0011`/`0x001c` records, plant identification
 kept as its own field rather than folded into `vendor`/`product` (see
 below). BACnet's comes from a ReadProperty or ReadPropertyMultiple ACK's
 Device object Vendor-Name/Model-Name/Firmware-Revision/
-Application-Software-Version/Serial-Number properties (see below). Every
-other protocol here (DNP3, Modbus, IEC 104, HART-IP, MMS, MQTT, FF-HSE,
-S7comm-Plus) leaves these fields empty for now -- populating DNP3's (via
-its own Device Attributes, group/variation 0) is tracked as follow-on work
-in docs/DEVELOPMENT.md's ROADMAP. First-seen/last-seen, by
+Application-Software-Version/Serial-Number properties (see below). DNP3's
+comes from a Device Attributes (IEEE 1815 group/variation 0) response
+resolving Device Manufacturer's Name (variation 252), Device Product Name
+and Model (variation 250), Device Serial Number (variation 248), or Device
+Manufacturer's Software Version (variation 242) as a VSTR value (see
+below); Device Manufacturer's Hardware Version (variation 243) is decoded
+but deliberately not promoted to inventory identity, matching this
+project's precedent of not promoting a raw hardware/module-type code onto
+`vendor`/`product`/`firmware revision` fields meant for human-readable
+values. Every other protocol here (Modbus, IEC 104, HART-IP, MMS, MQTT,
+FF-HSE, S7comm-Plus) leaves these fields empty for now. First-seen/last-seen, by
 contrast, are populated for every asset and edge regardless of protocol. Every distinct `(protocol, client, server, server port)`
 tuple becomes one **edge** (also carrying its own first-seen/last-seen) --
 deliberately coarser than `policy validate`'s own per-TCP-session
@@ -664,6 +670,43 @@ five well-known identity properties on a Device object are recognized
 this way -- a general property, or the same properties read off a
 non-Device object, are decoded into `bacnet_values` like any other
 ReadProperty(Multiple) result but never promoted to identity; see
+LIMITATIONS.
+
+DNP3 identity is promoted from a Device Attributes (IEEE 1815 group/
+variation 0) response (`dnp3.hpp`/`docs/PROTOCOL_COVERAGE.md`'s own DNP3
+section covers the decode itself): Device Manufacturer's Name (variation
+252) -> `vendor`, Device Product Name and Model (variation 250) ->
+`product`, Device Manufacturer's Software Version (variation 242) ->
+`firmware_revision`, and Device Serial Number (variation 248) ->
+`serial_number`. Only a VSTR-typed value on one of these four variations is
+promoted; a value declared with any other Device Attributes data type
+(UINT/INT/FLT/etc.) is still decoded and shown on the object itself but
+never promoted to identity:
+
+```sh
+$ conduitscope inventory -r tests/sample_dnp3.pcap
+...
+ASSETS (2):
+  ...
+  192.168.1.11  00:0c:29:aa:bb:11  [server]  dnp3  (22 packet(s))
+      first seen: 2023-11-14 21:33:20.000000Z  last seen: 2023-11-14 21:33:31.011000Z
+      identity:  vendor=Acme Controls  product="Widget RTU-9000"  firmware=3.2.1  serial=SN-778812
+...
+```
+
+`decode --format json` also gains standalone `dnp3_device_*` fields
+(`dnp3_has_device_identity`, and, when true, whichever of
+`dnp3_device_manufacturer_name`/`_product_name`/`_software_version`/
+`_hardware_version`/`_serial_number` the response actually carried),
+independent of `inventory`'s own wiring, same pattern as OPC UA's/
+S7comm's/BACnet's own identity fields above. `dnp3_device_hardware_version`
+is decoded and shown here even though it is never promoted to
+`inventory`'s `firmware_revision`/`vendor`/`product` fields (see above).
+Device Attributes variations 0 (null/group placeholder), 254
+(non-specific all-attributes request), and 255 (List of Attribute
+Variations, which uses a fundamentally different index-prefix-as-
+attribute-id addressing scheme) are not decoded, nor are the OSTR/BSTR/
+TIME/UNCD/U8BS8LIST/U8BS8EXLIST Device Attributes data types -- see
 LIMITATIONS.
 
 #### Closing the loop
@@ -4619,7 +4662,7 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   same fallback, for the exact same reason.
 - **`inventory`'s passively-inferred device identity (vendor/product/
   firmware revision/serial number -- Grok gap #2) is wired for EtherNet/IP,
-  OPC UA, and S7comm so far.** A `ListIdentity` response's CIP Identity object is
+  OPC UA, S7comm, BACnet/IP, and DNP3 so far.** A `ListIdentity` response's CIP Identity object is
   already fully decoded (vendor ID/device type/product code/revision/serial
   number/product name); `decode` itself only ever surfaces this inside the
   packet's own `summary` text (`"ListIdentity; identity: vendor=1
@@ -4652,16 +4695,50 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   asset-identity-relevant ones this project decodes) -- recognized as SZL
   data (so `s7comm_has_userdata_szl`/`s7comm_szl_id`/`s7comm_szl_id_name`
   still populate) but their own sub-record bytes aren't interpreted further.
-  BACnet/IP (a Device object's Vendor-Name/Model-Name/Firmware-Revision
-  read via ReadProperty(Multiple)) and DNP3 (IEEE 1815 Device Attributes)
-  still carry comparable identity data on the wire but neither is wired
-  into `inventory` yet -- tracked as follow-on work in
-  docs/DEVELOPMENT.md's ROADMAP. Rack/slot (also asked for in Grok's
-  original review) is scoped out entirely: no protocol this project
-  decodes carries a device's own rack/slot number as a field it volunteers
-  about itself (CIP does have a path-addressable rack/slot concept, but
-  only in an explicit-messaging *request path* a scanner already has to
-  know out-of-band -- there is nothing to passively infer there).
+  BACnet/IP's ReadProperty or ReadPropertyMultiple ACK of a Device object's
+  Vendor-Name/Model-Name/Firmware-Revision/Application-Software-Version/
+  Serial-Number properties promotes Vendor-Name into `vendor`, Model-Name
+  into `product`, Firmware-Revision into `firmware_revision` (falling back
+  to Application-Software-Version only when Firmware-Revision itself
+  wasn't read in that exchange), and Serial-Number into `serial_number` --
+  also surfaced directly on `decode --format json` as `bacnet_device_*`
+  fields, same "both inventory wiring AND standalone decode fields"
+  pattern as OPC UA/S7comm above. Only these five well-known properties
+  read off a Device object are recognized this way; a general property, or
+  the same properties read off a non-Device object, are decoded into
+  `bacnet_values` like any other ReadProperty(Multiple) result but never
+  promoted to identity. DNP3's Device Attributes (IEEE 1815 group/
+  variation 0) response promotes Device Manufacturer's Name (variation
+  252) into `vendor`, Device Product Name and Model (variation 250) into
+  `product`, Device Manufacturer's Software Version (variation 242) into
+  `firmware_revision`, and Device Serial Number (variation 248) into
+  `serial_number` -- also surfaced directly on `decode --format json` as
+  `dnp3_device_*` fields, same pattern again. Only a VSTR-typed value on
+  one of these four variations is promoted; a value declared with any
+  other Device Attributes data type is decoded and shown on the object
+  itself but never promoted to identity. Device Manufacturer's Hardware
+  Version (variation 243) is decoded but deliberately never promoted to
+  `inventory` identity, since it's a raw hardware/module-type code rather
+  than a human-readable vendor/model/firmware value. Device Attributes
+  variations 0 (null/group placeholder), 254 (non-specific all-attributes
+  request), and 255 (List of Attribute Variations, whose bundling format
+  uses index prefixes to mean a different attribute's variation number
+  rather than a point index) are not decoded, nor are the OSTR/BSTR/TIME/
+  UNCD/U8BS8LIST/U8BS8EXLIST Device Attributes data types -- Wireshark's
+  own `packet-dnp.c` dissector has the identical gap for these types (it
+  reads only the type byte and advances no further), which this decoder
+  deliberately reproduces as a documented bailout rather than guess a
+  length. Also, per IEEE 1815, a plain Read (function code 0x01) request
+  never carries Device Attributes object data -- this decoder accounts for
+  that specifically for group 0; the same request/response asymmetry
+  exists for every other DNP3 object group too but is not yet accounted
+  for there, since no fixture currently exercises it. Rack/slot (also
+  asked for in Grok's original review) is scoped out entirely: no protocol
+  this project decodes carries a device's own rack/slot number as a field
+  it volunteers about itself (CIP does have a path-addressable rack/slot
+  concept, but only in an explicit-messaging *request path* a scanner
+  already has to know out-of-band -- there is nothing to passively infer
+  there).
 - **Direction/initiator determination is, in general, only ever as good as
   the evidence available for a given flow -- it can't always be established
   with certainty, only approximately.** "Approximately" has one precise

@@ -38,6 +38,62 @@
 // computed and skipped structurally (so later object headers in the same
 // fragment stay correctly aligned), just without per-point value decoding.
 //
+// Group 0 (Device Attributes, IEEE 1815) is a second, separate decode path
+// (see decode_device_attribute_point in dnp3.cpp), not an entry in the
+// point-format table above: unlike every other group, a Device Attributes
+// object's per-point byte width isn't implied by its group/variation at
+// all -- each point instead carries its own inline 1-byte Data Type Code
+// (VSTR/UINT/INT/FLT/...) followed by a 1-byte length and that many bytes
+// of value, so the width is only known once that type byte has actually
+// been read (cross-checked against Wireshark's packet-dnp.c
+// dnp3_al_process_object's own `AL_OBJ_GROUP(al_obj) == 0x0` branch, which
+// uses the exact same data-type-then-length-then-value shape). This
+// decoder fully decodes NONE/VSTR/UINT/INT/FLT (every data type this
+// release's five promoted attributes -- see "Device attribute identity
+// correlation" below -- and the large majority of other real-world
+// attributes actually use); OSTR/BSTR/TIME/UNCD and the two list types
+// (U8BS8LIST/U8BS8EXLIST) are recognized but not decoded -- Wireshark's own
+// dissector has the identical gap for these (it reads the data-type byte
+// but never advances past it for them either), and rather than silently
+// guess a length this decoder stops object parsing for the fragment with
+// a note, same "never guess" posture as every other unsupported shape
+// here. Also out of scope: variation 0 (the bare group/null-variation
+// placeholder), 254 (non-specific "all attributes" request), and 255
+// (List of Attribute Variations, whose index-prefixed bundle format packs
+// a DIFFERENT attribute's variation number into each list entry's own
+// index prefix rather than naming one attribute in the object header
+// itself) -- a real single-attribute read/response (e.g. "read g0v252")
+// is by far the dominant real-world shape and the only one decoded here.
+// A Device Attributes object header also has a request/response asymmetry
+// none of the other groups' point-format-table path accounts for: a plain
+// Read (function code 0x01) request never carries object data on the wire
+// for ANY group (only the object header naming which points to read) --
+// this decoder narrowly applies that rule to group 0 only (see dnp3.cpp),
+// leaving the point-format-table path's existing behavior for every other
+// group untouched, since fixing that generally is a separate, unscoped
+// change this phase does not attempt.
+//
+// Device attribute identity correlation (DNP3's analog of BACnet's own
+// Device-object identity correlation -- bacnet.hpp): when a Device
+// Attributes response includes one of five commonly-implemented
+// attributes -- Device Manufacturer's Name (variation 252), Device
+// Product Name and Model (variation 250), Device Serial Number (variation
+// 248), Device Manufacturer's Software Version (variation 242), Device
+// Manufacturer's Hardware Version (variation 243), variation numbers
+// confirmed against Wireshark's packet-dnp.c AL_OBJ_DA_MFG/AL_OBJ_DA_PROD/
+// AL_OBJ_DA_SERNUM/AL_OBJ_DA_SWVER/AL_OBJ_DA_HWVER definitions, not
+// guessed -- as a VSTR (visible ASCII string) value, its text is promoted
+// onto Dnp3ApplicationFragment's device_manufacturer_name/
+// device_product_name/device_serial_number/device_software_version/
+// device_hardware_version fields (has_device_identity=true). A non-VSTR
+// value on one of these five variations (technically legal on the wire,
+// essentially never seen in practice) is decoded and shown in
+// dnp3_point_values like any other attribute but is NOT promoted -- this
+// correlation only recognizes the specific, documented "identity string"
+// shape, the same narrow-pattern-not-general-tracking scope every other
+// identity correlation in this codebase already uses (see bacnet.hpp's
+// own comment on this same trade-off).
+//
 // Data link "user data" (the transport+application bytes) is NOT contiguous
 // on the wire: it is split into blocks of up to 16 bytes, each followed by
 // its own 2-byte CRC (including a short final block). Dnp3LinkFrame's
@@ -270,6 +326,24 @@ struct Dnp3ApplicationFragment {
 
     std::vector<Dnp3ObjectHeader> objects;
 
+    // Device attribute identity correlation -- see the file header comment's own paragraph. Set
+    // only when at least one of the five recognized identity attributes was seen as a VSTR value
+    // in this fragment's object list; each individual field stays empty unless THAT SPECIFIC
+    // attribute was present (a response naming only Device Manufacturer's Name leaves
+    // device_product_name/device_serial_number/device_software_version/device_hardware_version
+    // empty, not defaulted to anything). device_hardware_version is decoded and exposed here (and
+    // in dnp3_point_values) like the other four, but is deliberately NOT wired into
+    // InventoryAsset -- it has no InventoryAsset field of its own (only firmware_revision, which
+    // device_software_version maps onto), same "decode it, but don't invent a narrow new field for
+    // a secondary fact" posture as S7comm's own module-type-code/version (see asset_inventory.hpp's
+    // own comment on that).
+    bool has_device_identity = false;
+    std::string device_manufacturer_name;  // Device Attributes variation 252
+    std::string device_product_name;       // Device Attributes variation 250 (Product Name and Model)
+    std::string device_serial_number;      // Device Attributes variation 248
+    std::string device_software_version;   // Device Attributes variation 242 (Manufacturer's SW Version)
+    std::string device_hardware_version;   // Device Attributes variation 243 (Manufacturer's HW Version)
+
     std::string summary;
     std::vector<std::string> notes;
 };
@@ -365,6 +439,18 @@ struct Dnp3Result {
     std::vector<std::string> dnp3_object_headers;
     std::vector<std::string> dnp3_point_values;
     std::vector<Dnp3ObjectRange> dnp3_objects;  // see Dnp3ObjectRange's own comment above
+
+    // Device attribute identity correlation -- see Dnp3ApplicationFragment's own comment
+    // (dnp3.hpp's file header) for what these mean and how they're populated. Merged across every
+    // data-link frame coalesced into this one TCP payload (Dnp3Decoder::decode), first-seen-wins
+    // per field, same convention dnp3_object_headers/dnp3_point_values already use -- unlike
+    // dnp3_has_function/dnp3_function_name, which reflect only the FIRST frame.
+    bool dnp3_has_device_identity = false;
+    std::string dnp3_device_manufacturer_name;
+    std::string dnp3_device_product_name;
+    std::string dnp3_device_serial_number;
+    std::string dnp3_device_software_version;
+    std::string dnp3_device_hardware_version;
 
     bool link_crc_valid = false;
     bool header_crc_valid = false;

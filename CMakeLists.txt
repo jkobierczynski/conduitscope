@@ -754,6 +754,100 @@ add_test(NAME dnp3_bad_block_crc_fields_in_json
 set_tests_properties(dnp3_bad_block_crc_fields_in_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"index\": 14,[^}]*\"dnp3_link_crc_valid\": false,\n    \"dnp3_header_crc_valid\": true,\n    \"dnp3_block_count\": 2,\n    \"dnp3_block_crc_failures\": 1")
 
+# --------------------------------------------------------------------------
+# Phase 5 (docs/design/asset-inventory-real-record.md): Device Attributes (group 0, IEEE 1815)
+# decode + identity correlation. Packets 15-22 of sample_dnp3.pcap -- see
+# tools/make_sample_pcap.py's own per-packet comments for the full byte-level rationale.
+# --------------------------------------------------------------------------
+
+# Packet 15: a plain Read request for g0v252 (Device Manufacturer's Name) carries NO object data
+# on the wire (dnp3.hpp's file header comment on the request/response asymmetry) -- confirms the
+# object header itself still decodes (0 byte(s) of object data, no truncation note).
+add_test(NAME dnp3_device_attribute_read_request_no_data
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --verbose)
+set_tests_properties(dnp3_device_attribute_read_request_no_data PROPERTIES
+  PASS_REGULAR_EXPRESSION "function=Read \\(0x01\\) objects: \\[g0v252\\][^\n]*\n *note: object 0: g0v252 \\(Device Manufacturer's Name\\) qualifier=0x00 range=0-0 -- 1 point\\(s\\), 0 byte\\(s\\) of object data")
+
+# Packet 16: the matching single-attribute Response -- has_device_identity=true,
+# device_manufacturer_name="Acme Controls", every other device_* field absent (only the fields
+# actually present are ever emitted -- see write_dnp3_json_fields's own comment).
+add_test(NAME dnp3_device_attribute_single_identity_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_device_attribute_single_identity_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 16,[^}]*\"dnp3_has_device_identity\": true,\n    \"dnp3_device_manufacturer_name\": \"Acme Controls\",\n    \"notes\""
+  FAIL_REGULAR_EXPRESSION "\"index\": 16,[^}]*\"dnp3_device_product_name\"")
+
+# Packet 17: a Response bundling all five recognized identity attributes -- confirms every field
+# promotes correctly in one fragment, and the "device-identity(...)" summary suffix (mirroring
+# BACnet's own apdu_summary()) renders all five.
+add_test(NAME dnp3_device_attribute_all_five_identity_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_device_attribute_all_five_identity_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 17,[^}]*\"dnp3_has_device_identity\": true,\n    \"dnp3_device_manufacturer_name\": \"Acme Controls\",\n    \"dnp3_device_product_name\": \"Widget RTU-9000\",\n    \"dnp3_device_serial_number\": \"SN-778812\",\n    \"dnp3_device_software_version\": \"3\\.2\\.1\",\n    \"dnp3_device_hardware_version\": \"Rev B\",")
+
+add_test(NAME dnp3_device_attribute_all_five_identity_summary_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_device_attribute_all_five_identity_summary_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "device-identity\\(manufacturer=Acme Controls product=Widget RTU-9000 serial=SN-778812 sw-version=3\\.2\\.1 hw-version=Rev B\\)")
+
+# Packet 18: g0v252 declared as Data Type Code 0x05 (OSTR) instead of VSTR -- not decoded by this
+# groundwork release (same gap Wireshark's own packet-dnp.c dissector has), and critically NOT
+# promoted (a non-VSTR value on an identity variation is never treated as identity).
+add_test(NAME dnp3_device_attribute_unsupported_data_type_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --verbose)
+set_tests_properties(dnp3_device_attribute_unsupported_data_type_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: object header 0: point 0: data type OSTR is not decoded by this groundwork release")
+
+add_test(NAME dnp3_device_attribute_unsupported_data_type_not_promoted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_device_attribute_unsupported_data_type_not_promoted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 18,[^}]*\"dnp3_has_device_identity\": false,")
+
+# Packet 19: a non-identity variation (g0v221, "Number of analog outputs") decoded as UINT --
+# confirms the generic (non-promoted) group-0 path works for a numeric type too, not just VSTR.
+add_test(NAME dnp3_device_attribute_generic_uint_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_device_attribute_generic_uint_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 19,[^}]*\"dnp3_objects\": \\[\"g0v221 \\(Device Attribute 221\\)\"\\],\n    \"dnp3_values\": \\[\"g0v221 idx=0: 4\"\\],\n    \"dnp3_has_device_identity\": false,")
+
+# Packet 20: a non-zero index prefix (qualifier 0x17) on group 0, variation 255 (List of
+# Attribute Variations) -- the "bundling format... not decoded" bailout, distinct from the plain
+# unsupported-data-type bailout above.
+add_test(NAME dnp3_device_attribute_index_prefix_bundle_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --verbose)
+set_tests_properties(dnp3_device_attribute_index_prefix_bundle_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: object header 0: Device Attributes \\(group 0\\) with qualifier 0x17 \\(a non-zero index prefix\\) is the \"List of Attribute Variations\" bundling format")
+
+# Packet 21: g0v252 declares a 20-byte VSTR length but only 5 bytes actually remain (truncated
+# capture) -- the truncation note names the exact declared-vs-available counts, and nothing is
+# promoted.
+add_test(NAME dnp3_device_attribute_truncated_vstr_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_device_attribute_truncated_vstr_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 21,[^}]*\"dnp3_has_device_identity\": false,\n    \"notes\": \\[\"object header 0: point 0: truncated: VSTR declares 20 byte\\(s\\) but only 5 remain\"")
+
+# Packet 22: variation 0 (the bare "Device Attributes Group and null variation" placeholder) --
+# the variation-0/254/255 bailout, distinct from the index-prefix bailout in packet 20 (this one
+# is refused on the variation number alone, with prefix_code == 0).
+add_test(NAME dnp3_device_attribute_null_variation_not_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --verbose)
+set_tests_properties(dnp3_device_attribute_null_variation_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: object header 0: Device Attributes variation 0 \\(Device Attributes Group and null variation\\) is not decoded by this groundwork release")
+
+# Inventory wiring: packet 17's Response (192.168.1.10, the outstation) carries all five
+# identity attributes -- update_identity binds vendor/product/firmware_revision/serial_number
+# onto that IP's InventoryAsset (device_hardware_version is deliberately NOT promoted -- see
+# asset_inventory.cpp's own comment on that).
+add_test(NAME dnp3_device_attribute_inventory_identity_wired_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
+set_tests_properties(dnp3_device_attribute_inventory_identity_wired_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 [^\n]*\\[server\\][^\n]*\n[^\n]*\n *identity: *vendor=Acme Controls  product=\"Widget RTU-9000\"  firmware=3\\.2\\.1  serial=SN-778812")
+
+add_test(NAME dnp3_device_attribute_inventory_identity_wired_json
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(dnp3_device_attribute_inventory_identity_wired_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.10\",[^}]*\"vendor\": \"Acme Controls\",\n *\"product\": \"Widget RTU-9000\",\n *\"firmware_revision\": \"3\\.2\\.1\",\n *\"serial_number\": \"SN-778812\"")
+
 # Real-world confirmation, independent of the synthetic fixture above: a genuine capture's own
 # CRC bytes (computed by a real DNP3 stack, not by tools/make_sample_pcap.py) must validate --
 # this is a strong end-to-end check that the algorithm/table genuinely matches the DNP3 spec, not
@@ -13812,12 +13906,12 @@ set_tests_properties(baseline_learn_dnp3_produces_expected_operations PROPERTIES
 add_test(NAME baseline_check_dnp3_unmodified_zero_findings
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap'")
 set_tests_properties(baseline_check_dnp3_unmodified_zero_findings PROPERTIES
-  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 6 distinct operation\\(s\\) observed, 6 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 15 distinct operation\\(s\\) observed, 15 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
 
 add_test(NAME baseline_check_dnp3_empty_baseline_finds_new_conduit
   COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_dnp3_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap'")
 set_tests_properties(baseline_check_dnp3_empty_baseline_finds_new_conduit PROPERTIES
-  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(6 finding\\(s\\)\\)"
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(15 finding\\(s\\)\\)"
   FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
 
 # Shrinks the already-learned [0, 3) range for "Response/Binary Input/v2" down to [0, 2) with sed,

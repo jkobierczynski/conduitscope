@@ -364,6 +364,27 @@ def dnp3_link_frame(source: int, destination: int, user_data: bytes, control: in
     return header + dnp3_block_crc_encode(user_data)
 
 
+def dnp3_device_attribute_header(variation: int, qualifier: int = 0x00, range_start: int = 0,
+                                  range_stop: int = 0) -> bytes:
+    """A bare Device Attributes (group 0, IEEE 1815) object header with NO object data -- the
+    shape a plain Read request uses (see dnp3.hpp's file header comment on why a Read request
+    never carries object data for any group, applied narrowly to group 0 by conduitscope's own
+    decoder). qualifier defaults to 0x00 (8-bit start-stop, range 0-0), the real-world shape for
+    naming one specific attribute."""
+    return bytes([0, variation, qualifier, range_start, range_stop])
+
+
+def dnp3_device_attribute_vstr(variation: int, text: str) -> bytes:
+    """One Device Attributes (group 0) object header PLUS its VSTR (Visible ASCII String) object
+    data, for a single-attribute response: group=0, variation=<variation>, qualifier=0x00 (8-bit
+    start-stop, range 0-0), followed by Data Type Code 0x01 (VSTR) + 1-byte length + the ASCII
+    bytes -- see dnp3.hpp's own "Device attribute identity correlation" paragraph for which
+    variation numbers are recognized (252/250/248/242/243)."""
+    b = text.encode("ascii")
+    assert len(b) <= 255, "VSTR length must fit in one byte"
+    return dnp3_device_attribute_header(variation) + bytes([0x01, len(b)]) + b
+
+
 def build_dnp3_sample():
     packets = []
 
@@ -544,6 +565,107 @@ def build_dnp3_sample():
     tcp14 = tcp_header(20000, 51500, 6001, 6100, TCP_PSH | TCP_ACK, len(bad_block_crc_frame)) + bad_block_crc_frame
     ip14 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp14), 0x200D) + tcp14
     packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip14)
+
+    # 15) A Device Attributes (group 0, IEEE 1815) Read request for g0v252 (Device Manufacturer's
+    #     Name): qualifier=0x00 (8-bit start-stop, range 0-0 -- the real-world shape for reading
+    #     one specific attribute), and -- per dnp3.hpp's own file header comment on the request/
+    #     response asymmetry this decoder applies narrowly to group 0 -- NO object data at all,
+    #     since a plain Read request never carries values on the wire.
+    req15 = bytes([0xC0, 0xC0, 0x01]) + dnp3_device_attribute_header(252)
+    f15 = dnp3_link_frame(source=1, destination=1024, user_data=req15)
+    tcp15 = tcp_header(51500, 20000, 12000, 13000, TCP_PSH | TCP_ACK, len(f15)) + f15
+    ip15 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp15), 0x200E) + tcp15
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip15)
+
+    # 16) The matching Response: a single VSTR (Visible ASCII String) attribute, g0v252 =
+    #     "Acme Controls" -- Data Type Code 0x01 (VSTR) + 1-byte length + the ASCII bytes. This is
+    #     the identity correlation's simplest positive case: has_device_identity=true,
+    #     device_manufacturer_name="Acme Controls", every other device_* field stays empty.
+    resp16 = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) + dnp3_device_attribute_vstr(252, "Acme Controls")
+    f16 = dnp3_link_frame(source=1024, destination=1, user_data=resp16)
+    tcp16 = tcp_header(20000, 51500, 13000, 12000 + len(f15), TCP_PSH | TCP_ACK, len(f16)) + f16
+    ip16 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp16), 0x200F) + tcp16
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip16)
+
+    # 17) A Response bundling all FIVE recognized identity attributes as separate object headers
+    #     in one fragment -- Device Manufacturer's Name (g0v252), Device Product Name and Model
+    #     (g0v250), Device Serial Number (g0v248), Device Manufacturer's Software Version (g0v242),
+    #     Device Manufacturer's Hardware Version (g0v243). This is also the inventory-wiring
+    #     fixture (see the dnp3_devattr_inventory_* CTest cases): HMI_IP/PLC_IP are already
+    #     genuine unicast TCP endpoints (unlike BACnet's broadcast-heavy UDP fixture, DNP3's own
+    #     TCP addressing needs no special-casing here), so this single exchange doubles as both the
+    #     decode-level and inventory-level test.
+    resp17 = (
+        bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) +
+        dnp3_device_attribute_vstr(252, "Acme Controls") +
+        dnp3_device_attribute_vstr(250, "Widget RTU-9000") +
+        dnp3_device_attribute_vstr(248, "SN-778812") +
+        dnp3_device_attribute_vstr(242, "3.2.1") +
+        dnp3_device_attribute_vstr(243, "Rev B")
+    )
+    f17 = dnp3_link_frame(source=1024, destination=1, user_data=resp17)
+    tcp17 = tcp_header(20000, 51500, 13000 + len(f16), 12000 + len(f15), TCP_PSH | TCP_ACK, len(f17)) + f17
+    ip17 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp17), 0x2010) + tcp17
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip17)
+
+    # 18) A Response with an unsupported Device Attributes data type: g0v252 declared as Data Type
+    #     Code 0x05 (OSTR, Octet String) instead of VSTR -- exercises the "not decoded by this
+    #     groundwork release" bailout (same gap Wireshark's own packet-dnp.c dissector has for this
+    #     data type -- see dnp3.hpp's file header comment), confirming has_device_identity stays
+    #     false (a non-VSTR value on an identity variation is never promoted).
+    resp18 = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) + bytes([0, 252, 0x00, 0, 0]) + bytes([0x05])
+    f18 = dnp3_link_frame(source=1024, destination=1, user_data=resp18)
+    tcp18 = tcp_header(20000, 51500, 13000 + len(f16) + len(f17), 12000 + len(f15), TCP_PSH | TCP_ACK,
+                        len(f18)) + f18
+    ip18 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp18), 0x2011) + tcp18
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip18)
+
+    # 19) A Response naming a non-identity Device Attributes variation -- g0v221 ("Number of
+    #     analog outputs"), Data Type Code 0x02 (UINT), 1-byte length, value 4 -- confirms the
+    #     generic (non-promoted) group-0 decode path works structurally for UINT too, not just
+    #     VSTR: the value decodes and renders ("4"), but has_device_identity stays false (221 is
+    #     not one of the five recognized identity variations).
+    resp19 = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) + bytes([0, 221, 0x00, 0, 0]) + bytes([0x02, 0x01, 0x04])
+    f19 = dnp3_link_frame(source=1024, destination=1, user_data=resp19)
+    tcp19 = tcp_header(20000, 51500, 13000 + len(f16) + len(f17) + len(f18), 12000 + len(f15),
+                        TCP_PSH | TCP_ACK, len(f19)) + f19
+    ip19 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp19), 0x2012) + tcp19
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip19)
+
+    # 20) A Response using a non-zero index prefix on group 0 -- qualifier 0x17 (prefix code 1 =
+    #     1-byte index, range code 7 = 1-byte count), variation 255 (List of Attribute Variations)
+    #     -- exercises the "List of Attribute Variations bundling format... not decoded by this
+    #     groundwork release" bailout (dnp3.hpp's file header comment), distinct from the plain
+    #     unsupported-data-type bailout above.
+    resp20 = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) + bytes([0, 255, 0x17, 0x01])
+    f20 = dnp3_link_frame(source=1024, destination=1, user_data=resp20)
+    tcp20 = tcp_header(20000, 51500, 13000 + len(f16) + len(f17) + len(f18) + len(f19), 12000 + len(f15),
+                        TCP_PSH | TCP_ACK, len(f20)) + f20
+    ip20 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp20), 0x2013) + tcp20
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip20)
+
+    # 21) A truncated Response: g0v252 declares Data Type Code 0x01 (VSTR) with a 20-byte length,
+    #     but the frame is cut off after only 5 of those bytes -- exercises the truncation note
+    #     ("VSTR declares 20 byte(s) but only 5 remain"), confirming the header is marked
+    #     decoded=false and nothing is promoted.
+    resp21 = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) + bytes([0, 252, 0x00, 0, 0]) + bytes([0x01, 20]) + b"short"
+    f21 = dnp3_link_frame(source=1024, destination=1, user_data=resp21)
+    tcp21 = tcp_header(20000, 51500, 13000 + len(f16) + len(f17) + len(f18) + len(f19) + len(f20),
+                        12000 + len(f15), TCP_PSH | TCP_ACK, len(f21)) + f21
+    ip21 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp21), 0x2014) + tcp21
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip21)
+
+    # 22) A Response naming variation 0 (the bare "Device Attributes Group and null variation"
+    #     placeholder) -- exercises the variation-0/254/255 bailout distinctly from the index-
+    #     prefix bailout in packet 20 (this one is refused on the variation number alone, with
+    #     prefix_code == 0).
+    resp22 = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) + dnp3_device_attribute_header(0)
+    f22 = dnp3_link_frame(source=1024, destination=1, user_data=resp22)
+    tcp22 = tcp_header(20000, 51500,
+                        13000 + len(f16) + len(f17) + len(f18) + len(f19) + len(f20) + len(f21),
+                        12000 + len(f15), TCP_PSH | TCP_ACK, len(f22)) + f22
+    ip22 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp22), 0x2015) + tcp22
+    packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip22)
 
     data = pcap_global_header()
     for i, pkt in enumerate(packets):

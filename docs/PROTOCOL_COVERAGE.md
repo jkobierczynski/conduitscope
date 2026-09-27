@@ -191,6 +191,48 @@ A batch of more than 200 points in one object header only gets the first 200
 individually decoded (the object's byte length is still fully accounted for
 either way); a note says so when it happens.
 
+**Device Attributes (group 0, IEEE 1815) decode**: group 0's wire format is
+fundamentally different from every other group above -- a point's byte
+width isn't implied by its group/variation at all, since each point
+instead carries its own inline 1-byte Data Type Code (VSTR/UINT/INT/FLT/
+OSTR/BSTR/TIME/UNCD/...) followed by a 1-byte length and that many bytes of
+value, cross-checked against Wireshark's `packet-dnp.c`
+`dnp3_al_process_object`'s own `AL_OBJ_GROUP(al_obj) == 0x0` branch. Decoded
+via a separate decode path rather than an entry in the point-format table
+above. NONE/VSTR/UINT/INT/FLT are fully decoded; OSTR/BSTR/TIME/UNCD and the
+two list types (U8BS8LIST/U8BS8EXLIST) are recognized but not decoded
+further -- Wireshark's own dissector has the identical gap for these (it
+reads the Data Type Code byte but never advances past it for any of them
+either), and rather than guess a length this decoder doesn't actually know,
+object parsing stops with a note, same "never guess" posture as everywhere
+else in this decoder. Also explicitly out of scope: variation 0 (the bare
+null-variation placeholder), 254 (non-specific "all attributes" request),
+and 255 (List of Attribute Variations, whose index-prefixed bundle format
+packs a *different* attribute's variation number into each list entry's own
+index prefix rather than naming one attribute in the object header itself)
+-- a real single-attribute read/response (e.g. "read g0v252") is by far the
+dominant real-world shape and the only one decoded here. One more scope
+note: a plain Read (function code 0x01) request never carries object data
+on the wire for *any* group -- an asymmetry the point-format-table path
+above doesn't account for (its own fixtures simply avoid exercising it) --
+this decoder applies that rule narrowly to group 0 only.
+
+**Device attribute identity correlation**: when a Device Attributes
+response resolves to one of five well-known attributes -- Device
+Manufacturer's Name (variation 252), Device Product Name and Model
+(variation 250), Device Serial Number (variation 248), Device
+Manufacturer's Software Version (variation 242), Device Manufacturer's
+Hardware Version (variation 243), confirmed against Wireshark's
+`packet-dnp.c` `AL_OBJ_DA_MFG`/`AL_OBJ_DA_PROD`/`AL_OBJ_DA_SERNUM`/
+`AL_OBJ_DA_SWVER`/`AL_OBJ_DA_HWVER` definitions -- as a VSTR value, the
+value is promoted onto named `device_*` fields (`has_device_identity` +
+`device_manufacturer_name`/`device_product_name`/`device_serial_number`/
+`device_software_version`/`device_hardware_version`), the DNP3 analog of
+BACnet's own Device object identity correlation just above. A non-VSTR
+value on one of these five variations (legal on the wire, essentially
+never seen in practice) still decodes and appears in `dnp3_point_values`
+like any other attribute, but is never promoted.
+
 **Data-link CRC-16 validation:** both CRCs described above -- the 8-byte
 header CRC and every <=16-byte user-data block's own CRC -- are now genuinely
 calculated and compared against their on-the-wire value, not just located and

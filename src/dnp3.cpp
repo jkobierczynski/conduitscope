@@ -176,6 +176,7 @@ bool is_response_function(uint8_t fc) { return fc == 0x81 || fc == 0x82 || fc ==
 
 std::string dnp3_group_name(uint8_t group) {
     switch (group) {
+        case 0: return "Device Attributes";
         case 1: return "Binary Input";
         case 2: return "Binary Input Event";
         case 3: return "Double-bit Binary Input";
@@ -501,6 +502,205 @@ Dnp3PointValue decode_point_value(const Dnp3PointFormat& fmt, ByteSpan point_byt
 
     pv.value = val.str();
     return pv;
+}
+
+// --- Device Attributes (group 0) decode -------------------------------------------------------
+// See dnp3.hpp's file header comment ("Group 0 (Device Attributes, IEEE 1815) is a second,
+// separate decode path...") for the full reasoning. Everything below is specific to group 0 and
+// is never consulted for any other group.
+
+// IEEE 1815 Device Attributes Data Type Codes -- the 1-byte type tag that precedes every group-0
+// point's value on the wire (see decode_device_attribute_point below). Cross-checked against
+// Wireshark's packet-dnp.c AL_DATA_TYPE_* definitions, not guessed.
+constexpr uint8_t kDnp3DevAttrTypeNone = 0x00;
+constexpr uint8_t kDnp3DevAttrTypeVstr = 0x01;  // Visible ASCII String
+constexpr uint8_t kDnp3DevAttrTypeUint = 0x02;
+constexpr uint8_t kDnp3DevAttrTypeInt = 0x03;
+constexpr uint8_t kDnp3DevAttrTypeFlt = 0x04;
+constexpr uint8_t kDnp3DevAttrTypeOstr = 0x05;   // Octet String -- not decoded, see below
+constexpr uint8_t kDnp3DevAttrTypeBstr = 0x06;   // Bit String -- not decoded, see below
+constexpr uint8_t kDnp3DevAttrTypeTime = 0x07;   // DNP3 Time UINT48 -- not decoded, see below
+constexpr uint8_t kDnp3DevAttrTypeUncd = 0x08;   // Unicode String -- not decoded, see below
+constexpr uint8_t kDnp3DevAttrTypeU8Bs8List = 0xFE;    // not decoded, see below
+constexpr uint8_t kDnp3DevAttrTypeU8Bs8ExList = 0xFF;  // not decoded, see below
+
+std::string dnp3_device_attribute_type_name(uint8_t data_type) {
+    switch (data_type) {
+        case kDnp3DevAttrTypeNone: return "NONE";
+        case kDnp3DevAttrTypeVstr: return "VSTR";
+        case kDnp3DevAttrTypeUint: return "UINT";
+        case kDnp3DevAttrTypeInt: return "INT";
+        case kDnp3DevAttrTypeFlt: return "FLT";
+        case kDnp3DevAttrTypeOstr: return "OSTR";
+        case kDnp3DevAttrTypeBstr: return "BSTR";
+        case kDnp3DevAttrTypeTime: return "TIME";
+        case kDnp3DevAttrTypeUncd: return "UNCD";
+        case kDnp3DevAttrTypeU8Bs8List: return "U8BS8LIST";
+        case kDnp3DevAttrTypeU8Bs8ExList: return "U8BS8EXLIST";
+        default: return "Unknown (" + hex8(data_type) + ")";
+    }
+}
+
+// IEEE 1815 Device Attributes variation names this decoder recognizes -- the five identity
+// attributes this release promotes (dnp3.hpp's own "Device attribute identity correlation"
+// paragraph) plus the three reserved/special variations it deliberately does not decode further
+// (0/254/255 -- see the file header comment). A variation outside this table is still decoded
+// structurally by decode_device_attribute_point below (its data type/length come off the wire,
+// not out of this table) -- this only supplies a human-readable name for object-header rendering.
+// Cross-checked against Wireshark's packet-dnp.c AL_OBJ_DA_* definitions, not guessed.
+std::string dnp3_device_attribute_name(uint8_t variation) {
+    switch (variation) {
+        case 0: return "Device Attributes Group and null variation";
+        case 242: return "Device Manufacturer's Software Version";
+        case 243: return "Device Manufacturer's Hardware Version";
+        case 248: return "Device Serial Number";
+        case 250: return "Device Product Name and Model";
+        case 252: return "Device Manufacturer's Name";
+        case 254: return "Non-specific All-attributes Request";
+        case 255: return "List of Attribute Variations";
+        default: return "Device Attribute " + std::to_string(variation);
+    }
+}
+
+// Outcome of decoding one Device Attributes point's inline Data-Type-Code(+Length)+Value from
+// `ac` (advanced in place, same "check remaining() explicitly, never let ParseError propagate"
+// style as the rest of this file's object-header loop). `ok` false means `note` explains why
+// (truncation, or a data type this groundwork release does not decode -- see the file header
+// comment) and the caller must stop parsing further object headers in this fragment, same as
+// every other unsupported/truncated shape here.
+struct Dnp3DeviceAttributePointResult {
+    bool ok = false;
+    std::string note;
+    bool is_vstr = false;  // only VSTR values are eligible for identity-field promotion
+    std::string value;     // rendered value, meaningful only when ok
+};
+
+Dnp3DeviceAttributePointResult decode_device_attribute_point(Cursor& ac) {
+    Dnp3DeviceAttributePointResult r;
+    if (ac.remaining() < 1) {
+        r.note = "truncated: no Data Type Code byte remains";
+        return r;
+    }
+    uint8_t data_type = ac.u8();
+    std::ostringstream val;
+
+    switch (data_type) {
+        case kDnp3DevAttrTypeNone: {
+            // No length byte and no value for this type -- see Wireshark's own
+            // AL_DATA_TYPE_NONE case, which likewise reads nothing.
+            val << "(none)";
+            r.ok = true;
+            break;
+        }
+        case kDnp3DevAttrTypeVstr: {
+            if (ac.remaining() < 1) {
+                r.note = "truncated: no Length byte follows a VSTR (" +
+                          dnp3_device_attribute_type_name(data_type) + ") Data Type Code";
+                return r;
+            }
+            uint8_t len = ac.u8();
+            if (ac.remaining() < len) {
+                r.note = "truncated: VSTR declares " + std::to_string(len) + " byte(s) but only " +
+                          std::to_string(ac.remaining()) + " remain";
+                return r;
+            }
+            ByteSpan s = ac.bytes(len);
+            val << std::string(reinterpret_cast<const char*>(s.data()), s.size());
+            r.is_vstr = true;
+            r.ok = true;
+            break;
+        }
+        case kDnp3DevAttrTypeUint:
+        case kDnp3DevAttrTypeInt: {
+            if (ac.remaining() < 1) {
+                r.note = "truncated: no Length byte follows a " + dnp3_device_attribute_type_name(data_type) +
+                          " Data Type Code";
+                return r;
+            }
+            uint8_t len = ac.u8();
+            if (len != 1 && len != 2 && len != 4) {
+                r.note = dnp3_device_attribute_type_name(data_type) + " declares a " + std::to_string(len) +
+                          "-byte length, which is not a supported width (1, 2, or 4 expected)";
+                return r;
+            }
+            if (ac.remaining() < len) {
+                r.note = "truncated: " + dnp3_device_attribute_type_name(data_type) + " declares " +
+                          std::to_string(len) + " byte(s) but only " + std::to_string(ac.remaining()) +
+                          " remain";
+                return r;
+            }
+            uint32_t raw = 0;
+            for (uint8_t i = 0; i < len; ++i) raw |= static_cast<uint32_t>(ac.u8()) << (8 * i);
+            if (data_type == kDnp3DevAttrTypeInt) {
+                val << sign_extend(raw, len * 8);
+            } else {
+                val << raw;
+            }
+            r.ok = true;
+            break;
+        }
+        case kDnp3DevAttrTypeFlt: {
+            if (ac.remaining() < 1) {
+                r.note = "truncated: no Length byte follows a FLT Data Type Code";
+                return r;
+            }
+            uint8_t len = ac.u8();
+            if (len != 4 && len != 8) {
+                r.note = "FLT declares a " + std::to_string(len) +
+                          "-byte length, which is not a supported width (4 or 8 expected)";
+                return r;
+            }
+            if (ac.remaining() < len) {
+                r.note = "truncated: FLT declares " + std::to_string(len) + " byte(s) but only " +
+                          std::to_string(ac.remaining()) + " remain";
+                return r;
+            }
+            if (len == 4) {
+                uint32_t bits = ac.u32le();
+                float f;
+                std::memcpy(&f, &bits, sizeof(f));
+                val << f;
+            } else {
+                uint64_t bits = 0;
+                for (int i = 0; i < 8; ++i) bits |= static_cast<uint64_t>(ac.u8()) << (8 * i);
+                double d;
+                std::memcpy(&d, &bits, sizeof(d));
+                val << d;
+            }
+            r.ok = true;
+            break;
+        }
+        default:
+            // OSTR/BSTR/TIME/UNCD/U8BS8LIST/U8BS8EXLIST: Wireshark's own packet-dnp.c dissector
+            // has the identical gap for these -- it reads the Data Type Code but never advances
+            // past it for any of them either (no Length byte, no value) -- see this file's own
+            // header comment. Rather than guess a length this decoder doesn't actually know,
+            // parsing stops here with a note, same "never guess" posture as every other
+            // unsupported shape in this file.
+            r.note = "data type " + dnp3_device_attribute_type_name(data_type) +
+                      " is not decoded by this groundwork release (Wireshark's own packet-dnp.c "
+                      "dissector has the same gap for this data type, reading only the Data Type "
+                      "Code byte and no further -- see dnp3.hpp's file header comment)";
+            return r;
+    }
+
+    r.value = val.str();
+    return r;
+}
+
+// Promotes a decoded VSTR Device Attributes point onto Dnp3ApplicationFragment's identity fields
+// -- see dnp3.hpp's own "Device attribute identity correlation" paragraph. A no-op for any
+// variation outside the five recognized ones.
+void maybe_promote_device_attribute_identity(Dnp3ApplicationFragment& frag, uint8_t variation,
+                                              const std::string& value) {
+    switch (variation) {
+        case 242: frag.device_software_version = value; frag.has_device_identity = true; break;
+        case 243: frag.device_hardware_version = value; frag.has_device_identity = true; break;
+        case 248: frag.device_serial_number = value; frag.has_device_identity = true; break;
+        case 250: frag.device_product_name = value; frag.has_device_identity = true; break;
+        case 252: frag.device_manufacturer_name = value; frag.has_device_identity = true; break;
+        default: break;
+    }
 }
 
 struct IinFlag {
@@ -838,6 +1038,12 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
         oh.variation = ac.u8();
         oh.qualifier = ac.u8();
         oh.group_name = dnp3_group_name(oh.group);
+        if (oh.group == 0) {
+            // Device Attributes: the variation IS the specific attribute, so name the object
+            // header after that attribute (e.g. "Device Manufacturer's Name") rather than the
+            // generic group name -- see dnp3_device_attribute_name's own comment.
+            oh.group_name = dnp3_device_attribute_name(oh.variation);
+        }
         oh.prefix_code = oh.qualifier >> 4;
         oh.range_code = oh.qualifier & 0x0F;
 
@@ -907,6 +1113,83 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
 
         if (oh.range_code == 0x06 || oh.point_count == 0) {
             oh.object_data_bytes = 0;
+        } else if (oh.group == 0) {
+            // Device Attributes: object data is NOT a fixed per-point byte width the way every
+            // other group's point_format() table below assumes -- see dnp3.hpp's file header
+            // comment for the full reasoning. Decoded entirely here instead.
+            if (oh.prefix_code != 0) {
+                oh.decoded = false;
+                oh.note = "Device Attributes (group 0) with qualifier " + hex8(oh.qualifier) +
+                           " (a non-zero index prefix) is the \"List of Attribute Variations\" "
+                           "bundling format, where each list entry's own index prefix names a "
+                           "DIFFERENT attribute's variation number -- not decoded by this "
+                           "groundwork release, which covers only a single specific attribute per "
+                           "object header (see dnp3.hpp's file header comment); stopping object "
+                           "parsing for this fragment";
+                frag.objects.push_back(oh);
+                frag.notes.push_back("object header " + std::to_string(header_index) + ": " + oh.note);
+                break;
+            }
+            if (oh.variation == 0 || oh.variation == 254 || oh.variation == 255) {
+                oh.decoded = false;
+                oh.note = "Device Attributes variation " + std::to_string(oh.variation) + " (" +
+                           oh.group_name +
+                           ") is not decoded by this groundwork release (see dnp3.hpp's file header "
+                           "comment on why the null/all-attributes/list-of-variations forms are out "
+                           "of scope); stopping object parsing for this fragment";
+                frag.objects.push_back(oh);
+                frag.notes.push_back("object header " + std::to_string(header_index) + ": " + oh.note);
+                break;
+            }
+
+            if (frag.has_function && frag.function_code == 0x01) {
+                // A plain Read request never carries object data for ANY group -- the object
+                // header alone names which point(s) to read (see dnp3.hpp's file header comment
+                // on this request/response asymmetry, and why it's applied narrowly to group 0
+                // only). Every other function code (responses, and Write/Select/Operate-family
+                // requests, which DO carry data even on a request) falls through below.
+                oh.object_data_bytes = 0;
+            } else {
+                // CLI-configurable via --max-decoded-objects -- see resource_limits.hpp. 0/unset
+                // keeps the literal 200 default -- same cap/default as the point_format() path
+                // below.
+                const uint32_t kMaxDevAttrPointsPerHeader =
+                    static_cast<uint32_t>(resource_limits().max_decoded_objects.value_or(200));
+                uint32_t points_to_decode = std::min(oh.point_count, kMaxDevAttrPointsPerHeader);
+                size_t data_start = ac.position();
+                bool point_ok = true;
+                for (uint32_t p = 0; p < oh.point_count; ++p) {
+                    Dnp3DeviceAttributePointResult dr = decode_device_attribute_point(ac);
+                    if (!dr.ok) {
+                        point_ok = false;
+                        oh.note = "point " + std::to_string(p) + ": " + dr.note;
+                        break;
+                    }
+                    if (p < points_to_decode) {
+                        Dnp3PointValue pv;
+                        pv.index = oh.has_range ? oh.range_start + p : p;
+                        pv.index_is_explicit = false;
+                        pv.value = dr.value;
+                        oh.values.push_back(pv);
+                        if (dr.is_vstr) {
+                            maybe_promote_device_attribute_identity(frag, oh.variation, dr.value);
+                        }
+                    }
+                }
+                if (!point_ok) {
+                    oh.decoded = false;
+                    frag.objects.push_back(oh);
+                    frag.notes.push_back("object header " + std::to_string(header_index) + ": " + oh.note);
+                    break;
+                }
+                oh.object_data_bytes = ac.position() - data_start;
+                if (oh.point_count > kMaxDevAttrPointsPerHeader) {
+                    frag.notes.push_back("object header " + std::to_string(header_index) + ": only the first " +
+                                          std::to_string(kMaxDevAttrPointsPerHeader) + " of " +
+                                          std::to_string(oh.point_count) + " point value(s) were decoded "
+                                          "(safety cap)");
+                }
+            }
         } else {
             Dnp3PointFormat fmt;
             if (!point_format(oh.group, oh.variation, fmt)) {
@@ -1079,6 +1362,27 @@ void decode_dnp3_application_layer(ByteSpan app_bytes, Dnp3ApplicationFragment& 
             summary << ", +" << (frag.objects.size() - kMaxBrief) << " more";
         }
         summary << "]";
+    }
+
+    // Device attribute identity correlation, appended to the headline summary -- mirrors
+    // BACnet's own apdu_summary() "device-identity(...)" suffix (bacnet.cpp) for the same reason:
+    // this is audit-relevant enough to want visible in a one-line summary, not just in
+    // dnp3_point_values. Only the fields actually present are shown.
+    if (frag.has_device_identity) {
+        summary << " device-identity(";
+        bool first_field = true;
+        auto add_field = [&](const char* label, const std::string& value) {
+            if (value.empty()) return;
+            if (!first_field) summary << " ";
+            first_field = false;
+            summary << label << "=" << value;
+        };
+        add_field("manufacturer", frag.device_manufacturer_name);
+        add_field("product", frag.device_product_name);
+        add_field("serial", frag.device_serial_number);
+        add_field("sw-version", frag.device_software_version);
+        add_field("hw-version", frag.device_hardware_version);
+        summary << ")";
     }
 
     frag.summary = summary.str();
@@ -1311,6 +1615,22 @@ std::optional<ProtocolResult> Dnp3Decoder::decode(ByteSpan payload, DecodeContex
                 }
                 result.dnp3_point_values.push_back(entry);
             }
+        }
+        // Device attribute identity correlation -- merged across every coalesced frame (unlike
+        // dnp3_has_function/dnp3_function_name above, which reflect only the first), first-seen-
+        // wins per field, same convention dnp3_object_headers/dnp3_point_values already use. See
+        // Dnp3Result::dnp3_has_device_identity's own comment (dnp3.hpp).
+        if (app.has_device_identity) {
+            result.dnp3_has_device_identity = true;
+            if (result.dnp3_device_manufacturer_name.empty())
+                result.dnp3_device_manufacturer_name = app.device_manufacturer_name;
+            if (result.dnp3_device_product_name.empty()) result.dnp3_device_product_name = app.device_product_name;
+            if (result.dnp3_device_serial_number.empty())
+                result.dnp3_device_serial_number = app.device_serial_number;
+            if (result.dnp3_device_software_version.empty())
+                result.dnp3_device_software_version = app.device_software_version;
+            if (result.dnp3_device_hardware_version.empty())
+                result.dnp3_device_hardware_version = app.device_hardware_version;
         }
     };
 

@@ -11992,6 +11992,151 @@ it done as its own patch.
     to add a third repeated-record shape (WritePropertyMultiple's own
     PropertyValue-per-property, plus optional Priority) to this first pass.
 
+81. **Asset inventory: a real OT asset record -- Grok gap #2, fifth
+    increment (Phase 5: DNP3 Device Attributes (group 0) decode +
+    wiring).** Direct continuation of items 75-76, 79, and 80 above -- see
+    docs/design/asset-inventory-real-record.md's own Phase 5 section for
+    the full scoped plan. Confirmed the exact IEEE 1815 Device Attributes
+    variation numbers by direct primary-source research (Wireshark's own
+    `packet-dnp.c`, fetched via `curl` rather than `WebFetch` to avoid that
+    tool's established truncation issue on large dissector files -- see
+    item 79's own note on the same workaround) rather than trusting the
+    plan's own tentative wording: Device Manufacturer's Name is variation
+    252, Device Product Name and Model is variation 250, Device Serial
+    Number is variation 248, Device Manufacturer's Software Version is
+    variation 242, and Device Manufacturer's Hardware Version is variation
+    243. Also confirmed, re-checking `asset_inventory.cpp`'s dispatch, that
+    item 76's original open question (whether S7comm-Plus has any existing
+    decoder in this codebase at all) was already resolved as part of an
+    earlier item -- S7comm-Plus already has both a decoder and
+    `AssetInventoryEngine::observe` dispatch wiring, so no further action
+    was needed here.
+
+    **`dnp3.hpp`/`dnp3.cpp` gain a separate Device Attributes (group 0)
+    decode path**, sourced from `packet-dnp.c`'s `AL_OBJ_GROUP(al_obj) ==
+    0x0` branch: unlike every other DNP3 object group, group 0's per-point
+    byte width isn't implied by group/variation -- each point instead
+    carries an inline 1-byte Data Type Code (`AL_DATA_TYPE_NONE`/`VSTR`/
+    `UINT`/`INT`/`FLT`/`OSTR`/`BSTR`/`TIME`/`UNCD`/`U8BS8LIST`/
+    `U8BS8EXLIST`) followed, for VSTR/UINT/INT/FLT, by a 1-byte length then
+    that many value bytes. New `decode_device_attribute_point` decodes
+    NONE/VSTR/UINT/INT/FLT in full; OSTR/BSTR/TIME/UNCD/U8BS8LIST/
+    U8BS8EXLIST stop with a documented "not decoded" note after reading
+    just the type byte, reproducing a real gap in Wireshark's own
+    dissector (it reads only the type byte and advances no further for
+    these types) rather than guessing a length. New `dnp3_group_name`
+    case 0 and `dnp3_device_attribute_name` name the well-known
+    variations (0/242/243/248/250/252/254/255); a new `else if (oh.group
+    == 0)` branch in the object-header loop of
+    `decode_dnp3_application_layer` drives the per-point decode, bailing
+    out (undecoded, noted) for variation 0 (null/group placeholder), 254
+    (non-specific all-attributes request), and 255 (List of Attribute
+    Variations -- confirmed its bundling format uses a non-zero index
+    prefix where each entry's own prefix encodes a *different* attribute's
+    variation number, not a point index, fundamentally different
+    addressing explicitly scoped out of this pass) and for any non-zero
+    `prefix_code`. Also discovered and fixed narrowly for this new branch
+    only: a plain Read (function code 0x01) request never carries object
+    data for *any* DNP3 group, per Wireshark's own `header_only`
+    parameter -- an asymmetry the existing point_format()-table path for
+    every other group doesn't account for (a pre-existing, unaddressed gap
+    left untouched here, since no fixture for another group currently
+    exercises it and fixing it is a separate, unscoped change).
+
+    **New Device Attributes identity correlation** -- five new
+    `Dnp3ApplicationFragment`/`Dnp3Result` field pairs
+    (`has_device_identity`/`dnp3_has_device_identity`,
+    `device_manufacturer_name`/`dnp3_device_manufacturer_name`,
+    `device_product_name`/`dnp3_device_product_name`,
+    `device_serial_number`/`dnp3_device_serial_number`,
+    `device_software_version`/`dnp3_device_software_version`,
+    `device_hardware_version`/`dnp3_device_hardware_version`) and a new
+    `maybe_promote_device_attribute_identity` helper: when a Device
+    Attributes point resolves one of the five recognized variations as a
+    VSTR value, it's promoted onto the matching named field -- DNP3's own
+    analog of item 80's BACnet Device-object identity correlation. A
+    non-VSTR value on those variations is still decoded/shown but never
+    promoted. `Dnp3Decoder::decode`'s existing `merge_application_layer`
+    lambda grows a matching first-non-empty-wins merge across every
+    coalesced frame (mirroring its existing `dnp3_point_values` merge),
+    and the application-layer summary gains a trailing
+    `device-identity(manufacturer=... product=... serial=... sw-version=...
+    hw-version=...)` segment when set, only naming the fields actually
+    present. `write_dnp3_json_fields` (`src/output.cpp`) gains matching
+    standalone `dnp3_has_device_identity`/`dnp3_device_*` JSON fields,
+    independent of `inventory`'s own wiring -- same "both inventory wiring
+    AND standalone decode fields" pattern items 79/80 established for
+    S7comm/BACnet.
+
+    **`AssetInventoryEngine::observe`'s existing ENIP/OPC UA/S7comm/BACnet
+    identity block (`asset_inventory.cpp`) grows an `else if` sibling**
+    for `protocol == "dnp3" && ... dnp3_has_device_identity`:
+    `dnp3_device_manufacturer_name` -> `vendor`, `dnp3_device_product_name`
+    -> `product`, `dnp3_device_software_version` -> `firmware_revision`,
+    `dnp3_device_serial_number` -> `serial_number`.
+    `dnp3_device_hardware_version` is deliberately not promoted, matching
+    item 79's own S7comm module-type-code precedent of not promoting a raw
+    hardware/module code onto a human-readable-value field. No new
+    `InventoryAsset`/`update_identity` struct changes needed -- items
+    75/79/80 already added every field this phase needs. Also fixed, as a
+    proactive staleness catch (the same "catch and fix adjacent
+    staleness" pattern item 80 applied to docs/USER_GUIDE.md), a stale
+    doc comment on `AssetInventoryEngine::observe` in
+    `asset_inventory.hpp` that still said "currently populated for three
+    protocols" and was never updated when item 80's BACnet wiring shipped.
+
+    **Testing.** 8 new packets appended to `tests/sample_dnp3.pcap`
+    (`build_dnp3_sample` in `tools/make_sample_pcap.py`, using new
+    `dnp3_device_attribute_header`/`dnp3_device_attribute_vstr` helpers): a
+    Read request for Device Manufacturer's Name carrying no object data; a
+    single-attribute identity response; a response bundling all five
+    identity attributes (the same exchange also doubles as the
+    inventory-wiring fixture, since DNP3's addressing here is already
+    genuine unicast TCP, unlike item 80's BACnet fixture, which needed a
+    dedicated unicast packet pair since most of that fixture is broadcast
+    traffic); an unsupported-data-type (OSTR) bailout on an otherwise-
+    identity variation; a generic non-identity UINT attribute (confirming
+    ordinary Device Attributes decode without promotion); a List of
+    Attribute Variations (variation 255, non-zero index prefix) bundling
+    bailout; a truncated VSTR (declared length longer than the bytes
+    present); and a null-variation (0) bailout, a distinct code path from
+    the variation-255 case. 12 new CTest cases (`decode` text/JSON for
+    every scenario above, `inventory` text/JSON confirming the
+    `InventoryAsset` wiring) -- all verified against the real binary's own
+    output, never hand-written expected text -- plus two pre-existing
+    baseline CTest cases updated (`baseline_check_dnp3_unmodified_zero_findings`/
+    `baseline_check_dnp3_empty_baseline_finds_new_conduit`, whose hardcoded
+    operation/finding counts grew from 6 to 15, since `baseline.cpp`'s
+    unmodified `extract_dnp3_operations` naturally derives one distinct
+    operation per newly-decoded Device Attributes variation -- a
+    beneficial side effect, not a bug, giving baseline learning more
+    granular DNP3 Device Attributes coverage for free). Fuzz corpus for
+    `fuzz/corpus/dnp3/` regenerated from the updated fixture via
+    `tools/extract_fuzz_corpus.py` (`--layer l4 --l4-proto tcp`, matching
+    `fuzz_dnp3.cpp`'s own `GateKind::TcpPortIndependent` harness), adding
+    22 fresh seeds alongside the corpus's existing libFuzzer-discovered
+    (hash-named) entries, for 88 total; a ~45-second/1.2-million-execution
+    standalone `libFuzzer` run clean under ASan/UBSan (zero crashes, zero
+    sanitizer findings). Full CTest suite: 2082/2082 (default GCC build,
+    up from item 80's 2070); ASan/UBSan (2082/2082 non-fuzz-labeled, plus
+    the DNP3 fuzz corpus-regression target clean) and no-live-capture
+    (2070/2070) configs, plus a clean-room extract-rebuild-test, all
+    re-verified before delivery; MinGW-w64 cross-compile confirmed to
+    still compile and link cleanly (same standing no-Wine environment
+    limitation as every prior item).
+
+    **Not yet done, tracked for a following increment**: role
+    classification, tag/point/DB touch summarization, and CSV/CMDB,
+    STIX/TAXII-lite, and firewall-ACL-draft export -- unchanged from item
+    80's own list, minus DNP3 Device Attributes, which this item
+    completed. Every identity-bearing protocol named in the original Phase
+    0-5 scope (EtherNet/IP, OPC UA, S7comm, BACnet/IP, DNP3) is now wired;
+    Modbus, IEC 104, HART-IP, MMS, MQTT, FF-HSE, and S7comm-Plus have no
+    known passively-discoverable identity fields to wire (none of their
+    own wire formats carry an analog of CIP Identity/SZL/Device-object
+    properties/Device Attributes), so this list is not expected to grow
+    further as later phases land.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

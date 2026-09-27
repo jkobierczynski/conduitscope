@@ -517,6 +517,19 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
                                                                        : apdu.device_application_software_version;
         update_identity(dp.src_ip, apdu.device_vendor_name, apdu.device_model_name, firmware,
                          apdu.device_serial_number);
+    } else if (protocol == "dnp3" && dp.result && dp.result->as<Dnp3Result>().dnp3_has_device_identity) {
+        // A Device Attributes response carrying one or more of the five recognized identity
+        // attributes (see dnp3.hpp's "Device attribute identity correlation" paragraph) is sent BY
+        // the outstation being queried, same "identity describes whoever actually sent this
+        // packet" reasoning as every other protocol above. `firmware_revision` gets
+        // device_software_version (Device Manufacturer's Software Version, variation 242) --
+        // device_hardware_version (variation 243) has no InventoryAsset field of its own and is
+        // deliberately not promoted here (decoded and available in dnp3_device_hardware_version/
+        // dnp3_point_values regardless) -- same "decode it, but don't invent a narrow new field for
+        // a secondary fact" posture as S7comm's own module-type-code/version just above.
+        const Dnp3Result& dr = dp.result->as<Dnp3Result>();
+        update_identity(dp.src_ip, dr.dnp3_device_manufacturer_name, dr.dnp3_device_product_name,
+                         dr.dnp3_device_software_version, dr.dnp3_device_serial_number);
     }
 
     if (client_is_bcast || server_is_bcast) return;
