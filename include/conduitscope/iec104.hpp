@@ -225,6 +225,17 @@ struct Iec104Result {
     std::string iec104_cot_name;
     uint16_t iec104_common_address = 0;
     std::vector<std::string> iec104_object_values;
+
+    // The same Information Object Address each iec104_object_values entry already renders as its
+    // "ioa=<N>: ..." prefix, promoted to its own structured uint32_t list instead of a caller having
+    // to reparse rendered text -- the same "expose what's already extracted as a named field" posture
+    // enip.hpp's own identity_* fields already established relative to CipMessage's generic `values`.
+    // Populated in lockstep with iec104_object_values (Iec104Decoder::decode's merge_asdu lambda,
+    // iec104.cpp) -- same order, same kMaxObjectValues cap, one entry per object. Added for Phase 7 of
+    // Grok gap #2 ("asset inventory: a real OT asset record") -- AssetInventoryEngine reads this
+    // directly rather than reparsing iec104_object_values' rendered "ioa=..." strings (see
+    // InventoryEdge::top_touched_addresses' own comment, asset_inventory.hpp).
+    std::vector<uint32_t> iec104_object_ioas;
 };
 
 // id() == "iec104", gate_kind() == TcpPortIndependent. Wraps try_parse_iec104_apci/

@@ -39,6 +39,57 @@ std::string edge_key(const std::string& protocol, const std::string& client_ip, 
     return protocol + "|" + client_ip + "->" + server_ip + ":" + std::to_string(server_port);
 }
 
+// Phase 7 of Grok gap #2 -- see InventoryEdge::top_touched_addresses' own comment
+// (asset_inventory.hpp) for the full per-protocol touched-address key design; this function
+// implements exactly the modbus bullet there. Returns "" for a function code with no address
+// concept at all (an exception response, Diagnostics, Report Server ID, or any function code
+// outside the four read/write-multiple families this maps) -- caller skips an empty key, same "no
+// signal, don't fabricate one" convention as function_name's own empty-string handling just above
+// in observe().
+std::string modbus_touch_key(uint8_t function_code, uint16_t start_address, uint16_t quantity) {
+    uint8_t base = function_code & 0x7F;  // strip the 0x80 exception bit -- meaningless for addressing
+    std::string kind;
+    switch (base) {
+        case 0x01:  // Read Coils
+        case 0x0F:  // Write Multiple Coils
+            kind = "coil";
+            break;
+        case 0x02:  // Read Discrete Inputs
+            kind = "discrete";
+            break;
+        case 0x03:  // Read Holding Registers
+        case 0x10:  // Write Multiple Registers
+            kind = "hreg";
+            break;
+        case 0x04:  // Read Input Registers
+            kind = "ireg";
+            break;
+        default:
+            return "";
+    }
+    std::ostringstream oss;
+    oss << kind << ":" << std::setw(5) << std::setfill('0') << (static_cast<uint32_t>(start_address) + 1);
+    if (quantity > 1) {
+        oss << "-" << std::setw(5) << std::setfill('0')
+            << (static_cast<uint32_t>(start_address) + quantity);
+    }
+    return oss.str();
+}
+
+// Phase 7 of Grok gap #2 -- the dnp3 bullet of InventoryEdge::top_touched_addresses' own comment.
+// "g{group}v{variation}" is the SAME shorthand src/dnp3.cpp's own summary/dnp3_object_headers
+// rendering already establishes (see e.g. the "g" << group << "v" << variation shape at multiple
+// sites there) -- reused verbatim here for consistency rather than inventing a new notation.
+std::string dnp3_touch_key(const Dnp3ObjectRange& obj) {
+    std::ostringstream oss;
+    oss << "g" << static_cast<unsigned>(obj.group) << "v" << static_cast<unsigned>(obj.variation);
+    if (obj.has_range) {
+        oss << " idx " << obj.range_start;
+        if (obj.range_stop != obj.range_start) oss << "-" << obj.range_stop;
+    }
+    return oss.str();
+}
+
 // The known ports this feature's TCP-based protocols conventionally use, PLUS the two UDP ports
 // (BACNET_UDP_PORT/ENIP_IO_UDP_PORT) -- see AssetInventoryEngine::observe's own doc comment
 // (asset_inventory.hpp) for the full priority order this feeds into. On the TCP side this is now
@@ -440,6 +491,54 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         function_name = dp.s7plus_function_name;
     }
 
+    // Tag/point/DB touch summarization (Phase 7 of Grok gap #2) -- see
+    // InventoryEdge::top_touched_addresses' own comment (asset_inventory.hpp) for the full
+    // per-protocol design and exactly which five of this feature's twelve protocols are wired in
+    // here. Every address this packet's own already-decoded structures name is collected into
+    // `touched_addresses`; the edge-update block below folds each one into that edge's capped
+    // internal touch-count map. A packet from an out-of-scope protocol, or one whose payload didn't
+    // carry a recognized addressable request/item this pass, simply contributes nothing (the vector
+    // stays empty) -- same "no signal, don't fabricate one" posture as function_name's own
+    // empty-string default above.
+    std::vector<std::string> touched_addresses;
+    if (protocol == "modbus" && dp.result) {
+        const ModbusFrame& mb = dp.result->as<ModbusFrame>();
+        if (mb.start_address.has_value()) {
+            std::string key =
+                modbus_touch_key(mb.function_code, *mb.start_address, mb.quantity.value_or(1));
+            if (!key.empty()) touched_addresses.push_back(std::move(key));
+        }
+    } else if (protocol == "s7comm" && dp.protocol == "s7comm" && dp.result) {
+        // Read Var/Write Var Job (request) only -- S7CommResult::items is empty on the Ack_Data
+        // (response) side, see that field's own comment (s7comm.hpp).
+        for (const auto& item : dp.result->as<S7CommResult>().items) {
+            if (!item.syntax_supported || item.tag.empty()) continue;
+            touched_addresses.push_back(item.is_experimental ? ("experimental:" + item.tag) : item.tag);
+        }
+    } else if (protocol == "dnp3" && dp.result) {
+        for (const auto& obj : dp.result->as<Dnp3Result>().dnp3_objects) {
+            touched_addresses.push_back(dnp3_touch_key(obj));
+        }
+    } else if (protocol == "iec104" && dp.result) {
+        for (uint32_t ioa : dp.result->as<Iec104Result>().iec104_object_ioas) {
+            touched_addresses.push_back("ioa=" + std::to_string(ioa));
+        }
+    } else if (protocol == "enip" && dp.has_tcp && dp.result && dp.result->as<EnipResult>().first.has_cip) {
+        // Explicit messaging only -- never CIP I/O implicit messaging (which shares this same
+        // protocol=="enip" string but has no CipPath concept at all, see this file's own header
+        // comment). is_symbolic gates out class/instance/attribute-addressed CIP (generic object
+        // access, not a named tag -- see InventoryEdge::top_touched_addresses' own comment for why).
+        const CipMessage& cip = dp.result->as<EnipResult>().first.cip;
+        if (cip.path.is_symbolic && !cip.path.summary.empty()) {
+            touched_addresses.push_back(cip.path.summary);
+        }
+    } else if (protocol == "mqtt" && dp.result) {
+        const MqttMessage& mq = dp.result->as<MqttResult>().first;
+        if (mq.packet_type_name == "PUBLISH" && !mq.topic.empty()) {
+            touched_addresses.push_back(mq.topic);
+        }
+    }
+
     // See looks_like_broadcast_or_multicast's own comment, and observe()'s doc comment in
     // asset_inventory.hpp, for why a broadcast/multicast side is never turned into an asset or an
     // edge -- its non-broadcast counterpart (if any) still is.
@@ -554,6 +653,18 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     }
     ++eit->second.packet_count;
     if (!function_name.empty()) eit->second.functions.insert(function_name);
+    // Phase 7 of Grok gap #2 -- fold this packet's own touched_addresses (computed above) into this
+    // edge's capped internal touch-count map. kMaxTrackedAddressesPerEdge admits a NEW distinct key
+    // only up to the cap; a key already present always keeps incrementing regardless (see that
+    // constant's own comment, asset_inventory.hpp, for why this is a pure ceiling with no eviction).
+    for (const auto& addr : touched_addresses) {
+        auto ait = eit->second.address_touch_counts.find(addr);
+        if (ait != eit->second.address_touch_counts.end()) {
+            ++ait->second;
+        } else if (eit->second.address_touch_counts.size() < kMaxTrackedAddressesPerEdge) {
+            eit->second.address_touch_counts.emplace(addr, 1);
+        }
+    }
     if (!eit->second.has_timestamp) {
         eit->second.has_timestamp = true;
         eit->second.first_seen = dp.timestamp;
@@ -676,6 +787,28 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ie.direction_source = es.direction_source;
         ie.first_seen = es.first_seen;
         ie.last_seen = es.last_seen;
+
+        // Phase 7 of Grok gap #2 -- sort the internal touch-count map (never sorted during observe(),
+        // see EdgeState::address_touch_counts' own comment) by count descending, address string
+        // ascending as a deterministic tie-break, then truncate to the top
+        // kMaxShownTouchedAddressesPerEdge -- the one place this whole feature actually needs
+        // sorting/truncation, so it happens once here rather than repeatedly during observation.
+        ie.touched_addresses_total_distinct = es.address_touch_counts.size();
+        ie.top_touched_addresses.reserve(
+            std::min(es.address_touch_counts.size(), kMaxShownTouchedAddressesPerEdge));
+        for (const auto& [addr, count] : es.address_touch_counts) {
+            ie.top_touched_addresses.push_back(InventoryAddressTouch{addr, count});
+        }
+        std::sort(ie.top_touched_addresses.begin(), ie.top_touched_addresses.end(),
+                  [](const InventoryAddressTouch& a, const InventoryAddressTouch& b) {
+                      if (a.count != b.count) return a.count > b.count;
+                      return a.address < b.address;
+                  });
+        if (ie.top_touched_addresses.size() > kMaxShownTouchedAddressesPerEdge) {
+            ie.top_touched_addresses.resize(kMaxShownTouchedAddressesPerEdge);
+        }
+        ie.touched_addresses_truncated = ie.touched_addresses_total_distinct > ie.top_touched_addresses.size();
+
         report.edges.push_back(std::move(ie));
     }
 
@@ -899,6 +1032,24 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
             << ")\n";
         out << "      first seen: " << format_epoch_seconds(e.first_seen)
             << "  last seen: " << format_epoch_seconds(e.last_seen) << "\n";
+        // Phase 7 of Grok gap #2 -- see InventoryEdge::top_touched_addresses' own comment
+        // (asset_inventory.hpp). Omitted entirely when empty (an out-of-scope protocol, or an
+        // in-scope protocol whose traffic this session never carried a recognized addressable
+        // request/item on), same "don't print a header for nothing" convention as the identity/
+        // security/plant-identification lines above.
+        if (!e.top_touched_addresses.empty()) {
+            out << "      top touched addresses";
+            if (e.touched_addresses_truncated) {
+                out << " (top " << e.top_touched_addresses.size() << " of "
+                    << e.touched_addresses_total_distinct << " distinct addresses touched, by touch count)";
+            } else {
+                out << " (" << e.touched_addresses_total_distinct << " distinct address(es) touched)";
+            }
+            out << ":\n";
+            for (const auto& t : e.top_touched_addresses) {
+                out << "        " << t.address << "  (" << t.count << " touch(es))\n";
+            }
+        }
     }
     out << "\n";
 
@@ -1025,7 +1176,22 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         out << "      \"first_seen\": " << std::fixed << std::setprecision(6) << e.first_seen << ",\n";
         out << "      \"first_seen_text\": \"" << json_escape(format_epoch_seconds(e.first_seen)) << "\",\n";
         out << "      \"last_seen\": " << e.last_seen << ",\n";
-        out << "      \"last_seen_text\": \"" << json_escape(format_epoch_seconds(e.last_seen)) << "\"\n";
+        out << "      \"last_seen_text\": \"" << json_escape(format_epoch_seconds(e.last_seen)) << "\",\n";
+        // Phase 7 of Grok gap #2 -- appended after last_seen_text (the prior true-last field), same
+        // append-only convention as every addition above. Unconditional (an empty array, not an
+        // omitted field) for an edge with nothing to report here, matching observed_functions' own
+        // always-present-array convention above rather than vendor/product/etc.'s "omit when empty"
+        // one -- see InventoryEdge::top_touched_addresses' own comment (asset_inventory.hpp).
+        out << "      \"top_touched_addresses\": [";
+        for (size_t j = 0; j < e.top_touched_addresses.size(); ++j) {
+            if (j) out << ", ";
+            out << "{\"address\": \"" << json_escape(e.top_touched_addresses[j].address) << "\", \"count\": "
+                << e.top_touched_addresses[j].count << "}";
+        }
+        out << "],\n";
+        out << "      \"touched_addresses_total_distinct\": " << e.touched_addresses_total_distinct << ",\n";
+        out << "      \"touched_addresses_truncated\": " << (e.touched_addresses_truncated ? "true" : "false")
+            << "\n";
         out << "    }" << (i + 1 < report.edges.size() ? "," : "") << "\n";
     }
     out << "  ],\n";

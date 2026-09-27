@@ -84,6 +84,32 @@ class Resolver;
 // makes ("observed subnet as a first-pass heuristic").
 constexpr uint8_t kDefaultInventoryZonePrefixLen = 24;
 
+// Phase 7 of Grok gap #2 ("which specific tags/points/DBs were touched, not just function-code
+// categories") -- see InventoryEdge::top_touched_addresses' own comment for the full design. Two
+// separate caps, same "a wide internal ceiling, a narrow shown cutoff" shape
+// max_active_flows/max_flow_state_entries already use in resource_limits.hpp for an unrelated
+// (decode-time, per-flow) concern -- deliberately NOT wired into that CLI-configurable system: this
+// one is AssetInventoryEngine's own post-processing accumulation across a whole capture, a
+// different engine and a different concern, with no natural per-decode-call scope to hang a CLI flag
+// off of. Both are fixed engineering-judgment constants, not exposed on the CLI, matching this
+// codebase's own existing kMaxObjectValues/kMaxDecodedPointsPerHeader-style internal safety caps
+// (iec104.cpp/dnp3.cpp) rather than a tunable knob.
+//
+// kMaxTrackedAddressesPerEdge: once one edge (one client/server/protocol/port tuple) has this many
+// DISTINCT addresses in its internal touch-count map, no further new address is admitted -- but
+// every address already tracked keeps incrementing normally. Sized generously (4096, the same
+// "no legitimate deployment should ever observe this in practice" posture kDefaultMaxActiveFlows'
+// own comment takes at 100000) so this ceiling is a pure memory-safety backstop against a
+// pathological capture (an aggressive scanner sweeping tens of thousands of distinct register
+// addresses against one PLC), never something a real, bounded OT point list would hit.
+constexpr size_t kMaxTrackedAddressesPerEdge = 4096;
+
+// kMaxShownTouchedAddressesPerEdge: of whatever was tracked (up to the ceiling above),
+// InventoryEdge::top_touched_addresses keeps only the top-N by touch count (descending), address
+// string ascending as a deterministic tie-break for reproducible output -- the plan's own suggested
+// example ("top 32 most-frequently-touched addresses per edge").
+constexpr size_t kMaxShownTouchedAddressesPerEdge = 32;
+
 // One asset: a distinct IP address that appeared in at least one packet of one of this feature's
 // eleven recognized protocols. AssetInventoryEngine::finish sorts these numerically by address for
 // a report that's deterministic independent of capture order.
@@ -249,6 +275,14 @@ struct InventoryAsset {
 // for BACnet specifically, the request/response APDU type -- BACnet's client and
 // server both conventionally listen on the SAME port (47808), so the usual "known port vs.
 // ephemeral port" heuristic can't distinguish them at all; see observe()'s own comment.
+// One address this edge's client touched, and how many packets touched it -- Phase 7 of Grok gap
+// #2. See InventoryEdge::top_touched_addresses' own comment for the full design and per-protocol
+// key format.
+struct InventoryAddressTouch {
+    std::string address;
+    size_t count = 0;
+};
+
 struct InventoryEdge {
     std::string client_ip, server_ip;
     // "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"/"iec104"/"hartip"/"opcua"/"mms"/"mqtt"/"ffhse"/
@@ -271,6 +305,94 @@ struct InventoryEdge {
     // last_seen's own comment; same source field, same free-to-add reasoning.
     double first_seen = 0.0;
     double last_seen = 0.0;
+
+    // Phase 7 of Grok gap #2 ("asset inventory: a real OT asset record" -- Grok's original review
+    // asked which specific tags/points/DBs were touched, not just the function-code categories
+    // `observed_functions` above already records): the top kMaxShownTouchedAddressesPerEdge (32)
+    // distinct addresses this edge's client touched, by touch count descending, address string
+    // ascending as a deterministic tie-break -- sorted and truncated once, in
+    // `AssetInventoryEngine::finish`, from an internal per-edge map capped at
+    // kMaxTrackedAddressesPerEdge (4096) distinct addresses (see both constants' own comments just
+    // above for the two-tier cap design).
+    //
+    // Populated for exactly five of this feature's twelve protocols -- the ones with an
+    // already-decoded, already-structured address/tag field this phase could wire in with NO new
+    // protocol decode (confirmed per-protocol during implementation, mirroring vendor/product/
+    // firmware_revision's own "reuse, don't newly decode" posture elsewhere in this file):
+    //   - modbus: a "<kind>:<1-based address>[-<1-based end address>]" key derived from the
+    //     read/write-multiple families' own already-decoded ModbusFrame::function_code + start_address
+    //     (+ quantity, when > 1, rendered as an inclusive range) -- kind is "coil" (Read Coils/Write
+    //     Multiple Coils), "discrete" (Read Discrete Inputs), "hreg" (Read Holding Registers/Write
+    //     Multiple Registers), or "ireg" (Read Input Registers); address is start_address+1 (the
+    //     conventional 1-based Modicon reference numbering), zero-padded to 5 digits -- e.g.
+    //     "hreg:00001-00010" for a 10-register Read Holding Registers request starting at wire address
+    //     0. The `kind` word itself disambiguates register type rather than relying on a Modicon
+    //     leading-digit convention (0x/1x/3x/4x), which this key format doesn't otherwise follow.
+    //     Write Single Coil/Register never contribute (ModbusFrame::start_address stays nullopt for
+    //     that family -- see its own comment, modbus.hpp) -- a documented scope boundary shared with
+    //     the baseline engine, not new here.
+    //   - s7comm: S7Item::tag verbatim (e.g. "DB10.DBW100", "I0.0", "MB50", "T5") for every item on a
+    //     Read Var/Write Var request whose S7Item::syntax_supported is true -- an item decoded via the
+    //     EXPERIMENTAL 0xB2/TIA-1200 symbolic path (S7Item::is_experimental) is prefixed
+    //     "experimental:" so a reader can't mistake a not-fully-verified address for a
+    //     well-established S7ANY one, same "mark it, don't hide it" posture s7comm.hpp's own file
+    //     comment already takes for that decode path elsewhere.
+    //   - dnp3: "g{group}v{variation}" (Dnp3ObjectRange::group/variation -- the SAME shorthand
+    //     src/dnp3.cpp's own summary/dnp3_object_headers rendering already establishes, reused
+    //     verbatim for consistency) plus " idx {start}-{stop}" (or " idx {start}" when the range is a
+    //     single point) when Dnp3ObjectRange::has_range is true. This is coarser than a genuine
+    //     per-point index -- Dnp3Result (the merged, cross-fragment struct this engine actually reads)
+    //     only retains Dnp3ObjectRange's own group/variation/range-of-the-header level, not each
+    //     individual Dnp3PointValue::index inside it (those exist only at the per-fragment
+    //     Dnp3ObjectHeader::values level, which isn't retained past decode) -- a deliberate,
+    //     documented scope boundary: exposing true per-point indices here would mean widening
+    //     Dnp3Result itself, genuinely new decode-surface work, not the "reuse what's already there"
+    //     scope this phase stayed within. A header-level range is still a materially more specific
+    //     "what was touched" answer than `observed_functions`' function-name-only view.
+    //   - iec104: "ioa={value}" from Iec104Result::iec104_object_ioas (a small, additive field
+    //     promoting the same numeric Information Object Address already rendered, stringified, into
+    //     iec104_object_values -- see that field's own comment, iec104.hpp -- as its own structured
+    //     uint32_t list; zero new parsing, the exact same promotion enip.hpp's own identity_* fields
+    //     already got relative to CipMessage's generic values in an earlier phase).
+    //   - enip (explicit messaging only, never CIP I/O implicit messaging -- see this file's own
+    //     header comment on why the two share one protocol="enip"): CipMessage::path.summary verbatim
+    //     (e.g. "MyTag.Member[3]"), only when CipPath::is_symbolic is true -- i.e. only a genuine
+    //     Rockwell Logix5000 named-tag path (Read Tag/Write Tag/Read Tag Fragmented/Write Tag
+    //     Fragmented/Read Modify Write Tag; see CipPath::is_symbolic's own comment, enip.hpp). A
+    //     class/instance/attribute-addressed CIP message (not a named tag at all -- e.g. Identity
+    //     object Get_Attributes_All) is deliberately excluded: that's generic CIP object access, not
+    //     a "tag/point" in the sense this phase's ask means, and CipPath::summary's own class/instance
+    //     rendering isn't a stable per-device address the way a tag name is.
+    //   - mqtt: MqttMessage::topic verbatim, PUBLISH packets only (every other MQTT packet type --
+    //     CONNECT/SUBSCRIBE/PINGREQ/... -- carries no topic of its own here; MqttMessage::topic is
+    //     documented "PUBLISH only", mqtt.hpp). A topic is this protocol's own natural point-address
+    //     equivalent -- the specific data channel a publisher/subscriber touches, the direct MQTT
+    //     analog of a Modbus register or an S7 DB tag.
+    //
+    // Explicitly deferred, not attempted, for the other seven protocols (confirmed with Jurgen before
+    // implementing, since it changed this phase's scope from the plan's own original, more
+    // conservative framing): OPC UA and MMS both address by a genuinely symbolic path (a NodeId; a
+    // "domainId/itemId" object reference) that this codebase currently only ever stringifies into a
+    // free-text notes/values entry (OpcUaMessage has no structured NodeId field of its own;
+    // MmsFrame::values is "key=value" strings, not a structured domain/item field) -- promoting either
+    // to a real structured field would be genuinely new decode-surface work, not reuse, so both stay
+    // out of scope for this phase. BACnet/HART-IP/FF-HSE/S7comm-Plus carry no per-point/per-tag
+    // addressing concept this codebase decodes at all today. See docs/USER_GUIDE.md's LIMITATIONS for
+    // this same list in user-facing form.
+    std::vector<InventoryAddressTouch> top_touched_addresses;
+
+    // However many distinct addresses this edge actually had tracked (bounded by
+    // kMaxTrackedAddressesPerEdge above -- see that constant's own comment for what happens past it),
+    // even though only the top kMaxShownTouchedAddressesPerEdge are listed in
+    // top_touched_addresses above. 0 for every edge whose protocol isn't one of the five wired in
+    // above (top_touched_addresses is then also empty).
+    size_t touched_addresses_total_distinct = 0;
+
+    // True when touched_addresses_total_distinct exceeds top_touched_addresses.size() -- i.e. this
+    // edge touched more distinct addresses than fit in the shown top-N cutoff, so
+    // top_touched_addresses is a genuine subset, not the whole picture. Never true when
+    // touched_addresses_total_distinct is 0.
+    bool touched_addresses_truncated = false;
 };
 
 // One inferred zone: every observed asset IP that falls in the same `network` (a
@@ -479,6 +601,14 @@ public:
     //     `security_posture`/`plant_identification` stay unset.
     // First-identity-seen wins for every field above, per asset. Every other protocol leaves these
     // fields empty for now.
+    //
+    // Tag/point/DB touch summarization (InventoryEdge::top_touched_addresses -- Phase 7 of Grok gap
+    // #2): for the five protocols wired in (see that field's own comment for the full list and
+    // per-protocol key format), every address this packet's own decoded structures name is folded
+    // into that edge's internal touch-count map here in observe() -- the same per-packet
+    // accumulation shape as `functions`/observed_functions above, just keyed by address instead of
+    // function name, and capped (kMaxTrackedAddressesPerEdge) rather than unbounded. The final
+    // sort-by-count-descending/truncate-to-top-N step happens once, in `finish()`, not here.
     void observe(const DecodedPacket& packet);
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.
@@ -513,6 +643,13 @@ private:
         double first_seen = 0.0;
         double last_seen = 0.0;
         bool has_timestamp = false;  // see AssetState::has_timestamp's own comment
+
+        // Internal accumulation for InventoryEdge::top_touched_addresses -- see that field's own
+        // comment (asset_inventory.hpp) for the per-protocol key format and the two-tier cap design.
+        // Admission-capped at kMaxTrackedAddressesPerEdge distinct keys in observe() -- once hit, an
+        // already-present key keeps incrementing but no new key is added. finish() sorts/truncates
+        // this into the final top_touched_addresses list; this map itself is never sorted.
+        std::unordered_map<std::string, size_t> address_touch_counts;
     };
 
     // TCP-session-level state, exactly mirroring PolicyEngine::FlowState's client/server-only

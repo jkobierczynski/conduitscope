@@ -1,14 +1,14 @@
 # Asset inventory: a real OT asset record -- design document
 
-Status: **Phases 0-6 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
+Status: **Phases 0-7 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
 dispatch, OPC UA identity promotion, S7comm SZL decode + wiring, BACnet ReadPropertyMultiple decode +
 Device-object identity correlation, DNP3 Device Attributes decode + identity correlation, role
-classification) implemented and shipped.** Phases 7-10 (tag/point/DB touch summarization, CSV/CMDB
+classification, tag/point/DB touch summarization) implemented and shipped.** Phases 8-10 (CSV/CMDB
 export, STIX/TAXII-lite export, firewall-ACL-draft export) are scoped below but not yet started. Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
 fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76,
-79, 81-82 for the changelog-style writeup of what shipped and its exact verification numbers.
+79, 81-83 for the changelog-style writeup of what shipped and its exact verification numbers.
 
 ## Context
 
@@ -493,17 +493,118 @@ regression targets); no-live-capture 2081/2081; plus a clean-room extract-rebuil
 re-verified before delivery; MinGW-w64 cross-compile confirmed to still compile and link cleanly
 (same standing no-Wine-here limitation as every prior phase).
 
-**Not yet done, tracked for a following increment**: tag/point/DB touch summarization, and
-CSV/CMDB, STIX/TAXII-lite, and firewall-ACL-draft export -- unchanged from Phase 5's own list, minus
-role classification, which this phase completed.
+**Not yet done, tracked for a following increment**: CSV/CMDB, STIX/TAXII-lite, and
+firewall-ACL-draft export -- unchanged from Phase 5's own list, minus role classification (Phase 6)
+and tag/point/DB touch summarization (this phase), both now shipped.
 
-## Phase 7 -- Tag/point/DB touch summarization
+## Phase 7 -- Tag/point/DB touch summarization (shipped)
 
-Extend `InventoryEdge` with a capped, summarized per-address touch record (e.g. top 32
-most-frequently-touched addresses per edge) rather than an unbounded set. Per protocol: Modbus
-register address, S7 DB number + start address, DNP3 point index, IEC104 IOA. New "TOP TOUCHED
-ADDRESSES" subsection per edge in text/JSON. CIP/OPC UA/MMS/MQTT "tag" addressing is symbolic-path-
-based rather than a small integer -- explicitly deferred/flagged rather than attempted in this phase.
+New `InventoryEdge::top_touched_addresses` (a capped, sorted list of `{address, count}` pairs -- see
+that field's own comment in `asset_inventory.hpp` for the complete per-protocol design this section
+summarizes) plus `touched_addresses_total_distinct`/`touched_addresses_truncated`, replacing the
+plan's originally-sketched raw `std::map` with a two-tier cap design worked out during
+implementation: an internal per-edge accumulation map (`AssetInventoryEngine::EdgeState::
+address_touch_counts`) admits at most `kMaxTrackedAddressesPerEdge` (4096) distinct addresses --
+past that ceiling, an already-tracked address keeps incrementing but no new one is admitted, the same
+"pure ceiling, no eviction" shape `resource_limits.hpp`'s own `max_active_flows`/
+`max_flow_state_entries` already use for an unrelated (decode-time, per-flow) concern. `finish()`
+then sorts that map once (count descending, address string ascending as a deterministic tie-break)
+and truncates to the top `kMaxShownTouchedAddressesPerEdge` (32, the plan's own suggested example) for
+the final report. Both constants are fixed engineering-judgment values, not CLI-configurable --
+deliberately NOT wired into `resource_limits.hpp`'s own tunable-cap system, since that system is
+scoped to decode-time/per-flow adversarial-input protection inside `Decoder`, a different engine and a
+different concern from `AssetInventoryEngine`'s own post-processing accumulation across a whole
+capture.
+
+The plan's own research instruction -- confirm during implementation whether CIP/OPC UA/MMS/MQTT's
+symbolic-path addressing is "already surfaced anywhere reusable" before deciding per-protocol scope --
+turned up a real, materially different answer per protocol, surfaced to and confirmed by Jurgen (see
+this phase's own open question below) before implementing: OPC UA's NodeId and MMS's domain/item
+object reference are genuinely only ever stringified into free-text `notes`/`values` entries in this
+codebase today (neither has a structured field of its own), so promoting either would be real new
+decode-surface work and both stay explicitly deferred/out of scope; but CIP's `CipMessage::path.
+summary` (already a structured, human-readable tag-name string whenever `CipPath::is_symbolic` is
+true) and MQTT's `MqttMessage::topic` (already a structured field, PUBLISH-only) are both zero-new-
+decode reuse exactly like every other protocol this phase wires in, so the shipped scope widened from
+the plan's original four-protocol list to six:
+
+  - **modbus**: a `"<kind>:<1-based address>[-<1-based end address>]"` key from the read/write-
+    multiple families' own already-decoded `function_code`+`start_address`(+`quantity`) --
+    `kind` is `coil`/`discrete`/`hreg`/`ireg`; Write Single Coil/Register never contribute
+    (`start_address` stays unset for that family -- a pre-existing, documented scope boundary, not
+    new here).
+  - **s7comm**: `S7Item::tag` verbatim (e.g. `"DB10.DBW100"`, `"I0.0"`, `"T5"`) for every item on a
+    Read Var/Write Var request whose `syntax_supported` is true, prefixed `"experimental:"` when
+    decoded via the EXPERIMENTAL 0xB2/TIA-1200 path (`is_experimental`) -- never silently presented
+    as equally trustworthy as a well-established S7ANY tag.
+  - **dnp3**: `"g{group}v{variation}"` (the SAME shorthand `src/dnp3.cpp`'s own summary/
+    `dnp3_object_headers` rendering already establishes, reused verbatim) plus `" idx {start}-{stop}"`
+    (or `" idx {start}"` for a single-point range) when `Dnp3ObjectRange::has_range` is true --
+    deliberately header-range-level, not true per-point (the merged `Dnp3Result` this engine reads
+    doesn't retain each fragment's own per-point `Dnp3PointValue::index`; exposing that would be new
+    decode-surface work, out of scope here).
+  - **iec104**: `"ioa={value}"` from a new, small, additive `Iec104Result::iec104_object_ioas` field
+    (a `std::vector<uint32_t>`, populated in lockstep with the already-existing
+    `iec104_object_values` inside `Iec104Decoder::decode`'s `merge_asdu` lambda, same cap) -- the same
+    "promote an already-extracted value to a named structured field" pattern Phase 1's ENIP
+    `identity_*` fields already established.
+  - **enip** (explicit messaging only, never CIP I/O implicit messaging): `CipMessage::path.summary`
+    verbatim, gated on `CipPath::is_symbolic` -- a class/instance/attribute-addressed CIP message
+    (generic object access, e.g. Identity `Get_Attributes_All`) contributes nothing, since that isn't
+    a tag/point in the sense this phase's ask means.
+  - **mqtt**: `MqttMessage::topic` verbatim, PUBLISH packets only.
+
+BACnet/HART-IP/FF-HSE/S7comm-Plus carry no per-point/per-tag addressing concept this codebase decodes
+at all today, and stay out of scope for the same reason.
+
+Rendered as a new "top touched addresses" block per edge in `write_inventory_report_text` (omitted
+entirely, not printed empty, for an edge with nothing tracked -- same convention the identity/
+security/plant-identification lines already follow), and in `write_inventory_report_json` as three new
+fields appended after `last_seen_text` (the prior true-last field) -- `top_touched_addresses` (always
+an array, even empty, same unconditional-emission convention `observed_functions` already uses, unlike
+`vendor`/`product`'s own omit-when-empty one), `touched_addresses_total_distinct`, and
+`touched_addresses_truncated`.
+
+One open question surfaced to, and resolved by, Jurgen before implementing: whether to widen this
+phase's scope to include CIP tag paths and MQTT topics (discovered during research to already be
+free reuse, unlike the plan's original framing that lumped all four "symbolic" protocols together as
+deferred) or ship exactly the plan's original four-protocol list. Jurgen chose to include CIP and MQTT.
+
+**Testing.** New `tests/sample_touch_summarization.pcap`
+(`build_touch_summarization_sample` in `tools/make_sample_pcap.py`) puts one concern on its own
+isolated, fresh client/server IP pair per edge, so each expected result is independently hand-
+verifiable: a modbus edge exercising every key format plus the write-multiple request+response
+double-touch; a second modbus edge with 35 distinct single-register reads (every count tied at 1)
+proving both the top-32 truncation and the deterministic (count desc, address asc) sort actually fire,
+not just documented; an s7comm edge with three S7ANY tags plus one EXPERIMENTAL 0xB2 item, proving the
+`"experimental:"` prefix applies to only the right one; a dnp3 edge with a no-range Class-0-poll
+request key alongside a real multi-point range and a single-point range in the response, proving all
+three has_range/tie-break shapes render correctly; an iec104 edge with a 5-point SQ=1 report, proving
+the new `iec104_object_ioas` field feeds this engine correctly; an enip edge with a symbolic Read_Tag/
+Write_Tag round trip against the same tag alongside a class/instance `Get_Attributes_All` on the same
+edge, proving the latter contributes nothing even though three CIP messages were exchanged; an mqtt
+edge with three PUBLISH packets across two topics; and an opcua edge (GetEndpoints), proving this
+out-of-scope protocol genuinely emits nothing rather than silently mis-tracking it. 12 new CTest cases
+(nine text, three JSON), all verified against the real binary's own output on the first run -- no
+hand-written expected text. Two PRE-EXISTING CTest regexes were also found broken during this phase's
+verification pass and fixed (`inventory_enip_no_identity_fields_omitted_for_client_json`/
+`inventory_opcua_no_identity_fields_omitted_for_client_json`): both anchored on an asset's JSON object
+ending immediately after `last_seen_text`, a pattern Phase 6's own unconditional `inferred_role`
+addition had already invalidated without either regex being updated at the time -- a latent regression
+from Phase 6, not introduced by this phase, caught only because this phase's own verification pass
+ran the full suite from a clean build. No new fuzz harness/corpus work was needed: the one piece of
+new parsing-adjacent code (`iec104_object_ioas`'s population) is a pure additive promotion of a value
+that was already extracted from already-validated bytes inside `merge_asdu` (no new byte-parsing path
+of its own), and `AssetInventoryEngine`'s own touch-tracking is, like Phase 6's role inference, pure
+post-processing over already-decoded, already-validated structures -- parsing no untrusted bytes of
+its own. `docs/PROTOCOL_COVERAGE.md` was deliberately NOT updated for this phase, per the Phase 0/6
+precedent that it's scoped to wire-format decode coverage only: nothing here decodes a new wire
+format, `iec104_object_ioas` only exposes an already-decoded value as a new structured field. Full
+CTest suite: 2105/2105 (default GCC build, up from Phase 6's 2093 -- 12 new touch-summarization tests
+plus the 2 pre-existing regex fixes just described, net +12); ASan/UBSan 2181/2181; no-live-capture
+2093/2093; plus a clean-room extract-rebuild-test, all re-verified before delivery; MinGW-w64
+cross-compile confirmed to still compile and link cleanly (same standing no-Wine-here limitation as
+every prior phase).
 
 ## Phase 8 -- CSV / CMDB export
 
@@ -559,6 +660,11 @@ message types) all updated in the same phase as the code, per this project's sta
   writers (text/JSON/CSV/STIX/ACL). Also where Phase 6's `inferred_role` heuristic lives (shipped) --
   `InventoryAsset::inferred_role`'s own comment there is the authoritative statement of the full rule
   table; `finish()`'s new role-inference pass and `write_inventory_report_text`/`_json`'s rendering.
+  Also where Phase 7's `top_touched_addresses` (shipped) lives -- `InventoryEdge::
+  top_touched_addresses`'s own comment there is the authoritative statement of the full per-protocol
+  key design and the two-tier cap; `observe()`'s new per-packet address extraction, `EdgeState::
+  address_touch_counts`'s capped accumulation, `finish()`'s sort/truncate pass, and
+  `write_inventory_report_text`/`_json`'s rendering.
 - `include/conduitscope/enip.hpp` -- already has the fields Phase 1 needed; read-only reference.
 - `include/conduitscope/opcua.hpp` / `src/opcua.cpp` -- Phase 2's `OpcUaMessage` field promotion
   (shipped); `src/output.cpp`'s `write_opcua_json_fields` also gained the same fields.
@@ -571,6 +677,9 @@ message types) all updated in the same phase as the code, per this project's sta
 - `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode and
   device attribute identity correlation (shipped); `src/asset_inventory.cpp`'s `observe()` and
   `src/output.cpp`'s `write_dnp3_json_fields` also gained the corresponding wiring/fields.
+- `include/conduitscope/iec104.hpp` / `src/iec104.cpp` -- Phase 7's small, additive
+  `Iec104Result::iec104_object_ioas` field (shipped), populated alongside the already-existing
+  `iec104_object_values` in `Iec104Decoder::decode`'s `merge_asdu` lambda; no new decode.
 - `src/cli_main.cpp` -- Phase 8's `--format csv` CLI plumbing for `inventory`.
 - `tools/make_sample_pcap.py`, `tools/extract_fuzz_corpus.py`, `CMakeLists.txt`, `fuzz/fuzz_*.cpp`.
 - `docs/USER_GUIDE.md`, `docs/DEVELOPMENT.md`, `docs/PROTOCOL_COVERAGE.md`.

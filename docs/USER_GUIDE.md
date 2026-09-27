@@ -761,6 +761,71 @@ attribute-id addressing scheme) are not decoded, nor are the OSTR/BSTR/
 TIME/UNCD/U8BS8LIST/U8BS8EXLIST Device Attributes data types -- see
 LIMITATIONS.
 
+Each edge can also carry a "top touched addresses" block -- Grok gap #2's "which specific tags/
+points/DBs were touched, not just function-code categories" ask -- listing up to 32 of the specific
+addresses that edge's client touched, sorted by touch count (most-touched first, address string
+ascending as a tie-break), omitted entirely (not printed empty) when nothing was tracked for that
+edge's protocol. It's populated for six of this tool's twelve protocols, each reusing an
+already-decoded, already-structured address/tag field (no new protocol decode): Modbus (a
+`"<kind>:<1-based address>[-<end>]"` key, `kind` being `coil`/`discrete`/`hreg`/`ireg`; Write Single
+Coil/Register never contribute, since Modbus doesn't put an address on the wire for that pair of
+function codes at all -- see LIMITATIONS), S7comm (the same Step 7-style tag notation `identity:`
+above already showed for S7 SZL, e.g. `"DB10.DBW100"`, prefixed `"experimental:"` when it came from
+the EXPERIMENTAL 0xB2/TIA-1200 symbolic decode rather than the well-established S7ANY one), DNP3 (a
+`"g{group}v{variation}"` key, plus `" idx {start}-{stop}"` when the object header carried an explicit
+range -- coarser than a true per-point index, since the object-header level is what this tool's own
+merged DNP3 result retains), IEC 104 (`"ioa={value}"`), EtherNet/IP (a Logix5000 named-tag path, e.g.
+`"MyTag.Member[3]"` -- ONLY for a genuine symbolic Read/Write Tag request; a class/instance-addressed
+CIP message, e.g. Identity `Get_Attributes_All`, contributes nothing, since that's generic object
+access, not a tag), and MQTT (the PUBLISH topic string). OPC UA, MMS, BACnet, HART-IP, FF-HSE, and
+S7comm-Plus are all deliberately out of scope: OPC UA's NodeId and MMS's domain/item object
+reference are genuinely symbolic-path addressing this tool currently only ever renders as free text,
+not a structured field, so promoting either would be new decode work rather than reuse; the rest
+carry no per-point/per-tag addressing concept this tool decodes at all.
+
+`tests/sample_touch_summarization.pcap` (`build_touch_summarization_sample` in
+`tools/make_sample_pcap.py`) puts one edge per protocol/concern on its own fresh IP pair, including
+a 35-distinct-address modbus edge purpose-built to show the top-32 cutoff actually firing -- see
+that function's own docstring for the full per-edge breakdown. A trimmed excerpt (the S7comm and
+Modbus-truncation edges from that fixture):
+
+```sh
+$ conduitscope inventory -r tests/sample_touch_summarization.pcap
+...
+  192.168.1.244 -> 192.168.1.245:102 (mms)  s7comm  [Read Var]  (1 packet(s), direction: port-heuristic)
+      first seen: 2023-11-15 12:07:21.041000Z  last seen: 2023-11-15 12:07:21.041000Z
+      top touched addresses (4 distinct address(es) touched):
+        DB5.DBW20  (1 touch(es))
+        I0.1  (1 touch(es))
+        T5  (1 touch(es))
+        experimental:DB5.DBX7.2  (1 touch(es))
+  192.168.1.242 -> 192.168.1.243:502 (modbus)  modbus  [Read Holding Registers]  (35 packet(s), direction: port-heuristic)
+      first seen: 2023-11-15 12:06:46.006000Z  last seen: 2023-11-15 12:07:20.040000Z
+      top touched addresses (top 32 of 35 distinct addresses touched, by touch count):
+        hreg:00001  (1 touch(es))
+        ...
+        hreg:00032  (1 touch(es))
+...
+```
+
+(The `(mms)` next to the S7comm edge's port number is just `docs/MANUAL.md`'s own port-to-service-name
+table -- S7comm and MMS conventionally share TCP/102, and that lookup has no notion of which protocol
+this specific edge actually decoded as; the `s7comm` right after it, and `[Read Var]`, are this
+edge's own real protocol/function.)
+
+`inventory --format json` carries the same data as three new, always-present fields per edge (never
+omitted, matching `observed_functions`' own always-an-array convention rather than
+`vendor`/`product`'s own omit-when-empty one): `top_touched_addresses` (an array of `{"address":
+..., "count": ...}` objects, empty when nothing was tracked), `touched_addresses_total_distinct` (how
+many distinct addresses this edge actually had tracked, which can exceed the 32 shown), and
+`touched_addresses_truncated` (true when it does).
+
+Internally, this feature bounds itself two ways rather than tracking every address a capture could
+ever contain: an edge stops admitting brand-new distinct addresses once it's tracked 4096 of them
+(an already-tracked address keeps incrementing normally past that point), and the final report shows
+only the top 32 of whatever was tracked, by touch count. Both numbers are fixed engineering
+judgment, not currently exposed on the CLI -- see LIMITATIONS.
+
 #### Closing the loop
 
 `--policy-out` writes the inferred zones/conduits above as a `policy`-format
@@ -4814,6 +4879,24 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   "HMI/Engineering Station" rules are mutually exclusive by construction (`ever_server &&
   !ever_client` vs. `ever_client && !ever_server`), so an asset clearing a peer-count threshold on
   one side is never promoted just because it also happens to serve something else.
+- **`inventory`'s "top touched addresses" block (Grok gap #2's "which specific tags/points/DBs were
+  touched" ask) is populated for six of this tool's twelve protocols, each reusing an
+  already-decoded, already-structured address/tag field -- OPC UA, MMS, BACnet, HART-IP, FF-HSE, and
+  S7comm-Plus are all deliberately out of scope, not silently omitted.** OPC UA's NodeId and MMS's
+  domain/item object reference are genuinely symbolic-path addressing this tool currently only ever
+  renders as free text (no structured field of its own to promote), so adding either here would be
+  new decode work, not reuse; the other four carry no per-point/per-tag addressing concept this tool
+  decodes at all. Within the six that ARE covered, Modbus's Write Single Coil/Write Single Register
+  never contribute a touch -- request and response share an identical wire shape for that specific
+  pair of function codes, so this tool has no way to tell where the address field even is without
+  transaction-ID pairing (`ModbusFrame::start_address`'s own comment, `modbus.hpp`, has the full
+  reasoning); DNP3's key is header-range-level (`"g{group}v{variation}"` plus an
+  index range), not a true per-point index, since that's the granularity this tool's own merged DNP3
+  result retains. Two fixed internal caps bound this feature's memory use rather than tracking every
+  address a capture could ever contain -- a per-edge ceiling of 4096 distinct addresses actually
+  tracked (already-tracked addresses keep incrementing past it; new ones simply aren't admitted), and
+  a final top-32-by-touch-count cutoff for what's actually shown in the report -- neither is currently
+  exposed on the CLI as a tunable.
 - **Direction/initiator determination is, in general, only ever as good as
   the evidence available for a given flow -- it can't always be established
   with certainty, only approximately.** "Approximately" has one precise

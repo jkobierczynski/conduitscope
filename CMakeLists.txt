@@ -9863,7 +9863,11 @@ set_tests_properties(inventory_enip_identity_wired_into_asset_json PROPERTIES
 add_test(NAME inventory_enip_no_identity_fields_omitted_for_client_json
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
 set_tests_properties(inventory_enip_no_identity_fields_omitted_for_client_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-14 22:46:48.008000Z\"\n *\\}")
+  # Updated for Phase 6 of Grok gap #2 (InventoryAsset::inferred_role): every asset's JSON object
+  # unconditionally gets an "inferred_role" field after last_seen_text now (see that field's own
+  # comment, asset_inventory.hpp, for why it's never omitted the way vendor/product/etc. are) -- this
+  # anchor pattern's "nothing else follows" assertion has to include it, not stop at last_seen_text.
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-14 22:46:48.008000Z\",\n *\"inferred_role\": \"Unknown\"\n *\\}")
 
 # ---------------------------------------------------------------------------------------------
 # Grok gap #2 phase 2: OPC UA identity promotion. tests/sample_opcua.pcap's own GetEndpointsResponse
@@ -9894,7 +9898,9 @@ set_tests_properties(inventory_opcua_identity_wired_into_asset_json PROPERTIES
 add_test(NAME inventory_opcua_no_identity_fields_omitted_for_client_json
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
 set_tests_properties(inventory_opcua_no_identity_fields_omitted_for_client_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-15 00:13:24.000000Z\"\n *\\}")
+  # Same fix as inventory_enip_no_identity_fields_omitted_for_client_json just above -- see that
+  # test's own comment.
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-15 00:13:24.000000Z\",\n *\"inferred_role\": \"Unknown\"\n *\\}")
 
 # ---------------------------------------------------------------------------------------------
 # Grok gap #2 phase 6: InventoryAsset::inferred_role, a passive, low-confidence, purely
@@ -9978,6 +9984,111 @@ add_test(NAME inventory_role_json_unknown_rendered_not_omitted
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
 set_tests_properties(inventory_role_json_unknown_rendered_not_omitted PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.216\",.*\"inferred_role\": \"Unknown\"")
+
+# ---------------------------------------------------------------------------------------------
+# Grok gap #2 phase 7: InventoryEdge::top_touched_addresses -- tag/point/DB touch summarization
+# (see that field's own comment in asset_inventory.hpp for the full per-protocol key design and the
+# two-tier cap). tests/sample_touch_summarization.pcap (build_touch_summarization_sample in
+# tools/make_sample_pcap.py) puts one concern on its own isolated client/server IP pair -- see that
+# function's own docstring for the full per-edge reasoning behind each expected key/count below.
+# ---------------------------------------------------------------------------------------------
+
+# modbus, basic key-format coverage: 5 distinct addresses, sorted by count (desc) then address
+# (asc) -- hreg:00201-00202 was touched by BOTH the Write Multiple Registers request AND its
+# response (real wire behavior echoes address+quantity on both sides -- see ModbusFrame::
+# start_address's own comment, modbus.hpp), so it's the only 2-touch entry and sorts first.
+add_test(NAME inventory_touch_modbus_basic_key_formats_and_sort_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_modbus_basic_key_formats_and_sort_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.240 -> 192\\.168\\.1\\.241.*top touched addresses \\(5 distinct address\\(es\\) touched\\):\n *hreg:00201-00202  \\(2 touch\\(es\\)\\)\n *coil:00006-00008  \\(1 touch\\(es\\)\\)\n *discrete:00001  \\(1 touch\\(es\\)\\)\n *hreg:00001-00010  \\(1 touch\\(es\\)\\)\n *ireg:00100  \\(1 touch\\(es\\)\\)")
+
+# modbus, truncation + deterministic sort: 35 distinct single-register reads, every count tied at
+# 1 -- the top 32 SHOWN are exactly the 32 lexically/numerically smallest addresses (hreg:00001
+# through hreg:00032); hreg:00033/00034/00035 exist (touched_addresses_total_distinct=35) but are
+# NOT among the top 32 shown, proving kMaxShownTouchedAddressesPerEdge's cutoff and the
+# (count desc, address asc) tie-break both actually fire, not just documented.
+add_test(NAME inventory_touch_modbus_truncated_to_top_32_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_modbus_truncated_to_top_32_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.242 -> 192\\.168\\.1\\.243.*top touched addresses \\(top 32 of 35 distinct addresses touched, by touch count\\):\n *hreg:00001  \\(1 touch\\(es\\)\\).*hreg:00032  \\(1 touch\\(es\\)\\)\n")
+
+add_test(NAME inventory_touch_modbus_truncated_excludes_beyond_top_32_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_modbus_truncated_excludes_beyond_top_32_text PROPERTIES
+  FAIL_REGULAR_EXPRESSION "hreg:00033")
+
+add_test(NAME inventory_touch_modbus_truncated_json_fields
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_modbus_truncated_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_ip\": \"192\\.168\\.1\\.242\",.*\"touched_addresses_total_distinct\": 35,\n *\"touched_addresses_truncated\": true")
+
+# s7comm: three well-established S7ANY tags (S7Item::tag verbatim) plus one EXPERIMENTAL 0xB2 item
+# -- the "experimental:" prefix is applied ONLY to the 0xB2-decoded item (S7Item::is_experimental),
+# never to the S7ANY ones, and it sorts last (lowercase "e" > every uppercase tag-name first letter
+# in ASCII, so this also incidentally re-confirms the plain string sort).
+add_test(NAME inventory_touch_s7comm_tags_and_experimental_prefix_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_s7comm_tags_and_experimental_prefix_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.244 -> 192\\.168\\.1\\.245.*top touched addresses \\(4 distinct address\\(es\\) touched\\):\n *DB5\\.DBW20  \\(1 touch\\(es\\)\\)\n *I0\\.1  \\(1 touch\\(es\\)\\)\n *T5  \\(1 touch\\(es\\)\\)\n *experimental:DB5\\.DBX7\\.2  \\(1 touch\\(es\\)\\)")
+
+# dnp3: "g{group}v{variation}" reused verbatim from src/dnp3.cpp's own existing shorthand, plus the
+# " idx {start}-{stop}" range suffix (g1v2, a real 2-point range) vs. the single-point collapse to
+# just " idx {n}" with no "-" (g30v1, start==stop) vs. no suffix at all when has_range is false (the
+# g60v1 Class 0 poll, qualifier 0x06 "all" -- carries no range by definition).
+add_test(NAME inventory_touch_dnp3_group_variation_range_keys_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_dnp3_group_variation_range_keys_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.246 -> 192\\.168\\.1\\.247.*top touched addresses \\(3 distinct address\\(es\\) touched\\):\n *g1v2 idx 3-5  \\(1 touch\\(es\\)\\)\n *g30v1 idx 10  \\(1 touch\\(es\\)\\)\n *g60v1  \\(1 touch\\(es\\)\\)")
+
+# iec104: the new Iec104Result::iec104_object_ioas promotion (added this phase alongside the
+# already-existing iec104_object_values) feeds this feature directly -- 5 sequential IOAs (SQ=1
+# report, base IOA 500) each become their own "ioa=<N>" touch.
+add_test(NAME inventory_touch_iec104_ioa_keys_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_iec104_ioa_keys_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.248 -> 192\\.168\\.1\\.249.*top touched addresses \\(5 distinct address\\(es\\) touched\\):\n *ioa=500  \\(1 touch\\(es\\)\\)\n *ioa=501  \\(1 touch\\(es\\)\\)\n *ioa=502  \\(1 touch\\(es\\)\\)\n *ioa=503  \\(1 touch\\(es\\)\\)\n *ioa=504  \\(1 touch\\(es\\)\\)")
+
+# enip: CipPath::summary verbatim for a symbolic (ANSI Extended Symbol segment 0x91) Read_Tag/
+# Write_Tag round trip against the SAME tag "PumpSpeed" -- 2 touches, one per message -- while a
+# THIRD CIP message on this same edge (a class/instance-addressed Get_Attributes_All, is_symbolic
+# false) contributes NOTHING: touched_addresses_total_distinct stays 1, not 2, even though three CIP
+# messages were exchanged on this edge.
+add_test(NAME inventory_touch_enip_symbolic_tag_only_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_enip_symbolic_tag_only_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.250 -> 192\\.168\\.1\\.251.*\\[Get_Attributes_All, Read_Tag, Write_Tag\\].*top touched addresses \\(1 distinct address\\(es\\) touched\\):\n *PumpSpeed  \\(2 touch\\(es\\)\\)")
+
+# mqtt: MqttMessage::topic verbatim, PUBLISH only -- CONNECT/CONNACK on this same edge contribute
+# nothing (no topic field of their own), and one of the two topics was published twice.
+add_test(NAME inventory_touch_mqtt_publish_topics_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_mqtt_publish_topics_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.252 -> 192\\.168\\.1\\.253.*top touched addresses \\(2 distinct address\\(es\\) touched\\):\n *line1/pump1/speed  \\(2 touch\\(es\\)\\)\n *line1/pump1/status  \\(1 touch\\(es\\)\\)")
+
+# opcua: deliberately out of scope this phase (see InventoryEdge::top_touched_addresses' own
+# comment for why) -- a GetEndpoints exchange on this edge must produce NO "top touched addresses"
+# line at all in the text report (omitted entirely, same "don't print a header for nothing"
+# convention the identity/security lines already follow), not an empty one.
+add_test(NAME inventory_touch_opcua_out_of_scope_produces_no_section_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_opcua_out_of_scope_produces_no_section_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.254 -> 192\\.168\\.1\\.1.*direction: port-heuristic\\)\n *first seen: [^\n]*\n\nINFERRED ZONES")
+
+# Same opcua out-of-scope check in JSON: the array is present but empty (unconditional emission,
+# same "always an array, never an omitted field" convention observed_functions already follows --
+# see InventoryEdge::top_touched_addresses' own comment for why this differs from vendor/product's
+# own "omit when empty" convention), never omitted or null.
+add_test(NAME inventory_touch_opcua_out_of_scope_empty_array_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_opcua_out_of_scope_empty_array_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_ip\": \"192\\.168\\.1\\.254\",.*\"top_touched_addresses\": \\[\\],\n *\"touched_addresses_total_distinct\": 0,\n *\"touched_addresses_truncated\": false")
+
+# JSON shape for a populated edge: address+count object pairs, matching the enip edge's own
+# hand-verified text-mode expectation above.
+add_test(NAME inventory_touch_json_address_count_object_shape
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
+set_tests_properties(inventory_touch_json_address_count_object_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"client_ip\": \"192\\.168\\.1\\.250\",.*\"top_touched_addresses\": \\[\\{\"address\": \"PumpSpeed\", \"count\": 2\\}\\],\n *\"touched_addresses_total_distinct\": 1,\n *\"touched_addresses_truncated\": false")
 
 # ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,

@@ -864,6 +864,7 @@ std::optional<ProtocolResult> Iec104Decoder::decode(ByteSpan payload, DecodeCont
                 entry += "]";
             }
             result.iec104_object_values.push_back(entry);
+            result.iec104_object_ioas.push_back(obj.ioa);
         }
     };
 

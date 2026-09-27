@@ -6183,6 +6183,270 @@ def build_role_classification_sample():
     (TESTS_DIR / "sample_role_classification.pcap").write_bytes(data)
 
 
+def build_touch_summarization_sample():
+    """Feeds `inventory`'s Phase 7 tag/point/DB touch summarization
+    (InventoryEdge::top_touched_addresses, see that field's own comment in asset_inventory.hpp for
+    the full per-protocol key design) one edge per concern, each isolated on its own fresh
+    client/server IP pair so hand-verified expected output can't be perturbed by another edge's
+    packets landing on the same one:
+
+      - 192.168.1.240 -> .241 (modbus, basic key-format coverage): one Read Coils, one Read Discrete
+        Inputs, one Read Holding Registers, one Read Input Registers, and one Write Multiple
+        Registers request+response pair (touched twice, proving the per-PACKET touch count, not
+        per-distinct-key-occurrence) -- 5 distinct addresses, none truncated.
+      - 192.168.1.242 -> .243 (modbus, truncation/sort): 35 distinct single-register Read Holding
+        Registers requests at addresses 0-34, all touched exactly once -- proves
+        kMaxShownTouchedAddressesPerEdge (32) truncation and the (count desc, address asc)
+        deterministic sort actually fires: with every count tied at 1, the top 32 shown are exactly
+        the 32 numerically/lexically smallest addresses (hreg:00001 through hreg:00032), and
+        hreg:00033/00034/00035 are the ones left out.
+      - 192.168.1.244 -> .245 (s7comm): a single Read Var request with three well-established S7ANY
+        items (I0.1, DB5.DBW20, T5) plus one EXPERIMENTAL 0xB2 item (the exact DB5.DBX7.2 bytes
+        build_s7comm_1200sym_sample already uses) -- proves the "experimental:" prefix is applied
+        only to the 0xB2-decoded item, not the S7ANY ones.
+      - 192.168.1.246 -> .247 (dnp3): a Class 0 poll request (g60v1, no range) plus a response
+        carrying two object headers -- g1v2 start-stop 3-5 (a real range) and g30v1 start-stop 10-10
+        (single point, collapsing to "idx 10" with no "-" range suffix) -- proves both the
+        "g{group}v{variation}" shorthand and the has_range/single-point rendering.
+      - 192.168.1.248 -> .249 (iec104): a GI-shaped SQ=1 report, 5 sequential M_SP_NA_1 points at
+        IOA 500-504 -- proves the new Iec104Result::iec104_object_ioas promotion feeds this feature
+        correctly (5 distinct "ioa=500".."ioa=504" keys, one packet, one touch each).
+      - 192.168.1.250 -> .251 (enip, explicit messaging): RegisterSession, then a symbolic Read_Tag
+        and Write_Tag round trip against the SAME tag "PumpSpeed" (2 touches, proving CipPath::
+        summary's bare-tag rendering is identical on both request shapes) plus a class/instance-
+        addressed Get_Attributes_All on the Identity object -- proves CipPath::is_symbolic's own
+        gate excludes non-tag CIP addressing: touched_addresses_total_distinct stays 1 even though
+        three CIP messages were exchanged.
+      - 192.168.1.252 -> .253 (mqtt): CONNECT/CONNACK (contribute nothing -- not PUBLISH) then three
+        PUBLISH packets, two to "line1/pump1/speed" and one to "line1/pump1/status" -- 2 distinct
+        topics, one touched twice.
+      - 192.168.1.254 -> 192.168.1.1 (opcua): a GetEndpoints exchange, the SAME shape
+        build_role_classification_sample's add_opcua_get_endpoints already uses -- proves this
+        feature genuinely emits NOTHING for an out-of-scope protocol (touched_addresses_total_distinct
+        stays 0, top_touched_addresses stays empty) rather than silently mis-tracking it.
+
+    Every device here is a fresh IP not reused by any other sample fixture, matching
+    build_role_classification_sample's own convention."""
+    packets = []
+
+    def add(payload: bytes):
+        packets.append(payload)
+
+    MB1_C_IP, MB1_C_MAC = "192.168.1.240", mac("00:0c:29:6b:00:01")
+    MB1_S_IP, MB1_S_MAC = "192.168.1.241", mac("00:0c:29:6b:00:02")
+    MB2_C_IP, MB2_C_MAC = "192.168.1.242", mac("00:0c:29:6b:00:03")
+    MB2_S_IP, MB2_S_MAC = "192.168.1.243", mac("00:0c:29:6b:00:04")
+    S7_C_IP, S7_C_MAC = "192.168.1.244", mac("00:0c:29:6b:00:05")
+    S7_S_IP, S7_S_MAC = "192.168.1.245", mac("00:0c:29:6b:00:06")
+    DNP3_C_IP, DNP3_C_MAC = "192.168.1.246", mac("00:0c:29:6b:00:07")
+    DNP3_S_IP, DNP3_S_MAC = "192.168.1.247", mac("00:0c:29:6b:00:08")
+    IEC_C_IP, IEC_C_MAC = "192.168.1.248", mac("00:0c:29:6b:00:09")
+    IEC_S_IP, IEC_S_MAC = "192.168.1.249", mac("00:0c:29:6b:00:0a")
+    ENIP_C_IP, ENIP_C_MAC = "192.168.1.250", mac("00:0c:29:6b:00:0b")
+    ENIP_S_IP, ENIP_S_MAC = "192.168.1.251", mac("00:0c:29:6b:00:0c")
+    MQTT_C_IP, MQTT_C_MAC = "192.168.1.252", mac("00:0c:29:6b:00:0d")
+    MQTT_S_IP, MQTT_S_MAC = "192.168.1.253", mac("00:0c:29:6b:00:0e")
+    OPCUA_C_IP, OPCUA_C_MAC = "192.168.1.254", mac("00:0c:29:6b:00:0f")
+    OPCUA_S_IP, OPCUA_S_MAC = "192.168.1.1", mac("00:0c:29:6b:00:10")
+
+    # --- modbus edge 1: basic key-format coverage ---------------------------------------------
+    def mb_req(func, addr, qty, sport, seq, ack, ident):
+        pdu = struct.pack("!BHH", func, addr, qty)
+        mb = struct.pack("!HHHB", 1, 0, 1 + len(pdu), 1) + pdu
+        tcp = tcp_header(sport, 502, seq, ack, TCP_PSH | TCP_ACK, len(mb)) + mb
+        ip = ipv4_header(MB1_C_IP, MB1_S_IP, 6, len(tcp), ident) + tcp
+        add(eth_header(MB1_S_MAC, MB1_C_MAC, 0x0800) + ip)
+        return len(mb)
+
+    mb_req(0x01, 5, 3, 55001, 1000, 2000, 0xB000)     # Read Coils 5..7      -> coil:00006-00008
+    mb_req(0x02, 0, 1, 55002, 1000, 2000, 0xB001)     # Read Discrete Inputs 0 -> discrete:00001
+    mb_req(0x03, 0, 10, 55003, 1000, 2000, 0xB002)    # Read Holding Registers 0..9 -> hreg:00001-00010
+    mb_req(0x04, 99, 1, 55004, 1000, 2000, 0xB003)    # Read Input Registers 99 -> ireg:00100
+
+    # Write Multiple Registers request+response: real wire behavior echoes address+quantity on
+    # BOTH sides (ModbusFrame::start_address's own comment, modbus.hpp) -- so this ONE distinct
+    # key ("hreg:00201-00202") gets touched TWICE, once per packet.
+    wr_data = struct.pack("!HH", 111, 222)
+    wr_req_pdu = struct.pack("!BHHB", 0x10, 200, 2, 4) + wr_data
+    wr_req = struct.pack("!HHHB", 1, 0, 1 + len(wr_req_pdu), 1) + wr_req_pdu
+    tcp = tcp_header(55005, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(wr_req)) + wr_req
+    ip = ipv4_header(MB1_C_IP, MB1_S_IP, 6, len(tcp), 0xB004) + tcp
+    add(eth_header(MB1_S_MAC, MB1_C_MAC, 0x0800) + ip)
+    wr_resp_pdu = struct.pack("!BHH", 0x10, 200, 2)
+    wr_resp = struct.pack("!HHHB", 1, 0, 1 + len(wr_resp_pdu), 1) + wr_resp_pdu
+    tcp = tcp_header(502, 55005, 2000, 1000 + len(wr_req), TCP_PSH | TCP_ACK, len(wr_resp)) + wr_resp
+    ip = ipv4_header(MB1_S_IP, MB1_C_IP, 6, len(tcp), 0xB005) + tcp
+    add(eth_header(MB1_C_MAC, MB1_S_MAC, 0x0800) + ip)
+
+    # --- modbus edge 2: truncation + deterministic sort ----------------------------------------
+    def mb2_req(addr, sport, ident):
+        pdu = struct.pack("!BHH", 0x03, addr, 1)
+        mb = struct.pack("!HHHB", 1, 0, 1 + len(pdu), 1) + pdu
+        tcp = tcp_header(sport, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb)) + mb
+        ip = ipv4_header(MB2_C_IP, MB2_S_IP, 6, len(tcp), ident) + tcp
+        add(eth_header(MB2_S_MAC, MB2_C_MAC, 0x0800) + ip)
+
+    for i in range(35):
+        mb2_req(i, 56000 + i, 0xB100 + i)
+
+    # --- s7comm edge: three S7ANY items + one EXPERIMENTAL 0xB2 item ---------------------------
+    def s7any_item(transport_size, count, db_number, area, byte_address, bit_offset=0):
+        addr = (byte_address << 3) | bit_offset
+        return (bytes([0x12, 0x0A, 0x10, transport_size]) +
+                struct.pack("!HHB", count, db_number, area) +
+                bytes([(addr >> 16) & 0xFF, (addr >> 8) & 0xFF, addr & 0xFF]))
+
+    def s7any_item_raw_addr(transport_size, count, db_number, area, raw_addr):
+        return (bytes([0x12, 0x0A, 0x10, transport_size]) +
+                struct.pack("!HHB", count, db_number, area) +
+                bytes([(raw_addr >> 16) & 0xFF, (raw_addr >> 8) & 0xFF, raw_addr & 0xFF]))
+
+    AREA_I, AREA_DB, AREA_T = 0x81, 0x84, 0x1D
+    TS_BIT, TS_WORD = 0x01, 0x04
+    experimental_item_hex = "b2ff008a0e000511223344400000" "3a"  # -> DB5.DBX7.2 (see
+    # build_s7comm_1200sym_sample's own comment for this exact byte provenance).
+    items = (
+        s7any_item(TS_BIT, 1, 0, AREA_I, 0, bit_offset=1) +          # I0.1
+        s7any_item(TS_WORD, 1, 5, AREA_DB, 20) +                     # DB5.DBW20
+        s7any_item_raw_addr(TS_WORD, 1, 0, AREA_T, 5) +              # T5
+        (bytes([0x12, len(bytes.fromhex(experimental_item_hex))]) + bytes.fromhex(experimental_item_hex))
+    )
+    read_param = bytes([0x04, 4]) + items
+    read_req = s7_header(0x01, 100, len(read_param), 0) + read_param
+    cotp_req = tpkt_frame(COTP_DT_HEADER, read_req)
+    tcp = tcp_header(57001, 102, 1000, 2000, TCP_PSH | TCP_ACK, len(cotp_req)) + cotp_req
+    ip = ipv4_header(S7_C_IP, S7_S_IP, 6, len(tcp), 0xB200) + tcp
+    add(eth_header(S7_S_MAC, S7_C_MAC, 0x0800) + ip)
+
+    # --- dnp3 edge: a Class 0 poll (no range) + a response with two object headers -------------
+    read_class0 = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+    read_frame = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+    tcp = tcp_header(58001, 20000, 5000, 6000, TCP_PSH | TCP_ACK, len(read_frame)) + read_frame
+    ip = ipv4_header(DNP3_C_IP, DNP3_S_IP, 6, len(tcp), 0xB300) + tcp
+    add(eth_header(DNP3_S_MAC, DNP3_C_MAC, 0x0800) + ip)
+
+    resp_payload = (
+        bytes([0xC0, 0xC0, 0x81, 0x80, 0x00]) +
+        bytes([1, 2, 0x00, 3, 5]) + bytes([0x81, 0x01, 0x00]) +               # g1v2 idx 3-5
+        bytes([30, 1, 0x00, 10, 10]) + bytes([0x01, 0x00, 0x00, 0x00, 0x00])  # g30v1 idx 10 (single point)
+    )
+    resp_frame = dnp3_link_frame(source=1024, destination=1, user_data=resp_payload)
+    tcp = tcp_header(20000, 58001, 6000, 5000 + len(read_frame), TCP_PSH | TCP_ACK, len(resp_frame)) + resp_frame
+    ip = ipv4_header(DNP3_S_IP, DNP3_C_IP, 6, len(tcp), 0xB301) + tcp
+    add(eth_header(DNP3_C_MAC, DNP3_S_MAC, 0x0800) + ip)
+
+    # --- iec104 edge: STARTDT handshake + a 5-point SQ=1 report ---------------------------------
+    def add_iec(from_client, payload, seq_state):
+        if from_client:
+            sport, dport, sip, dip, smac, dmac = 59001, IEC104_PORT, IEC_C_IP, IEC_S_IP, IEC_C_MAC, IEC_S_MAC
+        else:
+            sport, dport, sip, dip, smac, dmac = IEC104_PORT, 59001, IEC_S_IP, IEC_C_IP, IEC_S_MAC, IEC_C_MAC
+        tcp = tcp_header(sport, dport, seq_state[0], seq_state[1], TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(sip, dip, 6, len(tcp), 0xB400 + len(packets)) + tcp
+        add(eth_header(dmac, smac, 0x0800) + ip)
+
+    add_iec(True, iec104_apdu(iec104_u_control(IEC104_STARTDT_ACT)), [3000, 4000])
+    add_iec(False, iec104_apdu(iec104_u_control(IEC104_STARTDT_CON)), [4000, 3000])
+    sp_objects = ioa(500) + bytes([0x00, 0x00, 0x00, 0x00, 0x00])  # 5 sequential SIQ points, all OFF/good
+    sp_report = iec104_asdu(1, 0x85, 20, 1, sp_objects)  # type 1 (M_SP_NA_1), SQ=1|count=5, COT=20 (GI)
+    add_iec(False, iec104_apdu(iec104_i_control(0, 0), sp_report), [4000, 3000])
+
+    # --- enip edge: RegisterSession, symbolic Read_Tag/Write_Tag on the same tag, then a --------
+    #     class/instance (non-symbolic) Get_Attributes_All that must NOT contribute a touch.
+    def add_enip(from_client, payload, seq_state):
+        if from_client:
+            sport, dport, sip, dip, smac, dmac = 60001, ENIP_PORT, ENIP_C_IP, ENIP_S_IP, ENIP_C_MAC, ENIP_S_MAC
+        else:
+            sport, dport, sip, dip, smac, dmac = ENIP_PORT, 60001, ENIP_S_IP, ENIP_C_IP, ENIP_S_MAC, ENIP_C_MAC
+        tcp = tcp_header(sport, dport, seq_state[0], seq_state[1], TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(sip, dip, 6, len(tcp), 0xB500 + len(packets)) + tcp
+        add(eth_header(dmac, smac, 0x0800) + ip)
+        if from_client:
+            seq_state[0] += len(payload)
+        else:
+            seq_state[1] += len(payload)
+
+    session_handle = 0x99887766
+    ctx = b"CS-PH7-1"
+    seq = [12000, 13000]
+    add_enip(True, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=0, sender_context=ctx), seq)
+    add_enip(False, enip_message(0x0065, data=struct.pack("<HH", 1, 0), session_handle=session_handle,
+                                  sender_context=ctx), seq)
+    add_enip(True, enip_message(0x006F, data=enip_cpf_unconnected(cip_read_tag_request("PumpSpeed", 1)),
+                                 session_handle=session_handle, sender_context=ctx), seq)
+    add_enip(False, enip_message(0x006F,
+                                  data=enip_cpf_unconnected(cip_read_tag_response(0xC4, struct.pack("<i", 42))),
+                                  session_handle=session_handle, sender_context=ctx), seq)
+    add_enip(True, enip_message(
+        0x006F, data=enip_cpf_unconnected(cip_write_tag_request("PumpSpeed", 0xC4, struct.pack("<i", 100), 1)),
+        session_handle=session_handle, sender_context=ctx), seq)
+    add_enip(False, enip_message(0x006F, data=enip_cpf_unconnected(cip_write_tag_response(0x00)),
+                                  session_handle=session_handle, sender_context=ctx), seq)
+    # Class/instance (0x20 class-8/0x24 instance-8 logical segments)-addressed Get_Attributes_All
+    # against the Identity object (class 0x01, instance 1) -- CipPath::is_symbolic is false here
+    # (no ANSI Extended Symbol segment at all), so this must contribute NOTHING to touched_addresses.
+    ga_path = bytes([0x20, 0x01, 0x24, 0x01])
+    ga_req = bytes([0x01, len(ga_path) // 2]) + ga_path
+    add_enip(True, enip_message(0x006F, data=enip_cpf_unconnected(ga_req), session_handle=session_handle,
+                                 sender_context=ctx), seq)
+    ga_resp = bytes([0x01 | 0x80, 0x00, 0x00, 0x00])
+    add_enip(False, enip_message(0x006F, data=enip_cpf_unconnected(ga_resp), session_handle=session_handle,
+                                  sender_context=ctx), seq)
+
+    # --- mqtt edge: CONNECT/CONNACK (no topic) then 3 PUBLISH packets, 2 distinct topics ---------
+    connect_body = (mqtt_str("MQTT") + bytes([4]) + bytes([0x02]) + struct.pack(">H", 60) +
+                    mqtt_str("touch-sample-publisher"))
+    connect_pkt = mqtt_packet(1, 0, connect_body)
+    tcp = tcp_header(61001, 1883, 30000, 40000, TCP_PSH | TCP_ACK, len(connect_pkt)) + connect_pkt
+    ip = ipv4_header(MQTT_C_IP, MQTT_S_IP, 6, len(tcp), 0xB600) + tcp
+    add(eth_header(MQTT_S_MAC, MQTT_C_MAC, 0x0800) + ip)
+    connack_pkt = mqtt_packet(2, 0, bytes([0x00, 0x00]))
+    tcp = tcp_header(1883, 61001, 40000, 30000 + len(connect_pkt), TCP_PSH | TCP_ACK, len(connack_pkt)) + connack_pkt
+    ip = ipv4_header(MQTT_S_IP, MQTT_C_IP, 6, len(tcp), 0xB601) + tcp
+    add(eth_header(MQTT_C_MAC, MQTT_S_MAC, 0x0800) + ip)
+
+    mqtt_cseq = [30000 + len(connect_pkt)]
+
+    def mqtt_publish(topic, payload_bytes):
+        pkt = mqtt_packet(3, 0x00, mqtt_str(topic) + payload_bytes)
+        tcp = tcp_header(61001, 1883, mqtt_cseq[0], 40000 + len(connack_pkt), TCP_PSH | TCP_ACK, len(pkt)) + pkt
+        ip = ipv4_header(MQTT_C_IP, MQTT_S_IP, 6, len(tcp), 0xB602 + len(packets)) + tcp
+        add(eth_header(MQTT_S_MAC, MQTT_C_MAC, 0x0800) + ip)
+        mqtt_cseq[0] += len(pkt)
+
+    mqtt_publish("line1/pump1/speed", b"72.3")
+    mqtt_publish("line1/pump1/status", b"RUNNING")
+    mqtt_publish("line1/pump1/speed", b"73.1")
+
+    # --- opcua edge: GetEndpoints, proving this out-of-scope protocol contributes NOTHING --------
+    channel_id = 900001
+    ge_req_params = opcua_string("opc.tcp://192.168.1.254:4840/UA/Sample") + opcua_array_count(0) + \
+        opcua_array_count(0)
+    ge_req_body = opcua_service_message(428, opcua_request_header(1), ge_req_params)
+    req_msg = opcua_symmetric_message("MSG", channel_id, 1, 1, 1, ge_req_body)
+    tcp = tcp_header(62001, OPCUA_PORT, 10000, 20000, TCP_PSH | TCP_ACK, len(req_msg)) + req_msg
+    ip = ipv4_header(OPCUA_C_IP, OPCUA_S_IP, 6, len(tcp), 0xB700) + tcp
+    add(eth_header(OPCUA_S_MAC, OPCUA_C_MAC, 0x0800) + ip)
+
+    server_app_desc = opcua_application_description(
+        "urn:conduitscope:touch-sample:opcua", "urn:conduitscope:touch-sample:opcua:product",
+        app_name_text="Touch Sample OPC UA Server", app_name_locale="en", app_type=0)
+    endpoint = opcua_endpoint_description(
+        "opc.tcp://192.168.1.254:4840/UA/Sample", server_app_desc, security_mode=1,
+        security_policy_uri="http://opcfoundation.org/UA/SecurityPolicy#None")
+    ge_resp_params = opcua_array_count(1) + endpoint
+    ge_resp_body = opcua_service_message(431, opcua_response_header(1, 0), ge_resp_params)
+    resp_msg = opcua_symmetric_message("MSG", channel_id, 1, 1, 1, ge_resp_body)
+    tcp = tcp_header(OPCUA_PORT, 62001, 20000, 10000 + len(req_msg), TCP_PSH | TCP_ACK, len(resp_msg)) + resp_msg
+    ip = ipv4_header(OPCUA_S_IP, OPCUA_C_IP, 6, len(tcp), 0xB701) + tcp
+    add(eth_header(OPCUA_C_MAC, OPCUA_S_MAC, 0x0800) + ip)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_050_000 + i, i * 1000)
+    (TESTS_DIR / "sample_touch_summarization.pcap").write_bytes(data)
+
+
 def build_tcp_reassembly_sample():
     """Exercises Decoder::reassemble_tcp_payload -- general, per-TCP-flow reassembly of a single
     PDU/frame's own bytes split across TCP segments -- directly. This is a different layer from
@@ -19603,6 +19867,7 @@ if __name__ == "__main__":
     build_summarize_unclassified_sample()
     build_inventory_sample()
     build_role_classification_sample()
+    build_touch_summarization_sample()
     build_tcp_reassembly_sample()
     build_resource_exhaustion_active_flows_sample()
     build_resource_exhaustion_flow_state_sample()

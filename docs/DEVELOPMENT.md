@@ -12250,6 +12250,138 @@ it done as its own patch.
     firewall-ACL-draft export -- unchanged from item 81's own list, minus
     role classification, which this item completed.
 
+83. **Asset inventory: a real OT asset record -- Grok gap #2, seventh
+    increment (Phase 7: tag/point/DB touch summarization).** Direct
+    continuation of items 75-76, 79-82 above -- see
+    docs/design/asset-inventory-real-record.md's own Phase 7 section for
+    the full scoped plan. The plan's own research instruction -- confirm
+    during implementation whether CIP/OPC UA/MMS/MQTT's symbolic-path
+    addressing is already surfaced anywhere reusable before deciding
+    per-protocol scope -- turned up a real, protocol-specific answer,
+    surfaced to and confirmed by Jurgen before implementing: OPC UA's
+    NodeId and MMS's domain/item object reference are genuinely only ever
+    stringified into free-text `notes`/`values` entries in this codebase
+    today (promoting either would be new decode-surface work), but CIP's
+    `CipMessage::path.summary` and MQTT's `MqttMessage::topic` are BOTH
+    already structured fields -- zero-new-decode reuse exactly like every
+    other protocol this item wires in. Jurgen chose to widen this item's
+    scope to include CIP and MQTT rather than ship only the plan's
+    original four-protocol list.
+
+    **New `InventoryEdge::top_touched_addresses`** (a sorted, capped
+    `std::vector<InventoryAddressTouch>` of `{address, count}` pairs -- see
+    that field's own comment for the complete per-protocol key design this
+    summarizes) plus `touched_addresses_total_distinct`/
+    `touched_addresses_truncated`. A new two-tier cap, worked out during
+    implementation rather than the plan's originally-sketched bare
+    `std::map`: `AssetInventoryEngine::EdgeState::address_touch_counts`
+    (a new private field) accumulates per-packet in `observe()`, admitting
+    at most `kMaxTrackedAddressesPerEdge` (4096) distinct keys -- past
+    that ceiling an already-tracked key keeps incrementing but no new one
+    is admitted, the same "pure ceiling, no eviction" shape
+    `resource_limits.hpp`'s own `max_active_flows`/`max_flow_state_entries`
+    already use for an unrelated (decode-time, per-flow) concern, and
+    deliberately NOT wired into that CLI-configurable system, since it's a
+    different engine and a different (whole-capture post-processing, not
+    per-decode-call) concern. `finish()` sorts each edge's map once (count
+    descending, address string ascending as a deterministic tie-break) and
+    truncates to the top `kMaxShownTouchedAddressesPerEdge` (32, the
+    plan's own suggested example) -- both constants fixed engineering
+    judgment, not CLI-configurable.
+
+    **Per-protocol address extraction**, mirroring `observe()`'s own
+    existing per-protocol `function_name` extraction block's structure:
+    modbus (a `"<kind>:<1-based address>[-<end>]"` key from the
+    read/write-multiple families' own already-decoded `function_code` +
+    `start_address` + `quantity`; Write Single Coil/Register never
+    contribute, since `ModbusFrame::start_address` stays unset for that
+    family -- a pre-existing, documented scope boundary, not new here);
+    s7comm (`S7Item::tag` verbatim for every item whose `syntax_supported`
+    is true, prefixed `"experimental:"` when `is_experimental` -- Read
+    Var/Write Var Job requests only, `S7CommResult::items` is empty on the
+    Ack_Data response side); dnp3 (`"g{group}v{variation}"`, the SAME
+    shorthand `src/dnp3.cpp`'s own summary/`dnp3_object_headers` rendering
+    already establishes, reused verbatim, plus `" idx {start}-{stop}"`/
+    `" idx {start}"` when `Dnp3ObjectRange::has_range` is true); iec104
+    (`"ioa={value}"` from a new, small, additive
+    `Iec104Result::iec104_object_ioas` field -- see below); enip explicit
+    messaging only (`CipMessage::path.summary` verbatim, gated on
+    `CipPath::is_symbolic` -- a class/instance-addressed CIP message
+    contributes nothing); mqtt (`MqttMessage::topic` verbatim, PUBLISH
+    packets only).
+
+    **New `Iec104Result::iec104_object_ioas`** (`include/conduitscope/
+    iec104.hpp`/`src/iec104.cpp`): a small, additive `std::vector<uint32_t>`
+    field populated in lockstep with the already-existing
+    `iec104_object_values` inside `Iec104Decoder::decode`'s `merge_asdu`
+    lambda, same `kMaxObjectValues` cap -- the same "promote an
+    already-extracted value to a named structured field" pattern item 1's
+    ENIP `identity_*` fields already established relative to `CipMessage`'s
+    generic `values`. No new decode: the IOA was already being extracted
+    and rendered into `iec104_object_values`' `"ioa=<N>: ..."` strings;
+    this just exposes the same already-parsed value as its own field so
+    `AssetInventoryEngine` doesn't have to reparse rendered text.
+
+    **Rendering**: `write_inventory_report_text` gains a new "top touched
+    addresses" block per edge (omitted entirely, not printed empty, for an
+    edge with nothing tracked -- same convention the identity/security/
+    plant-identification lines already follow). `write_inventory_report_json`
+    gains three new, always-present fields per edge, appended after
+    `last_seen_text` (the prior true-last field, same append-only
+    convention every prior JSON addition in this file follows):
+    `top_touched_addresses` (always an array, even empty -- same
+    unconditional-emission convention `observed_functions` already uses,
+    unlike `vendor`/`product`'s own omit-when-empty one),
+    `touched_addresses_total_distinct`, `touched_addresses_truncated`.
+
+    **Testing.** New `tests/sample_touch_summarization.pcap`
+    (`build_touch_summarization_sample` in `tools/make_sample_pcap.py`)
+    puts one concern on its own isolated, fresh client/server IP pair per
+    edge: a modbus edge exercising every key format plus the
+    write-multiple request+response double-touch; a second modbus edge
+    with 35 distinct single-register reads (every count tied at 1) proving
+    both the top-32 truncation and the deterministic sort actually fire;
+    an s7comm edge with three S7ANY tags plus one EXPERIMENTAL 0xB2 item;
+    a dnp3 edge covering all three has_range/tie-break shapes; an iec104
+    edge with a 5-point SQ=1 report, proving the new `iec104_object_ioas`
+    field feeds this engine correctly; an enip edge with a symbolic
+    Read_Tag/Write_Tag round trip against the same tag alongside a
+    class/instance `Get_Attributes_All` on the same edge, proving the
+    latter contributes nothing even though three CIP messages were
+    exchanged; an mqtt edge with three PUBLISH packets across two topics;
+    and an opcua edge, proving this out-of-scope protocol genuinely emits
+    nothing. 12 new CTest cases (nine text, three JSON), all verified
+    against the real binary's own output on the first run. Two
+    PRE-EXISTING CTest regexes were also found broken during this item's
+    verification pass and fixed
+    (`inventory_enip_no_identity_fields_omitted_for_client_json`/
+    `inventory_opcua_no_identity_fields_omitted_for_client_json`): both
+    anchored on an asset's JSON object ending immediately after
+    `last_seen_text`, a pattern item 82's own unconditional `inferred_role`
+    addition had already invalidated without either regex being updated at
+    the time -- a latent regression from item 82, not introduced by this
+    item, caught only because this item's own verification pass ran the
+    full suite from a clean build. No new fuzz harness/corpus work was
+    needed: `iec104_object_ioas`'s population is a pure additive promotion
+    of an already-extracted value (no new byte-parsing path), and
+    `AssetInventoryEngine`'s own touch-tracking is, like item 82's role
+    inference, pure post-processing over already-decoded, already-validated
+    structures. `docs/PROTOCOL_COVERAGE.md` was deliberately NOT updated
+    for this item, per the item 75/82 precedent that it's scoped to
+    wire-format decode coverage only -- nothing here decodes a new wire
+    format. Full CTest suite: 2105/2105 (default GCC build, up from item
+    82's 2093 -- 12 new tests plus the 2 pre-existing regex fixes just
+    described, net +12); ASan/UBSan 2181/2181; no-live-capture 2093/2093;
+    plus a clean-room extract-rebuild-test, all re-verified before
+    delivery; MinGW-w64 cross-compile confirmed to still compile and link
+    cleanly (same standing no-Wine environment limitation as every prior
+    item).
+
+    **Not yet done, tracked for a following increment**: CSV/CMDB,
+    STIX/TAXII-lite, and firewall-ACL-draft export -- unchanged from item
+    81's own list, minus role classification (item 82) and tag/point/DB
+    touch summarization (this item), both now complete.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
