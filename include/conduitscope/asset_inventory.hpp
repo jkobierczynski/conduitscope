@@ -6,12 +6,21 @@
 // full rationale and prior art (NSA's abandoned GRASSMARLIN, CISA's much heavier Malcolm).
 //
 // Scope: originally just five protocols (ROADMAP item 17's first pass), widened to match every
-// protocol PolicyEngine::observe itself evaluates over TCP -- ten in total: Modbus, DNP3, S7comm (a
-// COTP-only session with no S7comm payload still counts, same "cotp folds into s7comm" convention
-// PolicyEngine::observe uses -- see AssetInventoryEngine::observe's own comment), EtherNet/IP (both
-// explicit messaging over TCP and CIP I/O implicit messaging over UDP/2222 -- decoder.cpp promotes
-// both to protocol=="enip", see decoder.hpp), BACnet/IP, IEC 104, HART-IP, OPC UA, MMS, MQTT, and
-// FF-HSE.
+// protocol PolicyEngine::observe itself evaluates over TCP, plus S7comm-Plus (added separately --
+// see below) -- eleven in total: Modbus, DNP3, S7comm (a COTP-only session with no S7comm payload
+// still counts, same "cotp folds into s7comm" convention PolicyEngine::observe uses -- see
+// AssetInventoryEngine::observe's own comment), EtherNet/IP (both explicit messaging over TCP and
+// CIP I/O implicit messaging over UDP/2222 -- decoder.cpp promotes both to protocol=="enip", see
+// decoder.hpp), BACnet/IP, IEC 104, HART-IP, OPC UA, MMS, MQTT, FF-HSE, and S7comm-Plus.
+//
+// S7comm-Plus is NOT one of the ten protocols PolicyEngine::observe evaluates (it has no
+// policy-engine zoning counterpart yet), but it's a distinct, independently-decoded application
+// protocol (s7commplus.hpp/DecodedPacket::s7plus_* -- a flat-field protocol, not one carried via
+// DecodedPacket::result) sharing classic S7comm's own TCP/102/TPKT/COTP transport, so it counts
+// toward this feature's asset/edge model the same way every other TCP-based protocol here does --
+// see AssetInventoryEngine::observe's own comment for exactly where it's dispatched and how its
+// function name (DecodedPacket::s7plus_function_name) is surfaced on InventoryEdge::
+// observed_functions.
 //
 // TWO of those ten (HART-IP, FF-HSE) are deliberately narrower here than what decoder.cpp itself can
 // recognize: both protocols can appear over UDP on the wire (HART-IP conventionally; FF-HSE almost
@@ -76,8 +85,8 @@ class Resolver;
 constexpr uint8_t kDefaultInventoryZonePrefixLen = 24;
 
 // One asset: a distinct IP address that appeared in at least one packet of one of this feature's
-// ten recognized protocols. AssetInventoryEngine::finish sorts these numerically by address for a
-// report that's deterministic independent of capture order.
+// eleven recognized protocols. AssetInventoryEngine::finish sorts these numerically by address for
+// a report that's deterministic independent of capture order.
 struct InventoryAsset {
     std::string ip;
     // The FIRST-seen MAC address for this IP (never overwritten by a later packet, same "first
@@ -90,12 +99,38 @@ struct InventoryAsset {
     bool has_mac = false;
     std::string mac;
     // sorted, distinct: "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"/"iec104"/"hartip"/"opcua"/"mms"/
-    // "mqtt"/"ffhse" -- see this file's own header comment for the two (hartip/ffhse) that are
-    // TCP-only here despite also being decodable over UDP.
+    // "mqtt"/"ffhse"/"s7comm-plus" -- see this file's own header comment for the two (hartip/ffhse)
+    // that are TCP-only here despite also being decodable over UDP.
     std::vector<std::string> protocols;
     bool ever_client = false;  // acted as the initiator on at least one observed exchange
     bool ever_server = false;  // acted as the responder on at least one observed exchange
     size_t packet_count = 0;   // total packets (either direction) this IP appeared in
+
+    // First/last-seen, straight from DecodedPacket::timestamp (seconds since the Unix epoch, from
+    // the pcap record header) -- the min/max across every packet this IP appeared in, either role.
+    // Grok gap #2's "last-seen" ask (docs/reviews/2026-09-grok-ics-ot-improvement-areas.md) -- free
+    // to add since every DecodedPacket already carries this field; no new decode work. Always
+    // meaningful once this asset exists (every asset came from at least one packet).
+    double first_seen = 0.0;
+    double last_seen = 0.0;
+
+    // Passively-inferred device identity (Grok gap #2's vendor/product/firmware/serial ask) --
+    // empty/unset unless a protocol's own identity-bearing message positively supplied it (never
+    // guessed, never inferred from e.g. an OUI vendor lookup, which is a MAC-address fact, not a
+    // device-identity fact, and already rendered separately via Resolver::oui_vendor). First
+    // identity response actually seen for this IP wins, same "first occurrence wins" convention
+    // has_mac/mac above already use. See AssetInventoryEngine::observe's own comment for exactly
+    // which protocols currently populate these and how each one is sourced.
+    //
+    // `vendor`: for EtherNet/IP, a raw numeric CIP Vendor ID ("Vendor ID 1234 (ODVA-registered,
+    // name not resolved)") -- this codebase has no CIP Vendor ID -> name table (ODVA's registry is
+    // several thousand entries; adding a full lookup table is out of scope for this pass, and
+    // scoped out deliberately rather than silently -- see docs/USER_GUIDE.md's LIMITATIONS).
+    std::string vendor;
+    std::string product;            // e.g. EtherNet/IP CIP Identity's own product-name string
+    std::string firmware_revision;  // e.g. EtherNet/IP CIP Identity's own "major.minor" revision
+    std::string serial_number;      // rendered as "0x" + hex, matching this codebase's own existing
+                                     // text-summary convention for this exact field (enip.cpp)
 };
 
 // One aggregated, directional communication: `client_ip` -> `server_ip`, every packet of ONE
@@ -113,7 +148,9 @@ struct InventoryAsset {
 // ephemeral port" heuristic can't distinguish them at all; see observe()'s own comment.
 struct InventoryEdge {
     std::string client_ip, server_ip;
-    std::string protocol;  // "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"/"iec104"/"hartip"/"opcua"/"mms"/"mqtt"/"ffhse"
+    // "modbus"/"dnp3"/"s7comm"/"enip"/"bacnet"/"iec104"/"hartip"/"opcua"/"mms"/"mqtt"/"ffhse"/
+    // "s7comm-plus"
+    std::string protocol;
     uint16_t server_port = 0;
     // Distinct, non-empty function/service names observed on this edge, sorted -- the same source
     // fields FlowReport::observed_functions documents (policy_engine.hpp), restricted to this
@@ -126,6 +163,11 @@ struct InventoryEdge {
     // comment (asset_inventory.cpp) for exactly how "most authoritative" is decided when more than
     // one contributes.
     DirectionSource direction_source = DirectionSource::PortHeuristic;
+
+    // First/last-seen across every packet folded into this edge -- see InventoryAsset::first_seen/
+    // last_seen's own comment; same source field, same free-to-add reasoning.
+    double first_seen = 0.0;
+    double last_seen = 0.0;
 };
 
 // One inferred zone: every observed asset IP that falls in the same `network` (a
@@ -208,7 +250,7 @@ struct AssetInventoryReport {
     // empty and there is no InventoryZone::network to read it from instead.
     uint8_t zone_prefix_len = kDefaultInventoryZonePrefixLen;
     size_t total_packets = 0;
-    // Packets that were not one of the ten recognized protocols, had no IPv4 layer at all, or were
+    // Packets that were not one of the eleven recognized protocols, had no IPv4 layer at all, or were
     // a HART-IP/FF-HSE packet seen over UDP (deliberately excluded -- see this file's own header
     // comment) -- never part of any asset/edge above. Mirrors PolicyReport::skipped_non_tcp's own role, though
     // the two aren't computed the same way: policy validate only ever looks at TCP; this counts a
@@ -235,14 +277,14 @@ public:
 
     // Folds one already-decoded packet into this engine's asset/edge state. Call once per packet,
     // in capture order (same discipline as Decoder::decode/PolicyEngine::observe). A packet whose
-    // protocol isn't one of this feature's ten recognized ones, that has no IPv4 layer at all, or
+    // protocol isn't one of this feature's eleven recognized ones, that has no IPv4 layer at all, or
     // that is a HART-IP/FF-HSE packet seen over UDP (see this file's own header comment), only
     // increments skipped_packets -- see AssetInventoryReport::skipped_packets' own comment.
     //
     // Client (initiator) vs. server, per protocol:
     //   - modbus/dnp3/s7comm (including a COTP-only session)/enip explicit messaging/iec104/hartip
-    //     (TCP only)/opcua/mms/mqtt/ffhse (TCP only) -- every TCP-based protocol here: exactly
-    //     PolicyEngine::observe's own priority order -- a pure SYN packet authoritatively marks its
+    //     (TCP only)/opcua/mms/mqtt/ffhse (TCP only)/s7comm-plus -- every TCP-based protocol here:
+    //     exactly PolicyEngine::observe's own priority order -- a pure SYN packet authoritatively marks its
     //     source as the client, a SYN-ACK authoritatively marks its DESTINATION as the client, and
     //     otherwise whichever endpoint's port is one of this feature's known protocol ports
     //     (502/20000/102/44818/2404) is assumed to be the server, falling back to "lower port number
@@ -289,9 +331,24 @@ public:
     // Independent of all of the above: a packet whose protocol is one of notable_it_protocols.hpp's
     // 43 "IT protocols an OT auditor flags" (ROADMAP item 18) is ALSO recorded into
     // AssetInventoryReport::notable_protocols -- see InventoryNotableProtocol's own comment for why
-    // this never disturbs `skipped_packets` or this engine's own ten-protocol asset/edge model, and
-    // policy_engine.hpp's own NotableProtocolFinding for the analogous (independently implemented)
-    // finding in `policy validate`.
+    // this never disturbs `skipped_packets` or this engine's own eleven-protocol asset/edge model,
+    // and policy_engine.hpp's own NotableProtocolFinding for the analogous (independently
+    // implemented) finding in `policy validate`.
+    //
+    // Also independent of all of the above: InventoryAsset::first_seen/last_seen and
+    // InventoryEdge::first_seen/last_seen (DecodedPacket::timestamp's min/max across every packet
+    // that asset/edge aggregates) are updated for every packet that reaches an update_asset/edge
+    // call, regardless of protocol -- see those fields' own comments (asset_inventory.hpp).
+    //
+    // Passively-inferred device identity (InventoryAsset::vendor/product/firmware_revision/
+    // serial_number -- Grok gap #2): currently populated for EtherNet/IP only, from a decoded
+    // ListIdentity response (EnipFrame::has_identity, see enip.hpp) -- the IP that actually SENT
+    // that response packet (DecodedPacket::src_ip on the specific packet carrying it, not simply
+    // "whichever side this session's handshake/port-heuristic called the server," since a
+    // ListIdentity exchange is itself the thing deciding which side is the real device) gets its
+    // identity fields populated, first-identity-seen wins. Every other protocol leaves these fields
+    // empty for now -- see docs/DEVELOPMENT.md's ROADMAP for the remaining phases (OPC UA, S7comm
+    // SZL, BACnet ReadPropertyMultiple, DNP3 Device Attributes) that will populate them further.
     void observe(const DecodedPacket& packet);
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.
@@ -306,6 +363,12 @@ private:
         bool ever_client = false;
         bool ever_server = false;
         size_t packet_count = 0;
+        double first_seen = 0.0;
+        double last_seen = 0.0;
+        bool has_timestamp = false;  // first packet sets both first_seen/last_seen unconditionally;
+                                       // guards the min/max comparison on every packet after that
+        std::string vendor, product, firmware_revision, serial_number;  // see InventoryAsset's own
+                                                                          // comment
     };
 
     struct EdgeState {
@@ -315,6 +378,9 @@ private:
         size_t packet_count = 0;
         // See InventoryEdge::direction_source's own comment -- mirrored here verbatim.
         DirectionSource direction_source = DirectionSource::PortHeuristic;
+        double first_seen = 0.0;
+        double last_seen = 0.0;
+        bool has_timestamp = false;  // see AssetState::has_timestamp's own comment
     };
 
     // TCP-session-level state, exactly mirroring PolicyEngine::FlowState's client/server-only
@@ -331,6 +397,16 @@ private:
 
     void update_asset(const std::string& ip, const DecodedPacket& dp, const std::string& protocol,
                        bool is_client_role);
+
+    // Populates an already-existing asset's identity fields (vendor/product/firmware_revision/
+    // serial_number) -- first-identity-seen wins, mirroring has_mac/mac's own convention (see
+    // AssetState's own comment). A no-op if `ip` has no asset entry yet (can only happen if `ip` was
+    // itself a broadcast/multicast address, which update_asset never creates an entry for -- see
+    // looks_like_broadcast_or_multicast's own comment; a real device sending its own identity
+    // response is never a broadcast source in practice, but this stays defensive rather than assume
+    // it).
+    void update_identity(const std::string& ip, const std::string& vendor, const std::string& product,
+                          const std::string& firmware_revision, const std::string& serial_number);
 
     // Aggregated state for one InventoryNotableProtocol -- see that struct's own comment. Folds one
     // observation into notable_protocols_/notable_protocol_order_, keyed by `key` (already

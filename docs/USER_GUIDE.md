@@ -399,18 +399,24 @@ doesn't cover).
 Like `policy validate`, `inventory` decodes the capture exactly as `decode`
 would and does not change or duplicate any decoding logic -- see
 `AssetInventoryEngine` (`asset_inventory.hpp`/`.cpp`), built on the same
-already-public `DecodedPacket` output. Ten protocols are counted here --
+already-public `DecodedPacket` output. Eleven protocols are counted here --
 the SAME ten `PolicyEngine::observe` itself evaluates over TCP for
-`policy validate`: **Modbus**, **DNP3**, **S7comm** (a COTP-only session
-with no S7comm payload still counts, the same "cotp folds into s7comm"
-convention `PolicyEngine::observe` uses), **EtherNet/IP** (both explicit
-messaging over TCP and CIP I/O implicit messaging over UDP/2222),
-**BACnet/IP**, **IEC 104**, **HART-IP**, **OPC UA**, **MMS**, **MQTT**, and
-**FF-HSE**. Every other packet -- including every other protocol this
-project decodes -- is counted only in the report's `skipped_packets` total,
-never as an asset or an edge. One family of "every other protocol" is
-additionally surfaced as its own, separate finding regardless: see "Notable
-IT protocols" below.
+`policy validate`, plus **S7comm-Plus** (not one of PolicyEngine's own ten
+-- it has no policy-engine zoning counterpart yet -- but Grok's own
+external review of this project, docs/reviews/2026-09-grok-ics-ot-improvement-areas.md,
+specifically asked for it here regardless): **Modbus**, **DNP3**,
+**S7comm** (a COTP-only session with no S7comm payload still counts, the
+same "cotp folds into s7comm" convention `PolicyEngine::observe` uses),
+**EtherNet/IP** (both explicit messaging over TCP and CIP I/O implicit
+messaging over UDP/2222), **BACnet/IP**, **IEC 104**, **HART-IP**,
+**OPC UA**, **MMS**, **MQTT**, **FF-HSE**, and **S7comm-Plus** (a distinct,
+independently-decoded application protocol from classic S7comm above
+despite sharing its TCP/102/TPKT/COTP transport, the same way MMS is its
+own protocol value despite sharing that transport too). Every other
+packet -- including every other protocol this project decodes -- is
+counted only in the report's `skipped_packets` total, never as an asset or
+an edge. One family of "every other protocol" is additionally surfaced as
+its own, separate finding regardless: see "Notable IT protocols" below.
 
 Two of those ten -- **HART-IP** and **FF-HSE** -- are counted here ONLY
 when carried over TCP, even though both can also appear over UDP (HART-IP
@@ -441,8 +447,24 @@ asset list with the broadcast address itself.
 
 Every observed IP becomes one **asset**: its MAC (and OUI vendor guess,
 resolver permitting), every protocol it was seen speaking, whether it was
-ever a client, ever a server, or both, and a packet count. Every distinct
-`(protocol, client, server, server port)` tuple becomes one **edge** --
+ever a client, ever a server, or both, a packet count, and first-seen/
+last-seen timestamps (from the pcap's own per-packet capture time -- the
+min/max across every packet this IP appeared in). Where a protocol's own
+identity-bearing message was actually observed, an asset also carries
+passively-inferred **vendor**/**product**/**firmware revision**/**serial
+number** fields (Grok gap #2's "turn inventory into a real OT asset
+record" ask) -- currently wired for **EtherNet/IP** only, from a decoded
+CIP Identity `ListIdentity` response (`vendor` is a raw numeric CIP Vendor
+ID, e.g. `Vendor ID 1`, since this project has no CIP Vendor ID -> name
+table -- ODVA's registry runs to several thousand entries, and a full
+lookup table is out of scope for this pass; see LIMITATIONS). Every other
+protocol here (S7comm, BACnet/IP, OPC UA, DNP3, ...) leaves these four
+fields empty for now -- populating them (S7comm SZL, BACnet
+ReadPropertyMultiple, OPC UA GetEndpoints, DNP3 Device Attributes) is
+tracked as follow-on work in docs/DEVELOPMENT.md's ROADMAP. First-seen/
+last-seen, by contrast, are populated for every asset and edge regardless
+of protocol. Every distinct `(protocol, client, server, server port)`
+tuple becomes one **edge** (also carrying its own first-seen/last-seen) --
 deliberately coarser than `policy validate`'s own per-TCP-session
 `FlowReport`, since an inventory answers "does X talk to Y over protocol
 P," not "how many sessions did X open to Y." Every observed asset IP is
@@ -465,15 +487,19 @@ $ conduitscope inventory -r tests/sample_inventory.pcap
 OT asset inventory
   capture: tests/sample_inventory.pcap
   scope:   Modbus, DNP3, S7comm, EtherNet/IP, BACnet/IP, IEC 104, HART-IP (TCP only),
-           OPC UA, MMS, and MQTT -- plus FF-HSE (TCP only; rarely applicable, since
-           FF-HSE is fundamentally a UDP protocol) -- see docs/MANUAL.md's ROADMAP item 17
+           OPC UA, MMS, MQTT, and S7comm-Plus -- plus FF-HSE (TCP only; rarely
+           applicable, since FF-HSE is fundamentally a UDP protocol) -- see
+           docs/MANUAL.md's ROADMAP item 17
 
-9 asset(s) observed, 14 total packet(s) in capture, 0 skipped (not one of the ten recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen over UDP)
+9 asset(s) observed, 14 total packet(s) in capture, 0 skipped (not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen over UDP)
 
 ASSETS (9):
   10.0.5.21  00:0c:29:de:ad:01 (VMware)  [client]  dnp3, s7comm  (6 packet(s))
+      first seen: 2023-11-15 03:46:42.002000Z  last seen: 2023-11-15 03:46:47.007000Z
   10.0.5.22  00:0c:29:de:ad:02 (VMware)  [client]  enip  (4 packet(s))
+      first seen: 2023-11-15 03:46:48.008000Z  last seen: 2023-11-15 03:46:51.011000Z
   192.168.1.10  00:0c:29:aa:bb:cc (VMware)  [server]  modbus  (2 packet(s))
+      first seen: 2023-11-15 03:46:40.000000Z  last seen: 2023-11-15 03:46:41.001000Z
   ...
 
 COMMUNICATIONS (5):
@@ -508,6 +534,24 @@ below. See docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier
 design record and the industry precedent researched before adding this
 field.
 
+`tests/sample_inventory.pcap`'s own EtherNet/IP traffic never happens to
+include a `ListIdentity` exchange, so no asset above carries an
+`identity:` line -- `tests/sample_enip.pcap` does (it was built for
+exactly this, see `build_enip_sample`'s own docstring in
+`tools/make_sample_pcap.py`):
+
+```sh
+$ conduitscope inventory -r tests/sample_enip.pcap
+...
+ASSETS (2):
+  192.168.1.10  00:0c:29:aa:bb:cc  [server]  enip  (9 packet(s))
+      first seen: 2023-11-14 22:46:40.000000Z  last seen: 2023-11-14 22:46:48.008000Z
+      identity:  vendor=Vendor ID 1  product="Conduit-ENIP-Sample"  firmware=2.1  serial=0x1337ab
+  192.168.1.50  00:0c:29:11:22:33  [client]  enip  (9 packet(s))
+      first seen: 2023-11-14 22:46:40.000000Z  last seen: 2023-11-14 22:46:48.008000Z
+...
+```
+
 #### Closing the loop
 
 `--policy-out` writes the inferred zones/conduits above as a `policy`-format
@@ -534,7 +578,7 @@ matching UDP traffic the capture actually has -- not a bug in either
 command, just the current, documented edge of `policy validate`'s own
 scope (see docs/DEVELOPMENT.md's ROADMAP item 9).
 
-If the capture carries no traffic from any of the ten recognized
+If the capture carries no traffic from any of the eleven recognized
 protocols at all, there is nothing to infer even one zone from --
 `--policy-out`'s file then contains only explanatory comments, no
 `zones:`/`conduits:` keys at all (deliberately not a validly-loadable
@@ -542,8 +586,8 @@ policy file), and `inventory` prints a note to that effect.
 
 #### Notable IT protocols (docs/DEVELOPMENT.md's ROADMAP item 18)
 
-Independent of, and never counted toward, the ten-protocol asset/edge model
-above: `inventory` also surfaces every one of the 43 "IT protocols an OT
+Independent of, and never counted toward, the eleven-protocol asset/edge
+model above: `inventory` also surfaces every one of the 43 "IT protocols an OT
 auditor flags" (RDP/VNC/TeamViewer/AnyDesk/Zoom; SMB/SSH/HTTP/HTTPS/SNMP/
 Telnet/FTP/TFTP/QUIC; NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+/EAPOL; CAPWAP
 control+data/LWAPP control+data/GTP-U/PPPoE; GRE/NVGRE/EoIP/ESP/AH/IP-in-IP/
@@ -558,7 +602,7 @@ handshake state for these 43 protocols to draw a confirmed direction from,
 so `client_ip`/`server_ip` here are always the same "lower port number is
 the server" heuristic guess). A packet that produces a `notable_protocols`
 entry still counts toward `skipped_packets` exactly as it always did --
-this is a strictly additive finding, not a widening of the ten-protocol
+this is a strictly additive finding, not a widening of the eleven-protocol
 scope above. `inventory` has no compliance concept at all, so there is no
 `--strict-it-protocols`-equivalent flag here; the finding is always
 reported and never affects this command's own (always-zero-on-success)
@@ -4449,6 +4493,27 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   protocol decoding's own request/response classification (see above).
   `inventory`'s own client/server determination (see above) uses the exact
   same fallback, for the exact same reason.
+- **`inventory`'s passively-inferred device identity (vendor/product/
+  firmware revision/serial number -- Grok gap #2) is wired for EtherNet/IP
+  only so far.** A `ListIdentity` response's CIP Identity object is already
+  fully decoded (vendor ID/device type/product code/revision/serial number/
+  product name -- see `decode`'s own `enip_identity_*` fields), so this was
+  free to wire straight through; the `vendor` field itself stays a raw
+  numeric CIP Vendor ID (e.g. `Vendor ID 1`), never a resolved name, since
+  this project has no CIP Vendor ID -> name lookup table (ODVA's own
+  registry runs to several thousand entries; building and maintaining one
+  is out of scope for this pass). S7comm (System Status List/SZL), BACnet/IP
+  (a Device object's Vendor-Name/Model-Name/Firmware-Revision read via
+  ReadProperty(Multiple)), OPC UA (`GetEndpoints`'s own ApplicationUri/
+  SecurityMode), and DNP3 (IEEE 1815 Device Attributes) all carry
+  comparable identity data on the wire but none of it is wired into
+  `inventory` yet -- tracked as follow-on work in docs/DEVELOPMENT.md's
+  ROADMAP. Rack/slot (also asked for in Grok's original review) is scoped
+  out entirely: no protocol this project decodes carries a device's own
+  rack/slot number as a field it volunteers about itself (CIP does have a
+  path-addressable rack/slot concept, but only in an explicit-messaging
+  *request path* a scanner already has to know out-of-band -- there is
+  nothing to passively infer there).
 - **Direction/initiator determination is, in general, only ever as good as
   the evidence available for a given flow -- it can't always be established
   with certainty, only approximately.** "Approximately" has one precise

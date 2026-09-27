@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <iomanip>
 #include <map>
 #include <ostream>
 #include <sstream>
@@ -18,6 +19,7 @@
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
 #include "conduitscope/s7comm.hpp"
+#include "conduitscope/time_format.hpp"
 
 namespace conduitscope {
 
@@ -127,6 +129,15 @@ std::string zone_name_for(const CidrBlock& block) {
     return "zone_" + addr + "_" + std::to_string(block.prefix_len);
 }
 
+// Renders an epoch-seconds timestamp (InventoryAsset::first_seen/last_seen and InventoryEdge's own
+// pair) as a readable UTC date/time, reusing time_format.hpp's own `decode --time-format
+// absolute-date` renderer rather than inventing a second one. first_ts/prev_ts (Relative/Delta's
+// own bookkeeping) are irrelevant to AbsoluteDate, so `ts` is passed for both -- see
+// format_timestamp's own comment (time_format.hpp) for why that's safe.
+std::string format_epoch_seconds(double ts) {
+    return format_timestamp(ts, TimeFormat::AbsoluteDate, TimeOffset{}, ts, ts);
+}
+
 std::string json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -170,6 +181,26 @@ void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPack
         a.has_mac = true;
         a.mac = (ip == dp.src_ip) ? dp.src_mac : dp.dst_mac;
     }
+    if (!a.has_timestamp) {
+        a.has_timestamp = true;
+        a.first_seen = dp.timestamp;
+        a.last_seen = dp.timestamp;
+    } else {
+        a.first_seen = std::min(a.first_seen, dp.timestamp);
+        a.last_seen = std::max(a.last_seen, dp.timestamp);
+    }
+}
+
+void AssetInventoryEngine::update_identity(const std::string& ip, const std::string& vendor,
+                                            const std::string& product, const std::string& firmware_revision,
+                                            const std::string& serial_number) {
+    auto it = assets_.find(ip);
+    if (it == assets_.end()) return;  // see this method's own comment (asset_inventory.hpp)
+    AssetState& a = it->second;
+    if (a.vendor.empty()) a.vendor = vendor;
+    if (a.product.empty()) a.product = product;
+    if (a.firmware_revision.empty()) a.firmware_revision = firmware_revision;
+    if (a.serial_number.empty()) a.serial_number = serial_number;
 }
 
 void AssetInventoryEngine::record_notable_protocol(const std::string& key, const std::string& protocol,
@@ -201,8 +232,8 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
 
     // "IT protocols an OT auditor flags" (ROADMAP item 18) -- checked first, unconditionally,
     // mirroring PolicyEngine::observe's own identical placement -- see this method's own doc comment
-    // (asset_inventory.hpp) for why this never disturbs skipped_packets_ or the ten-protocol asset/
-    // edge model below.
+    // (asset_inventory.hpp) for why this never disturbs skipped_packets_ or the eleven-protocol
+    // asset/edge model below.
     auto notable_tier = notable_it_protocol_tier(dp.protocol);
 
     if (!dp.has_ip || (!dp.has_tcp && !dp.has_udp)) {
@@ -263,7 +294,14 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     } else if (dp.protocol == "opcua") protocol = "opcua";
     else if (dp.protocol == "mms") protocol = "mms";
     else if (dp.protocol == "mqtt") protocol = "mqtt";
-    else if (dp.protocol == "ffhse") {
+    else if (dp.protocol == "s7comm-plus") {
+        // A different, independent application protocol from classic S7comm above despite sharing
+        // its TCP/102/TPKT/COTP transport -- see this file's own header comment. Flat-field on
+        // DecodedPacket (dp.s7plus_*), not carried via dp.result -- see decoder.hpp's own comment
+        // for why. Not one of PolicyEngine::observe's own ten protocols (no policy-engine zoning
+        // counterpart yet), but Grok gap #2 explicitly asked for it here regardless.
+        protocol = "s7comm-plus";
+    } else if (dp.protocol == "ffhse") {
         // Same reasoning as hartip above -- FF-HSE is decodable over TCP (decoder.cpp's own
         // opportunistic Auto-mode dispatch tries it there too) but is, in real deployments,
         // fundamentally a UDP protocol (ffhse.hpp), and PolicyEngine::observe never evaluates UDP.
@@ -279,8 +317,8 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
             // the IP-protocol-number-keyed Tier 5 tunnels, both handled above) -- direction is always
             // the plain port-number heuristic (see InventoryNotableProtocol's own comment for why),
             // reusing this file's own src_is_client_by_port rather than the session/handshake-based
-            // tcp_sessions_ machinery below, which only ever tracks this feature's own ten recognized
-            // protocols.
+            // tcp_sessions_ machinery below, which only ever tracks this feature's own eleven
+            // recognized protocols.
             bool src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, dp.has_tcp);
             std::string client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
             std::string server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
@@ -394,6 +432,8 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         function_name = dp.result->as<MqttResult>().first.packet_type_name;
     } else if (protocol == "ffhse" && dp.result && !dp.result->as<FfhseResult>().first.message_name.empty()) {
         function_name = dp.result->as<FfhseResult>().first.message_name;
+    } else if (protocol == "s7comm-plus" && dp.s7plus_has_function && !dp.s7plus_function_name.empty()) {
+        function_name = dp.s7plus_function_name;
     }
 
     // See looks_like_broadcast_or_multicast's own comment, and observe()'s doc comment in
@@ -403,6 +443,22 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     bool server_is_bcast = looks_like_broadcast_or_multicast(server_ip);
     if (!client_is_bcast) update_asset(client_ip, dp, protocol, /*is_client_role=*/true);
     if (!server_is_bcast) update_asset(server_ip, dp, protocol, /*is_client_role=*/false);
+
+    // Passively-inferred device identity (Grok gap #2) -- EtherNet/IP CIP Identity, the only
+    // protocol wired up so far (see observe()'s own doc comment in asset_inventory.hpp for the
+    // others still to come). A ListIdentity response's identity fields describe whichever IP
+    // actually SENT this specific packet -- not simply "the server," since it's this exchange
+    // itself that's the evidence of which side is the real device -- so this binds to dp.src_ip
+    // directly rather than to client_ip/server_ip above. update_identity is a no-op if dp.src_ip
+    // has no asset entry (only possible if it were a broadcast source, which a real identity
+    // response never is in practice).
+    if (protocol == "enip" && dp.result && dp.result->as<EnipResult>().first.has_identity) {
+        const EnipFrame& identity = dp.result->as<EnipResult>().first;
+        std::ostringstream serial;
+        serial << "0x" << std::hex << identity.identity_serial_number;
+        update_identity(dp.src_ip, "Vendor ID " + std::to_string(identity.identity_vendor_id),
+                         identity.identity_product_name, identity.identity_revision, serial.str());
+    }
 
     if (client_is_bcast || server_is_bcast) return;
 
@@ -426,6 +482,14 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     }
     ++eit->second.packet_count;
     if (!function_name.empty()) eit->second.functions.insert(function_name);
+    if (!eit->second.has_timestamp) {
+        eit->second.has_timestamp = true;
+        eit->second.first_seen = dp.timestamp;
+        eit->second.last_seen = dp.timestamp;
+    } else {
+        eit->second.first_seen = std::min(eit->second.first_seen, dp.timestamp);
+        eit->second.last_seen = std::max(eit->second.last_seen, dp.timestamp);
+    }
 }
 
 AssetInventoryReport AssetInventoryEngine::finish() const {
@@ -456,6 +520,12 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ia.ever_client = as.ever_client;
         ia.ever_server = as.ever_server;
         ia.packet_count = as.packet_count;
+        ia.first_seen = as.first_seen;
+        ia.last_seen = as.last_seen;
+        ia.vendor = as.vendor;
+        ia.product = as.product;
+        ia.firmware_revision = as.firmware_revision;
+        ia.serial_number = as.serial_number;
         report.assets.push_back(std::move(ia));
         (void)addr;
     }
@@ -471,6 +541,8 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         std::sort(ie.observed_functions.begin(), ie.observed_functions.end());
         ie.packet_count = es.packet_count;
         ie.direction_source = es.direction_source;
+        ie.first_seen = es.first_seen;
+        ie.last_seen = es.last_seen;
         report.edges.push_back(std::move(ie));
     }
 
@@ -586,7 +658,7 @@ void write_notable_protocols_text(std::ostream& out, const AssetInventoryReport&
     out << "NOTABLE IT PROTOCOLS (" << report.notable_protocols.size() << "):\n";
     out << "  Protocols an OT auditor would flag as worth attention on their own -- see "
            "docs/MANUAL.md's\n";
-    out << "  ROADMAP item 18. Not part of the ten-protocol scope above; does not count toward "
+    out << "  ROADMAP item 18. Not part of the eleven-protocol scope above; does not count toward "
            "skipped_packets.\n";
     if (report.notable_protocols.empty()) {
         out << "  (none)\n";
@@ -622,13 +694,13 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
     out << "OT asset inventory\n";
     out << "  capture: " << capture_path << "\n";
     out << "  scope:   Modbus, DNP3, S7comm, EtherNet/IP, BACnet/IP, IEC 104, HART-IP (TCP only),\n";
-    out << "           OPC UA, MMS, and MQTT -- plus FF-HSE (TCP only; rarely applicable, since\n";
-    out << "           FF-HSE is fundamentally a UDP protocol) -- see docs/MANUAL.md's ROADMAP "
-           "item 17\n\n";
+    out << "           OPC UA, MMS, MQTT, and S7comm-Plus -- plus FF-HSE (TCP only; rarely\n";
+    out << "           applicable, since FF-HSE is fundamentally a UDP protocol) -- see\n";
+    out << "           docs/MANUAL.md's ROADMAP item 17\n\n";
 
     out << report.assets.size() << " asset(s) observed, " << report.total_packets
         << " total packet(s) in capture, " << report.skipped_packets
-        << " skipped (not one of the ten recognized protocols, no IPv4 layer, or HART-IP/FF-HSE "
+        << " skipped (not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE "
            "seen over UDP)\n\n";
 
     out << "ASSETS (" << report.assets.size() << "):\n";
@@ -644,6 +716,16 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         }
         out << "  [" << role_text(a) << "]  " << protocol_list_text(a.protocols) << "  (" << a.packet_count
             << " packet(s))\n";
+        out << "      first seen: " << format_epoch_seconds(a.first_seen)
+            << "  last seen: " << format_epoch_seconds(a.last_seen) << "\n";
+        if (!a.vendor.empty() || !a.product.empty() || !a.firmware_revision.empty() || !a.serial_number.empty()) {
+            out << "      identity:";
+            if (!a.vendor.empty()) out << "  vendor=" << a.vendor;
+            if (!a.product.empty()) out << "  product=\"" << a.product << "\"";
+            if (!a.firmware_revision.empty()) out << "  firmware=" << a.firmware_revision;
+            if (!a.serial_number.empty()) out << "  serial=" << a.serial_number;
+            out << "\n";
+        }
     }
     out << "\n";
 
@@ -662,6 +744,8 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         if (!e.observed_functions.empty()) out << "  [" << protocol_list_text(e.observed_functions) << "]";
         out << "  (" << e.packet_count << " packet(s), direction: " << direction_source_name(e.direction_source)
             << ")\n";
+        out << "      first seen: " << format_epoch_seconds(e.first_seen)
+            << "  last seen: " << format_epoch_seconds(e.last_seen) << "\n";
     }
     out << "\n";
 
@@ -717,7 +801,24 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         }
         out << "],\n";
         out << "      \"role\": \"" << role_text(a) << "\",\n";
-        out << "      \"packet_count\": " << a.packet_count << "\n";
+        out << "      \"packet_count\": " << a.packet_count << ",\n";
+        // Appended after packet_count (the prior true-last field), same "no established JSON-shape
+        // test anchored on an earlier field needs to change" append-only convention this file's own
+        // notable_protocols/direction_source additions already follow. std::fixed/setprecision(6)
+        // matches output.cpp's own DecodedPacket::timestamp JSON rendering exactly (its own
+        // "timestamp" field) -- otherwise an epoch value this large default-renders in scientific
+        // notation (e.g. "1.7e+09"), technically valid JSON but needlessly unreadable.
+        out << "      \"first_seen\": " << std::fixed << std::setprecision(6) << a.first_seen << ",\n";
+        out << "      \"first_seen_text\": \"" << json_escape(format_epoch_seconds(a.first_seen)) << "\",\n";
+        out << "      \"last_seen\": " << a.last_seen << ",\n";
+        out << "      \"last_seen_text\": \"" << json_escape(format_epoch_seconds(a.last_seen)) << "\"";
+        if (!a.vendor.empty()) out << ",\n      \"vendor\": \"" << json_escape(a.vendor) << "\"";
+        if (!a.product.empty()) out << ",\n      \"product\": \"" << json_escape(a.product) << "\"";
+        if (!a.firmware_revision.empty()) {
+            out << ",\n      \"firmware_revision\": \"" << json_escape(a.firmware_revision) << "\"";
+        }
+        if (!a.serial_number.empty()) out << ",\n      \"serial_number\": \"" << json_escape(a.serial_number) << "\"";
+        out << "\n";
         out << "    }" << (i + 1 < report.assets.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -749,7 +850,14 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         // see CMakeLists.txt's inventory_json_report_shape and
         // inventory_json_bacnet_edge_has_no_server_port_service tests in particular, both of which
         // only match fields up through packet_count's predecessors.
-        out << "      \"direction_source\": \"" << direction_source_name(e.direction_source) << "\"\n";
+        out << "      \"direction_source\": \"" << direction_source_name(e.direction_source) << "\",\n";
+        // Appended after direction_source (the prior true-last field) -- same append-only
+        // convention as the assets array's own first_seen/last_seen addition above (see that
+        // addition's own comment for why std::fixed/setprecision(6) is applied here too).
+        out << "      \"first_seen\": " << std::fixed << std::setprecision(6) << e.first_seen << ",\n";
+        out << "      \"first_seen_text\": \"" << json_escape(format_epoch_seconds(e.first_seen)) << "\",\n";
+        out << "      \"last_seen\": " << e.last_seen << ",\n";
+        out << "      \"last_seen_text\": \"" << json_escape(format_epoch_seconds(e.last_seen)) << "\"\n";
         out << "    }" << (i + 1 < report.edges.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -872,7 +980,7 @@ void write_inventory_policy_yaml(std::ostream& out, const AssetInventoryReport& 
         // and no 'zones:'/'conduits:' keys, makes that obvious rather than emitting a file that
         // LOOKS like a policy but fails to load with a confusing error.
         out << "#\n";
-        out << "# No asset was observed in this capture (0 packets of any of the ten recognized "
+        out << "# No asset was observed in this capture (0 packets of any of the eleven recognized "
                "protocols --\n";
         out << "# Modbus/DNP3/S7comm/EtherNet-IP/BACnet-IP/IEC104/HART-IP/OPC UA/MMS/MQTT/FF-HSE, "
                "see\n";

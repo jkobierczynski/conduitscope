@@ -9566,6 +9566,45 @@ add_test(NAME inventory_ffhse_recognized_tcp_only_udp_skipped
 set_tests_properties(inventory_ffhse_recognized_tcp_only_udp_skipped PROPERTIES
   PASS_REGULAR_EXPRESSION "2 asset\\(s\\) observed, 70 total packet\\(s\\) in capture, 66 skipped.*192\\.168\\.1\\.10 .*\\[server\\]  ffhse  \\(4 packet\\(s\\)\\)")
 
+# S7comm-Plus (Grok gap #2 -- see docs/reviews/2026-09-grok-ics-ot-improvement-areas.md) added to
+# this feature's dispatch: a distinct, independent application protocol from classic S7comm despite
+# sharing TCP/102/TPKT/COTP transport (see this file's own header comment) -- s7comm and s7comm-plus
+# must show as two separate protocols/edges on the same IP pair/port, exactly the same "coexist as
+# distinct edges, edge_key includes protocol" proof inventory_mms_recognized_coexists_with_s7comm_fold
+# already establishes for mms/s7comm.
+add_test(NAME inventory_s7comm_plus_recognized
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap")
+set_tests_properties(inventory_s7comm_plus_recognized PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[client\\+server\\]  s7comm, s7comm-plus.*s7comm-plus  \\[DeleteObject, Explore, GetMultiVariables, SetMultiVariables, SetVariable\\]")
+
+# ---------------------------------------------------------------------------------------------
+# Grok gap #2 phase 0/1: last-seen (free -- DecodedPacket::timestamp already exists) and
+# EtherNet/IP CIP Identity wiring (free -- EnipFrame::has_identity/identity_* are already fully
+# decoded, see enip.hpp) into InventoryAsset. tests/sample_enip.pcap's own ListIdentity response
+# (built for this exact purpose -- see build_enip_sample's own docstring) carries vendor=1,
+# device_type=0x0C, product_code=54, revision 2.1, serial 0x001337AB, name "Conduit-ENIP-Sample" --
+# sent BY 192.168.1.10 (the PLC/server side), so identity binds to that IP, not the HMI/client.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME inventory_enip_identity_wired_into_asset_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
+set_tests_properties(inventory_enip_identity_wired_into_asset_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 .*\\[server\\]  enip.*first seen: 2023-11-14 22:46:40.*last seen: 2023-11-14 22:46:48.*identity:  vendor=Vendor ID 1  product=\"Conduit-ENIP-Sample\"  firmware=2.1  serial=0x1337ab")
+
+add_test(NAME inventory_enip_identity_wired_into_asset_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
+set_tests_properties(inventory_enip_identity_wired_into_asset_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.10\",.*\"packet_count\": 9,\n *\"first_seen\": 1700002000.000000,\n *\"first_seen_text\": \"2023-11-14 22:46:40.000000Z\",\n *\"last_seen\": 1700002008.008000,\n *\"last_seen_text\": \"2023-11-14 22:46:48.008000Z\",\n *\"vendor\": \"Vendor ID 1\",\n *\"product\": \"Conduit-ENIP-Sample\",\n *\"firmware_revision\": \"2.1\",\n *\"serial_number\": \"0x1337ab\"")
+
+# The client (HMI) side has no identity of its own -- never sent a ListIdentity response -- so its
+# vendor/product/firmware_revision/serial_number fields must be omitted entirely (never emitted as
+# empty strings or null), same "omit, never null, on a miss" convention hostname/mac_vendor above
+# already follow.
+add_test(NAME inventory_enip_no_identity_fields_omitted_for_client_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
+set_tests_properties(inventory_enip_no_identity_fields_omitted_for_client_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-14 22:46:48.008000Z\"\n *\\}")
+
 # ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,
 # TeamViewer, AnyDesk, and Zoom. See docs/MANUAL.md's ROADMAP item 18 for the full "why this

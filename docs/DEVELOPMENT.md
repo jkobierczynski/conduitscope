@@ -11431,6 +11431,115 @@ it done as its own patch.
     #1) -- see docs/design/policy-engine-zoning.md's own "Context" section
     for the full six-phase scope.**
 
+75. **Asset inventory: a real OT asset record -- Grok gap #2, first
+    increment (Phases 0-1: last-seen scaffolding, EtherNet/IP CIP Identity
+    wiring, S7comm-Plus dispatch).** First installment of Jurgen's own
+    next-priority item after gap #1 above -- see
+    docs/design/asset-inventory-real-record.md for the full ten-phase
+    breakdown and the research that informed it:
+    `include/conduitscope/asset_inventory.hpp`/`.cpp` were
+    read in full, alongside `enip.hpp`/`.cpp`, `s7comm.hpp`, `bacnet.hpp`,
+    `opcua.hpp`/`.cpp`, and `dnp3.hpp`, to establish exactly which of
+    Grok's asks (docs/reviews/2026-09-grok-ics-ot-improvement-areas.md)
+    were free (already-decoded fields with nowhere to go yet), which
+    needed a small field promotion (OPC UA), and which needed real new
+    decoder work (S7comm SZL, BACnet ReadPropertyMultiple, DNP3 Device
+    Attributes) -- none of the latter shipped in this increment.
+
+    **`InventoryAsset` gains `first_seen`/`last_seen`** (min/max of
+    `DecodedPacket::timestamp` across every packet the asset appeared in --
+    free, since every `DecodedPacket` already carries this field) and
+    **`vendor`/`product`/`firmware_revision`/`serial_number`** (empty
+    unless a protocol's own identity-bearing message positively supplied
+    them, first-identity-seen wins, mirroring `has_mac`/`mac`'s own
+    convention). `InventoryEdge` gains the same `first_seen`/`last_seen`
+    pair. Rendered in the text report as a new `first seen: ... last seen:
+    ...` line per asset/edge and, where present, an `identity: vendor=...
+    product="..." firmware=... serial=...` line per asset; JSON gains
+    `first_seen`/`first_seen_text`/`last_seen`/`last_seen_text` (the
+    rendered form reusing `time_format.hpp`'s own `TimeFormat::
+    AbsoluteDate` renderer, not a second implementation) plus
+    `vendor`/`product`/`firmware_revision`/`serial_number` when non-empty
+    -- all appended after each object's prior true-last field
+    (`packet_count` for assets, `direction_source` for edges), the same
+    append-only convention every earlier JSON-schema addition in this
+    codebase follows.
+
+    **EtherNet/IP wiring is pure plumbing, not new decode**: a
+    `ListIdentity` response's CIP Identity object was already fully
+    decoded (`EnipFrame::has_identity`/`identity_vendor_id`/
+    `identity_product_code`/`identity_revision`/`identity_serial_number`/
+    `identity_product_name` -- enip.hpp) with nowhere to go before this.
+    Identity binds to whichever IP actually **sent** that specific
+    response packet (`DecodedPacket::src_ip`), not to "the server" of the
+    TCP session generically -- the exchange itself is the evidence of
+    which side is the real device. `vendor` stays a raw numeric CIP Vendor
+    ID (e.g. `"Vendor ID 1"`) rather than a resolved name: this codebase
+    has no CIP Vendor ID -> name table, and ODVA's own registry runs to
+    several thousand entries -- building one is out of scope for this
+    increment and is called out as a deliberate limitation, not a silent
+    gap (see docs/USER_GUIDE.md's LIMITATIONS).
+
+    **S7comm-Plus added to `AssetInventoryEngine::observe`'s dispatch** --
+    confirmed absent from this file's own ten-protocol list going in
+    (Grok's still-valid ask, per docs/reviews/2026-09-grok-response.md's
+    fact-check), but, on reading `src/asset_inventory.cpp` directly, this
+    turned out to be pure wiring too: a full S7comm-Plus decoder already
+    exists (`s7commplus.hpp`/`.cpp`, flat fields on `DecodedPacket` --
+    `s7plus_has_function`/`s7plus_function_name` etc., not carried via
+    `DecodedPacket::result`) and was simply never added to this engine's
+    protocol dispatch or its function-name extraction. Client/server
+    determination needed no new code at all -- it rides the same
+    TCP/102/TPKT/COTP transport classic S7comm uses, already covered by
+    the generic TCP handshake/port-heuristic branch every TCP-based
+    protocol here shares. `AssetInventoryEngine` is now an eleven-protocol
+    feature; every "ten protocols"/"ten recognized" reference in
+    `asset_inventory.hpp`/`.cpp` and docs/USER_GUIDE.md's `inventory`
+    section was updated to eleven in the same pass.
+
+    **Testing.** `tests/sample_enip.pcap` and `tests/sample_s7commplus.pcap`
+    already existed and already carried, respectively, a `ListIdentity`
+    request/response (vendor=1/device_type=0x0C/product_code=54/
+    revision=2.1/serial=0x001337AB/name="Conduit-ENIP-Sample" -- built
+    for exactly this purpose, see `build_enip_sample`'s own docstring) and
+    a mixed S7comm/S7comm-Plus session on the same port -- no new fixtures
+    were needed. Four new CTest cases:
+    `inventory_s7comm_plus_recognized` (proves s7comm/s7comm-plus coexist
+    as distinct edges on the same IP pair/port, the same "edge_key
+    includes protocol" proof `inventory_mms_recognized_coexists_with_
+    s7comm_fold` already establishes for mms/s7comm),
+    `inventory_enip_identity_wired_into_asset_text`/`_json` (the identity
+    line/fields above, plus first_seen/last_seen), and
+    `inventory_enip_no_identity_fields_omitted_for_client_json` (proving
+    the HMI side, which never sent a `ListIdentity` response, gets no
+    empty-string/`null` placeholder fields at all -- omitted entirely,
+    same convention `hostname`/`mac_vendor` already follow on a miss).
+    Full CTest suite: 2043/2043 (default GCC build, zero regressions
+    against the prior 2039); ASan/UBSan (2119/2119) and no-live-capture
+    configs, plus a clean-room extract-rebuild-test, all re-verified
+    before delivery; MinGW-w64 cross-compile confirmed to still compile
+    and link cleanly (this sandbox has no Wine, so the cross-compiled
+    binary's own CTest cases have never been runnable here at all -- an
+    unrelated, pre-existing `inventory_opcua_recognized` fails identically
+    for the same reason, confirming this is an environment limitation, not
+    a regression).
+
+    **Not yet done, tracked for a following increment**: OPC UA identity
+    promotion (`GetEndpoints`/`FindServers`/`CreateSession` already
+    extract `application_uri`/`security_mode`/`security_policy_uri`
+    locally in `src/opcua.cpp` but only stringify them into `OpcUaResult`'s
+    generic `values`, not a named field -- the same small "promote an
+    already-extracted local value" pattern ENIP's own identity fields
+    already went through, just not done yet); S7comm SZL decode (System
+    Status List, ID 0x001C -- genuinely new decoder work, not wiring);
+    BACnet ReadPropertyMultiple decode plus Device-object property
+    correlation; DNP3 Device Attributes (IEEE 1815 group 0); role
+    classification; tag/point/DB touch summarization; and CSV/CMDB,
+    STIX/TAXII-lite, and firewall-ACL-draft export. Rack/slot was scoped
+    out of this feature entirely, not deferred -- no protocol this project
+    decodes carries a device's own rack/slot number as a field it
+    volunteers about itself.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

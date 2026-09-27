@@ -1,0 +1,239 @@
+# Asset inventory: a real OT asset record -- design document
+
+Status: **Phases 0-1 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
+dispatch) implemented and shipped.** Phases 2-10 (OPC UA identity promotion, S7comm SZL decode,
+BACnet ReadPropertyMultiple decode, DNP3 Device Attributes decode, role classification, tag/point/DB
+touch summarization, CSV/CMDB export, STIX/TAXII-lite export, firewall-ACL-draft export) are scoped
+below but not yet started. Written in response to
+[Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
+(item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
+fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP item 75 for the
+changelog-style writeup of what shipped and its exact verification numbers.
+
+## Context
+
+Following the now-shipped Grok gap #1 ("match how plants are zoned" -- see
+[policy-engine-zoning.md](policy-engine-zoning.md)), Jurgen asked to tackle Grok's gap #2 next, in his
+own stated priority order: **"Turn inventory into a real OT asset record."** Grok's original review
+asked for passively-inferred vendor/product/firmware/serial/rack-slot, PLC/RTU/IED/HMI/historian/
+engineering-station role classification, which specific tags/points/DBs were touched (not just
+function-code categories), last-seen plus client-vs-server-only visibility, CSV/CMDB/STIX-TAXII-lite/
+firewall-ACL export, and inventory support for every protocol conduitscope decodes (Grok specifically
+flagged S7comm-Plus as still missing from the five-protocol set it originally reviewed).
+
+`docs/reviews/2026-09-grok-response.md`'s fact-check already established that most of the "five
+protocols" claim is stale -- MMS/OPC UA/MQTT/BACnet were added in an earlier pass -- and
+`InventoryAsset::ever_client`/`ever_server` already satisfies the "seen as client vs. server" ask.
+What was actually still open, confirmed by direct research (reading `asset_inventory.hpp`/`.cpp` in
+full, `decoder.hpp`, and the identity-bearing decode paths in `enip.hpp`/`s7comm.hpp`/`bacnet.hpp`/
+`opcua.hpp`/`dnp3.hpp`):
+
+- **Last-seen** was free: `DecodedPacket::timestamp` already exists on every packet;
+  `InventoryAsset`/`InventoryEdge` just didn't track it.
+- **EtherNet/IP vendor/product/firmware/serial** was free: CIP Identity (`ListIdentity` response) was
+  already fully decoded into named fields on `EnipFrame` (`identity_vendor_id`, `identity_device_type`,
+  `identity_product_code`, `identity_revision`, `identity_status`, `identity_serial_number`,
+  `identity_product_name`). Pure wiring, no new decode.
+- **S7comm-Plus dispatch** was ALSO pure wiring, not new decode work as originally scoped below (see
+  Phase 5's own note) -- a full S7comm-Plus decoder already existed (`s7commplus.hpp`/`.cpp`) and was
+  simply never added to `AssetInventoryEngine::observe`'s protocol dispatch.
+- **OPC UA application/security identity** needs a small, well-scoped promotion, not new decode:
+  `GetEndpoints`/`FindServers`/`CreateSession` are already "Tier 1 full decode" and already extract
+  `application_uri`, `security_mode`, `security_policy_uri`, `endpoint_url` into local
+  `AppDescInfo`/`EndpointDescInfo` structs in `src/opcua.cpp` -- but those get stringified into
+  `OpcUaResult`'s generic `values` (`vector<string>`) instead of being kept as named fields. This
+  needs the same treatment ENIP already has: promote these onto `OpcUaResult` as first-class fields.
+- **BACnet vendor/model/firmware** needs real new work: I-Am carries a Vendor-ID today but only inside
+  unstructured `BacnetApdu::values` strings; a Device object's Vendor-Name/Model-Name/
+  Firmware-Revision/Application-Software-Version would come back via ReadProperty ACK (whose single
+  scalar PropertyValue decode already exists) or, far more realistically for actual deployments,
+  ReadPropertyMultiple -- **which isn't decoded at all yet**.
+- **S7comm SZL** (System Status List -- Order Number, Module Type Name, System Name/Plant
+  Identification) is **not decoded at all** -- net-new decode work, the S7 analog of CIP Identity/I-Am.
+- **DNP3 Device Attributes** (IEEE 1815 group 0 -- manufacturer name, product name/model, serial
+  number, firmware version) are **not decoded at all** -- also net-new decode work.
+- **Tag/point/DB touch tracking**: `InventoryEdge::observed_functions` only tracks function/service
+  *names* today, never the specific address touched. Real per-address tracking is unbounded-
+  cardinality by nature and needs a deliberate cap/summarization design, not just "add a set."
+- **Role classification** has zero existing precedent anywhere in the codebase -- needs a heuristic
+  designed from scratch, kept strictly informational like `purdue_level` in the policy engine.
+- **Export formats**: GRASSMARLIN-style graphs already exist. CSV/CMDB, STIX-TAXII-lite, and
+  firewall-ACL-object-group export have **zero precedent**, and `inventory`'s own `-T,--format` CLI
+  option is hardcoded to `{"text","json"}` only -- these are wholly new writers plus new CLI plumbing.
+
+Grok's item #2 is far broader and more heterogeneous than item #1: item #1 was one engine gaining
+coherent new capabilities along a single throughline (zoning). Item #2 spans "wire an already-decoded
+field through" (cheap), "promote an already-extracted local value to a named struct field"
+(cheap-ish), "decode a wire format from scratch" (S7 SZL, DNP3 attributes, BACnet RPM -- real protocol
+work, each independently spec-sourced and pinned exactly like every other decoder in this project), a
+new heuristic with no ground truth to check it against (role classification), and a new export
+subsystem (CSV/STIX/ACL) that has nothing to build on. This plan sequences from cheapest/highest-
+confidence to hardest/most-judgment, so each phase after the first ships real, independently useful
+value and nothing downstream blocks on the riskiest work finishing first.
+
+## Phase 0 -- `InventoryAsset`/`InventoryEdge` scaffolding: last-seen + vendor/product/firmware fields (shipped)
+
+Added `double first_seen`/`last_seen` to both `InventoryAsset` and `InventoryEdge` (min/max of
+`DecodedPacket::timestamp`) and `InventoryAsset` fields `vendor`/`product`/`firmware_revision`/
+`serial_number` (empty unless a protocol positively supplied them, first-identity-seen wins, mirroring
+`has_mac`/`mac`'s own convention). **Rack/slot is dropped from this plan's scope entirely**: no
+protocol conduitscope decodes carries a rack/slot number as a field a device volunteers about itself
+(CIP's own path-addressable rack/slot concept only ever appears in an explicit-messaging *request
+path* a scanner already has to know out-of-band -- there is nothing to passively infer). Rendered in
+text as a `first seen: ... last seen: ...` line and, where present, an `identity: ...` line per asset;
+JSON appends `first_seen`/`first_seen_text`/`last_seen`/`last_seen_text` and, when non-empty,
+`vendor`/`product`/`firmware_revision`/`serial_number`, all after each object's prior true-last field.
+
+## Phase 1 -- EtherNet/IP identity wiring + S7comm-Plus dispatch (zero/near-zero new decode) (shipped)
+
+EtherNet/IP: when `EnipFrame::has_identity` is true, populate the asset that actually **sent** that
+specific response packet (`DecodedPacket::src_ip`, not "the server" of the session generically -- the
+exchange itself is the evidence of which side is the real device) from `identity_vendor_id` (rendered
+as a raw numeric CIP Vendor ID, e.g. `"Vendor ID 1"` -- no CIP Vendor ID -> name table exists in this
+codebase, and building one is out of scope), `identity_product_name`, `identity_revision`,
+`identity_serial_number`.
+
+S7comm-Plus: confirmed absent from `AssetInventoryEngine::observe`'s ten-protocol dispatch going in,
+but reading `src/asset_inventory.cpp` directly during implementation found this was pure wiring, not
+new decode work as originally planned (see this doc's own "Context" section) -- a full S7comm-Plus
+decoder already existed (`s7commplus.hpp`/`.cpp`, flat fields on `DecodedPacket`) and just needed one
+dispatch branch plus one function-name extraction branch added. Client/server determination needed no
+new code: S7comm-Plus rides the same TCP/102/TPKT/COTP transport classic S7comm uses, already covered
+by the generic TCP handshake/port-heuristic branch every TCP-based protocol here shares.
+`AssetInventoryEngine` is now an eleven-protocol feature.
+
+## Phase 2 -- OPC UA identity promotion
+
+Add `application_uri`, `security_mode_name`, `security_policy_uri` (from the endpoint the traffic
+actually used, falling back to "first endpoint seen" when ambiguous) as named fields on `OpcUaResult`,
+alongside (not replacing) the existing stringified `values` entries -- mirroring exactly how ENIP
+already exposes both a human summary line and structured `identity_*` fields side by side. Source:
+`src/opcua.cpp`'s existing `read_application_description`/`read_endpoint_description` already extract
+these values locally; this phase only changes where they end up. Wire into `InventoryAsset::vendor`
+using `application_uri` as the vendor/product stand-in (OPC UA has no separate vendor/model -- the
+decoder's own header comment already treats ApplicationUri as "the stable identifier this decoder
+surfaces instead" of ApplicationName/ProductUri) plus a new informational `security_posture` note
+(e.g. "SecurityMode=None" flagged the same audit-relevant way the decoder's own header comment frames
+it).
+
+## Phase 3 -- S7comm SZL decode + wiring
+
+New decode work in `s7comm.hpp`/`.cpp`: recognize the SZL read function (Userdata/parameter-block SZL
+request, function group 0x04 "CPU functions", subfunction "Read SZL") and decode SZL ID 0x001C
+("Component Identification" -- Order Number, Module Type Name, plus, if present, Plant
+Identification/System Name) from the response data record, sourced from Wireshark's own public S7comm
+dissector fields (`s7comm.szl...`), exactly the way every other protocol here cites its primary
+source. New `S7SzlInfo`-style struct with named fields, exposed alongside current fields -- additive,
+nothing renamed or removed. Wire into `InventoryAsset`: `order_number` -> `product`,
+`module_type_name` -> informational note, `system_name` -> a new
+`InventoryAsset::plant_identification` field. Draft the exact SZL 0x001C field layout and put it in
+front of Jurgen for a sanity check before writing the decoder, the same discipline Phase 4 of the
+zoning plan established for its own Read/Write tables.
+
+## Phase 4 -- BACnet ReadPropertyMultiple decode + Device-object identity correlation
+
+Decode ReadPropertyMultiple request/ACK (ASHRAE 135 clause 15.7). New correlation logic: when a
+`ReadProperty`/`ReadPropertyMultiple` ACK's ObjectIdentifier is a Device object (object-type 8) and
+PropertyIdentifier is one of Vendor-Name(121)/Model-Name(70)/Firmware-Revision(44)/
+Application-Software-Version(12), recognize it and promote the CharacterString value onto named
+fields -- check ASHRAE 135's Device object property table directly before assuming a
+Serial-Number property exists (it doesn't, as a standard property); if none does, drop
+serial-number from BACnet's own field set rather than inventing a vendor-proprietary one. Wire into
+`InventoryAsset` alongside the existing I-Am-derived Vendor-ID.
+
+## Phase 5 -- DNP3 Device Attributes (group 0) decode + wiring
+
+Decode Device Attributes objects (IEEE 1815 group/variation 0): Device Manufacturer's Name, Device
+Serial Number, Product Name and Model, Firmware Version -- confirm exact variation numbers against the
+spec before implementing, don't guess. Wire into `InventoryAsset`.
+
+(This phase no longer also carries "add S7comm-Plus dispatch," as originally planned here -- that
+turned out to be pure wiring and shipped in Phase 1 instead once `src/asset_inventory.cpp` was read
+directly; see this doc's own "Context" section.)
+
+## Phase 6 -- Role classification (heuristic, informational only)
+
+New `InventoryAsset::inferred_role` (string, e.g. "PLC/RTU", "HMI", "Engineering Station",
+"Historian", "Unknown") from a small, explicit, documented heuristic table: protocol mix plus
+port/traffic-volume signals already available in `InventoryAsset`/`InventoryEdge`. Explicitly labeled
+low-confidence in both the report output and `docs/USER_GUIDE.md` -- same posture as
+`direction_source`'s own `PortHeuristic` tier. Draft the exact heuristic table and put it in front of
+Jurgen before implementing -- this one has no spec to cite at all, so it needs the sanity check even
+more than Phase 3/4's decode tables.
+
+## Phase 7 -- Tag/point/DB touch summarization
+
+Extend `InventoryEdge` with a capped, summarized per-address touch record (e.g. top 32
+most-frequently-touched addresses per edge) rather than an unbounded set. Per protocol: Modbus
+register address, S7 DB number + start address, DNP3 point index, IEC104 IOA. New "TOP TOUCHED
+ADDRESSES" subsection per edge in text/JSON. CIP/OPC UA/MMS/MQTT "tag" addressing is symbolic-path-
+based rather than a small integer -- explicitly deferred/flagged rather than attempted in this phase.
+
+## Phase 8 -- CSV / CMDB export
+
+New `inventory --format csv` (extend `cli_main.cpp`'s `CLI::IsMember({"text","json"})` to include
+`"csv"`), one row per `InventoryAsset` -- mirroring `decode`'s own CSV quoting rules exactly, reusing
+its existing CSV-field-quoting helper rather than writing a second one. Confirm with Jurgen whether
+edges/conduits need their own export before building a second writer speculatively.
+
+## Phase 9 -- STIX/TAXII-lite export
+
+New `write_inventory_stix_json` producing a minimal STIX 2.1 bundle: one `infrastructure` SDO per
+asset carrying vendor/product/firmware as `x_`-prefixed custom properties, no TAXII *server* (a
+transport protocol out of scope for a decoder/analysis tool) -- "lite" means "a valid STIX bundle
+file." Confirm this framing matches what Jurgen actually wants before building it.
+
+## Phase 10 -- Firewall ACL draft export
+
+New `write_inventory_acl_cisco`/`_fortinet`/`_paloalto` deriving object-group/address-group + rule
+drafts directly from `InventoryZone`/`InventoryConduit` (already exist) -- needs zero new asset
+fields, since Grok's ask here is "propose an ACL matching the zones/conduits I already observed."
+Output is explicitly a **draft for a human to review**, never something conduitscope claims is ready
+to deploy.
+
+## Testing & fixtures (every phase)
+
+New `tools/make_sample_pcap.py`-generated pcap per new decoded message type (Phase 0-1 needed none --
+`tests/sample_enip.pcap` and `tests/sample_s7commplus.pcap` already carried exactly the fixtures
+needed). New CTest entries against real captured output from the actual binary, never hand-written
+expected output. Full CTest (default GCC, ASan/UBSan, no-live-capture, MinGW-w64) after every phase,
+plus a clean-room extract-rebuild-test before delivery. New fuzz coverage for every newly-decoded
+message type (SZL, BACnet RPM, DNP3 Device Attributes).
+
+## Docs (same phase as the code)
+
+`asset_inventory.hpp`'s own header comment, `docs/USER_GUIDE.md`'s INVENTORY section and
+LIMITATIONS, `docs/DEVELOPMENT.md`'s ROADMAP, and `docs/PROTOCOL_COVERAGE.md` (for newly-decoded
+message types) all updated in the same phase as the code, per this project's standing convention.
+
+## Open questions for Jurgen (not blocking Phases 0-1, which already shipped)
+
+1. Rack/slot: confirmed nothing passively discoverable exists for it in any protocol this project
+   decodes -- OK to scope out entirely (as this plan now does), or does Jurgen want CIP's
+   path-addressable rack/slot surfaced only when a scanner's own explicit-messaging *request* names
+   one?
+2. Phase 8: asset-centric CSV only, or also an edges/conduits CSV for the CMDB use case?
+3. Phase 9: is a STIX 2.1 JSON bundle file sufficient ("TAXII-lite"), or was actual TAXII transport
+   part of the ask?
+
+## Critical files
+
+- `include/conduitscope/asset_inventory.hpp` / `src/asset_inventory.cpp` -- every new
+  `InventoryAsset`/`InventoryEdge` field, `observe()`/`finish()` wiring per protocol, new report
+  writers (text/JSON/CSV/STIX/ACL).
+- `include/conduitscope/enip.hpp` -- already has the fields Phase 1 needed; read-only reference.
+- `include/conduitscope/opcua.hpp` / `src/opcua.cpp` -- Phase 2's `OpcUaResult` field promotion.
+- `include/conduitscope/s7comm.hpp` / `src/s7comm.cpp` -- Phase 3's new SZL decode.
+- `include/conduitscope/bacnet.hpp` / `src/bacnet.cpp` -- Phase 4's new ReadPropertyMultiple decode.
+- `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode.
+- `src/cli_main.cpp` -- Phase 8's `--format csv` CLI plumbing for `inventory`.
+- `tools/make_sample_pcap.py`, `tools/extract_fuzz_corpus.py`, `CMakeLists.txt`, `fuzz/fuzz_*.cpp`.
+- `docs/USER_GUIDE.md`, `docs/DEVELOPMENT.md`, `docs/PROTOCOL_COVERAGE.md`.
+
+## Verification bar (every phase, before it's considered done)
+
+Default GCC build + full CTest; ASan/UBSan Clang build; MinGW-w64 cross-compile (compiles/links
+cleanly -- this project's sandbox has no Wine, so the cross-compiled binary's own tests have never
+been runnable here; an unrelated pre-existing test failing the identical way confirms this is an
+environment limitation, not a regression); final clean-room zip rebuild + full `ctest` pass before
+delivery via SendUserFile.
