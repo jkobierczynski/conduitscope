@@ -514,10 +514,13 @@ OT asset inventory
 ASSETS (9):
   10.0.5.21  00:0c:29:de:ad:01 (VMware)  [client]  dnp3, s7comm  (6 packet(s))
       first seen: 2023-11-15 03:46:42.002000Z  last seen: 2023-11-15 03:46:47.007000Z
+      role: HMI/Engineering Station  (heuristic, low confidence)
   10.0.5.22  00:0c:29:de:ad:02 (VMware)  [client]  enip  (4 packet(s))
       first seen: 2023-11-15 03:46:48.008000Z  last seen: 2023-11-15 03:46:51.011000Z
+      role: Unknown  (heuristic, low confidence)
   192.168.1.10  00:0c:29:aa:bb:cc (VMware)  [server]  modbus  (2 packet(s))
       first seen: 2023-11-15 03:46:40.000000Z  last seen: 2023-11-15 03:46:41.001000Z
+      role: PLC/RTU  (heuristic, low confidence)
   ...
 
 COMMUNICATIONS (5):
@@ -551,6 +554,55 @@ direction to CIP I/O) when a conduit opts UDP flow evaluation in by naming
 below. See docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier
 design record and the industry precedent researched before adding this
 field.
+
+Each asset's `role: <value>  (heuristic, low confidence)` line is a PASSIVE, LOW-CONFIDENCE, purely
+INFORMATIONAL guess at that asset's functional role (Grok gap #2's "PLC/RTU/IED/HMI/historian/
+engineering-station role classification" ask) -- never treated as fact anywhere else in this
+codebase, always carrying that same "(heuristic, low confidence)" qualifier the same way
+`direction: port-heuristic` above flags an unconfirmed guess. It's always exactly one of four
+values, computed from protocol mix and client/server behavior alone (see
+`InventoryAsset::inferred_role`'s own comment in `include/conduitscope/asset_inventory.hpp` for the
+complete rule table):
+
+  - **"PLC/RTU"**: never itself a client, and speaks at least one of this tool's nine classic
+    field-device protocols (modbus/dnp3/s7comm/s7comm-plus/enip/iec104/hartip/bacnet/ffhse) as a
+    server -- `192.168.1.10` above, a Modbus server that never itself polls anything. Deliberately
+    also covers what Grok separately called "IED": passively, a protective relay (typically
+    DNP3/IEC 104-heavy) and a PLC/RTU (typically Modbus/S7comm/EtherNet-IP-heavy) look identical --
+    both are simply "server-only on a field protocol" -- so this tool doesn't pretend to split them.
+  - **"HMI/Engineering Station"**: never itself a server, speaks at least one field-device protocol,
+    and is a client of at least TWO distinct devices -- `10.0.5.21` above, which polls both a DNP3
+    outstation and an S7-1500 PLC. The two-distinct-peer threshold is why `10.0.5.22` (which only
+    ever talks to ONE EtherNet/IP adapter) stays "Unknown" instead -- a single peer can't distinguish
+    a genuine supervisory workstation from a one-off diagnostic session. Deliberately also covers
+    what Grok separately called "Engineering Station" alongside "HMI": passively the two look
+    identical (both are a client polling several field devices; the difference is which software is
+    installed, invisible on the wire) -- combining them was confirmed with Jurgen before
+    implementing, since this heuristic has no spec to check a four-way split against.
+  - **"Historian/Data Collector"**: a client of at least two distinct devices via OPC UA and/or MMS,
+    with no classic-field-protocol client activity of its own -- the shape a historian aggregating
+    from several PLCs' own embedded OPC UA/MMS servers takes. A server-only OPC UA/MMS asset is
+    deliberately NOT promoted to "PLC/RTU" by the rule above -- unlike every other field protocol
+    here, OPC UA/MMS servers are just as often a real historian/aggregation-side server as a PLC's
+    own embedded one, so a server-only OPC UA/MMS asset with no other signal stays "Unknown" instead
+    of being guessed at.
+  - **"Unknown"**: everything else -- a genuinely dual-role asset (e.g. a protocol gateway that's
+    BOTH a server to one client and itself a client of several field devices -- ambiguous on
+    purpose, never guessed at as either PLC/RTU or HMI/Engineering Station just because it clears one
+    rule's peer-count threshold), a below-threshold single-peer client, and an MQTT-only asset (MQTT
+    is deliberately excluded from every rule above -- its own broker/publisher-subscriber roles don't
+    map onto "supervisory client polling field devices" the way every other protocol here does; a
+    known, documented gap, not an oversight -- see LIMITATIONS). Always rendered as the literal
+    string "Unknown", never omitted -- a role is always computed for every asset that exists at all,
+    so "Unknown" is this heuristic's own honest conclusion, not an absence of an attempt.
+
+`tests/sample_role_classification.pcap` (`build_role_classification_sample` in
+`tools/make_sample_pcap.py`) is purpose-built to show all four outcomes, including every "Unknown"
+flavor above, in one capture -- see that function's own docstring for the full per-asset breakdown.
+`inventory --format json` carries the same value as an always-present `inferred_role` field on each
+asset object (never omitted, unlike `vendor`/`product`/etc.) -- named `inferred_role`, not `role`,
+since the JSON report already has an unrelated `role` field for client/server/client+server (the
+same thing `[client]`/`[server]` above renders in text).
 
 `tests/sample_inventory.pcap`'s own EtherNet/IP traffic never happens to
 include a `ListIdentity` exchange, so no asset above carries an
@@ -4739,6 +4791,29 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   concept, but only in an explicit-messaging *request path* a scanner
   already has to know out-of-band -- there is nothing to passively infer
   there).
+- **`inventory`'s `role: <value>  (heuristic, low confidence)` line (Grok gap #2's "PLC/RTU/IED/HMI/
+  historian/engineering-station role classification" ask) is a passive, low-confidence, purely
+  informational guess, never treated as fact anywhere else in this codebase.** See this guide's own
+  INVENTORY section above for the complete four-rule table and a worked example; the short version:
+  it's derived entirely from protocol mix and client/server peer-count signals, with two deliberate
+  simplifications flagged to, and confirmed with, Jurgen before implementing rather than guessed at
+  silently. First, "PLC/RTU" folds in Grok's separately-named "IED", and "HMI/Engineering Station"
+  folds in Grok's separately-named "Engineering Station" -- in both cases the two are passively
+  indistinguishable (a protective relay and a PLC/RTU both just look like "server-only on a field
+  protocol"; an HMI and an engineering workstation both just look like "client polling several field
+  devices"), so this heuristic doesn't pretend to split them into four labels. Second, MQTT is
+  excluded from every rule entirely -- an MQTT-only asset's role always stays "Unknown", since MQTT's
+  own broker/publisher-subscriber roles don't map onto "supervisory client polling field devices" the
+  way every other protocol here does, and there's no meaningful way to fold "message broker" into any
+  of the four existing labels without inventing a fifth. Also deliberately NOT used as a signal:
+  packet-count/traffic-volume thresholds -- packet count tracks how long a capture ran and how
+  chatty a given protocol naturally is, not a device's functional role, and adding a volume cutoff
+  would mean inventing an even less-grounded threshold than the peer-count-based rules already use.
+  A genuinely dual-role asset (e.g. a protocol gateway that both answers one client and itself polls
+  several field devices) always stays "Unknown" too, on purpose -- the heuristic's "PLC/RTU" and
+  "HMI/Engineering Station" rules are mutually exclusive by construction (`ever_server &&
+  !ever_client` vs. `ever_client && !ever_server`), so an asset clearing a peer-count threshold on
+  one side is never promoted just because it also happens to serve something else.
 - **Direction/initiator determination is, in general, only ever as good as
   the evidence available for a given flow -- it can't always be established
   with certainty, only approximately.** "Approximately" has one precise

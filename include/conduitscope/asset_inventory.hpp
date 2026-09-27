@@ -155,6 +155,85 @@ struct InventoryAsset {
     // Read SZL response for this IP positively supplied it; first-seen wins, same convention as every
     // other identity field above.
     std::string plant_identification;
+
+    // Phase 6 of Grok gap #2 ("asset inventory: a real OT asset record" -- Grok's original review
+    // asked for "PLC/RTU/IED/HMI/historian/engineering-station role classification"): a PASSIVE,
+    // LOW-CONFIDENCE, purely INFORMATIONAL guess at this asset's functional role, from a small,
+    // explicit heuristic over protocol mix and client/server behavior -- never treated as fact
+    // anywhere else in this codebase (kept as informational-only as `PurdueLevel` is in the policy
+    // engine, per this feature's own plan), and always rendered with a "(heuristic, low confidence)"
+    // qualifier, the same posture `direction_source`'s own `PortHeuristic` tier already takes for an
+    // unconfirmed guess (see DirectionSource's own comment, decoder.hpp).
+    //
+    // Always one of exactly four values -- computed by `AssetInventoryEngine::finish` (needs the
+    // final, deduplicated edge list to count each asset's distinct peers, so it can't be computed
+    // per-packet in `observe` the way every other field above is):
+    //
+    //   - "PLC/RTU": `ever_server && !ever_client`, and `protocols` includes at least one of this
+    //     engine's nine "field-device protocols" -- modbus/dnp3/s7comm/s7comm-plus/enip/iec104/
+    //     hartip/bacnet/ffhse, i.e. every protocol here whose server side is conventionally the
+    //     physical/embedded device being polled or commanded, not a supervisory or middleware
+    //     component. A device that only ever ANSWERS, never itself initiates an outbound OT-protocol
+    //     session of its own, on a classic field-device protocol, is the single cleanest passive
+    //     signal this heuristic has: it's essentially always a controller, not a workstation.
+    //     Deliberately folds in "IED" (Grok's own separate ask): passively, an IED (a protective
+    //     relay, typically DNP3/IEC 104-heavy) and a PLC/RTU (typically Modbus/S7comm/EtherNet/IP-
+    //     heavy) produce the exact same server-only signal -- there is no reliable protocol-mix
+    //     tie-break between them (a PLC can speak DNP3 as a substation RTU function just as
+    //     legitimately as a dedicated IED can), so this heuristic doesn't pretend to split them.
+    //   - "HMI/Engineering Station": `ever_client && !ever_server`, `protocols` includes at least one
+    //     field-device protocol (same nine as above), AND this asset is a client of at least TWO
+    //     distinct server IPs across all edges (any protocol) -- the "one console polling many
+    //     PLCs" shape. The >= 2 distinct-peer threshold exists to keep a single one-off session (one
+    //     engineer's laptop briefly talking to exactly one PLC -- e.g. a firmware update, or a
+    //     one-time diagnostic session) out of this bucket, since one peer alone can't distinguish a
+    //     genuine supervisory/engineering workstation from a one-time visitor; that case falls
+    //     through to "Unknown" instead. Deliberately folds in "Engineering Station" alongside "HMI"
+    //     (Grok's own separate ask): passively, an HMI and an engineering workstation look
+    //     identical -- both are a client polling multiple field devices; the difference is purely
+    //     which software is installed, which this tool can't observe on the wire, so this heuristic
+    //     doesn't pretend to split them either (confirmed with Jurgen before implementing, given
+    //     this phase's plan flagged both splits as open questions with no spec to check them
+    //     against).
+    //   - "Historian/Data Collector": `ever_client`, and this asset is a client of at least TWO
+    //     distinct server IPs via at least one of this engine's two "data-platform protocols" --
+    //     opcua/mms, i.e. the two protocols that can be spoken natively BY a field device (a PLC's
+    //     own embedded OPC UA/MMS server) or by a supervisory/aggregation component, so they're
+    //     usable as a CLIENT-role signal here but deliberately NOT added to the field-device-protocol
+    //     set above (a server-only OPC UA/MMS asset stays classified by whatever else it does, or
+    //     falls to "Unknown" if that's all it does -- promoting an OPC UA/MMS SERVER straight to
+    //     "PLC/RTU" would misclassify a real OPC UA aggregation/historian server just as often as it
+    //     would correctly identify a PLC's own embedded server). Checked AFTER the HMI/Engineering
+    //     Station rule above, and only matches an asset with NO field-device-protocol client
+    //     activity at all: an asset that's a client of both a classic field protocol AND OPC UA/MMS
+    //     lands as "HMI/Engineering Station" instead, since mixed protocol-client behavior is more
+    //     characteristic of an engineering workstation than a dedicated historian (a historian that
+    //     ALSO happens to be an OPC UA/MMS SERVER -- e.g. re-exposing its own data to a downstream
+    //     MES/ERP system -- can still match this rule; only `ever_server` on a field-device protocol
+    //     is excluded by the HMI/Engineering Station rule's own `!ever_server`, not `ever_server` in
+    //     general). MQTT is deliberately excluded from both the field-device and data-platform sets:
+    //     MQTT's own client/broker roles (a broker is the "server", a publisher/subscriber is the
+    //     "client") don't map onto "supervisory client polling field devices" the way every other
+    //     protocol here does, so an MQTT-only asset's role stays "Unknown" under this heuristic --
+    //     a known, documented gap (see docs/USER_GUIDE.md's LIMITATIONS), not an oversight.
+    //   - "Unknown": every asset that doesn't match one of the three rules above -- includes a
+    //     dual-role asset (both `ever_client` and `ever_server` on field-device protocols, e.g. a
+    //     protocol gateway or a sub-master RTU relaying to further outstations -- genuinely
+    //     ambiguous, not guessed at); an asset with too few distinct peers to carry real signal (a
+    //     lone one-off client session); an MQTT-only asset (see above); and an asset this engine
+    //     observed only via `notable_protocols` or a broadcast/multicast destination that never
+    //     formed a real edge at all. Always rendered explicitly as the literal string "Unknown", not
+    //     left empty -- unlike `vendor`/`product`/etc. above (which stay empty when no protocol
+    //     positively supplied them), a role IS always computed for every asset that exists at all;
+    //     "Unknown" is this heuristic's own honest conclusion, not an absence of an attempt.
+    //
+    // Deliberately NOT used as a signal: raw packet-count/traffic-volume thresholds. Packet count
+    // correlates with how long a capture ran and how chatty a given protocol/exchange naturally is,
+    // not with a device's functional role, and adding a volume threshold would mean inventing an
+    // arbitrary cutoff with even less grounding than the peer-count thresholds above already have --
+    // left out of this first pass; revisit only if the peer-count-based rules above prove too coarse
+    // in practice.
+    std::string inferred_role = "Unknown";
 };
 
 // One aggregated, directional communication: `client_ip` -> `server_ip`, every packet of ONE

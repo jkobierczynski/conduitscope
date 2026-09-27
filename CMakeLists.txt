@@ -841,7 +841,7 @@ set_tests_properties(dnp3_device_attribute_null_variation_not_decoded PROPERTIES
 add_test(NAME dnp3_device_attribute_inventory_identity_wired_text
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text)
 set_tests_properties(dnp3_device_attribute_inventory_identity_wired_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 [^\n]*\\[server\\][^\n]*\n[^\n]*\n *identity: *vendor=Acme Controls  product=\"Widget RTU-9000\"  firmware=3\\.2\\.1  serial=SN-778812")
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 [^\n]*\\[server\\][^\n]*\n[^\n]*\n[^\n]*\n *identity: *vendor=Acme Controls  product=\"Widget RTU-9000\"  firmware=3\\.2\\.1  serial=SN-778812")
 
 add_test(NAME dnp3_device_attribute_inventory_identity_wired_json
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
@@ -9895,6 +9895,89 @@ add_test(NAME inventory_opcua_no_identity_fields_omitted_for_client_json
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
 set_tests_properties(inventory_opcua_no_identity_fields_omitted_for_client_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-15 00:13:24.000000Z\"\n *\\}")
+
+# ---------------------------------------------------------------------------------------------
+# Grok gap #2 phase 6: InventoryAsset::inferred_role, a passive, low-confidence, purely
+# informational role-classification heuristic (see that field's own comment in
+# asset_inventory.hpp for the full four-way rule table). tests/sample_role_classification.pcap
+# (build_role_classification_sample in tools/make_sample_pcap.py) is purpose-built to exercise
+# every branch of that table at once -- see that function's own docstring for the full per-asset
+# reasoning behind each expected role below.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME inventory_role_hmi_engineering_station_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_hmi_engineering_station_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.201 .*\\[client\\][^\n]*\n[^\n]*\n *role: HMI/Engineering Station  \\(heuristic, low confidence\\)")
+
+add_test(NAME inventory_role_historian_data_collector_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_historian_data_collector_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.202 .*\\[client\\][^\n]*\n[^\n]*\n *role: Historian/Data Collector  \\(heuristic, low confidence\\)")
+
+add_test(NAME inventory_role_plc_rtu_server_only_field_protocol_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_plc_rtu_server_only_field_protocol_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.210 .*\\[server\\][^\n]*\n[^\n]*\n *role: PLC/RTU  \\(heuristic, low confidence\\)")
+
+# .211 (the DNP3 outstation) answers TWO distinct clients (.201 and the dual-role gateway .215
+# below) yet still reads as PLC/RTU -- proves distinct-client count never enters this rule at all,
+# only ever_client/ever_server/protocol do.
+add_test(NAME inventory_role_plc_rtu_multiple_clients_still_plc_rtu_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_plc_rtu_multiple_clients_still_plc_rtu_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.211 .*\\[server\\][^\n]*\n[^\n]*\n *role: PLC/RTU  \\(heuristic, low confidence\\)")
+
+# .213/.214 are OPC UA server-only -- deliberately NOT promoted to PLC/RTU (opcua/mms are excluded
+# from the field-device-protocol set precisely because a server-only OPC UA asset could just as
+# easily be a real aggregation/historian-side server as a PLC's own embedded one).
+add_test(NAME inventory_role_opcua_server_only_not_promoted_to_plc_rtu_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_opcua_server_only_not_promoted_to_plc_rtu_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.213 .*\\[server\\][^\n]*\n[^\n]*\n *role: Unknown  \\(heuristic, low confidence\\)")
+
+# .215: the dual-role gateway. Client of two distinct field devices (would otherwise read as
+# HMI/Engineering Station on peer count alone) AND a Modbus server to .216 -- ever_server=true
+# excludes it from that rule, so it stays Unknown, proving the mutual-exclusion actually holds in
+# code, not just in the doc comment.
+add_test(NAME inventory_role_dual_role_gateway_stays_unknown_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_dual_role_gateway_stays_unknown_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.215 .*\\[client\\+server\\][^\n]*\n[^\n]*\n *role: Unknown  \\(heuristic, low confidence\\)")
+
+# .216: a one-off Modbus client of exactly ONE server (.215) -- below the >= 2 distinct-peer
+# threshold the HMI/Engineering-Station rule requires, so it stays Unknown.
+add_test(NAME inventory_role_below_peer_threshold_stays_unknown_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_below_peer_threshold_stays_unknown_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.216 .*\\[client\\][^\n]*\n[^\n]*\n *role: Unknown  \\(heuristic, low confidence\\)")
+
+# .217/.218: an MQTT publisher and its broker -- MQTT is deliberately excluded from every
+# role-heuristic protocol set (its own client/broker roles don't map onto "supervisory client
+# polling field devices" the way every other protocol here does), so BOTH sides stay Unknown.
+add_test(NAME inventory_role_mqtt_client_stays_unknown_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_mqtt_client_stays_unknown_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.217 .*\\[client\\][^\n]*\n[^\n]*\n *role: Unknown  \\(heuristic, low confidence\\)")
+
+add_test(NAME inventory_role_mqtt_broker_stays_unknown_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_mqtt_broker_stays_unknown_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.218 .*\\[server\\][^\n]*\n[^\n]*\n *role: Unknown  \\(heuristic, low confidence\\)")
+
+# JSON: `inferred_role` is ALWAYS present (unlike vendor/product/etc., which are omitted on a
+# miss) -- confirm this for both a classified asset and an "Unknown" one, and confirm the
+# already-existing "role" field (client/server/client+server -- a completely different concept,
+# see role_text's own comment in asset_inventory.cpp) is untouched by this addition.
+add_test(NAME inventory_role_json_inferred_role_field_present
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_json_inferred_role_field_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.201\",.*\"role\": \"client\",.*\"inferred_role\": \"HMI/Engineering Station\"")
+
+add_test(NAME inventory_role_json_unknown_rendered_not_omitted
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_role_classification.pcap")
+set_tests_properties(inventory_role_json_unknown_rendered_not_omitted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.216\",.*\"inferred_role\": \"Unknown\"")
 
 # ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,

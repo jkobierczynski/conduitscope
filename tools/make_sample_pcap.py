@@ -6020,6 +6020,169 @@ def build_inventory_sample():
     (TESTS_DIR / "sample_inventory.pcap").write_bytes(data)
 
 
+def build_role_classification_sample():
+    """Feeds `inventory`'s Phase 6 role heuristic (InventoryAsset::inferred_role, see that field's
+    own comment in asset_inventory.hpp for the full four-way rule table this fixture exercises) a
+    capture deliberately built to hit every branch of that table at least once:
+
+      - 192.168.1.201 (engineering workstation): client of THREE distinct field devices across
+        THREE different field-device protocols (modbus/dnp3/s7comm), never itself a server ->
+        "HMI/Engineering Station".
+      - 192.168.1.210 (Modbus PLC), .211 (DNP3 outstation), .212 (S7-1500 PLC): each server-only on
+        one classic field-device protocol -> "PLC/RTU" for all three (.211/.212 each additionally
+        answer a SECOND client below, proving distinct-client-count doesn't affect this rule at
+        all -- only ever_client/ever_server/protocol matters).
+      - 192.168.1.202 (historian): OPC UA client of TWO distinct OPC UA servers, no field-protocol
+        client activity at all -> "Historian/Data Collector".
+      - 192.168.1.213/.214 (OPC UA servers): server-only, OPC UA only -> deliberately "Unknown",
+        not "PLC/RTU" -- opcua/mms are excluded from the field-device-protocol set precisely because
+        a server-only OPC UA asset could just as easily be a real aggregation/historian-side server
+        as a PLC's own embedded one; see InventoryAsset::inferred_role's own comment.
+      - 192.168.1.215 (protocol gateway): BOTH a Modbus server (answering .216 below) AND a client
+        of two distinct field devices (.211, .212) -- would otherwise qualify for "HMI/Engineering
+        Station" on peer count alone, but its own ever_server=true excludes it -> "Unknown",
+        demonstrating the dual-role exclusion is real, not just documented.
+      - 192.168.1.216 (one-off client): a Modbus client of exactly ONE server (.215) -> "Unknown",
+        below the >= 2 distinct-peer threshold the HMI/Engineering-Station rule requires.
+      - 192.168.1.217/.218 (MQTT publisher/broker): a minimal CONNECT/CONNACK exchange -> "Unknown"
+        on BOTH sides -- MQTT is deliberately excluded from every role-heuristic protocol set (its
+        own client/broker roles don't map onto "supervisory client polling field devices" the way
+        every other protocol here does); see InventoryAsset::inferred_role's own comment.
+
+    Every device here is a fresh IP not reused by any other sample fixture, and every flow uses its
+    own TCP port pair, so this fixture's edges/roles can't be perturbed by (or perturb) anything
+    else `tools/make_sample_pcap.py` generates."""
+    packets = []
+
+    def add(payload: bytes):
+        packets.append(payload)
+
+    ENG_IP, ENG_MAC = "192.168.1.201", mac("00:0c:29:6a:00:01")
+    HIST_IP, HIST_MAC = "192.168.1.202", mac("00:0c:29:6a:00:02")
+    MB_PLC_IP, MB_PLC_MAC = "192.168.1.210", mac("00:0c:29:6a:00:10")
+    DNP3_RTU_IP, DNP3_RTU_MAC = "192.168.1.211", mac("00:0c:29:6a:00:11")
+    S7_PLC_IP, S7_PLC_MAC = "192.168.1.212", mac("00:0c:29:6a:00:12")
+    OPCUA_A_IP, OPCUA_A_MAC = "192.168.1.213", mac("00:0c:29:6a:00:13")
+    OPCUA_B_IP, OPCUA_B_MAC = "192.168.1.214", mac("00:0c:29:6a:00:14")
+    GATEWAY_IP, GATEWAY_MAC = "192.168.1.215", mac("00:0c:29:6a:00:15")
+    ONEOFF_IP, ONEOFF_MAC = "192.168.1.216", mac("00:0c:29:6a:00:16")
+    MQTT_CLIENT_IP, MQTT_CLIENT_MAC = "192.168.1.217", mac("00:0c:29:6a:00:17")
+    MQTT_BROKER_IP, MQTT_BROKER_MAC = "192.168.1.218", mac("00:0c:29:6a:00:18")
+
+    def add_modbus(client_ip, client_mac, server_ip, server_mac, sport):
+        mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+        tcp_req = tcp_header(sport, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+        ip_req = ipv4_header(client_ip, server_ip, 6, len(tcp_req), 0xA000 + len(packets)) + tcp_req
+        add(eth_header(server_mac, client_mac, 0x0800) + ip_req)
+        reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+        mb_resp = struct.pack("!HHHBBB", 1, 0, 2 + 1 + len(reg_data), 1, 3, len(reg_data)) + reg_data
+        tcp_resp = tcp_header(502, sport, 2000, 1000 + len(mb_req), TCP_PSH | TCP_ACK, len(mb_resp)) + mb_resp
+        ip_resp = ipv4_header(server_ip, client_ip, 6, len(tcp_resp), 0xA000 + len(packets)) + tcp_resp
+        add(eth_header(client_mac, server_mac, 0x0800) + ip_resp)
+
+    def add_dnp3(client_ip, client_mac, server_ip, server_mac, sport):
+        read_class0 = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+        read_frame = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+        tcp_req = tcp_header(sport, 20000, 5000, 6000, TCP_PSH | TCP_ACK, len(read_frame)) + read_frame
+        ip_req = ipv4_header(client_ip, server_ip, 6, len(tcp_req), 0xA100 + len(packets)) + tcp_req
+        add(eth_header(server_mac, client_mac, 0x0800) + ip_req)
+        resp_payload = bytes([0xC0, 0xC0, 0x81, 0x80, 0x00]) + bytes([1, 2, 0x00, 0, 2]) + bytes([0x81, 0x01, 0x00])
+        resp_frame = dnp3_link_frame(source=1024, destination=1, user_data=resp_payload)
+        tcp_resp = tcp_header(20000, sport, 6000, 5000 + len(read_frame), TCP_PSH | TCP_ACK,
+                               len(resp_frame)) + resp_frame
+        ip_resp = ipv4_header(server_ip, client_ip, 6, len(tcp_resp), 0xA100 + len(packets)) + tcp_resp
+        add(eth_header(client_mac, server_mac, 0x0800) + ip_resp)
+
+    def add_s7comm(client_ip, client_mac, server_ip, server_mac, sport):
+        cr = cotp_connection_pdu(0xE0, 0x0000, 0x0001, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+        cotp_cr = tpkt_frame(cr)
+        tcp_cr = tcp_header(sport, 102, 200, 300, TCP_PSH | TCP_ACK, len(cotp_cr)) + cotp_cr
+        ip_cr = ipv4_header(client_ip, server_ip, 6, len(tcp_cr), 0xA200 + len(packets)) + tcp_cr
+        add(eth_header(server_mac, client_mac, 0x0800) + ip_cr)
+        cc = cotp_connection_pdu(0xD0, 0x0001, 0x5001, bytes([0x01, 0x00]), bytes([0x03, 0x02]))
+        cotp_cc = tpkt_frame(cc)
+        tcp_cc = tcp_header(102, sport, 300, 200 + len(cotp_cr), TCP_PSH | TCP_ACK, len(cotp_cc)) + cotp_cc
+        ip_cc = ipv4_header(server_ip, client_ip, 6, len(tcp_cc), 0xA200 + len(packets)) + tcp_cc
+        add(eth_header(client_mac, server_mac, 0x0800) + ip_cc)
+        setup_param = struct.pack("!BBHHH", 0xF0, 0x00, 1, 1, 240)
+        setup_req = s7_header(0x01, 1, len(setup_param), 0) + setup_param
+        cotp_setup_req = tpkt_frame(COTP_DT_HEADER, setup_req)
+        tcp_req = tcp_header(sport, 102, 400, 500, TCP_PSH | TCP_ACK, len(cotp_setup_req)) + cotp_setup_req
+        ip_req = ipv4_header(client_ip, server_ip, 6, len(tcp_req), 0xA200 + len(packets)) + tcp_req
+        add(eth_header(server_mac, client_mac, 0x0800) + ip_req)
+        setup_resp_param = struct.pack("!BBHHH", 0xF0, 0x00, 1, 1, 240)
+        setup_resp = s7_header(0x03, 1, len(setup_resp_param), 0) + struct.pack("!BB", 0, 0) + setup_resp_param
+        cotp_setup_resp = tpkt_frame(COTP_DT_HEADER, setup_resp)
+        tcp_resp = tcp_header(102, sport, 500, 400 + len(cotp_setup_req), TCP_PSH | TCP_ACK,
+                               len(cotp_setup_resp)) + cotp_setup_resp
+        ip_resp = ipv4_header(server_ip, client_ip, 6, len(tcp_resp), 0xA200 + len(packets)) + tcp_resp
+        add(eth_header(client_mac, server_mac, 0x0800) + ip_resp)
+
+    def add_opcua_get_endpoints(client_ip, client_mac, server_ip, server_mac, sport, server_urn,
+                                 endpoint_url, channel_id):
+        ge_req_params = opcua_string(endpoint_url) + opcua_array_count(0) + opcua_array_count(0)
+        ge_req_body = opcua_service_message(428, opcua_request_header(1), ge_req_params)  # GetEndpointsRequest
+        req_msg = opcua_symmetric_message("MSG", channel_id, 1, 1, 1, ge_req_body)
+        tcp_req = tcp_header(sport, OPCUA_PORT, 10000, 20000, TCP_PSH | TCP_ACK, len(req_msg)) + req_msg
+        ip_req = ipv4_header(client_ip, server_ip, 6, len(tcp_req), 0xA300 + len(packets)) + tcp_req
+        add(eth_header(server_mac, client_mac, 0x0800) + ip_req)
+
+        server_app_desc = opcua_application_description(server_urn, server_urn + ":product",
+                                                          app_name_text="Sample OPC UA Server",
+                                                          app_name_locale="en", app_type=0)
+        endpoint_none = opcua_endpoint_description(
+            endpoint_url, server_app_desc, security_mode=1,
+            security_policy_uri="http://opcfoundation.org/UA/SecurityPolicy#None")
+        ge_resp_params = opcua_array_count(1) + endpoint_none
+        ge_resp_body = opcua_service_message(431, opcua_response_header(1, 0), ge_resp_params)  # GetEndpointsResponse
+        resp_msg = opcua_symmetric_message("MSG", channel_id, 1, 1, 1, ge_resp_body)
+        tcp_resp = tcp_header(OPCUA_PORT, sport, 20000, 10000 + len(req_msg), TCP_PSH | TCP_ACK,
+                               len(resp_msg)) + resp_msg
+        ip_resp = ipv4_header(server_ip, client_ip, 6, len(tcp_resp), 0xA300 + len(packets)) + tcp_resp
+        add(eth_header(client_mac, server_mac, 0x0800) + ip_resp)
+
+    # --- "HMI/Engineering Station": .201 polls three distinct field devices, three protocols -------
+    add_modbus(ENG_IP, ENG_MAC, MB_PLC_IP, MB_PLC_MAC, sport=54001)
+    add_dnp3(ENG_IP, ENG_MAC, DNP3_RTU_IP, DNP3_RTU_MAC, sport=54002)
+    add_s7comm(ENG_IP, ENG_MAC, S7_PLC_IP, S7_PLC_MAC, sport=54003)
+
+    # --- "Historian/Data Collector": .202 polls two distinct OPC UA servers, no field-protocol -----
+    #     client activity at all.
+    add_opcua_get_endpoints(HIST_IP, HIST_MAC, OPCUA_A_IP, OPCUA_A_MAC, sport=54010,
+                             server_urn="urn:conduitscope:role-sample:opcua-a",
+                             endpoint_url="opc.tcp://192.168.1.213:4840/UA/ServerA", channel_id=800001)
+    add_opcua_get_endpoints(HIST_IP, HIST_MAC, OPCUA_B_IP, OPCUA_B_MAC, sport=54011,
+                             server_urn="urn:conduitscope:role-sample:opcua-b",
+                             endpoint_url="opc.tcp://192.168.1.214:4840/UA/ServerB", channel_id=800002)
+
+    # --- Dual-role gateway (.215): client of .211/.212 (would otherwise read as HMI/Engineering ----
+    #     Station) AND server to .216 below -> "Unknown", proving the mutual-exclusion actually
+    #     holds in code, not just in the doc comment.
+    add_dnp3(GATEWAY_IP, GATEWAY_MAC, DNP3_RTU_IP, DNP3_RTU_MAC, sport=54020)
+    add_s7comm(GATEWAY_IP, GATEWAY_MAC, S7_PLC_IP, S7_PLC_MAC, sport=54021)
+    add_modbus(ONEOFF_IP, ONEOFF_MAC, GATEWAY_IP, GATEWAY_MAC, sport=54022)
+
+    # --- MQTT publisher (.217) / broker (.218): minimal CONNECT/CONNACK -- "Unknown" on both sides,
+    #     since MQTT is excluded from every role-heuristic protocol set (see this function's own
+    #     header comment).
+    connect_body = (mqtt_str("MQTT") + bytes([4]) + bytes([0x02]) + struct.pack(">H", 60) +
+                    mqtt_str("role-sample-publisher"))
+    connect_pkt = mqtt_packet(1, 0, connect_body)
+    tcp_connect = tcp_header(54030, 1883, 30000, 40000, TCP_PSH | TCP_ACK, len(connect_pkt)) + connect_pkt
+    ip_connect = ipv4_header(MQTT_CLIENT_IP, MQTT_BROKER_IP, 6, len(tcp_connect), 0xA400) + tcp_connect
+    add(eth_header(MQTT_BROKER_MAC, MQTT_CLIENT_MAC, 0x0800) + ip_connect)
+    connack_pkt = mqtt_packet(2, 0, bytes([0x00, 0x00]))
+    tcp_connack = tcp_header(1883, 54030, 40000, 30000 + len(connect_pkt), TCP_PSH | TCP_ACK,
+                              len(connack_pkt)) + connack_pkt
+    ip_connack = ipv4_header(MQTT_BROKER_IP, MQTT_CLIENT_IP, 6, len(tcp_connack), 0xA401) + tcp_connack
+    add(eth_header(MQTT_CLIENT_MAC, MQTT_BROKER_MAC, 0x0800) + ip_connack)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_040_000 + i, i * 1000)
+    (TESTS_DIR / "sample_role_classification.pcap").write_bytes(data)
+
+
 def build_tcp_reassembly_sample():
     """Exercises Decoder::reassemble_tcp_payload -- general, per-TCP-flow reassembly of a single
     PDU/frame's own bytes split across TCP segments -- directly. This is a different layer from
@@ -19439,6 +19602,7 @@ if __name__ == "__main__":
     build_policy_engine_sample()
     build_summarize_unclassified_sample()
     build_inventory_sample()
+    build_role_classification_sample()
     build_tcp_reassembly_sample()
     build_resource_exhaustion_active_flows_sample()
     build_resource_exhaustion_flow_state_sample()

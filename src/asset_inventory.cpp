@@ -564,6 +564,65 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     }
 }
 
+namespace {
+
+// Phase 6 of Grok gap #2 ("asset inventory: a real OT asset record") -- see
+// InventoryAsset::inferred_role's own comment (asset_inventory.hpp) for the full design record;
+// this is just the implementation of the table documented there.
+
+// Protocols whose server side is conventionally the physical/embedded field device being polled or
+// commanded (a PLC/RTU/IED/field controller) -- see InventoryAsset::inferred_role's own comment for
+// why this set doesn't include opcua/mms (ambiguous server-role signal) or mqtt (broker/client
+// roles don't map onto this axis at all).
+const std::unordered_set<std::string>& role_field_protocols() {
+    static const std::unordered_set<std::string> kFieldProtocols = {
+        "modbus", "dnp3", "s7comm", "s7comm-plus", "enip", "iec104", "hartip", "bacnet", "ffhse",
+    };
+    return kFieldProtocols;
+}
+
+// Protocols usable as a CLIENT-role signal for "Historian/Data Collector" -- see
+// InventoryAsset::inferred_role's own comment for why these two (and only these two) are excluded
+// from role_field_protocols() above despite also being spoken natively by field devices.
+const std::unordered_set<std::string>& role_data_platform_protocols() {
+    static const std::unordered_set<std::string> kDataPlatformProtocols = {"opcua", "mms"};
+    return kDataPlatformProtocols;
+}
+
+bool any_protocol_in(const std::vector<std::string>& protocols, const std::unordered_set<std::string>& set) {
+    for (const auto& p : protocols) {
+        if (set.count(p)) return true;
+    }
+    return false;
+}
+
+// `distinct_servers_by_client`: for each IP ever seen as an edge's client_ip, the set of distinct
+// server_ip's it was paired with across every edge (any protocol) -- see
+// InventoryAsset::inferred_role's own comment for the exact four-way rule table this implements.
+std::string infer_asset_role(const InventoryAsset& asset,
+                              const std::unordered_map<std::string, std::unordered_set<std::string>>&
+                                  distinct_servers_by_client) {
+    size_t distinct_servers = 0;
+    if (auto it = distinct_servers_by_client.find(asset.ip); it != distinct_servers_by_client.end()) {
+        distinct_servers = it->second.size();
+    }
+
+    if (asset.ever_server && !asset.ever_client && any_protocol_in(asset.protocols, role_field_protocols())) {
+        return "PLC/RTU";
+    }
+    if (asset.ever_client && !asset.ever_server && distinct_servers >= 2 &&
+        any_protocol_in(asset.protocols, role_field_protocols())) {
+        return "HMI/Engineering Station";
+    }
+    if (asset.ever_client && distinct_servers >= 2 &&
+        any_protocol_in(asset.protocols, role_data_platform_protocols())) {
+        return "Historian/Data Collector";
+    }
+    return "Unknown";
+}
+
+}  // namespace
+
 AssetInventoryReport AssetInventoryEngine::finish() const {
     AssetInventoryReport report;
     report.total_packets = total_packets_;
@@ -618,6 +677,21 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ie.first_seen = es.first_seen;
         ie.last_seen = es.last_seen;
         report.edges.push_back(std::move(ie));
+    }
+
+    // Phase 6 of Grok gap #2 -- InventoryAsset::inferred_role (see that field's own comment for the
+    // full heuristic table). Runs as its own pass here, after report.edges above is fully built:
+    // the heuristic needs each asset's count of DISTINCT server peers across the whole capture,
+    // which only exists once every edge has been deduplicated and aggregated -- it can't be
+    // computed incrementally per-packet in observe() the way every other InventoryAsset field is.
+    {
+        std::unordered_map<std::string, std::unordered_set<std::string>> distinct_servers_by_client;
+        for (const auto& ie : report.edges) {
+            distinct_servers_by_client[ie.client_ip].insert(ie.server_ip);
+        }
+        for (auto& ia : report.assets) {
+            ia.inferred_role = infer_asset_role(ia, distinct_servers_by_client);
+        }
     }
 
     // Zones: group every asset IP by its zone_prefix_len_-bit network. std::map's own ordering
@@ -792,6 +866,7 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
             << " packet(s))\n";
         out << "      first seen: " << format_epoch_seconds(a.first_seen)
             << "  last seen: " << format_epoch_seconds(a.last_seen) << "\n";
+        out << "      role: " << a.inferred_role << "  (heuristic, low confidence)\n";
         if (!a.vendor.empty() || !a.product.empty() || !a.firmware_revision.empty() || !a.serial_number.empty()) {
             out << "      identity:";
             if (!a.vendor.empty()) out << "  vendor=" << a.vendor;
@@ -902,6 +977,15 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         if (!a.plant_identification.empty()) {
             out << ",\n      \"plant_identification\": \"" << json_escape(a.plant_identification) << "\"";
         }
+        // Phase 6 of Grok gap #2 -- InventoryAsset::inferred_role's own comment (asset_inventory.hpp)
+        // has the full heuristic. Appended after plant_identification (the prior true-last field),
+        // same append-only convention as every addition above -- unconditional, unlike
+        // vendor/product/etc., since a role is always computed for every asset (see that field's own
+        // comment for why "Unknown" is a real conclusion here, not an absence). Named "inferred_role"
+        // rather than "role" to avoid colliding with the existing "role" field above (client/server/
+        // client+server -- a completely different, already-established concept; see role_text's own
+        // comment).
+        out << ",\n      \"inferred_role\": \"" << json_escape(a.inferred_role) << "\"";
         out << "\n";
         out << "    }" << (i + 1 < report.assets.size() ? "," : "") << "\n";
     }

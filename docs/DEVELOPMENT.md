@@ -12137,6 +12137,119 @@ it done as its own patch.
     properties/Device Attributes), so this list is not expected to grow
     further as later phases land.
 
+82. **Asset inventory: a real OT asset record -- Grok gap #2, sixth
+    increment (Phase 6: role classification, heuristic, informational
+    only).** Direct continuation of items 75-76, 79-81 above -- see
+    docs/design/asset-inventory-real-record.md's own Phase 6 section for
+    the full scoped plan. Unlike every prior increment, this one adds no
+    new protocol decode at all -- it's a pure post-processing heuristic
+    over already-decoded `InventoryAsset`/`InventoryEdge` state, so there
+    was no wire format to research and no primary source to cite. Because
+    of that, the plan itself flagged this phase as needing a sanity check
+    even more than items 79-81's own decode tables (which at least had a
+    spec to verify against): before writing any code, drafted the exact
+    four-rule heuristic table and put ONE concrete open question to
+    Jurgen -- whether "PLC/RTU"/"IED" and "HMI"/"Engineering Station"
+    should stay four separate labels (with a weak protocol-mix tie-break)
+    or collapse into two, given neither pair is actually distinguishable
+    from passive traffic alone. Jurgen chose the two-label collapse
+    (matching the recommended option) -- confirmed before any
+    `asset_inventory.hpp`/`.cpp` edit was made.
+
+    **New `InventoryAsset::inferred_role`** (string, always exactly one of
+    four values -- see that field's own comment for the complete rule
+    table this summarizes) computed by a new pass inside
+    `AssetInventoryEngine::finish`, run AFTER `report.edges` is fully
+    built and deduplicated: the heuristic needs each asset's count of
+    DISTINCT peer IPs, which doesn't exist per-packet in `observe` the way
+    every other `InventoryAsset` field does, so it can't be computed
+    incrementally. Two new protocol-set helpers in an anonymous namespace,
+    `role_field_protocols()` (modbus/dnp3/s7comm/s7comm-plus/enip/iec104/
+    hartip/bacnet/ffhse -- protocols whose server side is conventionally
+    the physical/embedded field device being polled or commanded) and
+    `role_data_platform_protocols()` (opcua/mms -- protocols spoken
+    natively by EITHER a field device's own embedded server or a
+    supervisory/aggregation component, so usable only as a CLIENT-role
+    signal, never a server-role one) drive a new `infer_asset_role`
+    function: (1) `ever_server && !ever_client` plus a field-device
+    protocol -> "PLC/RTU" (folds in "IED" -- see above); (2) `ever_client
+    && !ever_server` plus a field-device protocol plus >= 2 distinct
+    server peers -> "HMI/Engineering Station" (folds in "Engineering
+    Station" -- see above; the >= 2 threshold excludes a one-off
+    single-peer session); (3) `ever_client` plus >= 2 distinct server
+    peers via opcua/mms, checked AFTER rule 2 so mixed field-protocol +
+    OPC UA/MMS client behavior reads as HMI/Engineering Station rather
+    than Historian -> "Historian/Data Collector" (a server-only OPC
+    UA/MMS asset is deliberately NOT promoted to "PLC/RTU" by rule 1,
+    since a server-only OPC UA/MMS asset could just as easily be a real
+    historian/aggregation-side server as a PLC's own embedded one); (4)
+    everything else, including a genuinely dual-role asset (rules 1/2 are
+    mutually exclusive by their own `!ever_client`/`!ever_server`
+    conditions, so a dual-role asset -- e.g. a protocol gateway -- can't
+    match either even when it clears a peer-count threshold), a
+    below-threshold single-peer client, and an MQTT-only asset (MQTT is in
+    neither protocol set -- its own broker/publisher-subscriber roles
+    don't map onto "supervisory client polling field devices") -> literal
+    string "Unknown", never left empty (unlike `vendor`/`product`/etc., a
+    role is always computed for every asset that exists). Deliberately NOT
+    used as a signal: packet-count/traffic-volume thresholds -- rejected
+    as even less-grounded than the peer-count thresholds already in use.
+
+    **Rendering**: `write_inventory_report_text` gains a new `role:
+    <value>  (heuristic, low confidence)` line per asset, same
+    low-confidence framing `direction_source`'s own `port-heuristic` tier
+    already uses in this same report. `write_inventory_report_json` gains
+    a new, always-present `inferred_role` field, appended after
+    `plant_identification` (the prior true-last field, same append-only
+    convention every prior JSON addition in this file follows) --
+    deliberately named `inferred_role`, not `role`, to avoid colliding
+    with the JSON report's PRE-EXISTING `role` field (client/server/
+    client+server, computed by the unrelated, unchanged `role_text`
+    helper).
+
+    **Testing.** New `tests/sample_role_classification.pcap`
+    (`build_role_classification_sample` in `tools/make_sample_pcap.py`,
+    22 packets, 11 fresh IPs shared with no other fixture) purpose-built
+    to hit every branch of the rule table above at least once: an
+    engineering workstation client of three distinct field devices across
+    three protocols (HMI/Engineering Station); a historian client of two
+    distinct OPC UA servers with zero field-protocol client activity
+    (Historian/Data Collector); three server-only field-protocol devices,
+    one answering TWO distinct clients while staying PLC/RTU (proving
+    distinct-client count never enters that rule); two OPC UA-server-only
+    devices staying Unknown (proving opcua/mms are genuinely excluded from
+    promoting a server straight to PLC/RTU); a dual-role protocol gateway
+    -- both a Modbus server and a client of two distinct field devices --
+    staying Unknown (proving the mutual-exclusion actually holds in code,
+    not just in the doc comment); a one-off single-peer Modbus client
+    staying Unknown (below the peer-count threshold); and an MQTT
+    publisher/broker pair, both staying Unknown (proving MQTT's exclusion
+    holds on both the client and server side). 11 new CTest cases
+    (`inventory` text confirming each of the nine distinct role outcomes
+    above by IP, plus two JSON cases confirming `inferred_role` is always
+    present for both a classified asset and an explicit "Unknown" one, and
+    that it's distinct from the pre-existing `role` field) -- all verified
+    against the real binary's own output, never hand-written expected
+    text; one pre-existing CTest regex updated
+    (`dnp3_device_attribute_inventory_identity_wired_text`, whose match
+    needed one more `[^\n]*\n` to skip past the new `role:` line this
+    phase inserts between an asset's first-seen/last-seen line and its
+    `identity:` line). No new fuzz harness/corpus work was needed this
+    phase -- unlike every decode-adding item before it,
+    `AssetInventoryEngine::finish`'s new role-inference pass parses no
+    untrusted bytes of its own; it operates entirely on already-decoded,
+    already-validated in-memory structures. Full CTest suite: 2093/2093
+    (default GCC build, up from item 81's 2082); ASan/UBSan 2169/2169
+    (non-fuzz-labeled); no-live-capture 2081/2081; plus a clean-room
+    extract-rebuild-test, all re-verified before delivery; MinGW-w64
+    cross-compile confirmed to still compile and link cleanly (same
+    standing no-Wine environment limitation as every prior item).
+
+    **Not yet done, tracked for a following increment**: tag/point/DB
+    touch summarization, and CSV/CMDB, STIX/TAXII-lite, and
+    firewall-ACL-draft export -- unchanged from item 81's own list, minus
+    role classification, which this item completed.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
