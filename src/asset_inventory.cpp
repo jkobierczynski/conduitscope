@@ -90,6 +90,45 @@ std::string dnp3_touch_key(const Dnp3ObjectRange& obj) {
     return oss.str();
 }
 
+// modbus_touch_key/dnp3_touch_key above build their keys from formatted integers this codebase
+// itself already validated (function code, address, group/variation) -- inherently safe to print.
+// The two protocols below (MQTT topic, CIP symbolic tag path) instead hand this file a string read
+// directly off the wire, so it needs to be made safe for a text/JSON report -- and, above all, for
+// a terminal -- before landing in InventoryEdge::top_touched_addresses. Two concrete failure modes
+// without this: (1) a byte outside printable ASCII -- genuine non-ASCII device text in another
+// encoding, or (in practice, far more often) a false-positive protocol match decoding unrelated
+// binary traffic as if it were e.g. an MQTT topic (see mqtt.hpp's own "structural detection gate:
+// HONESTLY WEAK" paragraph -- PUBLISH/PUBREC/PUBCOMP have no strong signature the way CONNECT
+// does) -- reaches the console raw, which on a non-UTF-8 console codepage (Windows cmd.exe's
+// default) renders as exactly the kind of mojibake this was written to stop; (2) an unbounded
+// length -- that same false-positive case can turn an entire TCP payload into one "topic" string,
+// which would otherwise print as dozens of report lines for a single touch. Caps at
+// kMaxTouchAddressDisplayBytes RAW bytes examined (not escaped-output bytes, so the cap is
+// predictable regardless of how much \xHH-escaping inflates it), escapes every byte outside
+// printable ASCII (0x20-0x7E) as \xHH, and appends a byte-count suffix when truncated so the report
+// still says how large the real value was.
+constexpr size_t kMaxTouchAddressDisplayBytes = 96;
+
+std::string sanitize_touch_address(const std::string& raw) {
+    size_t show = std::min(raw.size(), kMaxTouchAddressDisplayBytes);
+    std::string out;
+    out.reserve(show);
+    for (size_t i = 0; i < show; ++i) {
+        unsigned char c = static_cast<unsigned char>(raw[i]);
+        if (c >= 0x20 && c <= 0x7E) {
+            out += static_cast<char>(c);
+        } else {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\x%02x", c);
+            out += buf;
+        }
+    }
+    if (raw.size() > show) {
+        out += " ...(truncated, " + std::to_string(raw.size()) + " byte(s) total)";
+    }
+    return out;
+}
+
 // The known ports this feature's TCP-based protocols conventionally use, PLUS the two UDP ports
 // (BACNET_UDP_PORT/ENIP_IO_UDP_PORT) -- see AssetInventoryEngine::observe's own doc comment
 // (asset_inventory.hpp) for the full priority order this feeds into. On the TCP side this is now
@@ -530,12 +569,12 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         // access, not a named tag -- see InventoryEdge::top_touched_addresses' own comment for why).
         const CipMessage& cip = dp.result->as<EnipResult>().first.cip;
         if (cip.path.is_symbolic && !cip.path.summary.empty()) {
-            touched_addresses.push_back(cip.path.summary);
+            touched_addresses.push_back(sanitize_touch_address(cip.path.summary));
         }
     } else if (protocol == "mqtt" && dp.result) {
         const MqttMessage& mq = dp.result->as<MqttResult>().first;
         if (mq.packet_type_name == "PUBLISH" && !mq.topic.empty()) {
-            touched_addresses.push_back(mq.topic);
+            touched_addresses.push_back(sanitize_touch_address(mq.topic));
         }
     }
 
