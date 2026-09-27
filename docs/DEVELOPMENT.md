@@ -11047,12 +11047,12 @@ it done as its own patch.
     Phase 3 (BACnet/IP + CIP I/O UDP flow evaluation) shipped next -- see
     item 71 below, Phase 4 (operation-level read/write function
     classification, all five function-table protocols) after that -- see
-    item 72 below, and Phase 5 (source-MAC restriction on VLAN conduits via
-    `from_macs:`) after that -- see item 73 below. Phase 6 -- multi-homed
-    assets/jump hosts as a new optional `assets:` section -- remains
-    approved and scoped in the original plan but not yet implemented. QinQ
-    zones remain explicitly deferred pending the decoder-layer double-tag
-    unwrap tracked under item 15's continuation, not part of this item.
+    item 72 below, Phase 5 (source-MAC restriction on VLAN conduits via
+    `from_macs:`) after that -- see item 73 below, and Phase 6 (multi-homed
+    assets/jump hosts as a new optional `assets:` section) after that -- see
+    item 74 below, which was this plan's sixth and final phase. QinQ zones
+    remain explicitly deferred pending the decoder-layer double-tag unwrap
+    tracked under item 15's continuation, not part of this item.
 
 71. **Policy engine: match how plants are zoned -- Grok gap #1, second
     increment (Phase 3: BACnet/IP + CIP I/O UDP flow evaluation).**
@@ -11335,8 +11335,101 @@ it done as its own patch.
     `EthernetFlowReport::src_mac`) doc comments updated to match. No new
     CLI flags were needed -- the allow-list lives entirely in the policy
     file's existing `from_macs:` field. Phase 6 (multi-homed assets/jump
-    hosts as a new optional `assets:` section) remains approved and scoped
-    in the original plan but not yet implemented.
+    hosts as a new optional `assets:` section) shipped next -- see item 74
+    below, the sixth and final phase of this plan.
+
+74. **Policy engine: match how plants are zoned -- Grok gap #1, sixth and
+    final increment (Phase 6: multi-homed assets and jump hosts as
+    first-class objects).** Continues item 70 above; see
+    docs/design/policy-engine-zoning.md's own Phase 6 section for the full
+    write-up. Adds a new, fully optional top-level policy section,
+    `assets:` -- named entries each declaring 2+ IPs (what makes them
+    "multi-homed") and an optional free-form `role:` -- as policy-file
+    ground truth for real multi-interface equipment (a dual-homed HMI, an
+    engineering workstation with a corporate NIC, a jump host), rather than
+    something inferred from traffic. Omitted entirely (the default): zero
+    effect, the same "inert unless declared" posture every earlier phase of
+    this plan established.
+
+    **Cross-reference.** Computed in `PolicyEngine::finish()` purely from
+    the parsed `Policy` (assets/zones/conduits) -- independent of the
+    capture. For each declared asset, every IP's zone is resolved via the
+    same `Policy::zone_for` lookup an ordinary flow's `client_ip`/
+    `server_ip` already uses; an asset whose IPs span two or more zones
+    with no conduit declaring a relationship between them (checked in
+    either direction, ignoring `bidirectional`) is flagged as an
+    undocumented cross-zone bridge -- the concrete equipment-level pattern
+    behind OWASP OT Top 10's "broken zones from dual-homed HMIs and
+    forgotten remote access" warning. Populates a new "MULTI-HOMED ASSETS"
+    report section (text + JSON, `PolicyReport::multi_homed_assets`) always
+    listing every declared asset (flagged or not), its IPs, each IP's
+    resolved zone, and every zone pair it touches with its covered/not-
+    covered status.
+
+    **Jump hosts.** Any asset whose `role` reads `"jump_host"`
+    (case-insensitive -- the one string this feature ever reads for more
+    than display) gets a further post-pass, run once `report.flows`/
+    `report.udp_flows` are fully populated: every TCP/UDP flow with an
+    endpoint inside that asset's declared IPs is called out in a new "JUMP
+    HOST FLOWS" report section (`PolicyReport::jump_host_flows`, a
+    self-contained `JumpHostFlowFinding` per match, mirroring
+    `NotableProtocolFinding`'s own "duplicate summary data, don't index"
+    convention) **regardless of that flow's own Allowed/Violation/
+    Unclassified verdict** -- remote access via a jump host is the pattern
+    being watched for, independent of whether the individual flow happens
+    to already be policy-compliant.
+
+    **Never a new matching primitive.** Neither new section writes to any
+    `FlowReport`/`UdpFlowReport`'s own `verdict`, and
+    `PolicyReport::compliant()`/`allowed_count()`/`violation_count()`/
+    `unclassified_count()` all still span only `flows`/`ethernet_flows`/
+    `udp_flows` -- completely untouched by `multi_homed_assets`/
+    `jump_host_flows`. This feature earns its keep purely through
+    visibility and can never turn an existing COMPLIANT capture
+    NON-COMPLIANT on its own. (This deliberately does not attempt the
+    richer, protocol/vendor/firmware-aware asset record that's the actual
+    subject of Grok's item #2 -- separate future work Jurgen has ordered;
+    `assets:` here is policy-file-declared ground truth, not something
+    `AssetInventoryEngine` derives from traffic.)
+
+    **Reporting.** `multi_homed_assets`/`jump_host_flows` appended as the
+    new true-last top-level JSON fields (`udp_flows` was the prior
+    true-last field, since item 71 above); both new text sections print
+    nothing at all -- not even a header -- when the policy declares no
+    `assets:`/no jump-host asset any flow touched, the same
+    "byte-for-byte unaffected when unused" convention every earlier
+    addition to this schema followed.
+
+    **Testing and docs.** 11 new CTest cases against
+    `tests/sample_modbus.pcap` and new `tests/policies/assets_*.yaml`/
+    `bad_asset_*.yaml` fixtures: a cross-zone asset already covered by a
+    declared conduit (not flagged), the same shape with no covering
+    conduit (flagged, capture still COMPLIANT), a `role: "jump_host"` asset
+    called out on an Allowed flow, the same asset called out on a
+    Violation flow (proving independence from verdict), JSON-shape
+    coverage for both the covered-asset and jump-host cases, and five new
+    validation-error paths (missing/duplicate asset name, fewer than two
+    `ips`, an invalid IP/CIDR, a duplicate IP/CIDR within one asset). One
+    pre-existing fixture, `policy_udp_bacnet_cip_io_compliant_json`, needed
+    its `PASS_REGULAR_EXPRESSION` updated to account for the two new
+    trailing JSON fields -- the same "a pre-existing regex anchored on the
+    old true-last field needs to change" maintenance every earlier phase's
+    own JSON append also required, not a regression. Full CTest suite:
+    2039/2039 (default GCC build, zero regressions against the prior
+    2028); ASan/UBSan, no-live-capture, and MinGW-w64-cross-compile
+    configs, plus a clean-room extract-rebuild-test, all re-verified
+    before delivery. `docs/USER_GUIDE.md` gained a new "Multi-homed assets
+    and jump hosts" subsection (under "Conduits"/POLICY FILE FORMAT), a
+    schema-block addition for `assets:`, two new "Validation errors"
+    entries, and a new "Multi-homed assets and jump hosts (JSON)"
+    subsection; `include/conduitscope/policy.hpp` (`Asset`,
+    `Policy::assets`) and `include/conduitscope/policy_engine.hpp`
+    (`MultiHomedAssetFinding`, `AssetZonePair`, `JumpHostFlowFinding`,
+    `PolicyReport::multi_homed_assets`/`jump_host_flows`) doc comments
+    updated to match. No new CLI flags were needed. **This was the sixth
+    and final phase of the "match how plants are zoned" plan (Grok gap
+    #1) -- see docs/design/policy-engine-zoning.md's own "Context" section
+    for the full six-phase scope.**
 
 ### Protocols not covered at all
 

@@ -1,0 +1,31 @@
+# Phase 6: same "engineering_workstation" asset as assets_multi_zone_covered.yaml (IPs spanning
+# hmi_zone and corp_zone), but this policy declares NO conduit between those two zones at all --
+# an undocumented cross-zone bridge sitting on real equipment, exactly the OWASP OT Top 10 "broken
+# zones from dual-homed HMIs" pattern this feature exists to surface. PolicyEngine::finish flags
+# this asset (flagged: true) purely from the policy file itself -- this is unaffected by, and
+# never affects, any flow's own verdict, so paired with tests/sample_modbus.pcap this capture still
+# reports COMPLIANT even though the asset finding is flagged.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+  corp_zone:
+    description: "Corporate IT network"
+    networks: [10.0.0.0/24]
+
+conduits:
+  - name: "HMI polls PLC via Modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+
+assets:
+  - name: engineering_workstation
+    description: "Dual-homed engineering workstation: plant NIC + corporate NIC"
+    ips: [192.168.1.50, 10.0.0.50]
+    role: "engineering_ws"

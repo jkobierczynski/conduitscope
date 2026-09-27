@@ -1,0 +1,25 @@
+# Phase 6: declares a role: "jump_host" asset whose IPs include HMI_IP (192.168.1.50). Paired
+# with tests/sample_modbus.pcap (HMI_IP -> PLC_IP:502), which this policy's own modbus conduit
+# permits (verdict: allowed) -- PolicyReport::jump_host_flows still calls this flow out in its own
+# report subsection, since "remote access via jump host" is watched for independent of whether the
+# individual flow happens to be policy-compliant.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI polls PLC via Modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+
+assets:
+  - name: remote_access_jump_box
+    ips: [192.168.1.50, 10.0.0.77]
+    role: "jump_host"

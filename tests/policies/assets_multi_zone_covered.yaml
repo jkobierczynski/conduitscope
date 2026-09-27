@@ -1,0 +1,35 @@
+# Phase 6 (multi-homed assets/jump hosts, see docs/design/policy-engine-zoning.md): declares one
+# multi-homed asset ("engineering_workstation") whose two IPs fall in two DIFFERENT zones
+# (hmi_zone and corp_zone) -- but a conduit already declares a relationship between those two
+# zones, so PolicyEngine::finish's cross-reference reports this asset informationally with
+# flagged: false (the "covered" case). Paired with tests/sample_modbus.pcap (HMI_IP 192.168.1.50
+# -> PLC_IP 192.168.1.10:502), which this policy's own modbus conduit already permits, so this
+# also stays COMPLIANT.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+  corp_zone:
+    description: "Corporate IT network"
+    networks: [10.0.0.0/24]
+
+conduits:
+  - name: "HMI polls PLC via Modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]
+  - name: "Corp network can reach the HMI"
+    from: corp_zone
+    to: hmi_zone
+    protocols: [any]
+
+assets:
+  - name: engineering_workstation
+    description: "Dual-homed engineering workstation: plant NIC + corporate NIC"
+    ips: [192.168.1.50, 10.0.0.50]
+    role: "engineering_ws"

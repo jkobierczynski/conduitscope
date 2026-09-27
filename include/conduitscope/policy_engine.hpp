@@ -235,6 +235,58 @@ struct NotableProtocolFinding {
     size_t packet_count = 0;
 };
 
+// One resolved zone-pair "bridge" a multi-homed asset's declared IPs touch -- see
+// MultiHomedAssetFinding's own comment for what this cross-references and why.
+struct AssetZonePair {
+    std::string zone_a, zone_b;  // canonical order (zone_a < zone_b), deduplicated
+    bool covered = false;        // true when some conduit's from_zones/to_zones names zone_a on
+                                  // one side and zone_b on the other (either order, ignoring
+                                  // 'bidirectional' -- see PolicyEngine::finish's own comment for
+                                  // why direction doesn't matter for this check)
+};
+
+// One declared multi-homed asset (Phase 6, see policy.hpp's own Asset comment and
+// docs/design/policy-engine-zoning.md), cross-referenced against the policy's own declared zones
+// and conduits -- computed purely from Policy itself (Policy::assets/zones/conduits), independent
+// of any packet capture: PolicyReport::multi_homed_assets is populated identically whether or not
+// a single packet was ever observed. Never changes any FlowVerdict -- see PolicyEngine::finish's
+// own comment for exactly why this can never turn an otherwise-COMPLIANT capture NON-COMPLIANT.
+struct MultiHomedAssetFinding {
+    std::string name;
+    std::string role;                // exactly Asset::role, verbatim (may be empty)
+    std::vector<std::string> ips;    // Asset::ips[i].text, in file order
+    std::vector<std::string> zones;  // same index as ips -- resolved zone name, or
+                                      // "unclassified" when no declared zone contains that IP
+    // Every distinct pair of zones this asset's IPs touch (deduplicated, canonical order),
+    // ALWAYS populated -- even when not flagged -- so the report shows this asset's full zone
+    // footprint, not just whether something's wrong.
+    std::vector<AssetZonePair> zone_pairs;
+    // True when this asset's IPs resolve to 2+ distinct zones AND at least one zone_pairs entry
+    // is !covered -- an undocumented cross-zone bridge sitting on real equipment (the OWASP OT
+    // Top 10 "broken zones from dual-homed HMIs" pattern this feature exists to surface).
+    bool flagged = false;
+};
+
+// One TCP or UDP flow where either endpoint belongs to a `role: "jump_host"`-tagged asset (Phase
+// 6) -- self-contained (duplicates summary data rather than indexing into
+// PolicyReport::flows/udp_flows, mirroring NotableProtocolFinding's own convention), and called
+// out regardless of that flow's own Allowed/Violation/Unclassified verdict: "remote access via
+// jump host" is the pattern being watched for, independent of whether the individual flow happens
+// to be policy-compliant. Computed as a post-pass in PolicyEngine::finish, after
+// PolicyReport::flows/udp_flows are fully populated.
+struct JumpHostFlowFinding {
+    std::string asset_name;
+    std::string jump_host_ip;      // whichever of client_ip/server_ip belongs to the asset
+    bool jump_host_is_client = false;
+    std::string client_ip, server_ip;
+    uint16_t server_port = 0;
+    std::string protocol;   // FlowReport::protocols joined with ", ", or UdpFlowReport::protocol
+    bool is_udp = false;    // true: this came from PolicyReport::udp_flows; false: ::flows
+    FlowVerdict verdict = FlowVerdict::Unclassified;
+    std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
+    std::string reason;           // set (non-empty) when verdict != Allowed
+};
+
 struct PolicyReport {
     std::vector<FlowReport> flows;  // one per observed TCP flow, in first-seen order
     // One per observed raw-Ethernet L2 flow (PROFINET RT/GOOSE/SV/EtherCAT), in first-seen order --
@@ -282,6 +334,19 @@ struct PolicyReport {
     // conduit-allow-list-only verdict this engine has always computed, per Jurgen's own explicit
     // "always flag, independent of compliance" design choice for this item.
     std::vector<NotableProtocolFinding> notable_protocols;
+
+    // Every declared multi-homed asset (Phase 6, policy.hpp's `assets:`), cross-referenced against
+    // this policy's own zones/conduits -- see MultiHomedAssetFinding's own comment. ALWAYS
+    // populated (one entry per Policy::assets entry, in file order) whenever the policy declares
+    // any assets at all, independent of the capture -- empty only when the policy declares none
+    // (the common case today, and the case every policy written before this feature existed is
+    // in). Purely additive reporting: nothing here ever changes a FlowVerdict or compliant().
+    std::vector<MultiHomedAssetFinding> multi_homed_assets;
+    // Every TCP or UDP flow where either endpoint belongs to a `role: "jump_host"`-tagged asset, in
+    // first-seen order -- see JumpHostFlowFinding's own comment. Empty whenever the policy declares
+    // no `role: "jump_host"` asset (the common case today) -- purely additive reporting, never
+    // affects any FlowVerdict or compliant().
+    std::vector<JumpHostFlowFinding> jump_host_flows;
 
     // Every count below spans `flows`, `ethernet_flows`, AND `udp_flows` -- an L2 flow's or a UDP
     // flow's verdict counts exactly like a TCP flow's for compliance purposes; there is no separate

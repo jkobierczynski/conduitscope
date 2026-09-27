@@ -796,6 +796,73 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
              "be what was intended for a first policy file");
     }
 
+    // --- assets (Phase 6, optional) --------------------------------------
+    // A fully optional top-level 'assets:' list of declared multi-homed assets -- see Asset's own
+    // header comment (policy.hpp) for what this feature does and why it can never change a
+    // FlowVerdict. Omitted entirely (the common case): policy.assets stays empty and every other
+    // code path in this function/PolicyEngine is completely unaffected.
+    if (const yaml_mini::Node* assets_node = root.find("assets")) {
+        if (assets_node->type != NodeType::Sequence) {
+            fail(source_name, assets_node->line, "'assets' must be a list of asset definitions");
+        }
+        std::unordered_set<std::string> asset_names;
+        for (const auto& item : assets_node->sequence) {
+            if (item.type != NodeType::Mapping) {
+                fail(source_name, item.line, "each asset must be a mapping (name/ips/role/...)");
+            }
+            Asset a;
+            a.line = item.line;
+
+            const auto* name = item.find("name");
+            if (!name || name->type != NodeType::Scalar || name->scalar.empty()) {
+                fail(source_name, item.line, "an asset is missing a required 'name'");
+            }
+            a.name = name->scalar;
+            if (!asset_names.insert(a.name).second) {
+                fail(source_name, item.line, "duplicate asset name '" + a.name + "'");
+            }
+
+            const auto* ips = item.find("ips");
+            if (!ips) {
+                fail(source_name, item.line, "asset '" + a.name + "' is missing a required 'ips' list");
+            }
+            auto ip_list = as_scalar_list(*ips, source_name, "asset '" + a.name + "'s 'ips'");
+            if (ip_list.size() < 2) {
+                fail(source_name, ips->line,
+                     "asset '" + a.name +
+                         "' declares fewer than two 'ips' -- an asset must declare at least two IPs "
+                         "to be 'multi-homed' in the first place; a single-homed device needs no "
+                         "'assets:' entry at all");
+            }
+            for (const auto& item2 : ip_list) {
+                auto cidr = parse_cidr(item2.text);
+                if (!cidr) {
+                    fail(source_name, item2.line,
+                         "asset '" + a.name + "': '" + item2.text +
+                             "' is not a valid IPv4 address or CIDR block (expected e.g. "
+                             "'10.10.10.0/24' or a bare address)");
+                }
+                for (const auto& existing : a.ips) {
+                    if (existing.text == item2.text) {
+                        fail(source_name, item2.line,
+                             "asset '" + a.name + "': '" + item2.text +
+                                 "' is listed more than once in 'ips'");
+                    }
+                }
+                a.ips.push_back(*cidr);
+            }
+
+            if (const auto* role = item.find("role")) {
+                if (role->type == NodeType::Scalar) a.role = role->scalar;
+            }
+            if (const auto* desc = item.find("description")) {
+                if (desc->type == NodeType::Scalar) a.description = desc->scalar;
+            }
+
+            policy.assets.push_back(std::move(a));
+        }
+    }
+
     return policy;
 }
 

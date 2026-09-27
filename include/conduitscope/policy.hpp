@@ -281,9 +281,52 @@ struct Conduit {
     int line = 0;
 };
 
+// One declared multi-homed asset (Phase 6, see docs/design/policy-engine-zoning.md) -- a real
+// piece of equipment with more than one network interface (a dual-homed HMI, an engineering
+// workstation that also has a corporate-network NIC, a jump host bridging two segments), declared
+// here as policy-file ground truth rather than something PolicyEngine infers from traffic. A
+// fully optional top-level `assets:` section; omitted entirely (the common case today): zero
+// effect on anything -- no Asset exists, `PolicyReport::multi_homed_assets`/`jump_host_flows` stay
+// empty, and no FlowVerdict anywhere is ever affected by this feature's mere existence (this is an
+// advisory, cross-referencing report addition, never a new matching primitive -- see
+// PolicyEngine::finish's own comment for exactly what it cross-references and why it can never
+// turn an otherwise-COMPLIANT capture NON-COMPLIANT).
+struct Asset {
+    std::string name;
+    // 2 or more IPv4 addresses/CIDR blocks -- what makes this asset "multi-homed" in the first
+    // place (parse_policy_text rejects fewer than two: a single-homed asset needs no entry here at
+    // all). Parsed by the same `parse_cidr` every zone's own `networks:` list uses, so a bare
+    // address is treated as /32 exactly the same way; PolicyEngine::finish looks up each block's
+    // own network address (CidrBlock::network) via Policy::zone_for, the same lookup an ordinary
+    // flow's client_ip/server_ip already goes through -- there is no new zone-matching mechanism
+    // here, just a second thing (an asset) checked against the SAME zones a flow's endpoint would
+    // be.
+    std::vector<CidrBlock> ips;
+    // Optional, purely informational free-form string (e.g. "jump_host", "hmi", "engineering_ws"),
+    // from an optional `role:` key -- same posture as Zone::purdue_level: never read by any
+    // MATCHING logic (nothing here changes a FlowVerdict). The one exception, and the only string
+    // this codebase ever compares against, is checked case-insensitively: an asset whose `role`
+    // reads "jump_host" gets its own extra report subsection (PolicyReport::jump_host_flows) --
+    // every flow where either endpoint belongs to it is called out regardless of that flow's own
+    // compliant/violation/unclassified status, since "remote access via jump host" is the pattern
+    // being watched for, independent of whether the individual flow happens to be policy-compliant
+    // (see docs/USER_GUIDE.md's "Multi-homed assets and jump hosts" section). Stored exactly as
+    // written in the policy file (not lowercased), unlike Conduit::conduit_type's small closed
+    // value space -- this field is free text, not a fixed enum.
+    std::string role;
+    // Optional free-text 'description' key, purely for the policy author's own documentation --
+    // mirrors Zone::description/Conduit::description, never read by any matching or reporting
+    // logic.
+    std::string description;
+    int line = 0;
+};
+
 struct Policy {
     std::vector<Zone> zones;
     std::vector<Conduit> conduits;
+    // Optional top-level `assets:` list of declared multi-homed assets (Phase 6). Empty (the
+    // default -- 'assets:' omitted entirely) means zero effect: see Asset's own header comment.
+    std::vector<Asset> assets;
 
     // Returns the zone whose CIDR list contains `ip`, or nullptr if no
     // declared zone does. Because parse_policy_text already rejects any

@@ -253,33 +253,85 @@ publish on a VLAN-zone conduit" subsection, two new "Validation errors" entries,
 entries for `from_macs`/`src_mac`/`src_mac_vendor`) and `docs/DEVELOPMENT.md` (ROADMAP item 73)
 updated in the same increment.
 
-## Phase 6 -- Multi-homed assets and jump hosts as first-class objects
+## Phase 6 -- Multi-homed assets and jump hosts as first-class objects -- IMPLEMENTED
 
-- New, fully optional top-level policy section, `assets:` -- a list of named entries, each `ips:`
-  (2+ IPv4 addresses/CIDRs -- what makes it "multi-homed"), optional `role:` (free-form
-  informational string, e.g. `"jump_host"`, `"hmi"`, same posture as `purdue_level`, never read by
-  matching logic itself). Omitted entirely: zero effect, same "inert unless declared" posture as
-  everything else in this plan.
-- **Validation-time cross-reference** (this is the actual payoff, and the concrete thing OWASP OT
-  Top 10's "broken zones from dual-homed HMIs and forgotten remote access" warning is about): for
-  each declared asset, look up every declared IP's zone via the existing
-  `zone_for`/`zone_for_hostname` machinery. If an asset's IPs resolve to two or more *different*
-  zones with no conduit declared between those zones for any protocol, that's an undocumented
-  cross-zone bridge sitting on real equipment -- flag it in a new "MULTI-HOMED ASSETS" report
-  section (text + JSON) listing the asset, its IPs, each IP's resolved zone, and whether a conduit
-  already covers the zone pair. An asset whose IPs all fall in one zone, or whose cross-zone pairs
-  are already covered by a declared conduit, is reported informationally with no flag.
-- **`role: jump_host` gets extra scrutiny**: any `FlowReport`/`UdpFlowReport` where the client or
-  server IP belongs to a jump-host-tagged asset is called out in its own report subsection
-  regardless of compliant/violation status -- remote-access-via-jump-host is the specific pattern
-  being watched for, independent of whether the individual flow happens to be policy-compliant.
+- New, fully optional top-level policy section, `assets:` -- a list of named entries (`Asset`,
+  policy.hpp, declared right before `Policy` since `Policy::assets` is a `std::vector<Asset>`
+  member), each with `ips:` (2+ IPv4 addresses/CIDRs, parsed by the same `parse_cidr` `networks:`
+  uses -- what makes it "multi-homed" in the first place; `parse_policy_text` rejects fewer than
+  two, an invalid entry, or a duplicate IP/CIDR within the same asset), an optional `role:`
+  (free-form informational string, e.g. `"jump_host"`, `"hmi"`, stored verbatim -- never lowercased,
+  unlike `Conduit::conduit_type`'s small closed value space, since this is free text -- same posture
+  as `purdue_level` otherwise), and an optional `description:` (mirrors `Zone`/`Conduit`'s own field,
+  never read by any logic). Missing/duplicate `name` and missing `ips` are rejected the same way a
+  conduit's own `name` is. Omitted entirely: zero effect -- no `Asset` exists, both new report
+  sections below stay empty, same "inert unless declared" posture as everything else in this plan.
+- **Validation-time cross-reference** (the actual payoff, and the concrete thing OWASP OT Top 10's
+  "broken zones from dual-homed HMIs and forgotten remote access" warning is about): computed in
+  `PolicyEngine::finish()` purely from `policy_` itself (assets/zones/conduits) -- independent of
+  the capture, so it's identical whether or not a single relevant packet was ever observed. For
+  each declared asset, every IP's zone is looked up via `Policy::zone_for(block.network)` -- the
+  exact same lookup an ordinary flow's `client_ip`/`server_ip` already goes through. If those IPs
+  resolve to two or more *different* zones (an IP matching no declared zone resolves to
+  `"unclassified"`, same as anywhere else -- and an unclassified/real-zone pair can never be
+  "covered", since no conduit ever names the reserved zone `unclassified`, so any asset with one
+  unclassified IP among 2+ distinct zones is flagged too), every such zone pair is checked: a pair
+  is "covered" when some conduit's `from_zones`/`to_zones` names one zone on one side and the other
+  on the other side, in *either* order (`bidirectional` is deliberately ignored here -- the question
+  is only "is a relationship between these two zones declared at all", not simulating actual traffic
+  direction the way flow-matching does). An asset with any uncovered pair is `flagged`. This
+  populates a new "MULTI-HOMED ASSETS" report section (text + JSON,
+  `PolicyReport::multi_homed_assets`, a `std::vector<MultiHomedAssetFinding>`) listing every
+  declared asset, its IPs, each IP's resolved zone, every distinct zone pair it touches (always
+  populated, even when not flagged, so the report shows the asset's full zone footprint) and
+  whether each pair is covered. An asset whose IPs all fall in one zone, or whose cross-zone pairs
+  are all covered, is still listed, just with `flagged: false` -- this section is never gated on
+  the policy declaring any assets in a way that hides "the good ones."
+- **`role: "jump_host"` gets extra scrutiny**: a post-pass in `finish()`, run *after*
+  `report.flows`/`report.udp_flows` are fully populated, scans both for any flow where `client_ip`
+  or `server_ip` falls within a `role: "jump_host"`-tagged asset's declared IPs (via
+  `cidr_contains`, checked case-insensitively against `role` via the existing `equal_ci` helper).
+  Every match becomes a self-contained `JumpHostFlowFinding` (mirroring `NotableProtocolFinding`'s
+  own "duplicate summary data, don't index into `flows`/`udp_flows`" convention) in the new
+  `PolicyReport::jump_host_flows` vector, called out in its own "JUMP HOST FLOWS" report section
+  (text + JSON) **regardless of that flow's own Allowed/Violation/Unclassified verdict** --
+  "remote access via a jump host" is the pattern being watched for, independent of whether the
+  individual flow happens to be policy-compliant. Raw-Ethernet L2 flows have no IP addressing at
+  all, so they're never in scope for this check.
 - This is intentionally an *advisory, cross-referencing* feature layered on top of existing
-  zone/flow data, not a new matching primitive -- it does not change any existing `FlowVerdict`, so
-  it cannot turn an existing COMPLIANT capture NON-COMPLIANT on its own; it earns its keep purely
-  through visibility. (This deliberately does not attempt to model the richer, protocol/vendor/
-  firmware-aware asset record that's the actual subject of Grok's item #2, which Jurgen has ordered
-  as separate future work -- `assets:` here is policy-file-declared ground truth, not something
-  `AssetInventoryEngine` derives from traffic.)
+  zone/flow data, not a new matching primitive -- neither new section ever writes to a
+  `FlowReport`/`UdpFlowReport`'s own `verdict`, and `PolicyReport::allowed_count()`/
+  `violation_count()`/`unclassified_count()`/`compliant()` all still span only `flows`/
+  `ethernet_flows`/`udp_flows`, completely untouched by `multi_homed_assets`/`jump_host_flows` --
+  so this feature cannot turn an existing COMPLIANT capture NON-COMPLIANT on its own; it earns its
+  keep purely through visibility. (This deliberately does not attempt to model the richer,
+  protocol/vendor/firmware-aware asset record that's the actual subject of Grok's item #2, which
+  Jurgen has ordered as separate future work -- `assets:` here is policy-file-declared ground truth,
+  not something `AssetInventoryEngine` derives from traffic.)
+- **Reporting**: `multi_homed_assets`/`jump_host_flows` appended as the new true-last top-level JSON
+  fields (`udp_flows` was the prior true-last field, since Phase 3 -- see "JSON report schema" in
+  docs/USER_GUIDE.md), and rendered as new "MULTI-HOMED ASSETS"/"JUMP HOST FLOWS" text sections
+  (`write_multi_homed_assets_text`/`write_jump_host_flows_text`, policy_engine.cpp), both printing
+  nothing at all (not even a header) when the policy declares no `assets:`/no `role: "jump_host"`
+  asset that any flow touched -- the same "byte-for-byte unaffected when unused" convention every
+  earlier addition to this schema followed (`write_idmz_conduits_text`'s own comment states this
+  precedent explicitly).
+
+**Verification bar met for Phase 6**: 2039/2039 (default GCC build, 11 new tests, zero regression
+against the prior 2028 -- one pre-existing fixture, `policy_udp_bacnet_cip_io_compliant_json`, had
+its `PASS_REGULAR_EXPRESSION` updated to account for the two new trailing JSON fields, the same
+"a pre-existing regex anchored on the old true-last field needs to change" maintenance every earlier
+phase's own JSON append also required), covering: a multi-homed asset whose cross-zone IPs are
+already covered by a declared conduit (not flagged); the same shape with no covering conduit
+(flagged, still COMPLIANT overall); a `role: "jump_host"` asset called out on an Allowed flow; the
+same asset called out on a Violation flow (proving the report section is independent of verdict);
+JSON shape coverage for both the covered-asset and jump-host cases; and five new validation-error
+paths (missing asset name, duplicate asset name, fewer than two `ips`, an invalid IP/CIDR, a
+duplicate IP/CIDR within one asset). `docs/USER_GUIDE.md` (new "Multi-homed assets and jump hosts"
+subsection, schema block addition, two new "Validation errors" entries, new "Multi-homed assets and
+jump hosts (JSON)" subsection) and `docs/DEVELOPMENT.md` (ROADMAP item 74) updated in the same
+increment. This is the sixth and final phase of this plan -- see this file's own "Context" section
+above.
 
 ## Testing & fixtures
 

@@ -779,6 +779,12 @@ conduits:
     bidirectional: <true | false>           # default: false; IPv4/hostname-zone conduits only
     functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
     from_macs: [<MAC address>, <...>]       # optional; see "from_macs" below; VLAN-zone conduits only
+
+assets:                                     # optional; see "Multi-homed assets and jump hosts" below
+  - name: "<asset name>"
+    description: "<optional free text>"
+    ips: [<IPv4 address or CIDR block>, <...>]  # 2 or more required
+    role: "<optional free text, e.g. \"jump_host\", \"hmi\">"
 ```
 
 **Zones.** Each zone name maps to EXACTLY ONE of: one or more IPv4 CIDR
@@ -1469,6 +1475,74 @@ exact case-insensitive `read`) is not treated as one -- it falls straight
 through to the ordinary unknown-function-name/typo-suggestion handling
 described above.
 
+### Multi-homed assets and jump hosts
+
+A fully optional top-level `assets:` section declares real pieces of
+equipment that have more than one network interface -- a dual-homed HMI, an
+engineering workstation that also has a corporate-network NIC, a jump host
+bridging two segments -- as policy-file ground truth, rather than something
+inferred from traffic:
+
+```yaml
+assets:
+  - name: "<asset name>"
+    description: "<optional free text>"
+    ips: [<IPv4 address or CIDR block>, <...>]  # 2 or more required
+    role: "<optional free-form string, e.g. \"jump_host\", \"hmi\">"
+```
+
+`ips` is parsed by the exact same rule `networks:` uses (a bare address is
+treated as `/32`), and must name **at least two** addresses -- that's what
+makes an asset "multi-homed" in the first place; a single-homed device needs
+no entry here at all. `role` is purely informational free text, same
+posture as a zone's `purdue_level`, with exactly one exception described
+below. Omitted entirely (the common case today): zero effect on anything --
+no `Asset` exists, the two report sections below stay empty, and no
+`FlowVerdict` anywhere is ever affected by this feature's mere existence.
+This is deliberately an *advisory, cross-referencing* feature layered on top
+of already-computed zone/flow data, never a new matching primitive.
+
+**Cross-referencing declared assets against declared zones.** For each
+declared asset, `policy validate` looks up every one of its IPs' zones
+through the exact same `zone_for` lookup an ordinary flow's `client_ip`/
+`server_ip` already goes through (an IP matching no declared zone resolves
+to `unclassified`, same as anywhere else). If those IPs resolve to two or
+more *different* zones, every such zone pair is checked against the
+policy's own conduits: a pair is "covered" when some conduit's `from`/`to`
+names one zone on one side and the other zone on the other side, in either
+order (`bidirectional` is ignored for this check -- the question is only
+whether a relationship between these two zones is declared at all, not
+simulating actual traffic direction). An asset with any *uncovered* zone
+pair is **flagged** -- an undocumented cross-zone bridge sitting on real
+equipment, the concrete pattern OWASP OT Top 10 warns about under "broken
+zones from dual-homed HMIs and forgotten remote access". This is reported
+in a "MULTI-HOMED ASSETS" section (text and JSON) listing every declared
+asset, its IPs, each IP's resolved zone, every distinct zone pair it
+touches and whether that pair is covered -- an asset whose IPs all fall in
+one zone, or whose cross-zone pairs are all covered, is still listed, just
+with `flagged: false`. This check is computed purely from the policy file
+itself (zones, conduits, assets) -- it doesn't depend on the capture at all,
+so it's identical whether or not a single relevant packet was ever
+observed, and it **never** changes any flow's own verdict or the report's
+overall `Result: COMPLIANT`/`NON-COMPLIANT`.
+
+**`role: "jump_host"` gets extra scrutiny.** This is the one string this
+feature ever reads for more than display: checked case-insensitively, an
+asset whose `role` reads `jump_host` has every TCP or UDP flow where either
+endpoint falls within one of its declared IPs called out in its own "JUMP
+HOST FLOWS" report section, **regardless of that flow's own compliant/
+violation/unclassified status** -- "remote access via a jump host" is the
+pattern being watched for here, independent of whether the individual flow
+happens to be policy-compliant. Raw-Ethernet L2 flows (PROFINET RT/GOOSE/
+Sampled Values/EtherCAT) have no IP addressing at all, so they're never in
+scope for this check.
+
+See `tests/policies/assets_multi_zone_covered.yaml` (cross-zone but
+covered, not flagged), `assets_flagged_uncovered_bridge.yaml` (cross-zone,
+uncovered, flagged), and `assets_jump_host_flow_allowed.yaml`/
+`assets_jump_host_flow_violation.yaml` (the same `role: "jump_host"` asset
+called out on both an Allowed and a Violation flow) for worked examples.
+
 ### Validation errors
 
 Every rule below is checked when the policy file is loaded, before any
@@ -1543,6 +1617,13 @@ error (see EXIT STATUS):
   protocols have a non-empty Read and Write set), but rejected rather than
   silently leaving the conduit fully unrestricted, since an empty
   `functions` list means "no restriction" everywhere else in the engine
+- an `assets:` entry missing `name`, or a duplicate asset name (see
+  "Multi-homed assets and jump hosts" above)
+- an `assets:` entry missing `ips`, giving fewer than two of them (an asset
+  must declare at least two IPs to be "multi-homed" in the first place -- a
+  single-homed device needs no `assets:` entry at all), an `ips` entry that
+  isn't a valid IPv4 address/CIDR block, or a duplicate IP/CIDR within the
+  same asset's own `ips` list
 
 ### Unsupported YAML constructs
 
@@ -1807,9 +1888,10 @@ adds nothing" convention every Resolver-derived field in this schema
 already follows.
 
 **`idmz_conduits[]`** -- appended after `notable_protocols`, which was the
-prior last field (`udp_flows[]`, documented next, is the true last field
-today), always present, empty when the policy declares no `idmz`-typed
-conduit. One entry per such conduit, in declaration order:
+prior last field (`udp_flows[]`, documented next, was the true last field
+for a while; see "Multi-homed assets and jump hosts (JSON)" below for what's
+true-last today), always present, empty when the policy declares no
+`idmz`-typed conduit. One entry per such conduit, in declaration order:
 
 ```json
 {
@@ -1823,9 +1905,8 @@ flow (i.e. it does NOT appear in `unexercised_conduits`), `false` otherwise
 -- see "iDMZ / IT-OT crossing conduits" above for the text-report
 equivalent.
 
-**`udp_flows[]`** (docs/design/policy-engine-zoning.md's Phase 3) -- the
-true last field in this report today, always present, empty when the
-policy never opted UDP flow evaluation in (see "UDP flow evaluation
+**`udp_flows[]`** (docs/design/policy-engine-zoning.md's Phase 3) -- always
+present, empty when the policy never opted UDP flow evaluation in (see "UDP flow evaluation
 (BACnet/IP, CIP I/O)" above). One entry per BACnet/IP or CIP I/O UDP flow:
 
 ```json
@@ -1862,6 +1943,67 @@ request/response concept at all -- see "UDP flow evaluation (BACnet/IP,
 CIP I/O)" above). `allowed_count`/`violation_count`/`unclassified_count`
 at the top level fold in `udp_flows[]` too, alongside `flows[]` and
 `ethernet_flows[]`; so does `unexercised_conduits`.
+
+### Multi-homed assets and jump hosts (JSON)
+
+**`multi_homed_assets[]`** (docs/design/policy-engine-zoning.md's Phase 6)
+-- appended after `udp_flows[]`, which was the prior last field, always
+present, empty when the policy declares no `assets:` at all. See
+"Multi-homed assets and jump hosts" above for the semantics; one entry per
+declared asset, in declaration order:
+
+```json
+{
+  "name": "engineering_workstation",
+  "role": "engineering_ws",
+  "ips": ["192.168.1.50", "10.0.0.50"],
+  "zones": ["hmi_zone", "corp_zone"],
+  "zone_pairs": [{"zone_a": "corp_zone", "zone_b": "hmi_zone", "covered": true}],
+  "flagged": false
+}
+```
+
+`role` is `null` when the policy didn't set one. `ips`/`zones` are parallel
+arrays (same index -- `zones[i]` is the zone `ips[i]` resolved to, or
+`"unclassified"`). `zone_pairs[]` lists every distinct pair of zones this
+asset's IPs touch (canonical `zone_a < zone_b` order, deduplicated) with
+whether a declared conduit covers that pair -- always populated, even when
+`flagged` is `false`, so a script can see the asset's full zone footprint,
+not just whether something's wrong. This entire array is computed purely
+from the policy file itself, independent of the capture -- unaffected by,
+and never affecting, `compliant`/`allowed_count`/`violation_count`/
+`unclassified_count` above.
+
+**`jump_host_flows[]`** -- the true last field in this report today,
+appended after `multi_homed_assets[]`, always present, empty when the
+policy declares no `role: "jump_host"` asset (or one is declared but no
+observed flow ever touched it). One entry per matching TCP or UDP flow, in
+first-seen order (TCP flows first, then UDP flows):
+
+```json
+{
+  "asset_name": "remote_access_jump_box",
+  "jump_host_ip": "192.168.1.50",
+  "jump_host_is_client": true,
+  "client_ip": "192.168.1.50",
+  "server_ip": "192.168.1.10",
+  "server_port": 502,
+  "protocol": "modbus",
+  "is_udp": false,
+  "verdict": "allowed",
+  "matched_conduit": "HMI polls PLC via Modbus",
+  "reason": null
+}
+```
+
+`jump_host_ip` is whichever of `client_ip`/`server_ip` fell within the named
+asset's declared `ips`; `jump_host_is_client` says which. `protocol` is
+that flow's own `protocols[]` joined with `", "` for a TCP flow, or the
+single UDP `protocol` string for a UDP flow (`is_udp` says which source
+this entry came from). `verdict`/`matched_conduit`/`reason` are copied
+verbatim from that flow's own entry in `flows[]`/`udp_flows[]` -- this array
+never carries its own, separate verdict; a flow appears here regardless of
+whether that verdict is `allowed`, `violation`, or `unclassified`.
 
 ### Hostname zones and the IPv6-flow reason string
 

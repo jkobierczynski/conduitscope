@@ -9212,7 +9212,7 @@ set_tests_properties(policy_udp_bacnet_cip_io_compliant_text PROPERTIES
 add_test(NAME policy_udp_bacnet_cip_io_compliant_json
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_bacnet_cip_io_compliant.yaml" --format json)
 set_tests_properties(policy_udp_bacnet_cip_io_compliant_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"bacnet\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 47808,.*\"observed_functions\": \\[\"readProperty\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via BACnet/IP and CIP I/O\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"enip\",.*\"server_port\": 2222,.*\"verdict\": \"allowed\",.*\"direction_source\": \"port-heuristic\"\n *\\}\n *\\]\n\\}")
+  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"bacnet\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 47808,.*\"observed_functions\": \\[\"readProperty\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via BACnet/IP and CIP I/O\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"enip\",.*\"server_port\": 2222,.*\"verdict\": \"allowed\",.*\"direction_source\": \"port-heuristic\"\n *\\}\n *\\],\n *\"multi_homed_assets\": \\[\n *\\],\n *\"jump_host_flows\": \\[\n *\\]\n\\}")
 
 # udp_bacnet_only_violation.yaml names only "bacnet" -- proves gating is policy-wide, not
 # per-protocol (Policy::has_udp_eligible_conduit()): CIP I/O is still evaluated (and violates,
@@ -14658,3 +14658,76 @@ add_test(NAME decode_as_rejects_out_of_range_port
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --format text -d 'tcp.port==99999,ldaps' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_decode_as.pcap'; echo EXITCODE=$?")
 set_tests_properties(decode_as_rejects_out_of_range_port PROPERTIES
   PASS_REGULAR_EXPRESSION "error: -d/--decode-as 'tcp\\.port==99999,ldaps' has an invalid port '99999'.*EXITCODE=1")
+
+# ---------------------------------------------------------------------------------------------
+# "Match how plants are zoned" (Grok gap #1, docs/DEVELOPMENT.md) -- Phase 6: multi-homed assets
+# and jump hosts as first-class objects. A fully optional top-level 'assets:' policy section,
+# purely advisory/cross-referencing -- never changes any FlowVerdict or compliant() (see
+# MultiHomedAssetFinding/JumpHostFlowFinding's own comments, policy_engine.hpp). Fixtures:
+# tests/policies/assets_*.yaml and bad_asset_*.yaml.
+# ---------------------------------------------------------------------------------------------
+
+# Asset whose two IPs fall in two different zones, but a conduit already declares a relationship
+# between those zones -- reported informationally, flagged: false.
+add_test(NAME policy_assets_multi_zone_covered_not_flagged
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_multi_zone_covered.yaml")
+set_tests_properties(policy_assets_multi_zone_covered_not_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*MULTI-HOMED ASSETS \\(1, 0 flagged\\):.*engineering_workstation \\(role: engineering_ws\\): ok.*192\\.168\\.1\\.50 -> zone 'hmi_zone'.*10\\.0\\.0\\.50 -> zone 'corp_zone'.*zone pair 'corp_zone' <-> 'hmi_zone': covered by a declared conduit")
+
+# Same asset, but no conduit connects hmi_zone/corp_zone -- an undocumented cross-zone bridge,
+# flagged: true. Never changes the flow's own verdict (still COMPLIANT).
+add_test(NAME policy_assets_flagged_uncovered_bridge
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_flagged_uncovered_bridge.yaml")
+set_tests_properties(policy_assets_flagged_uncovered_bridge PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*MULTI-HOMED ASSETS \\(1, 1 flagged\\):.*engineering_workstation \\(role: engineering_ws\\): FLAGGED -- undocumented cross-zone bridge.*zone pair 'corp_zone' <-> 'hmi_zone': NOT COVERED by any conduit")
+
+add_test(NAME policy_assets_multi_zone_covered_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_multi_zone_covered.yaml" --format json)
+set_tests_properties(policy_assets_multi_zone_covered_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"multi_homed_assets\": \\[\n *\\{\n *\"name\": \"engineering_workstation\",\n *\"role\": \"engineering_ws\",\n *\"ips\": \\[\"192\\.168\\.1\\.50\", \"10\\.0\\.0\\.50\"\\],\n *\"zones\": \\[\"hmi_zone\", \"corp_zone\"\\],\n *\"zone_pairs\": \\[\\{\"zone_a\": \"corp_zone\", \"zone_b\": \"hmi_zone\", \"covered\": true\\}\\],\n *\"flagged\": false\n *\\}\n *\\],\n *\"jump_host_flows\": \\[\n *\\]\n\\}")
+
+# role: "jump_host" asset whose IP matches the flow's client -- called out in JUMP HOST FLOWS
+# regardless of the flow's own Allowed verdict.
+add_test(NAME policy_assets_jump_host_flow_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_jump_host_flow_allowed.yaml")
+set_tests_properties(policy_assets_jump_host_flow_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*JUMP HOST FLOWS \\(1\\):.*asset 'remote_access_jump_box' \\(192\\.168\\.1\\.50 is client\\): 192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502 \\(modbus, tcp\\).*verdict: allowed \\(conduit 'HMI polls PLC via Modbus'\\)")
+
+# Same jump_host asset, but the only conduit permits dnp3 (not modbus) -- the flow is a Violation,
+# yet JUMP HOST FLOWS still calls it out, proving this is independent of the flow's own verdict.
+add_test(NAME policy_assets_jump_host_flow_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_jump_host_flow_violation.yaml")
+set_tests_properties(policy_assets_jump_host_flow_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT.*JUMP HOST FLOWS \\(1\\):.*asset 'remote_access_jump_box' \\(192\\.168\\.1\\.50 is client\\): 192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502 \\(modbus, tcp\\).*verdict: violation\n *a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502")
+
+add_test(NAME policy_assets_jump_host_flow_allowed_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_jump_host_flow_allowed.yaml" --format json)
+set_tests_properties(policy_assets_jump_host_flow_allowed_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"jump_host_flows\": \\[\n *\\{\n *\"asset_name\": \"remote_access_jump_box\",\n *\"jump_host_ip\": \"192\\.168\\.1\\.50\",\n *\"jump_host_is_client\": true,\n *\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"server_port\": 502,\n *\"protocol\": \"modbus\",\n *\"is_udp\": false,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI polls PLC via Modbus\",\n *\"reason\": null\n *\\}\n *\\]\n\\}")
+
+# --- assets: validation errors -----------------------------------------------------------------
+
+add_test(NAME policy_error_asset_missing_name
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_asset_missing_name.yaml")
+set_tests_properties(policy_error_asset_missing_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "an asset is missing a required 'name'")
+
+add_test(NAME policy_error_asset_duplicate_name
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_asset_duplicate_name.yaml")
+set_tests_properties(policy_error_asset_duplicate_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "duplicate asset name 'engineering_workstation'")
+
+add_test(NAME policy_error_asset_fewer_than_two_ips
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_asset_fewer_than_two_ips.yaml")
+set_tests_properties(policy_error_asset_fewer_than_two_ips PROPERTIES
+  PASS_REGULAR_EXPRESSION "asset 'single_homed_device' declares fewer than two 'ips' -- an asset must declare at least two IPs to be 'multi-homed' in the first place; a single-homed device needs no 'assets:' entry at all")
+
+add_test(NAME policy_error_asset_invalid_ip
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_asset_invalid_ip.yaml")
+set_tests_properties(policy_error_asset_invalid_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "asset 'engineering_workstation': 'not-an-ip' is not a valid IPv4 address or CIDR block \\(expected e\\.g\\. '10\\.10\\.10\\.0/24' or a bare address\\)")
+
+add_test(NAME policy_error_asset_duplicate_ip
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_asset_duplicate_ip.yaml")
+set_tests_properties(policy_error_asset_duplicate_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "asset 'engineering_workstation': '192\\.168\\.1\\.50' is listed more than once in 'ips'")

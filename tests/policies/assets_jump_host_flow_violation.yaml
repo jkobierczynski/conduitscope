@@ -1,0 +1,25 @@
+# Phase 6: same role: "jump_host" asset as assets_jump_host_flow_allowed.yaml, but this policy's
+# only conduit permits dnp3 (not modbus) between hmi_zone/plc_zone -- so, paired with
+# tests/sample_modbus.pcap, the HMI_IP -> PLC_IP:502 modbus flow is a Violation, not Allowed. This
+# proves PolicyReport::jump_host_flows calls the flow out regardless of its own verdict: it's
+# still reported here even though it's simultaneously a policy violation.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI polls PLC via DNP3 only"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [dnp3]
+    ports: [20000]
+
+assets:
+  - name: remote_access_jump_box
+    ips: [192.168.1.50, 10.0.0.77]
+    role: "jump_host"

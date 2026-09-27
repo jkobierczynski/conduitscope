@@ -853,6 +853,111 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         report.notable_protocols.push_back(std::move(nf));
     }
 
+    // --- Phase 6: multi-homed asset cross-reference (see docs/design/policy-engine-zoning.md) ---
+    // Computed purely from policy_ (assets/zones/conduits) -- completely independent of the
+    // capture, so this section is identical whether or not a single packet was ever observed.
+    // Never touches any FlowVerdict computed above.
+    for (const auto& asset : policy_.assets) {
+        MultiHomedAssetFinding mf;
+        mf.name = asset.name;
+        mf.role = asset.role;
+        std::vector<std::string> distinct_zones;
+        for (const auto& block : asset.ips) {
+            mf.ips.push_back(block.text);
+            const Zone* z = policy_.zone_for(block.network);
+            std::string zname = z ? z->name : "unclassified";
+            mf.zones.push_back(zname);
+            if (std::find(distinct_zones.begin(), distinct_zones.end(), zname) == distinct_zones.end()) {
+                distinct_zones.push_back(zname);
+            }
+        }
+        for (size_t i = 0; i < distinct_zones.size(); ++i) {
+            for (size_t j = i + 1; j < distinct_zones.size(); ++j) {
+                AssetZonePair pair;
+                if (distinct_zones[i] < distinct_zones[j]) {
+                    pair.zone_a = distinct_zones[i];
+                    pair.zone_b = distinct_zones[j];
+                } else {
+                    pair.zone_a = distinct_zones[j];
+                    pair.zone_b = distinct_zones[i];
+                }
+                // "Covered" means some conduit's from_zones/to_zones names zone_a on one side and
+                // zone_b on the other, in EITHER order, ignoring 'bidirectional' -- the point here
+                // is only "is there a declared relationship between these two zones at all", not
+                // simulating actual traffic direction the way finish()'s flow-matching above does.
+                pair.covered = std::any_of(policy_.conduits.begin(), policy_.conduits.end(), [&](const Conduit& c) {
+                    bool fwd = zone_list_contains(c.from_zones, pair.zone_a) &&
+                               zone_list_contains(c.to_zones, pair.zone_b);
+                    bool rev = zone_list_contains(c.from_zones, pair.zone_b) &&
+                               zone_list_contains(c.to_zones, pair.zone_a);
+                    return fwd || rev;
+                });
+                if (!pair.covered) mf.flagged = true;
+                mf.zone_pairs.push_back(std::move(pair));
+            }
+        }
+        report.multi_homed_assets.push_back(std::move(mf));
+    }
+
+    // --- Phase 6: jump-host flow post-pass ---------------------------------------------------
+    // Scans report.flows/report.udp_flows (now fully populated above) for any flow where either
+    // endpoint belongs to a role: "jump_host"-tagged asset -- see JumpHostFlowFinding's own
+    // comment. Purely additive: never touches any FlowVerdict already computed above. Raw-Ethernet
+    // L2 flows (report.ethernet_flows) have no IP addressing at all, so they're never in scope
+    // here -- only a TCP or UDP flow can have an endpoint that "belongs to" an IP-addressed asset.
+    for (const auto& fr : report.flows) {
+        auto client_u32 = parse_ipv4_string(fr.client_ip);
+        auto server_u32 = parse_ipv4_string(fr.server_ip);
+        for (const auto& asset : policy_.assets) {
+            if (!equal_ci(asset.role, "jump_host")) continue;
+            bool client_match = client_u32 && std::any_of(asset.ips.begin(), asset.ips.end(),
+                                                           [&](const CidrBlock& b) { return cidr_contains(b, *client_u32); });
+            bool server_match = !client_match && server_u32 &&
+                                 std::any_of(asset.ips.begin(), asset.ips.end(),
+                                             [&](const CidrBlock& b) { return cidr_contains(b, *server_u32); });
+            if (!client_match && !server_match) continue;
+            JumpHostFlowFinding jf;
+            jf.asset_name = asset.name;
+            jf.jump_host_ip = client_match ? fr.client_ip : fr.server_ip;
+            jf.jump_host_is_client = client_match;
+            jf.client_ip = fr.client_ip;
+            jf.server_ip = fr.server_ip;
+            jf.server_port = fr.server_port;
+            jf.protocol = join_comma(fr.protocols);
+            jf.is_udp = false;
+            jf.verdict = fr.verdict;
+            jf.matched_conduit = fr.matched_conduit;
+            jf.reason = fr.reason;
+            report.jump_host_flows.push_back(std::move(jf));
+        }
+    }
+    for (const auto& ur : report.udp_flows) {
+        auto client_u32 = parse_ipv4_string(ur.client_ip);
+        auto server_u32 = parse_ipv4_string(ur.server_ip);
+        for (const auto& asset : policy_.assets) {
+            if (!equal_ci(asset.role, "jump_host")) continue;
+            bool client_match = client_u32 && std::any_of(asset.ips.begin(), asset.ips.end(),
+                                                           [&](const CidrBlock& b) { return cidr_contains(b, *client_u32); });
+            bool server_match = !client_match && server_u32 &&
+                                 std::any_of(asset.ips.begin(), asset.ips.end(),
+                                             [&](const CidrBlock& b) { return cidr_contains(b, *server_u32); });
+            if (!client_match && !server_match) continue;
+            JumpHostFlowFinding jf;
+            jf.asset_name = asset.name;
+            jf.jump_host_ip = client_match ? ur.client_ip : ur.server_ip;
+            jf.jump_host_is_client = client_match;
+            jf.client_ip = ur.client_ip;
+            jf.server_ip = ur.server_ip;
+            jf.server_port = ur.server_port;
+            jf.protocol = ur.protocol;
+            jf.is_udp = true;
+            jf.verdict = ur.verdict;
+            jf.matched_conduit = ur.matched_conduit;
+            jf.reason = ur.reason;
+            report.jump_host_flows.push_back(std::move(jf));
+        }
+    }
+
     return report;
 }
 
@@ -1302,6 +1407,60 @@ void write_idmz_conduits_text(std::ostream& out, const PolicyReport& report, con
     out << "\n";
 }
 
+// Renders PolicyReport::multi_homed_assets (Phase 6) -- see MultiHomedAssetFinding's own comment.
+// Prints nothing at all (not even a header) when the policy declares no 'assets:' at all, so a
+// policy that never uses this feature renders byte-for-byte identically to before it existed.
+void write_multi_homed_assets_text(std::ostream& out, const PolicyReport& report) {
+    if (report.multi_homed_assets.empty()) return;
+    size_t flagged_count = static_cast<size_t>(std::count_if(
+        report.multi_homed_assets.begin(), report.multi_homed_assets.end(),
+        [](const MultiHomedAssetFinding& f) { return f.flagged; }));
+    out << "MULTI-HOMED ASSETS (" << report.multi_homed_assets.size() << ", " << flagged_count
+        << " flagged):\n";
+    out << "  Declared assets with 2+ IPs, cross-referenced against this policy's own zones/\n";
+    out << "  conduits -- an asset whose IPs span two or more zones with no conduit declared\n";
+    out << "  between them is an undocumented cross-zone bridge (OWASP OT Top 10's \"broken zones\n";
+    out << "  from dual-homed HMIs\" pattern). Purely advisory: never affects Result above.\n";
+    for (const auto& f : report.multi_homed_assets) {
+        out << "  - " << f.name;
+        if (!f.role.empty()) out << " (role: " << f.role << ")";
+        out << ": " << (f.flagged ? "FLAGGED -- undocumented cross-zone bridge" : "ok") << "\n";
+        for (size_t i = 0; i < f.ips.size(); ++i) {
+            out << "      " << f.ips[i] << " -> zone '" << f.zones[i] << "'\n";
+        }
+        for (const auto& pair : f.zone_pairs) {
+            out << "      zone pair '" << pair.zone_a << "' <-> '" << pair.zone_b << "': "
+                << (pair.covered ? "covered by a declared conduit" : "NOT COVERED by any conduit") << "\n";
+        }
+    }
+    out << "\n";
+}
+
+// Renders PolicyReport::jump_host_flows (Phase 6) -- see JumpHostFlowFinding's own comment. Prints
+// nothing at all when the policy declares no 'role: "jump_host"' asset, or when one is declared
+// but no observed flow ever touched it.
+void write_jump_host_flows_text(std::ostream& out, const PolicyReport& report, const Resolver& resolver) {
+    if (report.jump_host_flows.empty()) return;
+    out << "JUMP HOST FLOWS (" << report.jump_host_flows.size() << "):\n";
+    out << "  Every TCP/UDP flow where an endpoint belongs to a declared role: \"jump_host\" asset,\n";
+    out << "  regardless of that flow's own compliant/violation/unclassified status -- remote\n";
+    out << "  access via a jump host is the pattern being watched for here.\n";
+    for (size_t i = 0; i < report.jump_host_flows.size(); ++i) {
+        const JumpHostFlowFinding& f = report.jump_host_flows[i];
+        out << "  [" << (i + 1) << "] asset '" << f.asset_name << "' (" << f.jump_host_ip
+            << (f.jump_host_is_client ? " is client): " : " is server): ") << f.client_ip;
+        if (auto h = resolver.hostname(f.client_ip)) out << " (" << *h << ")";
+        out << " -> " << f.server_ip;
+        if (auto h = resolver.hostname(f.server_ip)) out << " (" << *h << ")";
+        out << ":" << f.server_port << " (" << f.protocol << ", " << (f.is_udp ? "udp" : "tcp") << ")\n";
+        out << "      verdict: " << verdict_name(f.verdict);
+        if (!f.matched_conduit.empty()) out << " (conduit '" << f.matched_conduit << "')";
+        out << "\n";
+        if (!f.reason.empty()) out << "      " << f.reason << "\n";
+    }
+    out << "\n";
+}
+
 }  // namespace
 
 void write_policy_report_text(std::ostream& out, const PolicyReport& report, const Policy& policy,
@@ -1435,6 +1594,9 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
     write_idmz_conduits_text(out, report, policy);
 
     write_notable_protocols_text(out, report, resolver);
+
+    write_multi_homed_assets_text(out, report);
+    write_jump_host_flows_text(out, report, resolver);
 }
 
 void write_policy_report_json(std::ostream& out, const PolicyReport& report, const Policy& policy,
@@ -1744,6 +1906,66 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         }
         out << "\n";
         out << "    }" << (i + 1 < report.udp_flows.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    // Multi-homed assets (Phase 6) -- see MultiHomedAssetFinding's own comment. Appended last,
+    // after every pre-existing field (udp_flows was the prior last field) -- always present as an
+    // array, empty when the policy declares no 'assets:' at all, so a policy that never uses this
+    // feature gets one more (empty) field, same posture every earlier addition to this schema took
+    // when it was new.
+    out << "  \"multi_homed_assets\": [\n";
+    for (size_t i = 0; i < report.multi_homed_assets.size(); ++i) {
+        const MultiHomedAssetFinding& f = report.multi_homed_assets[i];
+        out << "    {\n";
+        out << "      \"name\": \"" << json_escape(f.name) << "\",\n";
+        out << "      \"role\": " << (f.role.empty() ? "null" : ("\"" + json_escape(f.role) + "\"")) << ",\n";
+        out << "      \"ips\": [";
+        for (size_t j = 0; j < f.ips.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(f.ips[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"zones\": [";
+        for (size_t j = 0; j < f.zones.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(f.zones[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"zone_pairs\": [";
+        for (size_t j = 0; j < f.zone_pairs.size(); ++j) {
+            const AssetZonePair& p = f.zone_pairs[j];
+            if (j) out << ", ";
+            out << "{\"zone_a\": \"" << json_escape(p.zone_a) << "\", \"zone_b\": \"" << json_escape(p.zone_b)
+                << "\", \"covered\": " << (p.covered ? "true" : "false") << "}";
+        }
+        out << "],\n";
+        out << "      \"flagged\": " << (f.flagged ? "true" : "false") << "\n";
+        out << "    }" << (i + 1 < report.multi_homed_assets.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    // Jump-host flows (Phase 6) -- see JumpHostFlowFinding's own comment. Appended last, after every
+    // pre-existing field (multi_homed_assets was the prior last field) -- always present as an
+    // array, empty when the policy declares no 'role: \"jump_host\"' asset (or one is declared but
+    // no observed flow ever touched it), so a policy that never uses this feature gets one more
+    // (empty) field.
+    out << "  \"jump_host_flows\": [\n";
+    for (size_t i = 0; i < report.jump_host_flows.size(); ++i) {
+        const JumpHostFlowFinding& f = report.jump_host_flows[i];
+        out << "    {\n";
+        out << "      \"asset_name\": \"" << json_escape(f.asset_name) << "\",\n";
+        out << "      \"jump_host_ip\": \"" << json_escape(f.jump_host_ip) << "\",\n";
+        out << "      \"jump_host_is_client\": " << (f.jump_host_is_client ? "true" : "false") << ",\n";
+        out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
+        out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
+        out << "      \"server_port\": " << f.server_port << ",\n";
+        out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
+        out << "      \"is_udp\": " << (f.is_udp ? "true" : "false") << ",\n";
+        out << "      \"verdict\": \"" << verdict_name(f.verdict) << "\",\n";
+        out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
+        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << "\n";
+        out << "    }" << (i + 1 < report.jump_host_flows.size() ? "," : "") << "\n";
     }
     out << "  ]\n";
     out << "}\n";
