@@ -11524,13 +11524,8 @@ it done as its own patch.
     for the same reason, confirming this is an environment limitation, not
     a regression).
 
-    **Not yet done, tracked for a following increment**: OPC UA identity
-    promotion (`GetEndpoints`/`FindServers`/`CreateSession` already
-    extract `application_uri`/`security_mode`/`security_policy_uri`
-    locally in `src/opcua.cpp` but only stringify them into `OpcUaResult`'s
-    generic `values`, not a named field -- the same small "promote an
-    already-extracted local value" pattern ENIP's own identity fields
-    already went through, just not done yet); S7comm SZL decode (System
+    **Not yet done at the time of this increment**: OPC UA identity
+    promotion (see item 76 below, shipped next); S7comm SZL decode (System
     Status List, ID 0x001C -- genuinely new decoder work, not wiring);
     BACnet ReadPropertyMultiple decode plus Device-object property
     correlation; DNP3 Device Attributes (IEEE 1815 group 0); role
@@ -11539,6 +11534,112 @@ it done as its own patch.
     out of this feature entirely, not deferred -- no protocol this project
     decodes carries a device's own rack/slot number as a field it
     volunteers about itself.
+
+76. **Asset inventory: a real OT asset record -- Grok gap #2, second
+    increment (Phase 2: OPC UA identity promotion).** Direct continuation
+    of item 75 above -- see docs/design/asset-inventory-real-record.md's
+    own Phase 2 section for the scoped plan this followed.
+
+    **`OpcUaMessage` (not `OpcUaResult` -- see that struct's own comment,
+    opcua.hpp) gains `has_identity`/`identity_application_uri`/
+    `identity_security_mode_name`/`identity_security_policy_uri`.**
+    Promoted from a decoded `GetEndpointsResponse`'s FIRST endpoint (index
+    0) when its own endpoint array is non-empty -- `src/opcua.cpp`'s
+    existing `read_endpoint_description`/`read_application_description`
+    (used since `GetEndpointsResponse` was first added as a Tier 1 fully
+    decoded service) already extracted `application_uri`/`security_mode`/
+    `security_policy_uri` locally per endpoint and stringified them into
+    `OpcUaResult`'s generic `values`; this phase additionally keeps the
+    FIRST endpoint's own values as named fields, alongside (not replacing)
+    that existing stringified form. Deliberately just the first endpoint,
+    not necessarily the one this session actually negotiated -- this
+    decoder has no cross-message state to know which one was chosen, but a
+    real server's own ApplicationUri is the same across every endpoint it
+    offers regardless, so this is only an approximation for
+    SecurityMode/SecurityPolicyUri specifically when a server offers more
+    than one endpoint. `identity_security_mode_name` reuses `opcua.cpp`'s
+    own existing `security_mode_name()` helper rather than duplicating it.
+    Threading the new field through required widening
+    `decode_get_endpoints_response_params`'s and `call_tier1_decoder`'s
+    own signatures by one trailing `OpcUaMessage&` parameter each -- a
+    minimal, surgical change touching only the one dispatch branch
+    (`GetEndpointsResponse`) that needed it, not all ~18 `decode_*`
+    function signatures.
+
+    **`InventoryAsset` gains `security_posture`** (a new field, alongside
+    `vendor`/`product`/`firmware_revision`/`serial_number` from item 75 --
+    OPC UA-specific, empty for every other protocol). `AssetInventoryEngine
+    ::observe`'s existing ENIP identity block (item 75) grows an `else if`
+    sibling for `protocol == "opcua" && ... .has_identity`, binding to
+    `dp.src_ip` for the exact same reason ENIP's does (a
+    `GetEndpointsResponse` is sent BY the server being queried, same shape
+    as `ListIdentity`): `vendor` and `product` both get
+    `identity_application_uri` (OPC UA has no separate vendor/model field
+    the way CIP Identity does -- this decoder already treats ApplicationUri
+    as its own "stable identifier" stand-in, per opcua.hpp's own header
+    comment), `firmware_revision`/`serial_number` stay unset, and
+    `security_posture` gets `"SecurityMode=<mode>, Policy=<policy-uri>"`,
+    `"SECURITY FINDING: "`-prefixed when the mode is `"None"` -- mirroring
+    the exact `"SECURITY FINDING: "`-prefixed note convention
+    `opcua.cpp`'s own ActivateSession cleartext-credential check already
+    established (previously the only place in this codebase using that
+    convention). `update_identity()`'s signature grew a trailing
+    `security_posture` parameter, defaulted to `""` for the ENIP call site
+    so item 75's call didn't need updating. Rendered in the text report as
+    a new `security: ...` line (only when non-empty) directly under the
+    existing `identity: ...` line; JSON gains `security_posture` appended
+    after `serial_number` (the prior true-last optional field), same
+    append-only, omit-when-empty convention as item 75's fields.
+
+    **`decode --format json`'s own OPC UA output also gains these fields**
+    (`opcua_has_identity`/`opcua_identity_application_uri`/
+    `opcua_identity_security_mode_name`/`opcua_identity_security_policy_uri`
+    in `write_opcua_json_fields`, `src/output.cpp`) -- independent of
+    `inventory`'s own wiring above, so a `decode` user auditing OPC UA
+    traffic directly sees endpoint identity/security posture without
+    running `inventory` separately. Appended after `opcua_body_hex` (the
+    prior true-last field), same append-only convention. While reviewing
+    this doc's own EtherNet/IP identity paragraph for consistency, found
+    and fixed a pre-existing inaccuracy: it claimed `decode` exposes
+    dedicated `enip_identity_*` JSON fields, but no such fields exist --
+    `decode` only ever surfaces CIP Identity inside the packet's own
+    `summary` text (confirmed via direct output inspection); corrected in
+    docs/USER_GUIDE.md's LIMITATIONS in this same pass.
+
+    **Testing.** `tests/sample_opcua.pcap` already carried a
+    `GetEndpointsResponse` (packet #6, sent BY 192.168.1.10) with two
+    endpoints -- endpoint[0] (`ApplicationUri
+    "urn:conduitscope:sample-plc"`, `SecurityMode=None`, the audit-relevant
+    case this phase exists to surface) and endpoint[1]
+    (`SecurityMode=SignAndEncrypt`) -- confirmed via direct decode
+    inspection before writing any test; no new fixture was needed. Five new
+    CTest cases: `inventory_opcua_identity_wired_into_asset_text`/`_json`
+    (the identity/security lines/fields above),
+    `inventory_opcua_no_identity_fields_omitted_for_client_json` (the HMI
+    side, which never sent a `GetEndpointsResponse`, gets no fields at all
+    -- same omit-never-null convention item 75's ENIP test already
+    establishes), and
+    `opcua_get_endpoints_response_identity_fields_decoded`/
+    `opcua_no_identity_fields_omitted_when_absent` (the same fields on
+    `decode --format json` directly, plus confirming a message with no
+    identity, e.g. `OpenSecureChannelRequest`, still renders
+    `opcua_has_identity: false` with the nested fields correctly omitted).
+    Ran the full existing `opcua`-tagged CTest suite (53 cases after this
+    phase) to confirm the `call_tier1_decoder` signature widening caused
+    zero regressions. Full CTest suite: 2048/2048 (default GCC build, up
+    from the prior 2043); ASan/UBSan (2124/2124, up from 2119) and
+    no-live-capture (2036/2036, up from 2031) configs, plus a clean-room
+    extract-rebuild-test, all re-verified before delivery; MinGW-w64
+    cross-compile confirmed to still compile and link cleanly (same
+    standing no-Wine environment limitation as item 75 -- test execution,
+    not compilation, is what can't run here).
+
+    **Not yet done, tracked for a following increment**: S7comm SZL
+    decode, BACnet ReadPropertyMultiple decode plus Device-object property
+    correlation, DNP3 Device Attributes, role classification, tag/point/DB
+    touch summarization, and CSV/CMDB, STIX/TAXII-lite, and
+    firewall-ACL-draft export -- unchanged from item 75's own list, minus
+    OPC UA identity, which this item completed.
 
 ### Protocols not covered at all
 

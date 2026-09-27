@@ -193,7 +193,8 @@ void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPack
 
 void AssetInventoryEngine::update_identity(const std::string& ip, const std::string& vendor,
                                             const std::string& product, const std::string& firmware_revision,
-                                            const std::string& serial_number) {
+                                            const std::string& serial_number,
+                                            const std::string& security_posture) {
     auto it = assets_.find(ip);
     if (it == assets_.end()) return;  // see this method's own comment (asset_inventory.hpp)
     AssetState& a = it->second;
@@ -201,6 +202,7 @@ void AssetInventoryEngine::update_identity(const std::string& ip, const std::str
     if (a.product.empty()) a.product = product;
     if (a.firmware_revision.empty()) a.firmware_revision = firmware_revision;
     if (a.serial_number.empty()) a.serial_number = serial_number;
+    if (a.security_posture.empty()) a.security_posture = security_posture;
 }
 
 void AssetInventoryEngine::record_notable_protocol(const std::string& key, const std::string& protocol,
@@ -458,6 +460,19 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         serial << "0x" << std::hex << identity.identity_serial_number;
         update_identity(dp.src_ip, "Vendor ID " + std::to_string(identity.identity_vendor_id),
                          identity.identity_product_name, identity.identity_revision, serial.str());
+    } else if (protocol == "opcua" && dp.result && dp.result->as<OpcUaResult>().first.has_identity) {
+        // OPC UA's GetEndpointsResponse is sent BY the server being queried (same shape as ENIP's
+        // ListIdentity response above) -- see OpcUaMessage::has_identity's own comment (opcua.hpp)
+        // for why this is only the FIRST endpoint in that response, not necessarily the one this
+        // session actually negotiated.
+        const OpcUaMessage& identity = dp.result->as<OpcUaResult>().first;
+        std::string posture = "SecurityMode=" + identity.identity_security_mode_name +
+                               ", Policy=" + identity.identity_security_policy_uri;
+        if (identity.identity_security_mode_name == "None") {
+            posture = "SECURITY FINDING: " + posture + " (endpoint accepts no security at all)";
+        }
+        update_identity(dp.src_ip, identity.identity_application_uri, identity.identity_application_uri,
+                         /*firmware_revision=*/"", /*serial_number=*/"", posture);
     }
 
     if (client_is_bcast || server_is_bcast) return;
@@ -526,6 +541,7 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ia.product = as.product;
         ia.firmware_revision = as.firmware_revision;
         ia.serial_number = as.serial_number;
+        ia.security_posture = as.security_posture;
         report.assets.push_back(std::move(ia));
         (void)addr;
     }
@@ -726,6 +742,7 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
             if (!a.serial_number.empty()) out << "  serial=" << a.serial_number;
             out << "\n";
         }
+        if (!a.security_posture.empty()) out << "      security: " << a.security_posture << "\n";
     }
     out << "\n";
 
@@ -818,6 +835,9 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
             out << ",\n      \"firmware_revision\": \"" << json_escape(a.firmware_revision) << "\"";
         }
         if (!a.serial_number.empty()) out << ",\n      \"serial_number\": \"" << json_escape(a.serial_number) << "\"";
+        if (!a.security_posture.empty()) {
+            out << ",\n      \"security_posture\": \"" << json_escape(a.security_posture) << "\"";
+        }
         out << "\n";
         out << "    }" << (i + 1 < report.assets.size() ? "," : "") << "\n";
     }

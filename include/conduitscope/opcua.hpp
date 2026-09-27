@@ -418,6 +418,29 @@ struct OpcUaMessage {
     bool has_header = false;  // RequestHeader/ResponseHeader was itself decoded (Tier 1 and Tier 2 alike)
     OpcUaServiceHeader header;
 
+    // Passively-inferred device/application identity (Grok gap #2 -- see
+    // docs/reviews/2026-09-grok-ics-ot-improvement-areas.md) -- promoted from a decoded
+    // GetEndpointsResponse's FIRST EndpointDescription (index 0) when its own endpoint array is
+    // non-empty. Named identity_* to mirror EnipFrame's own identity_* convention (enip.hpp)
+    // despite the different source service -- this file's own "Service identification" comment
+    // above already frames GetEndpoints as "an OPC UA analog of ... EtherNet/IP ListIdentity."
+    // `identity_application_uri` is ApplicationDescription::ApplicationUri, this decoder's own
+    // "stable identifier" (see read_application_description's comment in opcua.cpp -- OPC UA has
+    // no separate vendor/product/model the way CIP Identity or S7 SZL do). `identity_security_
+    // mode_name`/`identity_security_policy_uri` are the SAME endpoint's own MessageSecurityMode/
+    // SecurityPolicyUri (is this endpoint accepting no security at all?) -- a DIFFERENT field from
+    // `security_policy_uri` above, which is the SecureConversation layer's own asymmetric-
+    // handshake security policy for THIS message, not an endpoint the server merely advertised.
+    // Deliberately just the first endpoint, not the one this session actually negotiated (this
+    // decoder has no cross-message state to know which one was chosen) -- a real server's
+    // ApplicationUri is the same across every endpoint it offers regardless, so this is only an
+    // approximation for security_mode/security_policy_uri specifically when a server offers more
+    // than one; see AssetInventoryEngine::observe's own comment for how this is used.
+    bool has_identity = false;
+    std::string identity_application_uri;
+    std::string identity_security_mode_name;
+    std::string identity_security_policy_uri;
+
     std::vector<std::string> values;  // Tier 1 service-specific decoded fields, "key=value" each
 
     bool body_shown_as_hex = false;

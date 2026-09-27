@@ -719,7 +719,7 @@ void decode_get_endpoints_request_params(Cursor& c, std::vector<std::string>& va
     values.push_back("endpoint-url=" + url.value_or(""));
 }
 
-void decode_get_endpoints_response_params(Cursor& c, std::vector<std::string>& values) {
+void decode_get_endpoints_response_params(Cursor& c, std::vector<std::string>& values, OpcUaMessage& msg) {
     int32_t n = read_array_count(c);
     values.push_back("endpoint-count=" + std::to_string(n));
     for (int32_t i = 0; i < n; ++i) {
@@ -727,6 +727,14 @@ void decode_get_endpoints_response_params(Cursor& c, std::vector<std::string>& v
         values.push_back("endpoint[" + std::to_string(i) + "]=" + e.endpoint_url +
                           " (security=" + security_mode_name(e.security_mode) +
                           ", policy=" + e.security_policy_uri + ")");
+        // Identity promotion (Grok gap #2) -- first endpoint only, see OpcUaMessage::has_identity's
+        // own comment (opcua.hpp) for why.
+        if (i == 0) {
+            msg.has_identity = true;
+            msg.identity_application_uri = e.server.application_uri;
+            msg.identity_security_mode_name = security_mode_name(e.security_mode);
+            msg.identity_security_policy_uri = e.security_policy_uri;
+        }
     }
 }
 
@@ -1085,11 +1093,11 @@ const ServiceInfo* lookup_service(uint32_t id) {
 // RequestHeader/ResponseHeader (confirmed against python-opcua's own generated bindings -- see
 // this file's header comment), so they fall through with nothing further to decode.
 void call_tier1_decoder(const std::string& name, Cursor& c, std::vector<std::string>& values,
-                         std::vector<std::string>& notes, bool redact) {
+                         std::vector<std::string>& notes, bool redact, OpcUaMessage& msg) {
     if (name == "OpenSecureChannelRequest") decode_open_secure_channel_request_params(c, values);
     else if (name == "OpenSecureChannelResponse") decode_open_secure_channel_response_params(c, values);
     else if (name == "GetEndpointsRequest") decode_get_endpoints_request_params(c, values);
-    else if (name == "GetEndpointsResponse") decode_get_endpoints_response_params(c, values);
+    else if (name == "GetEndpointsResponse") decode_get_endpoints_response_params(c, values, msg);
     else if (name == "FindServersRequest") decode_find_servers_request_params(c, values);
     else if (name == "FindServersResponse") decode_find_servers_response_params(c, values);
     else if (name == "CreateSessionRequest") decode_create_session_request_params(c, values);
@@ -1287,7 +1295,7 @@ std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload, bool redac
                                                        : read_request_header(bc, msg.values);
                         if (svc->full_decode) {
                             msg.service_body_decoded = true;
-                            call_tier1_decoder(msg.service_name, bc, msg.values, msg.notes, redact);
+                            call_tier1_decoder(msg.service_name, bc, msg.values, msg.notes, redact, msg);
                             if (bc.remaining() > 0) {
                                 msg.notes.push_back(std::to_string(bc.remaining()) +
                                                      " trailing byte(s) after this service's own "

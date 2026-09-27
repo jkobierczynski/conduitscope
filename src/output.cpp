@@ -3507,6 +3507,21 @@ void write_opcua_json_fields(std::ostream& out, const OpcUaMessage& m) {
         out << "    \"opcua_body_length\": " << m.body_length << ",\n";
         out << "    \"opcua_body_hex\": \"" << json_escape(m.body_hex) << "\",\n";
     }
+    // Appended after body_hex (the prior true-last field), same append-only convention every other
+    // field above already follows. Grok gap #2 phase 2 (docs/design/asset-inventory-real-record.md)
+    // -- promoted from a GetEndpointsResponse's first endpoint, see OpcUaMessage::has_identity's own
+    // comment (opcua.hpp) for exactly what these mean and why only the first endpoint. Surfaced here
+    // too, independent of the `inventory` command's own identity wiring (asset_inventory.cpp), so a
+    // `decode --format json` user auditing OPC UA traffic directly sees the same endpoint identity/
+    // security-posture fields without having to run `inventory` separately.
+    out << "    \"opcua_has_identity\": " << (m.has_identity ? "true" : "false") << ",\n";
+    if (m.has_identity) {
+        out << "    \"opcua_identity_application_uri\": \"" << json_escape(m.identity_application_uri) << "\",\n";
+        out << "    \"opcua_identity_security_mode_name\": \"" << json_escape(m.identity_security_mode_name)
+            << "\",\n";
+        out << "    \"opcua_identity_security_policy_uri\": \""
+            << json_escape(m.identity_security_policy_uri) << "\",\n";
+    }
 }
 
 // Zero-flat-field migration (extra-reader batch): the MQTT analog of write_opcua_json_fields

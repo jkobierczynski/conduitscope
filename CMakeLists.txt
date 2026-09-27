@@ -3861,6 +3861,23 @@ add_test(NAME opcua_get_endpoints_response_endpoint_array_decoded
 set_tests_properties(opcua_get_endpoints_response_endpoint_array_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"GetEndpointsResponse\",.*\"endpoint-count=2\", \"endpoint\\[0\\]=opc.tcp://192.168.1.10:4840/UA/PLC \\(security=None, policy=http://opcfoundation.org/UA/SecurityPolicy#None\\)\", \"endpoint\\[1\\]=opc.tcp://192.168.1.10:4840/UA/PLC \\(security=SignAndEncrypt, policy=http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256\\)\"\\],")
 
+# Grok gap #2 phase 2: the same GetEndpointsResponse's first endpoint (index 0, security=None) also
+# promotes onto named opcua_identity_* fields (independent of the inventory command's own identity
+# wiring -- see write_opcua_json_fields' own comment in output.cpp).
+add_test(NAME opcua_get_endpoints_response_identity_fields_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_get_endpoints_response_identity_fields_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"GetEndpointsResponse\",.*\"opcua_has_identity\": true,\n *\"opcua_identity_application_uri\": \"urn:conduitscope:sample-plc\",\n *\"opcua_identity_security_mode_name\": \"None\",\n *\"opcua_identity_security_policy_uri\": \"http://opcfoundation\\.org/UA/SecurityPolicy#None\",")
+
+# opcua_has_identity itself always renders (true or false) -- unlike InventoryAsset's optional
+# vendor/product fields, it's not omit-on-empty -- but the nested identity_* fields underneath it
+# must still be entirely absent when it's false (e.g. on an OpenSecureChannelRequest, which carries
+# no identity at all).
+add_test(NAME opcua_no_identity_fields_omitted_when_absent
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_no_identity_fields_omitted_when_absent PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"OpenSecureChannelRequest\",.*\"opcua_has_identity\": false,\n *\"notes\":")
+
 add_test(NAME opcua_find_servers_response_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text)
 set_tests_properties(opcua_find_servers_response_decoded PROPERTIES
@@ -9604,6 +9621,37 @@ add_test(NAME inventory_enip_no_identity_fields_omitted_for_client_json
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip.pcap")
 set_tests_properties(inventory_enip_no_identity_fields_omitted_for_client_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-14 22:46:48.008000Z\"\n *\\}")
+
+# ---------------------------------------------------------------------------------------------
+# Grok gap #2 phase 2: OPC UA identity promotion. tests/sample_opcua.pcap's own GetEndpointsResponse
+# (packet #6, sent BY 192.168.1.10, the server) carries two endpoints -- endpoint[0]
+# (ApplicationUri "urn:conduitscope:sample-plc", SecurityMode=None) and endpoint[1]
+# (SecurityMode=SignAndEncrypt) -- OpcUaMessage::has_identity promotes only the FIRST (index 0), the
+# audit-relevant "no security at all" case this phase exists to surface. vendor/product both get the
+# same ApplicationUri (OPC UA has no separate vendor/model field -- see InventoryAsset::vendor's own
+# comment), firmware_revision/serial_number stay unset (omitted, never emitted as "" or null, same
+# convention the ENIP tests above already establish), and security_posture gets the
+# "SECURITY FINDING: "-prefixed note mirroring opcua.cpp's own ActivateSession cleartext-credential
+# note convention.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME inventory_opcua_identity_wired_into_asset_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(inventory_opcua_identity_wired_into_asset_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10 .*\\[server\\]  opcua.*identity:  vendor=urn:conduitscope:sample-plc  product=\"urn:conduitscope:sample-plc\"\n *security: SECURITY FINDING: SecurityMode=None, Policy=http://opcfoundation\\.org/UA/SecurityPolicy#None \\(endpoint accepts no security at all\\)")
+
+add_test(NAME inventory_opcua_identity_wired_into_asset_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(inventory_opcua_identity_wired_into_asset_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.10\",.*\"vendor\": \"urn:conduitscope:sample-plc\",\n *\"product\": \"urn:conduitscope:sample-plc\",\n *\"security_posture\": \"SECURITY FINDING: SecurityMode=None, Policy=http://opcfoundation\\.org/UA/SecurityPolicy#None \\(endpoint accepts no security at all\\)\"")
+
+# The client side (192.168.1.50) never sent a GetEndpointsResponse -- no identity of its own -- so
+# its vendor/product/security_posture fields must be omitted entirely, same omit-never-null
+# convention the ENIP client-side test above already establishes.
+add_test(NAME inventory_opcua_no_identity_fields_omitted_for_client_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(inventory_opcua_no_identity_fields_omitted_for_client_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-15 00:13:24.000000Z\"\n *\\}")
 
 # ---------------------------------------------------------------------------------------------
 # Tier 1 "IT protocols an OT auditor flags" recognition (it_protocols.hpp/cpp) -- RDP, VNC,

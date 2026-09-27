@@ -452,18 +452,23 @@ last-seen timestamps (from the pcap's own per-packet capture time -- the
 min/max across every packet this IP appeared in). Where a protocol's own
 identity-bearing message was actually observed, an asset also carries
 passively-inferred **vendor**/**product**/**firmware revision**/**serial
-number** fields (Grok gap #2's "turn inventory into a real OT asset
-record" ask) -- currently wired for **EtherNet/IP** only, from a decoded
-CIP Identity `ListIdentity` response (`vendor` is a raw numeric CIP Vendor
-ID, e.g. `Vendor ID 1`, since this project has no CIP Vendor ID -> name
-table -- ODVA's registry runs to several thousand entries, and a full
-lookup table is out of scope for this pass; see LIMITATIONS). Every other
-protocol here (S7comm, BACnet/IP, OPC UA, DNP3, ...) leaves these four
-fields empty for now -- populating them (S7comm SZL, BACnet
-ReadPropertyMultiple, OPC UA GetEndpoints, DNP3 Device Attributes) is
-tracked as follow-on work in docs/DEVELOPMENT.md's ROADMAP. First-seen/
-last-seen, by contrast, are populated for every asset and edge regardless
-of protocol. Every distinct `(protocol, client, server, server port)`
+number** fields, plus an OPC UA-specific **security posture** note (Grok
+gap #2's "turn inventory into a real OT asset record" ask) -- currently
+wired for **EtherNet/IP** and **OPC UA**. EtherNet/IP's comes from a
+decoded CIP Identity `ListIdentity` response (`vendor` is a raw numeric CIP
+Vendor ID, e.g. `Vendor ID 1`, since this project has no CIP Vendor ID ->
+name table -- ODVA's registry runs to several thousand entries, and a full
+lookup table is out of scope for this pass; see LIMITATIONS). OPC UA's
+comes from a decoded `GetEndpointsResponse`'s first endpoint: `vendor`/
+`product` both get that endpoint's own ApplicationUri (OPC UA has no
+separate vendor/model field), `firmware revision`/`serial number` stay
+empty, and the security posture note records that endpoint's own
+SecurityMode/SecurityPolicyUri, flagged `SECURITY FINDING:` when it accepts
+no security at all. Every other protocol here (S7comm, BACnet/IP, DNP3,
+...) leaves these fields empty for now -- populating them (S7comm SZL,
+BACnet ReadPropertyMultiple, DNP3 Device Attributes) is tracked as
+follow-on work in docs/DEVELOPMENT.md's ROADMAP. First-seen/last-seen, by
+contrast, are populated for every asset and edge regardless of protocol. Every distinct `(protocol, client, server, server port)`
 tuple becomes one **edge** (also carrying its own first-seen/last-seen) --
 deliberately coarser than `policy validate`'s own per-TCP-session
 `FlowReport`, since an inventory answers "does X talk to Y over protocol
@@ -551,6 +556,37 @@ ASSETS (2):
       first seen: 2023-11-14 22:46:40.000000Z  last seen: 2023-11-14 22:46:48.008000Z
 ...
 ```
+
+OPC UA identity works the same way, promoted from a `GetEndpointsResponse`'s
+first endpoint (`tests/sample_opcua.pcap` has two -- the first offering
+`SecurityMode=None`). Since OPC UA has no separate vendor/model field the
+way CIP Identity does, `vendor`/`product` both get that endpoint's own
+ApplicationUri; there's no `firmware`/`serial` for OPC UA, but a
+`security:` line instead records that same endpoint's SecurityMode/
+SecurityPolicyUri, `SECURITY FINDING:`-prefixed when it accepts no
+security at all -- the same "SECURITY FINDING: "-prefixed convention this
+decoder's own ActivateSession cleartext-credential check already uses (see
+`docs/PROTOCOL_COVERAGE.md`'s OPC UA "Identity token decode" section):
+
+```sh
+$ conduitscope inventory -r tests/sample_opcua.pcap
+...
+ASSETS (2):
+  192.168.1.10  00:0c:29:aa:bb:cc  [server]  opcua  (32 packet(s))
+      first seen: 2023-11-15 00:10:00.000000Z  last seen: 2023-11-15 00:13:24.000000Z
+      identity:  vendor=urn:conduitscope:sample-plc  product="urn:conduitscope:sample-plc"
+      security: SECURITY FINDING: SecurityMode=None, Policy=http://opcfoundation.org/UA/SecurityPolicy#None (endpoint accepts no security at all)
+  192.168.1.50  00:0c:29:11:22:33  [client]  opcua  (32 packet(s))
+      first seen: 2023-11-15 00:10:00.000000Z  last seen: 2023-11-15 00:13:24.000000Z
+...
+```
+
+The same `opcua_identity_*` fields (`opcua_has_identity`,
+`opcua_identity_application_uri`, `opcua_identity_security_mode_name`,
+`opcua_identity_security_policy_uri`) are also surfaced directly on
+`decode --format json`'s own OPC UA output, independent of `inventory` --
+see the OPC UA endpoint/security-posture inventory example further below
+in this guide.
 
 #### Closing the loop
 
@@ -4495,25 +4531,35 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   same fallback, for the exact same reason.
 - **`inventory`'s passively-inferred device identity (vendor/product/
   firmware revision/serial number -- Grok gap #2) is wired for EtherNet/IP
-  only so far.** A `ListIdentity` response's CIP Identity object is already
-  fully decoded (vendor ID/device type/product code/revision/serial number/
-  product name -- see `decode`'s own `enip_identity_*` fields), so this was
-  free to wire straight through; the `vendor` field itself stays a raw
-  numeric CIP Vendor ID (e.g. `Vendor ID 1`), never a resolved name, since
-  this project has no CIP Vendor ID -> name lookup table (ODVA's own
-  registry runs to several thousand entries; building and maintaining one
-  is out of scope for this pass). S7comm (System Status List/SZL), BACnet/IP
-  (a Device object's Vendor-Name/Model-Name/Firmware-Revision read via
-  ReadProperty(Multiple)), OPC UA (`GetEndpoints`'s own ApplicationUri/
-  SecurityMode), and DNP3 (IEEE 1815 Device Attributes) all carry
-  comparable identity data on the wire but none of it is wired into
-  `inventory` yet -- tracked as follow-on work in docs/DEVELOPMENT.md's
-  ROADMAP. Rack/slot (also asked for in Grok's original review) is scoped
-  out entirely: no protocol this project decodes carries a device's own
-  rack/slot number as a field it volunteers about itself (CIP does have a
-  path-addressable rack/slot concept, but only in an explicit-messaging
-  *request path* a scanner already has to know out-of-band -- there is
-  nothing to passively infer there).
+  and OPC UA so far.** A `ListIdentity` response's CIP Identity object is
+  already fully decoded (vendor ID/device type/product code/revision/serial
+  number/product name); `decode` itself only ever surfaces this inside the
+  packet's own `summary` text (`"ListIdentity; identity: vendor=1
+  device_type=12 ... name=\"...\""` -- no dedicated `enip_identity_*` JSON
+  fields exist), so `inventory`'s own wiring reads the underlying decoded
+  struct directly rather than re-parsing that text. The `vendor` field
+  itself stays a raw numeric CIP Vendor ID (e.g. `Vendor ID 1`), never a
+  resolved name, since this project has no CIP Vendor ID -> name lookup
+  table (ODVA's own registry runs to several thousand entries; building and
+  maintaining one is out of scope for this pass). OPC UA's `GetEndpoints`
+  response promotes its first endpoint's ApplicationUri (into BOTH `vendor`
+  and `product` -- OPC UA has no separate vendor/model field) and its
+  SecurityMode/SecurityPolicyUri (into a `security_posture`/`security:`
+  line, `SECURITY FINDING:`-prefixed when SecurityMode is `None`) --
+  UNLIKE EtherNet/IP, these OPC UA identity fields ARE also surfaced
+  directly on `decode --format json`'s own output, as
+  `opcua_has_identity`/`opcua_identity_*` (see the OPC UA endpoint/
+  security-posture inventory example further below in this guide). S7comm
+  (System Status List/SZL), BACnet/IP (a Device object's Vendor-Name/Model-
+  Name/Firmware-Revision read via ReadProperty(Multiple)), and DNP3 (IEEE
+  1815 Device Attributes) all carry comparable identity data on the wire
+  but none of it is wired into `inventory` yet -- tracked as follow-on work
+  in docs/DEVELOPMENT.md's ROADMAP. Rack/slot (also asked for in Grok's
+  original review) is scoped out entirely: no protocol this project
+  decodes carries a device's own rack/slot number as a field it volunteers
+  about itself (CIP does have a path-addressable rack/slot concept, but
+  only in an explicit-messaging *request path* a scanner already has to
+  know out-of-band -- there is nothing to passively infer there).
 - **Direction/initiator determination is, in general, only ever as good as
   the evidence available for a given flow -- it can't always be established
   with certainty, only approximately.** "Approximately" has one precise
@@ -5353,6 +5399,21 @@ still accepting SecurityMode "None":
 conduitscope decode -r capture.pcap --protocol opcua -T json \
   | jq -r '[.[] | select(.opcua_service_name == "GetEndpointsResponse") | .opcua_values[] | select(startswith("endpoint["))] | unique[]'
 ```
+
+That same GetEndpointsResponse's FIRST endpoint is also promoted onto
+named `opcua_identity_application_uri`/`opcua_identity_security_mode_name`/
+`opcua_identity_security_policy_uri` fields, gated by `opcua_has_identity`
+-- a quick way to flag every server whose first-offered endpoint has no
+security, without parsing the `opcua_values` strings above:
+
+```sh
+conduitscope decode -r capture.pcap --protocol opcua -T json \
+  | jq -r '.[] | select(.opcua_has_identity == true and .opcua_identity_security_mode_name == "None") |
+           "\(.src_ip): \(.opcua_identity_application_uri)"'
+```
+
+`inventory`'s own report surfaces the same finding per-asset (not
+per-packet) -- see the INVENTORY section above.
 
 Find every OPC UA ActivateSession request that placed a UserName/Password
 credential on the wire in cleartext -- this decoder's own deliberate

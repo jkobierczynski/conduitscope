@@ -1,14 +1,14 @@
 # Asset inventory: a real OT asset record -- design document
 
-Status: **Phases 0-1 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
-dispatch) implemented and shipped.** Phases 2-10 (OPC UA identity promotion, S7comm SZL decode,
+Status: **Phases 0-2 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
+dispatch, OPC UA identity promotion) implemented and shipped.** Phases 3-10 (S7comm SZL decode,
 BACnet ReadPropertyMultiple decode, DNP3 Device Attributes decode, role classification, tag/point/DB
 touch summarization, CSV/CMDB export, STIX/TAXII-lite export, firewall-ACL-draft export) are scoped
 below but not yet started. Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
-fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP item 75 for the
-changelog-style writeup of what shipped and its exact verification numbers.
+fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76 for
+the changelog-style writeup of what shipped and its exact verification numbers.
 
 ## Context
 
@@ -102,19 +102,40 @@ new code: S7comm-Plus rides the same TCP/102/TPKT/COTP transport classic S7comm 
 by the generic TCP handshake/port-heuristic branch every TCP-based protocol here shares.
 `AssetInventoryEngine` is now an eleven-protocol feature.
 
-## Phase 2 -- OPC UA identity promotion
+## Phase 2 -- OPC UA identity promotion (shipped)
 
-Add `application_uri`, `security_mode_name`, `security_policy_uri` (from the endpoint the traffic
-actually used, falling back to "first endpoint seen" when ambiguous) as named fields on `OpcUaResult`,
-alongside (not replacing) the existing stringified `values` entries -- mirroring exactly how ENIP
-already exposes both a human summary line and structured `identity_*` fields side by side. Source:
-`src/opcua.cpp`'s existing `read_application_description`/`read_endpoint_description` already extract
-these values locally; this phase only changes where they end up. Wire into `InventoryAsset::vendor`
-using `application_uri` as the vendor/product stand-in (OPC UA has no separate vendor/model -- the
-decoder's own header comment already treats ApplicationUri as "the stable identifier this decoder
-surfaces instead" of ApplicationName/ProductUri) plus a new informational `security_posture` note
-(e.g. "SecurityMode=None" flagged the same audit-relevant way the decoder's own header comment frames
-it).
+Added `has_identity`/`identity_application_uri`/`identity_security_mode_name`/
+`identity_security_policy_uri` as named fields on `OpcUaMessage` (not `OpcUaResult` itself, which only
+ever has `summary`/`notes`/`first` -- these needed to go on the per-chunk struct `first` wraps, the
+same place ENIP's own `identity_*` fields live on `EnipFrame` rather than `EnipResult`; a precise
+implementation-location refinement discovered during implementation, not a change to this phase's
+intent), alongside (not replacing) the existing stringified `values` entries -- mirroring exactly how
+ENIP already exposes both a human summary line and structured `identity_*` fields side by side.
+Source: `src/opcua.cpp`'s existing `read_application_description`/`read_endpoint_description` (used
+by `decode_get_endpoints_response_params`) already extracted these values locally; this phase only
+changed where they end up, threading a new `OpcUaMessage&` parameter through
+`decode_get_endpoints_response_params` and `call_tier1_decoder` to do it. Promoted from the FIRST
+endpoint only (index 0) -- not "the endpoint the traffic actually used" as originally scoped, since
+this decoder has no cross-message state to know which endpoint a later session actually negotiated;
+a real server's own ApplicationUri is the same across every endpoint regardless, so this is only an
+approximation for SecurityMode/SecurityPolicyUri specifically when a server offers more than one
+endpoint -- documented plainly on `OpcUaMessage::has_identity`'s own comment rather than attempting
+the originally-scoped "match the session" tracking, which was out of proportion to this phase's size.
+
+Wired into `InventoryAsset::vendor`/`product` using `application_uri` as the vendor/product stand-in
+for both (OPC UA has no separate vendor/model -- the decoder's own header comment already treats
+ApplicationUri as "the stable identifier this decoder surfaces instead" of ApplicationName/
+ProductUri), plus a new `InventoryAsset::security_posture` field (not folded into `notes`, since
+`InventoryAsset` has no generic notes list) -- `"SecurityMode=<mode>, Policy=<policy>"`,
+`"SECURITY FINDING: "`-prefixed when SecurityMode is `"None"`, mirroring the exact same-named
+convention `opcua.cpp`'s own ActivateSession cleartext-credential check already established (the only
+other place in this codebase using it). Also surfaced directly on `decode --format json`'s own OPC UA
+output (`write_opcua_json_fields`, `src/output.cpp`), independent of `inventory`'s wiring, since OPC
+UA (unlike ENIP) is a zero-flat-field-migrated protocol whose `decode` JSON output already renders
+every other `OpcUaMessage` field directly. Fixture: `tests/sample_opcua.pcap`'s own
+`GetEndpointsResponse` already had exactly the scenario needed (two endpoints, the first with
+`SecurityMode=None`) -- no new fixture required. See `docs/DEVELOPMENT.md`'s ROADMAP item 76 for the
+full changelog writeup and exact test/verification counts.
 
 ## Phase 3 -- S7comm SZL decode + wiring
 
@@ -206,7 +227,7 @@ message type (SZL, BACnet RPM, DNP3 Device Attributes).
 LIMITATIONS, `docs/DEVELOPMENT.md`'s ROADMAP, and `docs/PROTOCOL_COVERAGE.md` (for newly-decoded
 message types) all updated in the same phase as the code, per this project's standing convention.
 
-## Open questions for Jurgen (not blocking Phases 0-1, which already shipped)
+## Open questions for Jurgen (not blocking Phases 0-2, which already shipped)
 
 1. Rack/slot: confirmed nothing passively discoverable exists for it in any protocol this project
    decodes -- OK to scope out entirely (as this plan now does), or does Jurgen want CIP's
@@ -222,7 +243,8 @@ message types) all updated in the same phase as the code, per this project's sta
   `InventoryAsset`/`InventoryEdge` field, `observe()`/`finish()` wiring per protocol, new report
   writers (text/JSON/CSV/STIX/ACL).
 - `include/conduitscope/enip.hpp` -- already has the fields Phase 1 needed; read-only reference.
-- `include/conduitscope/opcua.hpp` / `src/opcua.cpp` -- Phase 2's `OpcUaResult` field promotion.
+- `include/conduitscope/opcua.hpp` / `src/opcua.cpp` -- Phase 2's `OpcUaMessage` field promotion
+  (shipped); `src/output.cpp`'s `write_opcua_json_fields` also gained the same fields.
 - `include/conduitscope/s7comm.hpp` / `src/s7comm.cpp` -- Phase 3's new SZL decode.
 - `include/conduitscope/bacnet.hpp` / `src/bacnet.cpp` -- Phase 4's new ReadPropertyMultiple decode.
 - `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode.

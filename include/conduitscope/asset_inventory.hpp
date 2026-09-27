@@ -131,6 +131,19 @@ struct InventoryAsset {
     std::string firmware_revision;  // e.g. EtherNet/IP CIP Identity's own "major.minor" revision
     std::string serial_number;      // rendered as "0x" + hex, matching this codebase's own existing
                                      // text-summary convention for this exact field (enip.cpp)
+
+    // OPC UA-specific: for OPC UA, `vendor`/`product` above are BOTH set to the same
+    // GetEndpointsResponse's first-endpoint ApplicationUri (OPC UA has no separate vendor/model the
+    // way CIP Identity or S7 SZL do -- see opcua.hpp's own OpcUaMessage::identity_application_uri
+    // comment for why ApplicationUri is this decoder's own stand-in "stable identifier"), and
+    // `firmware_revision`/`serial_number` above are left empty (OPC UA's GetEndpoints exchange
+    // carries neither). This field instead records that SAME endpoint's own security posture --
+    // "SecurityMode=<mode>, Policy=<policy-uri>" -- prefixed "SECURITY FINDING: " when the mode is
+    // "None" (an endpoint accepting no security at all), the same "SECURITY FINDING:"-prefixed note
+    // convention opcua.cpp's own ActivateSession cleartext-credential check already established --
+    // see AssetInventoryEngine::observe's own comment for exactly how this is populated. Empty for
+    // every other protocol; first-identity-seen wins here too, same as vendor/product above.
+    std::string security_posture;
 };
 
 // One aggregated, directional communication: `client_ip` -> `server_ip`, every packet of ONE
@@ -341,13 +354,20 @@ public:
     // call, regardless of protocol -- see those fields' own comments (asset_inventory.hpp).
     //
     // Passively-inferred device identity (InventoryAsset::vendor/product/firmware_revision/
-    // serial_number -- Grok gap #2): currently populated for EtherNet/IP only, from a decoded
-    // ListIdentity response (EnipFrame::has_identity, see enip.hpp) -- the IP that actually SENT
-    // that response packet (DecodedPacket::src_ip on the specific packet carrying it, not simply
-    // "whichever side this session's handshake/port-heuristic called the server," since a
-    // ListIdentity exchange is itself the thing deciding which side is the real device) gets its
-    // identity fields populated, first-identity-seen wins. Every other protocol leaves these fields
-    // empty for now -- see docs/DEVELOPMENT.md's ROADMAP for the remaining phases (OPC UA, S7comm
+    // serial_number/security_posture -- Grok gap #2): currently populated for two protocols, both
+    // bound to DecodedPacket::src_ip on the specific packet carrying the identity-bearing response
+    // (not simply "whichever side this session's handshake/port-heuristic called the server," since
+    // that exchange is itself the thing deciding which side is the real device):
+    //   - EtherNet/IP, from a decoded ListIdentity response (EnipFrame::has_identity, see enip.hpp).
+    //   - OPC UA, from a decoded GetEndpointsResponse's first endpoint (OpcUaMessage::has_identity,
+    //     see opcua.hpp) -- `vendor`/`product` both get that endpoint's own ApplicationUri (OPC UA
+    //     has no separate vendor/model field the way CIP Identity does), `firmware_revision`/
+    //     `serial_number` stay empty, and `security_posture` records that same endpoint's own
+    //     SecurityMode/SecurityPolicyUri, "SECURITY FINDING: "-prefixed when SecurityMode is "None"
+    //     (an endpoint accepting no security at all) -- see InventoryAsset::security_posture's own
+    //     comment.
+    // First-identity-seen wins for every field above, per asset. Every other protocol leaves these
+    // fields empty for now -- see docs/DEVELOPMENT.md's ROADMAP for the remaining phases (S7comm
     // SZL, BACnet ReadPropertyMultiple, DNP3 Device Attributes) that will populate them further.
     void observe(const DecodedPacket& packet);
 
@@ -369,6 +389,7 @@ private:
                                        // guards the min/max comparison on every packet after that
         std::string vendor, product, firmware_revision, serial_number;  // see InventoryAsset's own
                                                                           // comment
+        std::string security_posture;  // see InventoryAsset::security_posture's own comment
     };
 
     struct EdgeState {
@@ -399,14 +420,16 @@ private:
                        bool is_client_role);
 
     // Populates an already-existing asset's identity fields (vendor/product/firmware_revision/
-    // serial_number) -- first-identity-seen wins, mirroring has_mac/mac's own convention (see
-    // AssetState's own comment). A no-op if `ip` has no asset entry yet (can only happen if `ip` was
-    // itself a broadcast/multicast address, which update_asset never creates an entry for -- see
-    // looks_like_broadcast_or_multicast's own comment; a real device sending its own identity
-    // response is never a broadcast source in practice, but this stays defensive rather than assume
-    // it).
+    // serial_number/security_posture) -- first-identity-seen wins, mirroring has_mac/mac's own
+    // convention (see AssetState's own comment). A no-op if `ip` has no asset entry yet (can only
+    // happen if `ip` was itself a broadcast/multicast address, which update_asset never creates an
+    // entry for -- see looks_like_broadcast_or_multicast's own comment; a real device sending its
+    // own identity response is never a broadcast source in practice, but this stays defensive rather
+    // than assume it). `security_posture` defaults to empty for callers (EtherNet/IP CIP Identity)
+    // that have nothing to say about it.
     void update_identity(const std::string& ip, const std::string& vendor, const std::string& product,
-                          const std::string& firmware_revision, const std::string& serial_number);
+                          const std::string& firmware_revision, const std::string& serial_number,
+                          const std::string& security_posture = "");
 
     // Aggregated state for one InventoryNotableProtocol -- see that struct's own comment. Folds one
     // observation into notable_protocols_/notable_protocol_order_, keyed by `key` (already
