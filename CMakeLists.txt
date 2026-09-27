@@ -5130,6 +5130,77 @@ set_tests_properties(s7comm_pi_control_sample_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "s7comm function codes:\n *PLC Control +[0-9]+\n *PLC Stop +[0-9]+")
 
 # --------------------------------------------------------------------------
+# Userdata (rosctr 0x07) Read SZL decode -- tests/sample_s7comm_szl.pcap, see
+# tools/make_sample_pcap.py's own build_s7comm_szl_sample() docstring for the full scenario list.
+# Asset-inventory Phase 3 of Grok gap #2 -- see docs/design/asset-inventory-real-record.md.
+# --------------------------------------------------------------------------
+
+add_test(NAME s7comm_szl_0011_module_identification_request_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text)
+set_tests_properties(s7comm_szl_0011_module_identification_request_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Userdata: Read SZL request \\(SZL-ID=0x0011 \"Module identification\", Index=0x0000\\)")
+
+add_test(NAME s7comm_szl_0011_module_identification_response_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text)
+set_tests_properties(s7comm_szl_0011_module_identification_response_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Userdata: Read SZL response \\(SZL-ID=0x0011 \"Module identification\", Index=0x0000\\) \\[Success\\] \\(order number=6ES7 315-2AG10-0AB0, version=0x0201\\)")
+
+add_test(NAME s7comm_szl_0011_module_identification_response_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format json)
+set_tests_properties(s7comm_szl_0011_module_identification_response_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_szl_id\": \"0x0011\",\n *\"s7comm_szl_id_name\": \"Module identification\",\n *\"s7comm_szl_index\": \"0x0000\",\n *\"s7comm_szl_return_code\": 255,\n *\"s7comm_szl_return_code_name\": \"Success\",\n *\"s7comm_szl_record_count\": 1,\n *\"s7comm_szl_record_length\": 28,\n *\"s7comm_szl_order_number\": \"6ES7 315-2AG10-0AB0\"")
+
+add_test(NAME s7comm_szl_001c_component_identification_response_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text)
+set_tests_properties(s7comm_szl_001c_component_identification_response_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Userdata: Read SZL response \\(SZL-ID=0x001c \"Component Identification\", Index=0x0000\\) \\[Success\\] \\(module type=CPU 315-2 PN/DP, PLC name=SIMATIC 300\\(1\\), module name=CPU 315-2 PN/DP, plant ID=Line3-Filler, serial number=S C-C1UR28922012\\)")
+
+add_test(NAME s7comm_szl_001c_component_identification_response_in_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format json)
+set_tests_properties(s7comm_szl_001c_component_identification_response_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_szl_plc_name\": \"SIMATIC 300\\(1\\)\",\n *\"s7comm_szl_module_name\": \"CPU 315-2 PN/DP\",\n *\"s7comm_szl_plant_identification\": \"Line3-Filler\",\n *\"s7comm_szl_serial_number\": \"S C-C1UR28922012\",\n *\"s7comm_szl_module_type_name\": \"CPU 315-2 PN/DP\"")
+
+# An SZL-ID this codebase recognizes as SZL data but doesn't decode any named field for --
+# has_userdata_szl/szl_id/szl_id_name must still populate, with no crash.
+add_test(NAME s7comm_szl_unrecognized_id_recognized_but_not_decoded_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text)
+set_tests_properties(s7comm_szl_unrecognized_id_recognized_but_not_decoded_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Userdata: Read SZL response \\(SZL-ID=0x0000 \"List of all the SZL-IDs of a module\", Index=0x0000\\) \\[Success\\]\n")
+
+# A failed Read SZL response (return code 0x0A, "Object does not exist") must render the return
+# code/name without attempting to read record data that was never sent.
+add_test(NAME s7comm_szl_failed_response_return_code_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text)
+set_tests_properties(s7comm_szl_failed_response_return_code_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Userdata: Read SZL response \\(SZL-ID=0x0011 \"Module identification\", Index=0x0000\\) \\[Object does not exist\\]\n")
+
+# A non-SZL Userdata exchange (CPU functions, but subfunction 0x02 "Message service" instead of
+# Read SZL) must still fall through to the generic, unchanged "not decoded" note.
+add_test(NAME s7comm_szl_non_readszl_userdata_falls_through_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text --verbose)
+set_tests_properties(s7comm_szl_non_readszl_userdata_falls_through_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: Userdata parameter block \\(vendor-specific extensions -- diagnostics, CPU functions, etc\\.\\) is not decoded in this groundwork release")
+
+add_test(NAME s7comm_szl_sample_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format json)
+
+add_test(NAME s7comm_szl_sample_csv_does_not_crash
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format csv)
+
+# AssetInventoryEngine wiring: SZL-ID 0x0011's order number -> product, SZL-ID 0x001C's serial
+# number -> serial_number, plant tag -> the new InventoryAsset::plant_identification field --
+# bound to the PLC (the response sender), first-identity-seen wins across both SZL-IDs.
+add_test(NAME s7comm_szl_inventory_identity_wired_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format text)
+set_tests_properties(s7comm_szl_inventory_identity_wired_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "identity: +product=\"6ES7 315-2AG10-0AB0\" +serial=S C-C1UR28922012\n *plant identification: Line3-Filler")
+
+add_test(NAME s7comm_szl_inventory_identity_wired_in_json
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_szl.pcap" --format json)
+set_tests_properties(s7comm_szl_inventory_identity_wired_in_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"product\": \"6ES7 315-2AG10-0AB0\",\n *\"serial_number\": \"S C-C1UR28922012\",\n *\"plant_identification\": \"Line3-Filler\"")
+
+# --------------------------------------------------------------------------
 # S7comm-Plus (0x72) -- tests/sample_s7commplus.pcap, see tools/make_sample_pcap.py's own
 # build_s7commplus_sample() docstring for the full scenario list. Validated against real TIA
 # Portal traffic too -- see the real_s7comm_plus_* cases above and

@@ -205,6 +205,62 @@ struct S7CommFrame {
     bool pi_control_has_more_data = false;  // 0x01: more data of the block/file can still be retrieved
     bool pi_control_has_error = false;      // 0x02: an error occurred
 
+    // Only populated for rosctr == 0x07 (Userdata) whose parameter block identifies function group
+    // 0x04 ("CPU functions") subfunction 0x01 ("Read SZL") -- Grok gap #2's System Status List ask
+    // (docs/design/asset-inventory-real-record.md's Phase 3). Every other Userdata function/
+    // subfunction combination is left entirely undecoded, same as before this addition (see
+    // s7comm.cpp's own Userdata parsing comment for the full parameter/data block wire layout,
+    // sourced directly from Wireshark's packet-s7comm.c/packet-s7comm_szl_ids.c dissectors -- the
+    // same primary-source discipline this file's other additions already follow -- and for exactly
+    // why this is scoped to Read SZL alone rather than every Userdata subfunction).
+    bool has_userdata_szl = false;
+    bool userdata_szl_is_response = false;  // false: Job/Request side; true: Ack_Data/Response side
+    uint16_t szl_id = 0;        // full 16-bit SZL-ID off the wire (diagnostic-type/extract-number/
+                                 // partial-list-number bitfields -- see s7comm.cpp); only the low
+                                 // byte (the partial-list number) is matched against below
+    std::string szl_id_name;    // e.g. "Module identification", "Component Identification", or
+                                 // "Unknown (0xNNNN)" -- from the partial-list-number name table
+    uint16_t szl_index = 0;
+
+    // Response side only (userdata_szl_is_response == true):
+    uint8_t szl_return_code = 0;
+    std::string szl_return_code_name;  // reuses s7comm_return_code_name -- the SAME value space a
+                                        // Read Var/Write Var data item's own return code uses
+    uint16_t szl_record_count = 0;
+    uint16_t szl_record_length = 0;    // bytes per record, as declared on the wire
+
+    // Identity fields actually promoted into InventoryAsset (AssetInventoryEngine::observe) --
+    // populated only when a response's own record(s) matched one of the two recognized SZL-ID/
+    // sub-index shapes below; every other SZL-ID, or an out-of-scope SZL-ID 0x001C sub-index, is
+    // left unset -- recognized as "SZL data present" via the fields above, but its record bytes are
+    // not interpreted further (see docs/USER_GUIDE.md's LIMITATIONS).
+    //
+    // SZL-ID 0x0011 ("Module identification"): the FIRST record recognized -- sub-indices
+    // 0x0001 (module)/0x0006 (basic hardware)/0x0007 (basic firmware)/0x0081 (firmware extension)
+    // all share the identical 28-byte record shape (Wireshark's own dissector comment: "it's
+    // (almost) the same structure for all possible indexes"), so this decoder doesn't need to
+    // distinguish which one it got.
+    bool has_szl_module_identification = false;
+    std::string szl_order_number;       // MLfB, e.g. "6ES7 315-2AG10-0AB0" (trailing spaces trimmed)
+    uint16_t szl_module_type_code = 0;  // raw BGTyp -- no name table, same "an incomplete table is
+                                         // worse than an honest raw value" posture InventoryAsset::
+                                         // vendor's own CIP Vendor ID field already documents
+    uint16_t szl_version = 0;           // Ausbg (version of the module or release of the OS)
+    uint16_t szl_pg_release = 0;        // Ausbe (release of the PG description file)
+
+    // SZL-ID 0x001C ("Component Identification"): five of its eleven documented sub-indices, the
+    // ones genuinely asset-identity-relevant -- 0x0004 (copyright), 0x0008 (Memory/Micro Memory
+    // Card serial number), 0x0009 (PROFIBUS/PROFINET Identification & Maintenance data), 0x000A
+    // (OEM copyright/id data), and 0x000B (location designation) are deliberately out of scope for
+    // this pass, flagged here rather than silently dropped (see docs/USER_GUIDE.md's LIMITATIONS).
+    std::string szl_plc_name;              // sub-index 0x0001 ("Name" -- name of the PLC)
+    std::string szl_module_name;           // sub-index 0x0002 ("Name" -- name of the module)
+    std::string szl_plant_identification;  // sub-index 0x0003 ("Tag" -- plant identification)
+    std::string szl_serial_number;         // sub-index 0x0005 ("Serialn") -- plain ASCII on S7,
+                                            // unlike EtherNet/IP's raw-hex serial (see
+                                            // InventoryAsset::serial_number's own comment)
+    std::string szl_module_type_name;      // sub-index 0x0007 ("Cputypname")
+
     std::string summary;
     std::vector<std::string> notes;
 };
@@ -248,6 +304,28 @@ struct S7CommResult {
     bool has_pi_control_status = false;
     bool pi_control_has_more_data = false;
     bool pi_control_has_error = false;
+
+    // Mirrors S7CommFrame's own Read SZL fields verbatim (all owned scalars/strings, no ByteSpan
+    // involved -- see that struct's own comments for what each means).
+    bool has_userdata_szl = false;
+    bool userdata_szl_is_response = false;
+    uint16_t szl_id = 0;
+    std::string szl_id_name;
+    uint16_t szl_index = 0;
+    uint8_t szl_return_code = 0;
+    std::string szl_return_code_name;
+    uint16_t szl_record_count = 0;
+    uint16_t szl_record_length = 0;
+    bool has_szl_module_identification = false;
+    std::string szl_order_number;
+    uint16_t szl_module_type_code = 0;
+    uint16_t szl_version = 0;
+    uint16_t szl_pg_release = 0;
+    std::string szl_plc_name;
+    std::string szl_module_name;
+    std::string szl_plant_identification;
+    std::string szl_serial_number;
+    std::string szl_module_type_name;
 };
 
 std::string s7comm_rosctr_name(uint8_t rosctr);

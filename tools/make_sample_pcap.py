@@ -3773,6 +3773,140 @@ def build_s7comm_pi_control_sample():
     (TESTS_DIR / "sample_s7comm_pi_control.pcap").write_bytes(data)
 
 
+def build_s7comm_szl_sample():
+    """Userdata (rosctr 0x07) Read SZL (function group 0x04 "CPU functions", subfunction 0x01) --
+    the asset-identity-inventory Phase 3 addition (Grok gap #2). Byte layout sourced directly from
+    Wireshark's own packet-s7comm.c (parameter block: function/itemcount/varspec marker/varspec
+    length/syntax id/type+funcgroup/subfunc/seq num) and packet-s7comm_szl_ids.c
+    (s7comm_decode_ud_cpu_szl_subfunc: data block's return code/transport size/length/SZL-ID/Index,
+    then, on a successful response, record-length/record-count/records;
+    s7comm_decode_szl_id_0111_idx_0001 for SZL-ID 0x0011's 28-byte record;
+    s7comm_decode_szl_id_xy1c_idx_000x for SZL-ID 0x001C's 34-byte-per-sub-index record family) --
+    see s7comm.hpp's file header and S7CommFrame's own szl_* field comments for exactly which of
+    these this codebase decodes and why. Each scenario is its own standalone one-packet TCP "flow"
+    (distinct source port), same pattern as build_s7comm_pi_control_sample() -- this decoder is
+    stateless per-packet here too."""
+    ENG_IP = HMI_IP
+
+    def pad(s: str, n: int) -> bytes:
+        b = s.encode("ascii")
+        assert len(b) <= n
+        return b.ljust(n, b" ")
+
+    def userdata_param(funcgroup: int, subfunc: int, req_type: int) -> bytes:
+        # function(0x00, "CPU services") + item count(1) + varspec marker(0x12, "Item") +
+        # varspec length(4) + syntax id(0x11, "PBC-BSEND/USEND" per S7COMM_SYNTAXID... -- NOT
+        # actually interpreted by this codebase's parse_s7_userdata beyond "not 0x12 extended", see
+        # its own comment) + type/funcgroup(1 byte, top 2 bits type, bottom 6 bits funcgroup) +
+        # subfunc(1) + sequence number(1) -- 8 bytes total, matching real non-fragmented Read SZL
+        # traffic (syntax id 0x12 "ParameterExtended"'s extra 4 bytes are a fragmentation-tracking
+        # extension this codebase deliberately doesn't need for a single-PDU SZL exchange).
+        return bytes([0x00, 0x01, 0x12, 0x04, 0x11, (req_type << 6) | funcgroup, subfunc, 0x00])
+
+    # S7COMM_UD_TYPE_REQ=0x01, S7COMM_UD_TYPE_RES=0x02 -- packet-s7comm.c's own userdata_type_names.
+    UD_TYPE_REQ, UD_TYPE_RES = 0x01, 0x02
+    FUNCGROUP_CPU = 0x04
+    SUBF_READSZL = 0x01
+
+    def szl_request_data(szl_id: int, szl_index: int) -> bytes:
+        # Return code(1, unused on the request side) + transport size(1, an undocumented-even-in-
+        # Wireshark's-own-dissector constant, 0x09 in real traffic -- see s7comm_decode_ud_data's
+        # own comment in packet-s7comm.c; this codebase's parse_s7_userdata doesn't interpret this
+        # byte at all, see its own comment) + length(2, constant 0x04 -- just the SZL-ID/Index that
+        # follow) + SZL-ID(2) + SZL-Index(2) = 8 bytes.
+        return bytes([0x00, 0x09]) + struct.pack("!H", 0x0004) + struct.pack("!HH", szl_id, szl_index)
+
+    def szl_response_data(szl_id: int, szl_index: int, return_code: int, records: list) -> bytes:
+        header = bytes([return_code, 0x09]) + struct.pack("!H", 0x0004) + struct.pack("!HH", szl_id, szl_index)
+        if return_code != 0xFF:
+            # A failed response carries no record-length/record-count/record fields at all --
+            # packet-s7comm_szl_ids.c's own s7comm_decode_ud_cpu_szl_subfunc only reads those when
+            # ret_val == S7COMM_ITEM_RETVAL_DATA_OK (0xFF).
+            return header
+        record_length = len(records[0]) if records else 0
+        assert all(len(r) == record_length for r in records)
+        return header + struct.pack("!HH", record_length, len(records)) + b"".join(records)
+
+    packets = []
+
+    def add_request(param: bytes, data: bytes, port: int, ident: int, pdu_ref: int):
+        req = s7_header(0x07, pdu_ref, len(param), len(data)) + param + data
+        cotp = tpkt_frame(COTP_DT_HEADER, req)
+        tcp = tcp_header(port, 102, 1000 + pdu_ref, 1100 + pdu_ref, TCP_PSH | TCP_ACK, len(cotp)) + cotp
+        ip = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+
+    def add_response(param: bytes, data: bytes, port: int, ident: int, pdu_ref: int):
+        resp = s7_header(0x07, pdu_ref, len(param), len(data)) + param + data
+        cotp = tpkt_frame(COTP_DT_HEADER, resp)
+        tcp = tcp_header(102, port, 1100 + pdu_ref, 1000 + pdu_ref, TCP_PSH | TCP_ACK, len(cotp)) + cotp
+        ip = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    # 1) Read SZL request for SZL-ID 0x0011 ("Module identification"), Index 0x0000.
+    add_request(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_REQ), szl_request_data(0x0011, 0x0000),
+                49230, 0x3830, 201)
+
+    # 2) Read SZL response, one 28-byte 0x0011 record: index(2) + MLFB(20) + module type(2) +
+    #    version(2) + pg release(2) -- s7comm_decode_szl_id_0111_idx_0001's own layout. MLFB/version
+    #    values below are arbitrary test values, not a claim about any real product.
+    record_0011 = (struct.pack("!H", 0x0001) + pad("6ES7 315-2AG10-0AB0", 20) +
+                   struct.pack("!HHH", 0x0001, 0x0201, 0x0000))
+    add_response(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_RES), szl_response_data(0x0011, 0x0000, 0xFF, [record_0011]),
+                 49230, 0x3831, 201)
+
+    # 3) Read SZL request for SZL-ID 0x001C ("Component Identification"), Index 0x0000 (all
+    #    sub-indices).
+    add_request(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_REQ), szl_request_data(0x001C, 0x0000),
+                49231, 0x3832, 202)
+
+    # 4) Read SZL response, five 34-byte 0x001C records -- every documented sub-index this
+    #    codebase decodes (0x0001 PLC name, 0x0002 module name, 0x0003 plant tag, 0x0005 serial
+    #    number, 0x0007 CPU type name) happens to be exactly 34 bytes total
+    #    (s7comm_decode_szl_id_xy1c_idx_000x's own per-case layout), so all five share one
+    #    record_length in this single response -- real hardware does the same when Index 0x0000
+    #    asks for every sub-record at once. Test values below are arbitrary, not a claim about any
+    #    real product's actual plant tag/serial number.
+    rec_0001 = struct.pack("!H", 0x0001) + pad("SIMATIC 300(1)", 24) + bytes(8)
+    rec_0002 = struct.pack("!H", 0x0002) + pad("CPU 315-2 PN/DP", 24) + bytes(8)
+    rec_0003 = struct.pack("!H", 0x0003) + pad("Line3-Filler", 32)
+    rec_0005 = struct.pack("!H", 0x0005) + pad("S C-C1UR28922012", 24) + bytes(8)
+    rec_0007 = struct.pack("!H", 0x0007) + pad("CPU 315-2 PN/DP", 32)
+    add_response(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_RES),
+                 szl_response_data(0x001C, 0x0000, 0xFF, [rec_0001, rec_0002, rec_0003, rec_0005, rec_0007]),
+                 49231, 0x3833, 202)
+
+    # 5) Read SZL request/response for an SZL-ID this codebase recognizes as SZL data but doesn't
+    #    decode any named field for (0x0000, "List of the partial list extracts (module states)"
+    #    per kSzlPartlistNames) -- confirms has_userdata_szl/szl_id/szl_id_name still populate, no
+    #    crash, and the summary/JSON output gracefully has nothing more to add.
+    add_request(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_REQ), szl_request_data(0x0000, 0x0000),
+                49232, 0x3834, 203)
+    add_response(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_RES), szl_response_data(0x0000, 0x0000, 0xFF, []),
+                 49232, 0x3835, 203)
+
+    # 6) Read SZL response reporting failure (return code 0x0A, "Object does not exist" --
+    #    s7comm_return_code_name) -- confirms the response-failed path (no record data follows,
+    #    per packet-s7comm_szl_ids.c's own S7COMM_ITEM_RETVAL_DATA_OK check) renders the return
+    #    code/name without attempting to read records that were never sent.
+    add_request(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_REQ), szl_request_data(0x0011, 0x0000),
+                49233, 0x3836, 204)
+    add_response(userdata_param(FUNCGROUP_CPU, SUBF_READSZL, UD_TYPE_RES), szl_response_data(0x0011, 0x0000, 0x0A, []),
+                 49233, 0x3837, 204)
+
+    # 7) A non-SZL Userdata exchange (function group 0x04 CPU functions, but subfunction 0x02
+    #    "Message service" instead of 0x01 "Read SZL") -- confirms parse_s7_userdata's own
+    #    fallback note still fires unchanged for every Userdata packet this codebase doesn't
+    #    specifically decode, exactly as it did before this SZL addition.
+    add_request(userdata_param(FUNCGROUP_CPU, 0x02, UD_TYPE_REQ), bytes([0x00, 0x00, 0x00, 0x00]),
+                49234, 0x3838, 205)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_800 + i, i * 1000)
+    (TESTS_DIR / "sample_s7comm_szl.pcap").write_bytes(data)
+
+
 # ==================================================================================================
 # IEC 61850 MMS (ISO 9506) fixture helpers -- Session(ISO 8327-1)/Presentation(ISO 8823)/
 # ACSE(ISO 8650-1)/MMS(ISO 9506-2) TLV builders, matching src/mms.cpp's own decode logic field for
@@ -19036,6 +19170,7 @@ if __name__ == "__main__":
     build_s7comm_1200sym_sample()
     build_s7comm_chaining_sample()
     build_s7comm_pi_control_sample()
+    build_s7comm_szl_sample()
     build_s7commplus_sample()
     build_mms_sample()
     build_mqtt_sample()

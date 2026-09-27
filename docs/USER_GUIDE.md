@@ -588,6 +588,45 @@ The same `opcua_identity_*` fields (`opcua_has_identity`,
 see the OPC UA endpoint/security-posture inventory example further below
 in this guide.
 
+S7comm identity works differently again: it's promoted from a Read SZL
+(System Status List) exchange (`s7comm.hpp`/`docs/PROTOCOL_COVERAGE.md`'s
+own S7comm section covers the decode itself), specifically SZL-ID `0x0011`
+("Module identification" -- the real Order Number/MLFB) and SZL-ID `0x001c`
+("Component Identification" -- PLC name, module name, plant tag, serial
+number, CPU type name). `product` prefers the real Order Number when a
+`0x0011` exchange was seen, falling back to the CPU/module/PLC name from
+`0x001c` when it wasn't (a real capture may only carry one of the two); a
+new `plant identification:` line records `0x001c` sub-index `0x0003`'s own
+site-assigned plant tag, kept separate from `vendor`/`product` since it's a
+site-assigned label, not a vendor/model fact:
+
+```sh
+$ conduitscope inventory -r tests/sample_s7comm_szl.pcap
+...
+ASSETS (2):
+  192.168.1.10  00:0c:29:aa:bb:cc  [server]  s7comm  (9 packet(s))
+      first seen: 2023-11-14 22:26:40.000000Z  last seen: 2023-11-14 22:26:48.008000Z
+      identity:  product="6ES7 315-2AG10-0AB0"  serial=S C-C1UR28922012
+      plant identification: Line3-Filler
+  192.168.1.50  00:0c:29:11:22:33  [client]  s7comm  (9 packet(s))
+      first seen: 2023-11-14 22:26:40.000000Z  last seen: 2023-11-14 22:26:48.008000Z
+...
+```
+
+`decode --format json` also gains standalone `s7comm_szl_*` fields
+(`s7comm_userdata_szl_is_response`, `s7comm_szl_id`/`_id_name`/`_index`,
+`s7comm_szl_return_code`/`_return_code_name`, and, on a successful
+response, `s7comm_szl_record_count`/`_record_length` plus whichever of
+`s7comm_szl_order_number`/`_module_type_code`/`_version`/`_pg_release`
+(SZL-ID `0x0011`) or `s7comm_szl_plc_name`/`_module_name`/
+`_plant_identification`/`_serial_number`/`_module_type_name` (SZL-ID
+`0x001c`) the response actually carried), independent of `inventory`'s own
+wiring, same pattern as OPC UA's `opcua_identity_*` fields above. Six of
+SZL-ID `0x001c`'s eleven documented sub-records (copyright string, MMC
+serial number, PROFINET I&M data, OEM data, location ID, and any
+unrecognized sub-index) are deliberately not decoded into named fields --
+see LIMITATIONS.
+
 #### Closing the loop
 
 `--policy-out` writes the inferred zones/conduits above as a `policy`-format
@@ -4530,8 +4569,8 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   `inventory`'s own client/server determination (see above) uses the exact
   same fallback, for the exact same reason.
 - **`inventory`'s passively-inferred device identity (vendor/product/
-  firmware revision/serial number -- Grok gap #2) is wired for EtherNet/IP
-  and OPC UA so far.** A `ListIdentity` response's CIP Identity object is
+  firmware revision/serial number -- Grok gap #2) is wired for EtherNet/IP,
+  OPC UA, and S7comm so far.** A `ListIdentity` response's CIP Identity object is
   already fully decoded (vendor ID/device type/product code/revision/serial
   number/product name); `decode` itself only ever surfaces this inside the
   packet's own `summary` text (`"ListIdentity; identity: vendor=1
@@ -4549,12 +4588,26 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   UNLIKE EtherNet/IP, these OPC UA identity fields ARE also surfaced
   directly on `decode --format json`'s own output, as
   `opcua_has_identity`/`opcua_identity_*` (see the OPC UA endpoint/
-  security-posture inventory example further below in this guide). S7comm
-  (System Status List/SZL), BACnet/IP (a Device object's Vendor-Name/Model-
-  Name/Firmware-Revision read via ReadProperty(Multiple)), and DNP3 (IEEE
-  1815 Device Attributes) all carry comparable identity data on the wire
-  but none of it is wired into `inventory` yet -- tracked as follow-on work
-  in docs/DEVELOPMENT.md's ROADMAP. Rack/slot (also asked for in Grok's
+  security-posture inventory example further below in this guide). S7comm's
+  Read SZL (System Status List) exchange promotes SZL-ID `0x0011`'s Order
+  Number into `product`, SZL-ID `0x001c`'s PLC/module/CPU-type name into
+  `product` as a fallback when `0x0011` wasn't seen, its serial number into
+  `serial_number`, and its plant tag into a new, S7-specific
+  `plant_identification` field (see the S7comm example further below in
+  this guide) -- also surfaced directly on `decode --format json` as
+  `s7comm_szl_*` fields, same "both inventory wiring AND standalone decode
+  fields" pattern as OPC UA. Six of SZL-ID `0x001c`'s eleven documented
+  sub-records are deliberately not decoded into named fields (copyright
+  string, MMC serial number, PROFINET I&M data, OEM copyright/ID, location
+  ID, and anything else `packet-s7comm_szl_ids.c` documents beyond the five
+  asset-identity-relevant ones this project decodes) -- recognized as SZL
+  data (so `s7comm_has_userdata_szl`/`s7comm_szl_id`/`s7comm_szl_id_name`
+  still populate) but their own sub-record bytes aren't interpreted further.
+  BACnet/IP (a Device object's Vendor-Name/Model-Name/Firmware-Revision
+  read via ReadProperty(Multiple)) and DNP3 (IEEE 1815 Device Attributes)
+  still carry comparable identity data on the wire but neither is wired
+  into `inventory` yet -- tracked as follow-on work in
+  docs/DEVELOPMENT.md's ROADMAP. Rack/slot (also asked for in Grok's
   original review) is scoped out entirely: no protocol this project
   decodes carries a device's own rack/slot number as a field it volunteers
   about itself (CIP does have a path-addressable rack/slot concept, but

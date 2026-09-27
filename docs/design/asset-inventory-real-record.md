@@ -1,14 +1,14 @@
 # Asset inventory: a real OT asset record -- design document
 
-Status: **Phases 0-2 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
-dispatch, OPC UA identity promotion) implemented and shipped.** Phases 3-10 (S7comm SZL decode,
-BACnet ReadPropertyMultiple decode, DNP3 Device Attributes decode, role classification, tag/point/DB
-touch summarization, CSV/CMDB export, STIX/TAXII-lite export, firewall-ACL-draft export) are scoped
-below but not yet started. Written in response to
+Status: **Phases 0-3 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
+dispatch, OPC UA identity promotion, S7comm SZL decode + wiring) implemented and shipped.** Phases
+4-10 (BACnet ReadPropertyMultiple decode, DNP3 Device Attributes decode, role classification,
+tag/point/DB touch summarization, CSV/CMDB export, STIX/TAXII-lite export, firewall-ACL-draft export)
+are scoped below but not yet started. Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
-fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76 for
-the changelog-style writeup of what shipped and its exact verification numbers.
+fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76,
+79 for the changelog-style writeup of what shipped and its exact verification numbers.
 
 ## Context
 
@@ -137,19 +137,76 @@ every other `OpcUaMessage` field directly. Fixture: `tests/sample_opcua.pcap`'s 
 `SecurityMode=None`) -- no new fixture required. See `docs/DEVELOPMENT.md`'s ROADMAP item 76 for the
 full changelog writeup and exact test/verification counts.
 
-## Phase 3 -- S7comm SZL decode + wiring
+## Phase 3 -- S7comm SZL decode + wiring (shipped)
 
-New decode work in `s7comm.hpp`/`.cpp`: recognize the SZL read function (Userdata/parameter-block SZL
-request, function group 0x04 "CPU functions", subfunction "Read SZL") and decode SZL ID 0x001C
+**Correction to this plan's own original assumption, caught before implementing.** The paragraph
+below (left in place, struck through in spirit, for the historical record) assumed SZL-ID 0x001C
+alone carried the Order Number and Module Type Name. Direct reading of Wireshark's own
+`packet-s7comm_szl_ids.c`/`packet-s7comm.c` dissector source -- fetched in full via `curl` after
+`WebFetch` truncated the ~4,000+ line file around its own small-model content-processing limit --
+found this wrong: SZL-ID 0x001C ("Component Identification") is not one flat record but a family of
+eleven differently-shaped sub-records selected by sub-index, and the real Order Number/MLFB actually
+lives in a *different* SZL-ID, 0x0011 ("Module identification"). This was flagged to Jurgen as a
+correction to the plan before any decode code was written, together with a scoped five-of-eleven
+sub-index plan for 0x001C (see below); Jurgen approved with "Yes, that's ok for me, go ahead."
+
+~~New decode work in `s7comm.hpp`/`.cpp`: recognize the SZL read function (Userdata/parameter-block
+SZL request, function group 0x04 "CPU functions", subfunction "Read SZL") and decode SZL ID 0x001C
 ("Component Identification" -- Order Number, Module Type Name, plus, if present, Plant
-Identification/System Name) from the response data record, sourced from Wireshark's own public S7comm
-dissector fields (`s7comm.szl...`), exactly the way every other protocol here cites its primary
-source. New `S7SzlInfo`-style struct with named fields, exposed alongside current fields -- additive,
-nothing renamed or removed. Wire into `InventoryAsset`: `order_number` -> `product`,
-`module_type_name` -> informational note, `system_name` -> a new
-`InventoryAsset::plant_identification` field. Draft the exact SZL 0x001C field layout and put it in
-front of Jurgen for a sanity check before writing the decoder, the same discipline Phase 4 of the
-zoning plan established for its own Read/Write tables.
+Identification/System Name) from the response data record~~ -- what actually shipped: both SZL-ID
+0x0011 (Order Number/MLFB, module type code, version, PG release -- one fixed 28-byte record) and
+SZL-ID 0x001C's five asset-identity-relevant sub-records (PLC name, module name, plant tag/"Plant
+Identification", serial number, CPU type name -- the other six documented sub-indices, copyright
+string/MMC serial/PROFINET I&M/OEM data/location ID/anything else, are recognized as SZL data but not
+decoded further, a deliberate scope boundary approved alongside the correction above), byte layouts
+sourced directly from `s7comm_decode_szl_id_0111_idx_0001`/`s7comm_decode_szl_id_xy1c_idx_000x` in
+Wireshark's own dissector source -- see `docs/PROTOCOL_COVERAGE.md`'s own "Userdata (0x07) Read SZL"
+section for the full field-by-field writeup. New fields live directly on the existing `S7CommFrame`/
+`S7CommResult` structs (`has_userdata_szl`, `szl_id`/`_id_name`/`_index`, `szl_return_code`/
+`_return_code_name`, `szl_record_count`/`_record_length`, `has_szl_module_identification` +
+`szl_order_number`/`_module_type_code`/`_version`/`_pg_release`, and `szl_plc_name`/`_module_name`/
+`_plant_identification`/`_serial_number`/`_module_type_name`) rather than a separate `S7SzlInfo`
+struct -- additive, nothing renamed or removed, matching the "widen the existing result struct"
+convention Phase 1/2 already established for ENIP/OPC UA. Wired into `InventoryAsset`: SZL-ID
+0x0011's `szl_order_number` -> `product` (preferred when present), SZL-ID 0x001C's
+`szl_module_type_name`/`szl_plc_name`/`szl_module_name` -> `product` as a fallback when 0x0011 wasn't
+seen, `szl_serial_number` -> `serial_number`, `szl_plant_identification` -> the new
+`InventoryAsset::plant_identification` field -- bound to `dp.src_ip` (the response sender, i.e. the
+PLC), mirroring the ENIP/OPC UA identity-binding precedent exactly. `update_identity()`'s signature
+grew a trailing `plant_identification` parameter, defaulted to `""` so the ENIP/OPC UA call sites
+didn't need updating (same pattern `security_posture` used in Phase 2).
+
+Also surfaced directly on `decode --format json`'s own S7comm output (`s7comm_szl_*` fields in
+`write_s7comm_json_fields`, `src/output.cpp`, appended after the existing `pi_control_*` block),
+independent of `inventory`'s own wiring -- same "both inventory wiring AND standalone decode fields"
+pattern Phase 2 established for OPC UA. `decode`'s own text summary renders a new segment for
+`has_userdata_szl`, showing SZL-ID/name/Index/return code and, on success, whichever identity fields
+the response actually carried.
+
+**Testing.** A new fixture, `tests/sample_s7comm_szl.pcap` (`build_s7comm_szl_sample` in
+`tools/make_sample_pcap.py`), covering: a 0x0011 request/response pair; a 0x001C request/response
+carrying all five decoded sub-records in one response (all five sub-record shapes happen to be
+exactly 34 bytes, so they share one `record_length`, matching what a real Index-0x0000 "give me every
+sub-record" request/response would look like); an SZL-ID this codebase recognizes as SZL data but
+decodes no named field for (0x0000); a failed response (return code 0x0A, "Object does not exist");
+and a non-SZL Userdata exchange (CPU functions group, but a different subfunction) confirming the
+generic fallback note still fires unchanged. All byte layouts cross-checked against the same primary
+dissector source before the fixture was written, not guessed. 12 new CTest cases (`decode` text/JSON
+for every scenario above, `inventory` text/JSON confirming the `InventoryAsset` wiring, plus
+does-not-crash JSON/CSV cases) -- all verified against the real binary's own output, never
+hand-written expected text. 9 new fuzz corpus seeds extracted from the new fixture into
+`fuzz/corpus/cotp_s7comm/` via `tools/extract_fuzz_corpus.py` (l4/tcp/port 102); a 60-second
+corpus-regression CTest run plus a separate ~1.4M-execution/60-second standalone libFuzzer run against
+the full corpus, both clean under ASan/UBSan. Full CTest suite: 2060/2060 (default GCC build, up from
+the prior 2048); ASan/UBSan (2060/2060 non-fuzz plus 76/76 fuzz corpus-regression targets, all clean)
+and no-live-capture (2048/2048) configs, plus a clean-room extract-rebuild-test, all re-verified before
+delivery; MinGW-w64 cross-compile confirmed to still compile and link cleanly (same standing
+no-Wine-here limitation as every prior phase).
+
+**Not yet done, tracked for a following increment**: BACnet ReadPropertyMultiple decode, DNP3 Device
+Attributes, role classification, tag/point/DB touch summarization, and CSV/CMDB, STIX/TAXII-lite, and
+firewall-ACL-draft export -- unchanged from Phase 2's own list, minus S7comm SZL, which this phase
+completed.
 
 ## Phase 4 -- BACnet ReadPropertyMultiple decode + Device-object identity correlation
 
@@ -227,7 +284,7 @@ message type (SZL, BACnet RPM, DNP3 Device Attributes).
 LIMITATIONS, `docs/DEVELOPMENT.md`'s ROADMAP, and `docs/PROTOCOL_COVERAGE.md` (for newly-decoded
 message types) all updated in the same phase as the code, per this project's standing convention.
 
-## Open questions for Jurgen (not blocking Phases 0-2, which already shipped)
+## Open questions for Jurgen (not blocking Phases 0-3, which already shipped)
 
 1. Rack/slot: confirmed nothing passively discoverable exists for it in any protocol this project
    decodes -- OK to scope out entirely (as this plan now does), or does Jurgen want CIP's
@@ -245,7 +302,9 @@ message types) all updated in the same phase as the code, per this project's sta
 - `include/conduitscope/enip.hpp` -- already has the fields Phase 1 needed; read-only reference.
 - `include/conduitscope/opcua.hpp` / `src/opcua.cpp` -- Phase 2's `OpcUaMessage` field promotion
   (shipped); `src/output.cpp`'s `write_opcua_json_fields` also gained the same fields.
-- `include/conduitscope/s7comm.hpp` / `src/s7comm.cpp` -- Phase 3's new SZL decode.
+- `include/conduitscope/s7comm.hpp` / `src/s7comm.cpp` -- Phase 3's new SZL decode (shipped);
+  `src/decoder.cpp`'s `S7CommResult` construction site and `src/output.cpp`'s
+  `write_s7comm_json_fields` also gained the same fields.
 - `include/conduitscope/bacnet.hpp` / `src/bacnet.cpp` -- Phase 4's new ReadPropertyMultiple decode.
 - `include/conduitscope/dnp3.hpp` / `src/dnp3.cpp` -- Phase 5's new Device Attributes decode.
 - `src/cli_main.cpp` -- Phase 8's `--format csv` CLI plumbing for `inventory`.

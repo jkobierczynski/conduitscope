@@ -194,7 +194,8 @@ void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPack
 void AssetInventoryEngine::update_identity(const std::string& ip, const std::string& vendor,
                                             const std::string& product, const std::string& firmware_revision,
                                             const std::string& serial_number,
-                                            const std::string& security_posture) {
+                                            const std::string& security_posture,
+                                            const std::string& plant_identification) {
     auto it = assets_.find(ip);
     if (it == assets_.end()) return;  // see this method's own comment (asset_inventory.hpp)
     AssetState& a = it->second;
@@ -203,6 +204,7 @@ void AssetInventoryEngine::update_identity(const std::string& ip, const std::str
     if (a.firmware_revision.empty()) a.firmware_revision = firmware_revision;
     if (a.serial_number.empty()) a.serial_number = serial_number;
     if (a.security_posture.empty()) a.security_posture = security_posture;
+    if (a.plant_identification.empty()) a.plant_identification = plant_identification;
 }
 
 void AssetInventoryEngine::record_notable_protocol(const std::string& key, const std::string& protocol,
@@ -473,6 +475,29 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         }
         update_identity(dp.src_ip, identity.identity_application_uri, identity.identity_application_uri,
                          /*firmware_revision=*/"", /*serial_number=*/"", posture);
+    } else if (protocol == "s7comm" && dp.protocol == "s7comm" && dp.result &&
+               dp.result->as<S7CommResult>().has_userdata_szl &&
+               dp.result->as<S7CommResult>().userdata_szl_is_response &&
+               dp.result->as<S7CommResult>().szl_return_code == 0xFF) {
+        // A Read SZL response is sent BY the CPU being queried, same "identity describes whoever
+        // actually sent this packet" reasoning as ENIP/OPC UA above. `product` prefers the real
+        // Order Number/MLFB (SZL-ID 0x0011) when present, falling back to the 0x001C family's own
+        // CPU-type or module/PLC name fields when it isn't (a real exchange may request only one
+        // SZL-ID, not both) -- see S7CommFrame::szl_order_number's own comment (s7comm.hpp) for why
+        // these two SZL-IDs are the ones actually carrying a vendor/model-equivalent fact. Module
+        // type code/version are deliberately NOT promoted to a field here (see this engine's own doc
+        // comment in asset_inventory.hpp) -- folded into an informational note on the packet-derived
+        // function-name path instead, downstream in this same observe() call, exactly like every
+        // other protocol's PLC Control PI-service scope boundary elsewhere in this file.
+        const S7CommResult& szl = dp.result->as<S7CommResult>();
+        std::string product = !szl.szl_order_number.empty()   ? szl.szl_order_number
+                               : !szl.szl_module_type_name.empty() ? szl.szl_module_type_name
+                               : !szl.szl_plc_name.empty()     ? szl.szl_plc_name
+                                                                : szl.szl_module_name;
+        if (!product.empty() || !szl.szl_serial_number.empty() || !szl.szl_plant_identification.empty()) {
+            update_identity(dp.src_ip, /*vendor=*/"", product, /*firmware_revision=*/"",
+                             szl.szl_serial_number, /*security_posture=*/"", szl.szl_plant_identification);
+        }
     }
 
     if (client_is_bcast || server_is_bcast) return;
@@ -542,6 +567,7 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ia.firmware_revision = as.firmware_revision;
         ia.serial_number = as.serial_number;
         ia.security_posture = as.security_posture;
+        ia.plant_identification = as.plant_identification;
         report.assets.push_back(std::move(ia));
         (void)addr;
     }
@@ -743,6 +769,9 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
             out << "\n";
         }
         if (!a.security_posture.empty()) out << "      security: " << a.security_posture << "\n";
+        if (!a.plant_identification.empty()) {
+            out << "      plant identification: " << a.plant_identification << "\n";
+        }
     }
     out << "\n";
 
@@ -837,6 +866,9 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         if (!a.serial_number.empty()) out << ",\n      \"serial_number\": \"" << json_escape(a.serial_number) << "\"";
         if (!a.security_posture.empty()) {
             out << ",\n      \"security_posture\": \"" << json_escape(a.security_posture) << "\"";
+        }
+        if (!a.plant_identification.empty()) {
+            out << ",\n      \"plant_identification\": \"" << json_escape(a.plant_identification) << "\"";
         }
         out << "\n";
         out << "    }" << (i + 1 < report.assets.size() ? "," : "") << "\n";

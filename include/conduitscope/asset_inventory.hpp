@@ -144,6 +144,17 @@ struct InventoryAsset {
     // see AssetInventoryEngine::observe's own comment for exactly how this is populated. Empty for
     // every other protocol; first-identity-seen wins here too, same as vendor/product above.
     std::string security_posture;
+
+    // S7comm-specific (Phase 3 of Grok gap #2 -- SZL/"System Status List" decode): the plant tag an
+    // S7-300/400/1200/1500 CPU can be configured to carry (SZL-ID 0x001C sub-index 0x0003, "Plant
+    // Identification" -- see S7CommFrame::szl_plant_identification's own comment in s7comm.hpp for
+    // the wire source). Kept as its own field rather than folded into `product` above: it's a
+    // site-assigned tag (e.g. "Line3-Filler"), not a vendor/model fact the way `vendor`/`product`
+    // are for every other protocol here, and a real CPU may carry a plant tag but no order number (or
+    // vice versa) depending on which SZL sub-records the exchange actually requested. Empty unless a
+    // Read SZL response for this IP positively supplied it; first-seen wins, same convention as every
+    // other identity field above.
+    std::string plant_identification;
 };
 
 // One aggregated, directional communication: `client_ip` -> `server_ip`, every packet of ONE
@@ -354,10 +365,11 @@ public:
     // call, regardless of protocol -- see those fields' own comments (asset_inventory.hpp).
     //
     // Passively-inferred device identity (InventoryAsset::vendor/product/firmware_revision/
-    // serial_number/security_posture -- Grok gap #2): currently populated for two protocols, both
-    // bound to DecodedPacket::src_ip on the specific packet carrying the identity-bearing response
-    // (not simply "whichever side this session's handshake/port-heuristic called the server," since
-    // that exchange is itself the thing deciding which side is the real device):
+    // serial_number/security_posture/plant_identification -- Grok gap #2): currently populated for
+    // three protocols, all bound to DecodedPacket::src_ip on the specific packet carrying the
+    // identity-bearing response (not simply "whichever side this session's handshake/port-heuristic
+    // called the server," since that exchange is itself the thing deciding which side is the real
+    // device):
     //   - EtherNet/IP, from a decoded ListIdentity response (EnipFrame::has_identity, see enip.hpp).
     //   - OPC UA, from a decoded GetEndpointsResponse's first endpoint (OpcUaMessage::has_identity,
     //     see opcua.hpp) -- `vendor`/`product` both get that endpoint's own ApplicationUri (OPC UA
@@ -366,9 +378,16 @@ public:
     //     SecurityMode/SecurityPolicyUri, "SECURITY FINDING: "-prefixed when SecurityMode is "None"
     //     (an endpoint accepting no security at all) -- see InventoryAsset::security_posture's own
     //     comment.
+    //   - S7comm, from a successful Read SZL response (S7CommResult::has_userdata_szl &&
+    //     userdata_szl_is_response && szl_return_code == 0xFF, see s7comm.hpp) -- `product` prefers
+    //     SZL-ID 0x0011's real Order Number/MLFB when present, falling back to SZL-ID 0x001C's own
+    //     CPU-type/module/PLC name fields when it isn't; `serial_number` gets 0x001C's own serial
+    //     number; `plant_identification` (a new, S7-specific field -- see its own comment) gets
+    //     0x001C's own plant tag; `vendor`/`security_posture` stay unset (S7comm's SZL exchange
+    //     carries neither a vendor name nor a security-posture-equivalent fact).
     // First-identity-seen wins for every field above, per asset. Every other protocol leaves these
-    // fields empty for now -- see docs/DEVELOPMENT.md's ROADMAP for the remaining phases (S7comm
-    // SZL, BACnet ReadPropertyMultiple, DNP3 Device Attributes) that will populate them further.
+    // fields empty for now -- see docs/DEVELOPMENT.md's ROADMAP for the remaining phases (BACnet
+    // ReadPropertyMultiple, DNP3 Device Attributes) that will populate them further.
     void observe(const DecodedPacket& packet);
 
     // Produces the final report from everything observed so far. Safe to call more than once (e.g.
@@ -389,7 +408,8 @@ private:
                                        // guards the min/max comparison on every packet after that
         std::string vendor, product, firmware_revision, serial_number;  // see InventoryAsset's own
                                                                           // comment
-        std::string security_posture;  // see InventoryAsset::security_posture's own comment
+        std::string security_posture;       // see InventoryAsset::security_posture's own comment
+        std::string plant_identification;   // see InventoryAsset::plant_identification's own comment
     };
 
     struct EdgeState {
@@ -425,11 +445,13 @@ private:
     // happen if `ip` was itself a broadcast/multicast address, which update_asset never creates an
     // entry for -- see looks_like_broadcast_or_multicast's own comment; a real device sending its
     // own identity response is never a broadcast source in practice, but this stays defensive rather
-    // than assume it). `security_posture` defaults to empty for callers (EtherNet/IP CIP Identity)
-    // that have nothing to say about it.
+    // than assume it). `security_posture`/`plant_identification` default to empty for callers
+    // (EtherNet/IP CIP Identity, and S7comm SZL responses that didn't carry a plant tag) that have
+    // nothing to say about them.
     void update_identity(const std::string& ip, const std::string& vendor, const std::string& product,
                           const std::string& firmware_revision, const std::string& serial_number,
-                          const std::string& security_posture = "");
+                          const std::string& security_posture = "",
+                          const std::string& plant_identification = "");
 
     // Aggregated state for one InventoryNotableProtocol -- see that struct's own comment. Folds one
     // observation into notable_protocols_/notable_protocol_order_, keyed by `key` (already

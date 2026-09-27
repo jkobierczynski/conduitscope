@@ -4,6 +4,7 @@
 #include "conduitscope/resource_limits.hpp"
 
 #include <algorithm>
+#include <iomanip>
 #include <sstream>
 
 namespace conduitscope {
@@ -769,6 +770,262 @@ void append_pi_control_block_notes(const std::vector<std::string>& blocks, std::
     }
 }
 
+// --- Userdata (0x07) / CPU functions (group 0x04) / Read SZL (subfunc 0x01) decoding ------------
+//
+// Reference: Wireshark's own packet-s7comm.c (Userdata parameter-block field layout --
+// s7comm_decode_ud, userdata_type_names/userdata_functiongroup_names/userdata_cpu_subfunc_names)
+// and packet-s7comm_szl_ids.c (the SZL-ID bitfield layout, the per-record decode functions for
+// SZL-ID 0x0011/0x001C, and the partial-list name table) -- both fetched and read directly for
+// this addition, the same primary-source discipline this file's other additions (PI service names,
+// 0xB2 reconstruction) already follow. See s7comm.hpp's own S7CommFrame::has_userdata_szl comment
+// for the full field list this produces.
+
+// Trims trailing space (0x20) padding, S7's own convention for fixed-width ASCII SZL fields --
+// same "trim_trailing_spaces" precedent melsec.cpp's own cpu_type_name field already establishes
+// for an almost identical field (a PLC's self-reported CPU/module type name).
+std::string trim_trailing_spaces(const std::string& s) {
+    size_t end = s.find_last_not_of(' ');
+    return end == std::string::npos ? std::string() : s.substr(0, end + 1);
+}
+
+struct SzlPartlistEntry {
+    uint16_t number;
+    const char* name;
+};
+
+// SZL-ID's own low byte ("number of the partial list") -- a partial transcription of Wireshark's
+// szl_partial_list_names[] table (packet-s7comm_szl_ids.c), all 39 entries. An unrecognized number
+// still renders (as "Unknown (0xNN)"), same fallback convention s7comm_function_name/
+// s7comm_rosctr_name already use.
+constexpr SzlPartlistEntry kSzlPartlistNames[] = {
+    {0x0000, "List of all the SZL-IDs of a module"},
+    {0x0011, "Module identification"},
+    {0x0012, "CPU characteristics"},
+    {0x0013, "User memory areas"},
+    {0x0014, "System areas"},
+    {0x0015, "Block types"},
+    {0x0016, "Priority classes"},
+    {0x0017, "List of the permitted SDBs with a number < 1000"},
+    {0x0018, "Maximum S7-300 I/O configuration"},
+    {0x0019, "Status of the module LEDs"},
+    {0x001c, "Component Identification"},
+    {0x0021, "Interrupt / error assignment"},
+    {0x0022, "Interrupt status"},
+    {0x0023, "Priority classes"},
+    {0x0024, "Modes"},
+    {0x0025, "Assignment between process image partitions and OBs"},
+    {0x0031, "Communication capability parameters"},
+    {0x0032, "Communication status data"},
+    {0x0033, "Diagnostics: device logon list"},
+    {0x0037, "Ethernet - Details of a Module"},
+    {0x0071, "H CPU group information"},
+    {0x0074, "Status of the module LEDs"},
+    {0x0075, "Switched DP slaves in the H-system"},
+    {0x0076, "DNN tree's root node"},
+    {0x0077, "DNN node - all linked objects"},
+    {0x0078, "DNN node data"},
+    {0x0081, "Start information list"},
+    {0x0082, "Start event list"},
+    {0x0090, "DP Master System Information"},
+    {0x0091, "Module status information"},
+    {0x0092, "Rack / station status information"},
+    {0x0094, "Rack / station status information"},
+    {0x0095, "Extended DP master system information"},
+    {0x0096, "Module status information, PROFINET IO and PROFIBUS DP"},
+    {0x00a0, "Diagnostic buffer of the CPU"},
+    {0x00b1, "Module diagnostic information (data record 0)"},
+    {0x00b2, "Module diagnostic information (data record 1), geographical address"},
+    {0x00b3, "Module diagnostic information (data record 1), logical address"},
+    {0x00b4, "Diagnostic data of a DP slave"},
+};
+
+std::string s7comm_szl_partlist_name(uint16_t partlist_num) {
+    for (const auto& entry : kSzlPartlistNames) {
+        if (entry.number == partlist_num) return entry.name;
+    }
+    std::ostringstream out;
+    out << "Unknown (0x" << std::hex << partlist_num << ")";
+    return out.str();
+}
+
+// SZL-ID 0x0011 ("Module identification"), sub-indices 0x0001 (module)/0x0006 (basic hardware)/
+// 0x0007 (basic firmware)/0x0081 (firmware extension) -- confirmed directly in
+// packet-s7comm_szl_ids.c's s7comm_decode_szl_id_0111_idx_0001 to share one 28-byte record shape
+// regardless of which of the four indices this particular record is: 2-byte index (ignored --
+// see this function's own caller, which already knows the SZL-Index from the request/response
+// header) + 20-byte ASCII MLfB (order number) + 2-byte module-type code + 2-byte version + 2-byte
+// PG-description-file release. `rc` is already scoped to exactly one record's own bytes by the
+// caller; does nothing if fewer than 28 bytes remain (a truncated capture, not a malformed one).
+void decode_szl_0011_record(Cursor& rc, S7CommFrame& frame) {
+    if (rc.remaining() < 28) return;
+    rc.u16be();  // per-record index -- redundant with the request/response's own SZL-Index
+    std::string mlfb = trim_trailing_spaces(ascii_text(rc.bytes(20)));
+    uint16_t module_type = rc.u16be();
+    uint16_t version = rc.u16be();
+    uint16_t pg_release = rc.u16be();
+    // First recognized record wins, mirroring InventoryAsset's own "first identity seen wins"
+    // convention (asset_inventory.hpp) -- a real Read SZL exchange for this SZL-ID essentially
+    // always carries exactly one record in practice (Index 0x0000, requesting all four sub-records
+    // at once, is a real possibility this still handles safely: whichever comes first in the
+    // response just wins, rather than being mis-parsed).
+    if (!frame.has_szl_module_identification) {
+        frame.has_szl_module_identification = true;
+        frame.szl_order_number = mlfb;
+        frame.szl_module_type_code = module_type;
+        frame.szl_version = version;
+        frame.szl_pg_release = pg_release;
+    }
+}
+
+// SZL-ID 0x001C ("Component Identification") -- eleven documented sub-record shapes, selected by
+// the record's own leading 2-byte index's low nibble (packet-s7comm_szl_ids.c's
+// s7comm_decode_szl_id_xy1c_idx_000x); this decodes the five that are genuinely asset-identity-
+// relevant (see S7CommFrame::szl_plc_name's own comment, s7comm.hpp, for exactly which, and why
+// the other six are deliberately out of scope). `rc` is already scoped to exactly one record's own
+// bytes by the caller (bounded by the response's own declared record length, not a hardcoded size
+// here), so an out-of-scope or unrecognized sub-index is simply left alone rather than misread.
+void decode_szl_001c_record(Cursor& rc, S7CommFrame& frame) {
+    if (rc.remaining() < 2) return;
+    uint16_t index = rc.u16be();
+    switch (index & 0x000f) {
+        case 0x0001:
+            if (rc.remaining() >= 24 && frame.szl_plc_name.empty()) {
+                frame.szl_plc_name = trim_trailing_spaces(ascii_text(rc.bytes(24)));
+            }
+            break;
+        case 0x0002:
+            if (rc.remaining() >= 24 && frame.szl_module_name.empty()) {
+                frame.szl_module_name = trim_trailing_spaces(ascii_text(rc.bytes(24)));
+            }
+            break;
+        case 0x0003:
+            if (rc.remaining() >= 32 && frame.szl_plant_identification.empty()) {
+                frame.szl_plant_identification = trim_trailing_spaces(ascii_text(rc.bytes(32)));
+            }
+            break;
+        case 0x0005:
+            if (rc.remaining() >= 24 && frame.szl_serial_number.empty()) {
+                frame.szl_serial_number = trim_trailing_spaces(ascii_text(rc.bytes(24)));
+            }
+            break;
+        case 0x0007:
+            if (rc.remaining() >= 32 && frame.szl_module_type_name.empty()) {
+                frame.szl_module_type_name = trim_trailing_spaces(ascii_text(rc.bytes(32)));
+            }
+            break;
+        default:
+            // 0x0004 (copyright), 0x0008 (MMC serial), 0x0009 (PROFINET I&M), 0x000a (OEM data),
+            // 0x000b (location id), and anything else -- recognized as SZL data (has_userdata_szl
+            // is already true on the frame) but this specific sub-record's own bytes are
+            // deliberately not interpreted further for this pass.
+            break;
+    }
+}
+
+// Parses the Userdata (rosctr 0x07) parameter block from `param_span`, and, only when it resolves
+// to function group 0x04 ("CPU functions") subfunction 0x01 ("Read SZL"), the SZL request/response
+// fields from the independently-addressed `data_span` -- mirroring how every other function code's
+// parameter/data blocks are addressed independently elsewhere in this file (see try_parse_s7comm's
+// own comment on why). Every other Userdata function/subfunction combination falls through to the
+// same generic "not decoded" note this codebase had before this addition; never throws.
+void parse_s7_userdata(ByteSpan param_span, ByteSpan data_span, S7CommFrame& frame) {
+    Cursor pc(param_span);
+    if (pc.remaining() < 5) {
+        frame.notes.push_back("Userdata parameter block is too short to contain its fixed prefix");
+        return;
+    }
+    pc.u8();  // function/service -- constant 0x00 ("CPU services"), not otherwise meaningful here
+    pc.u8();  // item count -- constant 0x01
+    pc.u8();  // variable specification marker -- constant ("Item")
+    pc.u8();  // length of the following address specification (always 4: syntax id + type/
+              // funcgroup + subfunc + seq num)
+    uint8_t syntax_id = pc.u8();
+
+    if (pc.remaining() < 3) {
+        frame.notes.push_back(
+            "Userdata parameter block is too short to contain its type/function group/"
+            "subfunction/sequence-number bytes");
+        return;
+    }
+    uint8_t type_funcgroup = pc.u8();
+    uint8_t type = (type_funcgroup & 0xc0) >> 6;  // 0=Indication, 1=Request, 2=Response
+    uint8_t funcgroup = type_funcgroup & 0x3f;
+    uint8_t subfunc = pc.u8();
+    pc.u8();  // sequence number -- not currently surfaced; see s7comm.hpp's file header for why
+              // this codebase doesn't attempt cross-packet fragment tracking
+
+    // Syntax id 0x12 ("ParameterExtended") means three more fields follow -- consumed here (so the
+    // parameter block's own remaining-byte accounting stays correct) but not currently surfaced;
+    // this codebase doesn't reassemble fragmented Userdata responses (see s7comm.hpp's file header).
+    if (syntax_id == 0x12 && pc.remaining() >= 4) {
+        pc.u8();     // data unit reference
+        pc.u8();     // last-data-unit flag
+        pc.u16be();  // error code
+    }
+
+    if (funcgroup != 0x04 || subfunc != 0x01) {
+        // Not Read SZL -- deliberately out of scope for this pass (see s7comm.hpp's file header),
+        // same generic note this codebase already had for every Userdata packet before this
+        // addition.
+        frame.notes.push_back("Userdata parameter block (vendor-specific extensions -- diagnostics, "
+                               "CPU functions, etc.) is not decoded in this groundwork release");
+        return;
+    }
+
+    frame.has_userdata_szl = true;
+    frame.userdata_szl_is_response = (type == 0x02);  // S7COMM_UD_TYPE_RES
+
+    Cursor dc(data_span);
+    if (dc.remaining() < 8) {
+        frame.notes.push_back("Read SZL data block is too short to contain its return code/"
+                               "transport size/length/SZL-ID/Index fields");
+        return;
+    }
+    frame.szl_return_code = dc.u8();
+    frame.szl_return_code_name = s7comm_return_code_name(frame.szl_return_code);
+    dc.u8();     // transport size -- undocumented even in Wireshark's own dissector; constant,
+                 // not rendered
+    dc.u16be();  // length of what follows -- not separately surfaced; the SZL-ID/Index/record
+                 // fields below are read directly instead
+    frame.szl_id = dc.u16be();
+    frame.szl_id_name = s7comm_szl_partlist_name(frame.szl_id & 0x00ff);
+    frame.szl_index = dc.u16be();
+
+    if (!frame.userdata_szl_is_response) return;  // Request side: SZL-ID/Index is everything there is
+    if (frame.szl_return_code != 0xFF) return;     // Response failed -- no record data follows
+
+    if (dc.remaining() < 4) {
+        frame.notes.push_back("Read SZL response is missing its record-length/record-count fields");
+        return;
+    }
+    uint16_t record_length = dc.u16be();
+    frame.szl_record_length = record_length;
+    uint16_t record_count = dc.u16be();
+    // Some CPU firmware sends a bogus 0xffff record count on a fragmented response (a documented
+    // quirk -- Wireshark's own dissector clamps the same way); clamp to what the data block
+    // actually has room for rather than trusting the field blindly.
+    if (record_length > 0 && static_cast<size_t>(record_count) * record_length > dc.remaining()) {
+        record_count = static_cast<uint16_t>(dc.remaining() / record_length);
+    }
+    frame.szl_record_count = record_count;
+    if (record_length == 0) return;
+
+    for (uint16_t i = 0; i < record_count && dc.remaining() >= record_length; ++i) {
+        Cursor rc(dc.bytes(record_length));
+        switch (frame.szl_id & 0x00ff) {
+            case 0x11:
+                decode_szl_0011_record(rc, frame);
+                break;
+            case 0x1c:
+                decode_szl_001c_record(rc, frame);
+                break;
+            default:
+                break;  // recognized as SZL data (has_userdata_szl is already true); this
+                        // particular SZL-ID's own record shape isn't decoded for this pass
+        }
+    }
+}
+
 void append_value_notes(const std::vector<S7DataItem>& items, std::vector<std::string>& notes) {
     for (size_t i = 0; i < items.size() && i < max_detailed_notes(); ++i) {
         const auto& di = items[i];
@@ -1005,8 +1262,7 @@ std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data) {
             }
         }
     } else if (frame.rosctr == 0x07) {
-        frame.notes.push_back("Userdata parameter block (vendor-specific extensions -- diagnostics, "
-                               "CPU functions, etc.) is not decoded in this groundwork release");
+        parse_s7_userdata(param_span, data_span, frame);
     } else if (frame.rosctr == 0x01 || frame.rosctr == 0x03) {
         frame.notes.push_back("no function code decoded (empty or too-short parameter block)");
     }
@@ -1055,6 +1311,44 @@ std::optional<S7CommFrame> try_parse_s7comm(ByteSpan cotp_user_data) {
         if (frame.has_pi_control_status) {
             s << " (more data=" << (frame.pi_control_has_more_data ? "yes" : "no")
               << ", error=" << (frame.pi_control_has_error ? "yes" : "no") << ")";
+        }
+    }
+    if (frame.has_userdata_szl) {
+        s << ": Read SZL " << (frame.userdata_szl_is_response ? "response" : "request") << " (SZL-ID=0x"
+          << std::hex << std::setfill('0') << std::setw(4) << frame.szl_id << std::dec << std::setfill(' ');
+        if (!frame.szl_id_name.empty()) {
+            s << " \"" << frame.szl_id_name << "\"";
+        }
+        s << ", Index=0x" << std::hex << std::setfill('0') << std::setw(4) << frame.szl_index << std::dec
+          << std::setfill(' ') << ")";
+        if (frame.userdata_szl_is_response) {
+            s << " [" << frame.szl_return_code_name << "]";
+            if (frame.szl_return_code == 0xFF) {
+                std::vector<std::string> identity_bits;
+                if (!frame.szl_order_number.empty()) identity_bits.push_back("order number=" + frame.szl_order_number);
+                if (!frame.szl_module_type_name.empty())
+                    identity_bits.push_back("module type=" + frame.szl_module_type_name);
+                if (!frame.szl_plc_name.empty()) identity_bits.push_back("PLC name=" + frame.szl_plc_name);
+                if (!frame.szl_module_name.empty()) identity_bits.push_back("module name=" + frame.szl_module_name);
+                if (!frame.szl_plant_identification.empty())
+                    identity_bits.push_back("plant ID=" + frame.szl_plant_identification);
+                if (!frame.szl_serial_number.empty())
+                    identity_bits.push_back("serial number=" + frame.szl_serial_number);
+                if (frame.has_szl_module_identification) {
+                    std::ostringstream ver;
+                    ver << "version=0x" << std::hex << std::setfill('0') << std::setw(4) << frame.szl_version
+                        << std::dec << std::setfill(' ');
+                    identity_bits.push_back(ver.str());
+                }
+                if (!identity_bits.empty()) {
+                    s << " (";
+                    for (size_t i = 0; i < identity_bits.size(); ++i) {
+                        if (i) s << ", ";
+                        s << identity_bits[i];
+                    }
+                    s << ")";
+                }
+            }
         }
     }
     if (frame.has_error && (frame.error_class != 0 || frame.error_code != 0)) {

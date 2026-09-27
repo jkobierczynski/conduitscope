@@ -11641,6 +11641,223 @@ it done as its own patch.
     firewall-ACL-draft export -- unchanged from item 75's own list, minus
     OPC UA identity, which this item completed.
 
+77. **NOT YET STARTED -- `decode`'s text output: color a packet's whole
+    line red when an attack-detection finding fired on it, not just on
+    `parse-error`/a Modbus exception response.** Jurgen's own request,
+    recorded here for a future increment. Today `TextWriter::write_packet`
+    (`src/output.cpp`) only sets its `severe` flag (which drives
+    `kBoldRed` on the summary text -- see that function's own comment) for
+    `p.protocol == "parse-error"` or a Modbus exception response;
+    `attack_detect.hpp`/`attack_detect.cpp` and
+    `ipv6_attack_detect.hpp`/`ipv6_attack_detect.cpp` (LAND, Teardrop, Ping
+    of Death, Smurf/Fraggle, SYN/ACK/ICMP/TCP/UDP flood, ICMP Redirect, IP
+    Source Routing, WinNuke, plus the IPv6-specific SLAAC/rogue-RA/DHCPv6
+    findings) fire by appending a curated string straight onto
+    `DecodedPacket::notes` -- the SAME generic vector every other curated
+    note in this codebase uses, with no dedicated flag, field, or shared
+    text prefix marking a note as an attack finding specifically (checked
+    directly: `notes.push_back(...)` call sites in both files use
+    per-signature text like `"LAND attack: ..."`, `"Ping of Death: ..."`,
+    `"SYN flood suspected: ..."`, no common `"ATTACK:"`-style prefix). So a
+    packet carrying an attack finding today gets colored purely by
+    whatever `protocol_tag_color()` its OWN protocol tag would normally
+    get (or plain `kDim` for a generic tcp/udp/non-ip line) -- the finding
+    itself is only visible if the reader scans down to the notes lines
+    below the packet's own head line, not from the head line's color at
+    a glance, which is what `severe`/`kBoldRed` exists to give
+    `parse-error` and Modbus exceptions. Implementing this needs a
+    decision on how `write_packet` recognizes "this packet has an attack
+    finding" without hand-matching note text: cleanest is likely a new
+    `bool DecodedPacket::has_attack_finding` (or an
+    `AttackDetectionState`-populated field) set at the SAME call sites
+    that already append to `notes` in `attack_detect.cpp`/
+    `ipv6_attack_detect.cpp`, then `severe`'s own condition in
+    `write_packet` widened to include it -- rather than a text-prefix
+    convention, which would require touching every existing
+    `notes.push_back` call site anyway to add the prefix, and would still
+    leave `write_packet` doing string matching against note text (fragile
+    against future wording changes) instead of checking a purpose-built
+    flag. JSON/CSV output was not discussed and is a separate decision --
+    Jurgen's request was specifically about the `decode` text output's own
+    line coloring.
+
+78. **NOT YET STARTED -- `decode`: a `--range`-style option to select
+    which packets get decoded by packet number, not just "the first N"
+    (`-c,--max-packets` already covers that case).** Jurgen's own request,
+    recorded here for a future increment; researched against primary
+    sources (Wireshark's own `tshark`/`editcap` man pages) before writing
+    this, per this project's own discipline of citing real behavior rather
+    than assuming it. Confirmed directly: `tshark` itself has NO built-in
+    option to select an arbitrary range or list of packets by packet
+    number -- its own `-c` is "maximum packets to read," always from the
+    start, exactly what this codebase's existing `-c,--max-packets`
+    already mirrors (see that option's own `--help` text, `cli_main.cpp`).
+    The Wireshark suite's actual prior art for "select packets by number"
+    lives in a SEPARATE tool, `editcap`, not `tshark`: `editcap`'s own
+    manual page documents trailing positional arguments -- "individual
+    packet numbers separated by whitespace and/or ranges of packet numbers
+    ... specified as *start*-*end*" (e.g. `editcap -r capture.pcapng
+    select.pcapng 1 5 10-20 30-40` to keep only those packets, or the same
+    without `-r` to instead exclude them) -- used as a separate
+    pre-processing pass to produce a smaller pcap BEFORE handing it to
+    `tshark`, not a `tshark` flag itself. `tcpdump` has no equivalent
+    concept at all (it has no notion of a stored, numbered packet list to
+    select from in the first place -- capture filters and `-c` are its only
+    volume controls).
+
+    Given that, the better fit for conduitscope is a DIRECT `decode`-time
+    equivalent of `editcap`'s own selection syntax (individual 1-based
+    packet numbers and/or `start-end` ranges), applied during decoding
+    itself rather than requiring a separate pre-processing pass with a
+    second tool -- e.g. `--range 5,10-20,30-40` (long-option name only;
+    every short letter `decode` currently uses is already taken --
+    `-a/-c/-d/-e/-f/-i/-o/-r/-t/-T/-v/-w/-x`, confirmed by a direct grep of
+    every `decode_cmd->add_option`/`->add_option` call in `cli_main.cpp`,
+    so this needs a fresh long-only flag, not a new short letter). Open
+    design questions for a future increment, not decided here: whether
+    packet numbers are 1-based over every frame in the capture (matching
+    `editcap`'s and this project's own existing `#<n>` packet-index
+    display in `decode`'s text output) or over only the packets that would
+    otherwise be printed after protocol/BPF filtering; how `--range`
+    interacts with `--max-packets` and `-f,--filter` when more than one is
+    given; and whether the parser for the `start-end`/comma-separated spec
+    belongs in `cli_main.cpp` directly or as a small shared helper (a
+    `PacketRangeSpec`-style struct) if `policy validate`/`inventory` ever
+    want the same selection mechanism later.
+
+79. **Asset inventory: a real OT asset record -- Grok gap #2, third
+    increment (Phase 3: S7comm SZL decode + wiring).** Direct continuation
+    of items 75-76 above -- see
+    docs/design/asset-inventory-real-record.md's own Phase 3 section for
+    the full scoped plan, including a correction to that plan's own
+    original assumption caught before implementing: SZL-ID 0x001C
+    ("Component Identification") is not one flat record but a family of
+    eleven differently-shaped sub-records, and the real Order Number/MLFB
+    this plan originally expected to find there actually lives in a
+    different SZL-ID, 0x0011 ("Module identification") -- found by
+    directly reading Wireshark's own `packet-s7comm_szl_ids.c`/
+    `packet-s7comm.c` dissector source (fetched via `curl` after `WebFetch`
+    truncated the file around its own small-model content-processing
+    limit) rather than trusting the plan's own wording, flagged to Jurgen,
+    and approved ("Yes, that's ok for me, go ahead.") before any decode
+    code was written.
+
+    **`S7CommFrame`/`S7CommResult` (`s7comm.hpp`) gain 19 new fields**
+    covering both in-scope SZL-IDs: `has_userdata_szl`,
+    `userdata_szl_is_response`, `szl_id`/`_id_name`/`_index`,
+    `szl_return_code`/`_return_code_name` (reusing the SAME
+    `s7comm_return_code_name` table Read Var/Write Var responses already
+    use -- confirmed to cover exactly the SZL return-code value space),
+    `szl_record_count`/`_record_length`, `has_szl_module_identification` +
+    `szl_order_number`/`_module_type_code`/`_version`/`_pg_release` (SZL-ID
+    0x0011, one fixed 28-byte record), and `szl_plc_name`/`_module_name`/
+    `_plant_identification`/`_serial_number`/`_module_type_name` (SZL-ID
+    0x001C, five of its eleven documented sub-records -- the other six,
+    copyright string/MMC serial/PROFINET I&M/OEM data/location ID/anything
+    else, are recognized as SZL data but deliberately not decoded further,
+    approved alongside the correction above). `src/s7comm.cpp` gains
+    `parse_s7_userdata` (the orchestrating function, wired into
+    `try_parse_s7comm`'s `rosctr == 0x07` branch in place of the old bare
+    "not decoded" note, which was migrated unchanged into
+    `parse_s7_userdata` itself as the fallback for every non-Read-SZL
+    Userdata exchange -- zero behavior change for those), plus
+    `decode_szl_0011_record`/`decode_szl_001c_record`, a 39-entry
+    `kSzlPartlistNames[]` table (transcribed from Wireshark's own
+    `szl_partial_list_names[]`) behind `s7comm_szl_partlist_name()`, and a
+    new `trim_trailing_spaces` helper mirroring the existing precedent in
+    `melsec.cpp`/`fins.cpp` rather than a third reimplementation. The
+    record loop is driven off the wire's own declared `record_length`
+    field (clamped against a documented CPU-firmware quirk where a
+    fragmented response can carry a bogus `0xffff` record count --
+    Wireshark's own dissector clamps the same way), not a hardcoded size
+    per SZL-ID, so it's naturally robust to firmware variation in
+    reserved-byte padding.
+
+    **`InventoryAsset` gains `plant_identification`** (a new field,
+    alongside `vendor`/`product`/`firmware_revision`/`serial_number`/
+    `security_posture` from items 75-76 -- S7-specific, empty for every
+    other protocol: a site-assigned plant tag, not a vendor/model fact).
+    `AssetInventoryEngine::observe`'s existing ENIP/OPC UA identity block
+    grows an `else if` sibling for `protocol == "s7comm" && ...
+    has_userdata_szl && ... userdata_szl_is_response && ...
+    szl_return_code == 0xFF`, binding to `dp.src_ip` for the same reason
+    ENIP/OPC UA do (a Read SZL response is sent BY the CPU being queried):
+    `product` prefers SZL-ID 0x0011's real Order Number when present,
+    falling back to SZL-ID 0x001C's own CPU-type/module/PLC name fields
+    when it isn't (a real exchange may request only one SZL-ID, not both);
+    `serial_number` gets 0x001C's own serial number; `plant_identification`
+    gets 0x001C's own plant tag. Module type code/version are deliberately
+    NOT promoted to a field -- no analog in this exchange to fold them into
+    the way item 76 folded OPC UA's security posture into `security:`, so
+    they stay accessible only via `decode --format json`'s own
+    `s7comm_szl_*` fields below. `update_identity()`'s signature grew a
+    trailing `plant_identification` parameter, defaulted to `""` for the
+    ENIP/OPC UA call sites so items 75-76's calls didn't need updating
+    (same pattern item 76 used for `security_posture`). Rendered in the
+    text report as a new `plant identification: ...` line (only when
+    non-empty) directly under the existing `identity:`/`security:` lines;
+    JSON gains `plant_identification` appended after `security_posture`
+    (the prior true-last optional field), same append-only,
+    omit-when-empty convention as items 75-76's fields.
+
+    **`decode --format json`'s own S7comm output also gains these
+    fields** (`s7comm_userdata_szl_is_response`, `s7comm_szl_id`/`_id_name`/
+    `_index`, `s7comm_szl_return_code`/`_return_code_name`,
+    `s7comm_szl_record_count`/`_record_length`, and whichever of
+    `s7comm_szl_order_number`/`_module_type_code`/`_version`/
+    `_pg_release` or `s7comm_szl_plc_name`/`_module_name`/
+    `_plant_identification`/`_serial_number`/`_module_type_name` the
+    response actually carried, in `write_s7comm_json_fields`,
+    `src/output.cpp`) -- independent of `inventory`'s own wiring above,
+    same "both inventory wiring AND standalone decode fields" pattern item
+    76 established for OPC UA. Appended after the existing
+    `pi_control_has_more_data`/`pi_control_has_error` block (the prior
+    true-last field), same append-only convention. `decode`'s own text
+    summary gains a new segment (analogous to `has_pi_service`) rendering
+    Read SZL request/response direction, SZL-ID/name/Index, return code,
+    and, on success, whichever identity fields the response carried.
+
+    **Testing.** A new fixture, `tests/sample_s7comm_szl.pcap`
+    (`build_s7comm_szl_sample` in `tools/make_sample_pcap.py`), with seven
+    scenarios: an SZL-ID 0x0011 request/response pair; an SZL-ID 0x001C
+    request/response carrying all five decoded sub-records in one response
+    (all five sub-record shapes happen to be exactly 34 bytes, so they
+    share one `record_length`, matching what a real Index-0x0000 "give me
+    every sub-record" exchange would look like); an SZL-ID this codebase
+    recognizes as SZL data but decodes no named field for (0x0000); a
+    failed response (return code 0x0A, "Object does not exist" --
+    confirming no attempt is made to read record data that was never
+    sent); and a non-SZL Userdata exchange (CPU functions group, but a
+    different subfunction) confirming the generic fallback note still
+    fires unchanged. Every byte layout (parameter block shape, data block
+    header, both SZL-ID record shapes) was cross-checked against
+    Wireshark's own dissector source directly before the fixture was
+    written, not guessed. 12 new CTest cases (`decode` text/JSON for every
+    scenario above, `inventory` text/JSON confirming the `InventoryAsset`
+    wiring, plus does-not-crash JSON/CSV cases) -- all verified against the
+    real binary's own output, never hand-written expected text. 9 new fuzz
+    corpus seeds extracted from the new fixture into
+    `fuzz/corpus/cotp_s7comm/` via `tools/extract_fuzz_corpus.py`
+    (`--layer l4 --l4-proto tcp --port 102`); the standard 60-second
+    corpus-regression CTest run, plus a separate ~1.4-million-execution,
+    60-second standalone `libFuzzer` run against the full 60-file corpus,
+    both clean under ASan/UBSan with coverage plateauing (no new crashes,
+    no new coverage growth after the first few thousand executions). Full
+    CTest suite: 2060/2060 (default GCC build, up from the prior 2048);
+    ASan/UBSan (2060/2060 non-fuzz cases, plus all 76 fuzz
+    corpus-regression targets including the widened `cotp_s7comm` one, all
+    clean) and no-live-capture (2048/2048, up from 2036) configs, plus a
+    clean-room extract-rebuild-test, all re-verified before delivery;
+    MinGW-w64 cross-compile confirmed to still compile and link cleanly
+    (same standing no-Wine environment limitation as items 75-76).
+
+    **Not yet done, tracked for a following increment**: BACnet
+    ReadPropertyMultiple decode plus Device-object property correlation,
+    DNP3 Device Attributes, role classification, tag/point/DB touch
+    summarization, and CSV/CMDB, STIX/TAXII-lite, and firewall-ACL-draft
+    export -- unchanged from item 76's own list, minus S7comm SZL, which
+    this item completed.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

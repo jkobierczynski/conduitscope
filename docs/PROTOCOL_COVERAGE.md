@@ -365,8 +365,10 @@ entry; both of those recognized-but-unconfirmed shapes fall back to raw hex
 rather than guessing further. Treat every `[EXPERIMENTAL]` tag as a
 plausible reconstruction, not a certainty -- see docs/USER_GUIDE.md's LIMITATIONS. Every other
 syntax id is recognized (by id) but not decoded at all, same as every other
-function code's parameter/data payload -- so is the entire Userdata
-parameter block used for vendor-specific diagnostics/CPU functions.
+function code's parameter/data payload -- the Userdata parameter block used
+for vendor-specific diagnostics/CPU functions is likewise not decoded in
+general, EXCEPT for one specific, high-value exchange: Read SZL, described
+next.
 
 **PLC Control (`0x28`) / PLC Stop (`0x29`)** -- two function codes long
 recognized only by name (see the function-code table above) -- now get their
@@ -420,6 +422,64 @@ data of the block/file can still be retrieved") and bit `0x02` ("an error
 occurred"). A handful of bytes in both function codes' fixed layout are
 simply unknown/reserved -- Wireshark's own dissector doesn't document their
 meaning either, so this decoder doesn't invent one here either.
+
+**Userdata (`0x07`) Read SZL** (function group `0x04` "CPU functions",
+subfunction `0x01`) -- Siemens' own device-status/identification query
+mechanism, the S7 analog of EtherNet/IP's CIP Identity and OPC UA's
+`GetEndpoints` identity promotion (asset-inventory Phase 3 of Grok gap #2;
+see `docs/design/asset-inventory-real-record.md`). Every other Userdata
+function/subfunction combination still falls through to the same generic
+"not decoded" note this codebase always had; Read SZL specifically now gets
+the full parameter block (type/function group/subfunction, syntax id, the
+extended-syntax data-unit-reference/error-code fields when present) and, on
+the data side, the SZL-ID (a 16-bit bitfield -- diagnostic-type nibble,
+partial-list-extract nibble, partial-list-number byte, named against a
+39-entry table transcribed from Wireshark's own `szl_partial_list_names[]`)
+and SZL-Index decoded for every request and response, plus the response's
+own return code (reusing the same `s7comm_return_code_name` table Read
+Var/Write Var responses already use -- confirmed to cover exactly the SZL
+return-code value space). On a successful (`0xFF`) response, the
+record-length/record-count fields drive an iteration over the individual
+SZL records themselves (clamped to what the response actually has room
+for, matching a documented CPU-firmware quirk where a fragmented response
+can carry a bogus `0xffff` record count -- Wireshark's own dissector clamps
+the same way), with two SZL-IDs decoded field-by-field:
+
+- **SZL-ID `0x0011`** ("Module identification") -- the real Order Number/
+  MLFB (e.g. `6ES7 315-2AG10-0AB0`, trailing spaces trimmed), module type
+  code, version, and PG (programming device) release, all from a single
+  fixed 28-byte record.
+- **SZL-ID `0x001c`** ("Component Identification") -- NOT a single flat
+  record the way `0x0011` is: eleven documented sub-record shapes, selected
+  by the record's own leading sub-index field, transcribed from Wireshark's
+  own `s7comm_decode_szl_id_xy1c_idx_000x`. Five sub-indices, all
+  genuinely asset-identity-relevant, are decoded: `0x0001` (PLC name),
+  `0x0002` (module name), `0x0003` (plant tag/"Plant Identification"),
+  `0x0005` (serial number), `0x0007` (CPU type name). The remaining six
+  (`0x0004` copyright string, `0x0008` MMC serial number, `0x0009`
+  PROFINET I&M data, `0x000a` OEM copyright/ID, `0x000b` location ID, and
+  anything else) are recognized as SZL data -- `has_userdata_szl`/`szl_id`/
+  `szl_id_name` still populate -- but their own sub-record bytes are
+  deliberately not interpreted further, a scope boundary decided by
+  asset-identity relevance rather than an attempt to decode every
+  documented SZL-ID this dissector names (`packet-s7comm_szl_ids.c` alone
+  runs to nearly 8,000 lines covering dozens of SZL-IDs; only these two are
+  in scope here).
+
+This originally-approved design assumed `0x001c` alone carried the Order
+Number -- direct reading of Wireshark's own dissector source during
+implementation found that assumption wrong (the real Order Number/MLFB
+lives in `0x0011`, not `0x001c`) and the scope was corrected before writing
+any decode code, the same "verify against primary sources, correct the plan
+rather than silently redefine it" discipline this project's own S7comm-Plus
+discovery (below) and `0xB2` groundwork already established. Every SZL
+string field uses the same trailing-space-trimming convention MELSEC's own
+`cpu_type_name`/FINS's `trim_trailing` already use in this codebase (a new
+`trim_trailing_spaces` helper mirroring them, not a third reimplementation).
+See `docs/USER_GUIDE.md`'s INVENTORY section for how these fields wire into
+`InventoryAsset::product`/`serial_number`/the new `plant_identification`
+field, and LIMITATIONS for the six deliberately-undecoded `0x001c`
+sub-indices.
 
 The `M2.0`-`M2.4` shape above was later checked against the *entire* 140MB
 source capture it came from, not just the five originally spot-checked

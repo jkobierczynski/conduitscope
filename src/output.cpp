@@ -3812,6 +3812,50 @@ void write_s7comm_json_fields(std::ostream& out, const S7CommResult& sr) {
         out << "    \"s7comm_pi_control_has_error\": " << (sr.pi_control_has_error ? "true" : "false")
             << ",\n";
     }
+    if (sr.has_userdata_szl) {
+        auto hex16 = [](uint16_t v) {
+            std::ostringstream s;
+            s << "0x" << std::hex << std::setfill('0') << std::setw(4) << v;
+            return s.str();
+        };
+        out << "    \"s7comm_userdata_szl_is_response\": " << (sr.userdata_szl_is_response ? "true" : "false")
+            << ",\n";
+        out << "    \"s7comm_szl_id\": \"" << hex16(sr.szl_id) << "\",\n";
+        if (!sr.szl_id_name.empty()) {
+            out << "    \"s7comm_szl_id_name\": \"" << json_escape(sr.szl_id_name) << "\",\n";
+        }
+        out << "    \"s7comm_szl_index\": \"" << hex16(sr.szl_index) << "\",\n";
+        if (sr.userdata_szl_is_response) {
+            out << "    \"s7comm_szl_return_code\": " << static_cast<int>(sr.szl_return_code) << ",\n";
+            out << "    \"s7comm_szl_return_code_name\": \"" << json_escape(sr.szl_return_code_name) << "\",\n";
+            if (sr.szl_return_code == 0xFF) {
+                out << "    \"s7comm_szl_record_count\": " << sr.szl_record_count << ",\n";
+                out << "    \"s7comm_szl_record_length\": " << sr.szl_record_length << ",\n";
+            }
+        }
+        if (sr.has_szl_module_identification) {
+            out << "    \"s7comm_szl_order_number\": \"" << json_escape(sr.szl_order_number) << "\",\n";
+            out << "    \"s7comm_szl_module_type_code\": \"" << hex16(sr.szl_module_type_code) << "\",\n";
+            out << "    \"s7comm_szl_version\": \"" << hex16(sr.szl_version) << "\",\n";
+            out << "    \"s7comm_szl_pg_release\": \"" << hex16(sr.szl_pg_release) << "\",\n";
+        }
+        if (!sr.szl_plc_name.empty()) {
+            out << "    \"s7comm_szl_plc_name\": \"" << json_escape(sr.szl_plc_name) << "\",\n";
+        }
+        if (!sr.szl_module_name.empty()) {
+            out << "    \"s7comm_szl_module_name\": \"" << json_escape(sr.szl_module_name) << "\",\n";
+        }
+        if (!sr.szl_plant_identification.empty()) {
+            out << "    \"s7comm_szl_plant_identification\": \"" << json_escape(sr.szl_plant_identification)
+                << "\",\n";
+        }
+        if (!sr.szl_serial_number.empty()) {
+            out << "    \"s7comm_szl_serial_number\": \"" << json_escape(sr.szl_serial_number) << "\",\n";
+        }
+        if (!sr.szl_module_type_name.empty()) {
+            out << "    \"s7comm_szl_module_type_name\": \"" << json_escape(sr.szl_module_type_name) << "\",\n";
+        }
+    }
 }
 
 // The MELSEC analog of write_twincat_json_fields/write_kerberos_json_fields above -- same
