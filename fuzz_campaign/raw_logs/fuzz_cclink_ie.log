@@ -1,0 +1,34 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1335220405
+INFO: Loaded 1 modules   (110 inline 8-bit counters): 110 [0x55d1b9b90c90, 0x55d1b9b90cfe), 
+INFO: Loaded 1 PC tables (110 PCs): 110 [0x55d1b9b90d00,0x55d1b9b913e0), 
+INFO:       31 files found in /home/claude/conduitscope/fuzz/corpus/cclink_ie
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 31 min: 1b max: 143b total: 1520b rss: 34Mb
+#33	INITED cov: 62 ft: 156 corp: 12/575b exec/s: 0 rss: 37Mb
+#1048576	pulse  cov: 62 ft: 156 corp: 12/575b lim: 4096 exec/s: 349525 rss: 407Mb
+#1094578	REDUCE cov: 62 ft: 156 corp: 12/574b lim: 4096 exec/s: 364859 rss: 423Mb L: 19/143 MS: 5 ShuffleBytes-CMP-CopyPart-EraseBytes-CrossOver- DE: "\016\000\000\000\000\000\000\000"-
+#2097152	pulse  cov: 62 ft: 156 corp: 12/574b lim: 4096 exec/s: 349525 rss: 474Mb
+#4194304	pulse  cov: 62 ft: 156 corp: 12/574b lim: 4096 exec/s: 322638 rss: 476Mb
+#8388608	pulse  cov: 62 ft: 156 corp: 12/574b lim: 4096 exec/s: 335544 rss: 476Mb
+#8873793	REDUCE cov: 62 ft: 156 corp: 12/570b lim: 4096 exec/s: 341299 rss: 476Mb L: 133/143 MS: 4 EraseBytes-PersAutoDict-ChangeBinInt-PersAutoDict- DE: "\016\000\000\000\000\000\000\000"-"\016\000\000\000\000\000\000\000"-
+#9470270	REDUCE cov: 62 ft: 156 corp: 12/569b lim: 4096 exec/s: 338223 rss: 476Mb L: 15/143 MS: 2 ChangeBit-EraseBytes-
+#12009234	REDUCE cov: 62 ft: 156 corp: 12/568b lim: 4096 exec/s: 333589 rss: 476Mb L: 132/143 MS: 4 ChangeBinInt-InsertByte-ChangeBit-EraseBytes-
+#14489847	REDUCE cov: 62 ft: 156 corp: 12/566b lim: 4096 exec/s: 329314 rss: 476Mb L: 130/143 MS: 3 ChangeBit-EraseBytes-InsertByte-
+#16777216	pulse  cov: 62 ft: 156 corp: 12/566b lim: 4096 exec/s: 328965 rss: 476Mb
+#23531633	REDUCE cov: 62 ft: 156 corp: 12/534b lim: 4096 exec/s: 331431 rss: 477Mb L: 98/143 MS: 5 EraseBytes-ChangeBit-CMP-ChangeBinInt-ChangeBit- DE: "\000\000\000\000\000\000\000\000"-
+#23607805	REDUCE cov: 62 ft: 156 corp: 12/518b lim: 4096 exec/s: 332504 rss: 477Mb L: 82/143 MS: 2 ChangeBit-EraseBytes-
+#28255832	REDUCE cov: 62 ft: 156 corp: 12/517b lim: 4096 exec/s: 328556 rss: 487Mb L: 81/143 MS: 5 ShuffleBytes-EraseBytes-CopyPart-ChangeBinInt-CrossOver-
+#33554432	pulse  cov: 62 ft: 156 corp: 12/517b lim: 4096 exec/s: 328965 rss: 487Mb
+#36872684	REDUCE cov: 62 ft: 156 corp: 12/509b lim: 4096 exec/s: 329220 rss: 487Mb L: 73/143 MS: 5 ChangeASCIIInt-ChangeBit-ChangeByte-CMP-EraseBytes- DE: "\377\377"-
+#49140104	REDUCE cov: 62 ft: 156 corp: 12/506b lim: 4096 exec/s: 327600 rss: 487Mb L: 70/143 MS: 4 ChangeByte-EraseBytes-ChangeBinInt-CrossOver-
+#54954398	REDUCE cov: 62 ft: 156 corp: 12/503b lim: 4096 exec/s: 329068 rss: 487Mb L: 67/143 MS: 3 ChangeByte-ShuffleBytes-EraseBytes-
+#67108864	pulse  cov: 62 ft: 156 corp: 12/503b lim: 4096 exec/s: 328965 rss: 487Mb
+#134217728	pulse  cov: 62 ft: 156 corp: 12/503b lim: 4096 exec/s: 326563 rss: 487Mb
+#175494384	DONE   cov: 62 ft: 156 corp: 12/503b lim: 4096 exec/s: 324388 rss: 487Mb
+###### Recommended dictionary. ######
+"\016\000\000\000\000\000\000\000" # Uses: 6843250
+"\000\000\000\000\000\000\000\000" # Uses: 4804203
+"\377\377" # Uses: 4212411
+###### End of recommended dictionary. ######
+Done 175494384 runs in 541 second(s)

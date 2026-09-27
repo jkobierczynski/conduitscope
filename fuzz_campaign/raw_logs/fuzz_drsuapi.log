@@ -1,0 +1,19 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3443434501
+INFO: Loaded 1 modules   (42 inline 8-bit counters): 42 [0x562c6949ed28, 0x562c6949ed52), 
+INFO: Loaded 1 PC tables (42 PCs): 42 [0x562c6949ed58,0x562c6949eff8), 
+INFO:       11 files found in /home/claude/conduitscope/fuzz/corpus/drsuapi
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 11 min: 1b max: 32b total: 233b rss: 34Mb
+#12	INITED cov: 28 ft: 39 corp: 4/73b exec/s: 0 rss: 36Mb
+#32768	pulse  cov: 28 ft: 39 corp: 4/73b lim: 347 exec/s: 16384 rss: 171Mb
+#65536	pulse  cov: 28 ft: 39 corp: 4/73b lim: 677 exec/s: 16384 rss: 302Mb
+#131072	pulse  cov: 28 ft: 39 corp: 4/73b lim: 1328 exec/s: 16384 rss: 470Mb
+#262144	pulse  cov: 28 ft: 39 corp: 4/73b lim: 2631 exec/s: 16384 rss: 471Mb
+#524288	pulse  cov: 28 ft: 39 corp: 4/73b lim: 4096 exec/s: 16384 rss: 472Mb
+#1048576	pulse  cov: 28 ft: 39 corp: 4/73b lim: 4096 exec/s: 16384 rss: 472Mb
+#2097152	pulse  cov: 28 ft: 39 corp: 4/73b lim: 4096 exec/s: 16644 rss: 472Mb
+#4194304	pulse  cov: 28 ft: 39 corp: 4/73b lim: 4096 exec/s: 16844 rss: 473Mb
+#8388608	pulse  cov: 28 ft: 39 corp: 4/73b lim: 4096 exec/s: 16980 rss: 474Mb
+#9185627	DONE   cov: 28 ft: 39 corp: 4/73b lim: 4096 exec/s: 16978 rss: 474Mb
+Done 9185627 runs in 541 second(s)

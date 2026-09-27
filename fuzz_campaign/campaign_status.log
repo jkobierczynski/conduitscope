@@ -1,0 +1,116 @@
+=== Campaign started 2026-09-26T01:27:48Z, 570s per harness, 2-wide ===
+Discovered 76 harnesses
+2026-09-26T03:40:33Z  fuzz_amqp10  rc=0  elapsed=543s  last_exec_marker=19468993  crash_artifacts=0
+2026-09-26T03:40:33Z  fuzz_amqp091  rc=0  elapsed=543s  last_exec_marker=27847524  crash_artifacts=0
+2026-09-26T03:40:33Z  progress: 2/76 harnesses done
+2026-09-26T03:49:36Z  fuzz_arp  rc=0  elapsed=541s  last_exec_marker=120377340  crash_artifacts=0
+2026-09-26T03:49:36Z  fuzz_bacnet  rc=0  elapsed=541s  last_exec_marker=18930965  crash_artifacts=0
+2026-09-26T03:49:36Z  progress: 4/76 harnesses done
+2026-09-26T03:58:40Z  fuzz_bsap  rc=0  elapsed=542s  last_exec_marker=93715614  crash_artifacts=0
+2026-09-26T03:58:40Z  fuzz_bgp  rc=0  elapsed=542s  last_exec_marker=18908255  crash_artifacts=0
+2026-09-26T03:58:40Z  progress: 6/76 harnesses done
+2026-09-26T04:07:44Z  fuzz_can_socketcan  rc=0  elapsed=542s  last_exec_marker=57054209  crash_artifacts=0
+2026-09-26T04:07:44Z  fuzz_canopen  rc=0  elapsed=542s  last_exec_marker=57620676  crash_artifacts=0
+2026-09-26T04:07:44Z  progress: 8/76 harnesses done
+2026-09-26T04:16:55Z  fuzz_cclink_ie  rc=0  elapsed=541s  last_exec_marker=175494384  crash_artifacts=0
+2026-09-26T04:16:55Z  fuzz_cdp  rc=0  elapsed=541s  last_exec_marker=19406029  crash_artifacts=0
+2026-09-26T04:16:55Z  progress: 10/76 harnesses done
+2026-09-26T04:25:59Z  fuzz_coap  rc=0  elapsed=542s  last_exec_marker=43417037  crash_artifacts=0
+2026-09-26T04:25:59Z  fuzz_codesys  rc=0  elapsed=542s  last_exec_marker=37050288  crash_artifacts=0
+2026-09-26T04:25:59Z  progress: 12/76 harnesses done
+2026-09-26T04:35:03Z  fuzz_dcerpc  rc=0  elapsed=542s  last_exec_marker=14155122  crash_artifacts=0
+2026-09-26T04:35:03Z  fuzz_cotp_s7comm  rc=0  elapsed=542s  last_exec_marker=11089271  crash_artifacts=0
+2026-09-26T04:35:03Z  progress: 14/76 harnesses done
+2026-09-26T04:44:06Z  fuzz_dcom  rc=0  elapsed=541s  last_exec_marker=6080100  crash_artifacts=0
+2026-09-26T04:44:07Z  fuzz_devicenet  rc=0  elapsed=542s  last_exec_marker=54635000  crash_artifacts=0
+2026-09-26T04:44:07Z  progress: 16/76 harnesses done
+2026-09-26T04:53:14Z  fuzz_dhcpv6  rc=0  elapsed=542s  last_exec_marker=8140320  crash_artifacts=0
+2026-09-26T04:53:14Z  fuzz_dicom  rc=0  elapsed=542s  last_exec_marker=28605671  crash_artifacts=0
+2026-09-26T04:53:14Z  progress: 18/76 harnesses done
+2026-09-26T05:02:18Z  fuzz_dns  rc=0  elapsed=542s  last_exec_marker=9519048  crash_artifacts=0
+2026-09-26T05:02:18Z  fuzz_dnp3  rc=0  elapsed=542s  last_exec_marker=11360587  crash_artifacts=0
+2026-09-26T05:02:18Z  progress: 20/76 harnesses done
+2026-09-26T05:39:08Z  fuzz_drsuapi  rc=0  elapsed=542s  last_exec_marker=9185627  crash_artifacts=0
+2026-09-26T05:39:08Z  fuzz_eapol  rc=0  elapsed=542s  last_exec_marker=188191624  crash_artifacts=0
+2026-09-26T05:39:08Z  progress: 22/76 harnesses done
+2026-09-26T05:48:12Z  fuzz_eigrp  rc=0  elapsed=542s  last_exec_marker=18661527  crash_artifacts=0
+2026-09-26T05:48:12Z  fuzz_enip  rc=0  elapsed=542s  last_exec_marker=2126919  crash_artifacts=0
+2026-09-26T05:48:12Z  progress: 24/76 harnesses done
+2026-09-26T05:57:16Z  fuzz_ethercat  rc=0  elapsed=541s  last_exec_marker=23915699  crash_artifacts=0
+2026-09-26T05:57:17Z  fuzz_ffhse  rc=0  elapsed=542s  last_exec_marker=18753175  crash_artifacts=0
+2026-09-26T05:57:17Z  progress: 26/76 harnesses done
+2026-09-26T06:06:20Z  fuzz_fins  rc=0  elapsed=541s  last_exec_marker=19119384  crash_artifacts=0
+2026-09-26T06:06:20Z  fuzz_fox  rc=0  elapsed=541s  last_exec_marker=15580760  crash_artifacts=0
+2026-09-26T06:06:20Z  progress: 28/76 harnesses done
+2026-09-26T07:48:37Z  fuzz_goose  rc=0  elapsed=543s  last_exec_marker=23005851  crash_artifacts=0
+2026-09-26T07:48:37Z  fuzz_ge_srtp  rc=0  elapsed=543s  last_exec_marker=133728861  crash_artifacts=0
+2026-09-26T07:48:37Z  progress: 30/76 harnesses done
+2026-09-26T08:06:03Z  fuzz_homeplug_av  rc=0  elapsed=542s  last_exec_marker=52712108  crash_artifacts=0
+2026-09-26T08:06:03Z  fuzz_hartip  rc=0  elapsed=542s  last_exec_marker=5471765  crash_artifacts=0
+2026-09-26T08:06:03Z  progress: 32/76 harnesses done
+2026-09-26T08:15:06Z  fuzz_hsrp  rc=0  elapsed=541s  last_exec_marker=13691768  crash_artifacts=0
+2026-09-26T08:15:07Z  fuzz_icmp  rc=0  elapsed=542s  last_exec_marker=29642274  crash_artifacts=0
+2026-09-26T08:15:07Z  progress: 34/76 harnesses done
+2026-09-26T08:24:10Z  fuzz_icmpv6  rc=0  elapsed=542s  last_exec_marker=13131714  crash_artifacts=0
+2026-09-26T08:24:10Z  fuzz_iec104  rc=0  elapsed=542s  last_exec_marker=10476259  crash_artifacts=0
+2026-09-26T08:24:10Z  progress: 36/76 harnesses done
+2026-09-26T08:33:15Z  fuzz_ieee802154  rc=0  elapsed=541s  last_exec_marker=17146075  crash_artifacts=0
+2026-09-26T08:33:15Z  fuzz_igmp  rc=0  elapsed=542s  last_exec_marker=17130585  crash_artifacts=0
+2026-09-26T08:33:15Z  progress: 38/76 harnesses done
+2026-09-26T08:42:20Z  fuzz_j1939  rc=0  elapsed=541s  last_exec_marker=55928028  crash_artifacts=0
+2026-09-26T08:42:20Z  fuzz_igrp  rc=0  elapsed=541s  last_exec_marker=19847340  crash_artifacts=0
+2026-09-26T08:42:20Z  progress: 40/76 harnesses done
+2026-09-26T08:51:24Z  fuzz_kerberos  rc=0  elapsed=542s  last_exec_marker=10781918  crash_artifacts=0
+2026-09-26T08:51:24Z  fuzz_ldap  rc=0  elapsed=542s  last_exec_marker=18717702  crash_artifacts=0
+2026-09-26T08:51:24Z  progress: 42/76 harnesses done
+2026-09-26T09:00:27Z  fuzz_lldp  rc=0  elapsed=541s  last_exec_marker=34562631  crash_artifacts=0
+2026-09-26T09:00:27Z  fuzz_lsarpc  rc=0  elapsed=541s  last_exec_marker=2095493  crash_artifacts=0
+2026-09-26T09:00:27Z  progress: 44/76 harnesses done
+2026-09-26T09:09:31Z  fuzz_melsec  rc=0  elapsed=542s  last_exec_marker=62782117  crash_artifacts=0
+2026-09-26T09:09:31Z  fuzz_mms  rc=0  elapsed=542s  last_exec_marker=24489627  crash_artifacts=0
+2026-09-26T09:09:31Z  progress: 46/76 harnesses done
+2026-09-26T09:18:36Z  fuzz_mpls  rc=0  elapsed=541s  last_exec_marker=66094637  crash_artifacts=0
+2026-09-26T09:18:37Z  fuzz_modbus  rc=0  elapsed=542s  last_exec_marker=208075291  crash_artifacts=0
+2026-09-26T09:18:37Z  progress: 48/76 harnesses done
+2026-09-26T09:27:40Z  fuzz_nbns  rc=0  elapsed=542s  last_exec_marker=13009142  crash_artifacts=0
+2026-09-26T09:27:40Z  fuzz_mqtt  rc=0  elapsed=542s  last_exec_marker=7173212  crash_artifacts=0
+2026-09-26T09:27:40Z  progress: 50/76 harnesses done
+2026-09-26T09:36:43Z  fuzz_ntlm  rc=0  elapsed=541s  last_exec_marker=69043600  crash_artifacts=0
+2026-09-26T09:36:44Z  fuzz_netlogon  rc=0  elapsed=542s  last_exec_marker=2270685  crash_artifacts=0
+2026-09-26T09:36:44Z  progress: 52/76 harnesses done
+2026-09-26T09:45:52Z  fuzz_ospf  rc=0  elapsed=541s  last_exec_marker=19011267  crash_artifacts=0
+2026-09-26T09:45:52Z  fuzz_opcua  rc=0  elapsed=541s  last_exec_marker=8769915  crash_artifacts=0
+2026-09-26T09:45:52Z  progress: 54/76 harnesses done
+2026-09-26T09:54:56Z  fuzz_pcap_reader  rc=0  elapsed=542s  last_exec_marker=1667025  crash_artifacts=0
+2026-09-26T09:54:57Z  fuzz_packet_decode  rc=0  elapsed=543s  last_exec_marker=28527  crash_artifacts=0
+2026-09-26T09:54:57Z  progress: 56/76 harnesses done
+2026-09-26T10:04:00Z  fuzz_powerlink  rc=0  elapsed=541s  last_exec_marker=13102025  crash_artifacts=0
+2026-09-26T10:04:00Z  fuzz_pim  rc=0  elapsed=541s  last_exec_marker=32355426  crash_artifacts=0
+2026-09-26T10:04:00Z  progress: 58/76 harnesses done
+2026-09-26T10:13:08Z  fuzz_profinet  rc=0  elapsed=542s  last_exec_marker=27284378  crash_artifacts=0
+2026-09-26T10:13:08Z  fuzz_pppoe  rc=0  elapsed=542s  last_exec_marker=233752616  crash_artifacts=0
+2026-09-26T10:13:08Z  progress: 60/76 harnesses done
+2026-09-26T10:22:14Z  fuzz_quic  rc=0  elapsed=542s  last_exec_marker=2075128  crash_artifacts=0
+2026-09-26T10:22:15Z  fuzz_rip  rc=0  elapsed=543s  last_exec_marker=24494722  crash_artifacts=0
+2026-09-26T10:22:15Z  progress: 62/76 harnesses done
+2026-09-26T10:31:18Z  fuzz_rmcp  rc=0  elapsed=541s  last_exec_marker=55429286  crash_artifacts=0
+2026-09-26T10:31:19Z  fuzz_s7comm_plus  rc=0  elapsed=542s  last_exec_marker=6117057  crash_artifacts=0
+2026-09-26T10:31:19Z  progress: 64/76 harnesses done
+2026-09-26T10:40:24Z  fuzz_slow_protocols  rc=0  elapsed=541s  last_exec_marker=20722283  crash_artifacts=0
+2026-09-26T10:40:24Z  fuzz_samr  rc=0  elapsed=541s  last_exec_marker=1032540  crash_artifacts=0
+2026-09-26T10:40:24Z  progress: 66/76 harnesses done
+2026-09-26T10:49:28Z  fuzz_srvsvc  rc=0  elapsed=541s  last_exec_marker=2592684  crash_artifacts=0
+2026-09-26T10:49:28Z  fuzz_smb  rc=0  elapsed=541s  last_exec_marker=7541064  crash_artifacts=0
+2026-09-26T10:49:28Z  progress: 68/76 harnesses done
+2026-09-26T10:58:32Z  fuzz_stp  rc=0  elapsed=542s  last_exec_marker=33852253  crash_artifacts=0
+2026-09-26T10:58:32Z  fuzz_sv  rc=0  elapsed=542s  last_exec_marker=27284411  crash_artifacts=0
+2026-09-26T10:58:32Z  progress: 70/76 harnesses done
+2026-09-26T11:07:38Z  fuzz_twincat  rc=0  elapsed=542s  last_exec_marker=87329225  crash_artifacts=0
+2026-09-26T11:07:38Z  fuzz_tls_sni  rc=0  elapsed=542s  last_exec_marker=196146002  crash_artifacts=0
+2026-09-26T11:07:38Z  progress: 72/76 harnesses done
+2026-09-26T11:16:41Z  fuzz_vrrp  rc=0  elapsed=541s  last_exec_marker=41580186  crash_artifacts=0
+2026-09-26T11:16:42Z  fuzz_winrm  rc=0  elapsed=542s  last_exec_marker=25369767  crash_artifacts=0
+2026-09-26T11:16:42Z  progress: 74/76 harnesses done
+2026-09-26T11:25:45Z  fuzz_zigbee  rc=0  elapsed=541s  last_exec_marker=15984873  crash_artifacts=0
+2026-09-26T11:25:45Z  fuzz_wkssvc  rc=0  elapsed=541s  last_exec_marker=4805437  crash_artifacts=0
+2026-09-26T11:25:45Z  progress: 76/76 harnesses done

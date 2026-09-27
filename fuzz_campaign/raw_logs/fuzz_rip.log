@@ -1,0 +1,63 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3318616862
+INFO: Loaded 1 modules   (74 inline 8-bit counters): 74 [0x5566c3d4ce40, 0x5566c3d4ce8a), 
+INFO: Loaded 1 PC tables (74 PCs): 74 [0x5566c3d4ce90,0x5566c3d4d330), 
+INFO:      125 files found in /home/claude/conduitscope/fuzz/corpus/rip
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 125 min: 1b max: 924b total: 26546b rss: 34Mb
+#126	INITED cov: 49 ft: 198 corp: 45/7874b exec/s: 0 rss: 41Mb
+#65536	pulse  cov: 49 ft: 198 corp: 45/7874b lim: 1315 exec/s: 32768 rss: 413Mb
+#73303	REDUCE cov: 49 ft: 198 corp: 45/7854b lim: 1385 exec/s: 36651 rss: 416Mb L: 590/665 MS: 2 CMP-EraseBytes- DE: "\001\000\000\000"-
+#131072	pulse  cov: 49 ft: 198 corp: 45/7854b lim: 1955 exec/s: 32768 rss: 424Mb
+#179660	NEW    cov: 49 ft: 200 corp: 46/8258b lim: 2440 exec/s: 35932 rss: 426Mb L: 404/665 MS: 1 CopyPart-
+#262144	pulse  cov: 49 ft: 200 corp: 46/8258b lim: 3254 exec/s: 37449 rss: 430Mb
+#465989	REDUCE cov: 49 ft: 200 corp: 46/8243b lim: 4096 exec/s: 33284 rss: 431Mb L: 89/665 MS: 4 EraseBytes-ChangeBinInt-ChangeBit-CopyPart-
+#484463	REDUCE cov: 49 ft: 200 corp: 46/8239b lim: 4096 exec/s: 34604 rss: 431Mb L: 85/665 MS: 4 ChangeBit-PersAutoDict-ChangeBinInt-EraseBytes- DE: "\001\000\000\000"-
+#519055	REDUCE cov: 49 ft: 200 corp: 46/8238b lim: 4096 exec/s: 34603 rss: 431Mb L: 84/665 MS: 1 EraseBytes-
+#524288	pulse  cov: 49 ft: 200 corp: 46/8238b lim: 4096 exec/s: 34952 rss: 431Mb
+#617789	REDUCE cov: 49 ft: 200 corp: 46/8198b lim: 4096 exec/s: 34321 rss: 431Mb L: 550/665 MS: 3 CMP-EraseBytes-CopyPart- DE: "\001\000"-
+#627640	REDUCE cov: 49 ft: 200 corp: 46/8188b lim: 4096 exec/s: 34868 rss: 431Mb L: 540/665 MS: 1 EraseBytes-
+#640123	REDUCE cov: 49 ft: 200 corp: 46/8169b lim: 4096 exec/s: 33690 rss: 431Mb L: 521/665 MS: 2 ShuffleBytes-EraseBytes-
+#668424	REDUCE cov: 49 ft: 200 corp: 46/8160b lim: 4096 exec/s: 33421 rss: 431Mb L: 512/665 MS: 1 EraseBytes-
+#860938	REDUCE cov: 49 ft: 200 corp: 46/8159b lim: 4096 exec/s: 34437 rss: 432Mb L: 664/664 MS: 1 EraseBytes-
+#964355	REDUCE cov: 49 ft: 200 corp: 46/8148b lim: 4096 exec/s: 34441 rss: 432Mb L: 501/664 MS: 1 EraseBytes-
+#986814	REDUCE cov: 49 ft: 200 corp: 46/8144b lim: 4096 exec/s: 34028 rss: 432Mb L: 497/664 MS: 4 ChangeBinInt-ShuffleBytes-ChangeByte-EraseBytes-
+#1048576	pulse  cov: 49 ft: 200 corp: 46/8144b lim: 4096 exec/s: 33825 rss: 432Mb
+#1428426	REDUCE cov: 49 ft: 200 corp: 46/8124b lim: 4096 exec/s: 34010 rss: 432Mb L: 477/664 MS: 1 EraseBytes-
+#2097152	pulse  cov: 49 ft: 200 corp: 46/8124b lim: 4096 exec/s: 34952 rss: 439Mb
+#2869274	REDUCE cov: 49 ft: 200 corp: 46/8117b lim: 4096 exec/s: 36785 rss: 451Mb L: 470/664 MS: 2 ChangeBit-EraseBytes-
+#2906713	REDUCE cov: 49 ft: 200 corp: 46/8097b lim: 4096 exec/s: 36793 rss: 451Mb L: 450/664 MS: 3 ChangeBit-ChangeBit-EraseBytes-
+#3823595	REDUCE cov: 49 ft: 200 corp: 46/8077b lim: 4096 exec/s: 38235 rss: 451Mb L: 184/664 MS: 1 EraseBytes-
+#3919841	REDUCE cov: 49 ft: 200 corp: 46/8071b lim: 4096 exec/s: 38056 rss: 451Mb L: 444/664 MS: 1 EraseBytes-
+#4194304	pulse  cov: 49 ft: 200 corp: 46/8071b lim: 4096 exec/s: 38479 rss: 451Mb
+#4381603	REDUCE cov: 49 ft: 200 corp: 46/8031b lim: 4096 exec/s: 38775 rss: 456Mb L: 404/664 MS: 2 ChangeByte-EraseBytes-
+#7819801	REDUCE cov: 49 ft: 200 corp: 46/8026b lim: 4096 exec/s: 44430 rss: 456Mb L: 179/664 MS: 2 CopyPart-EraseBytes-
+#7825243	REDUCE cov: 49 ft: 200 corp: 46/8016b lim: 4096 exec/s: 44461 rss: 456Mb L: 169/664 MS: 2 PersAutoDict-EraseBytes- DE: "\001\000\000\000"-
+#7873311	NEW    cov: 49 ft: 202 corp: 47/8940b lim: 4096 exec/s: 44481 rss: 456Mb L: 924/924 MS: 2 CopyPart-CopyPart-
+#8312166	REDUCE cov: 49 ft: 202 corp: 47/8937b lim: 4096 exec/s: 44213 rss: 472Mb L: 166/924 MS: 4 EraseBytes-ChangeBit-ChangeASCIIInt-ChangeBit-
+#8388608	pulse  cov: 49 ft: 202 corp: 47/8937b lim: 4096 exec/s: 44150 rss: 472Mb
+#8660152	REDUCE cov: 49 ft: 202 corp: 47/8925b lim: 4096 exec/s: 43960 rss: 472Mb L: 912/912 MS: 1 EraseBytes-
+#8929252	REDUCE cov: 49 ft: 202 corp: 47/8923b lim: 4096 exec/s: 43770 rss: 472Mb L: 164/912 MS: 5 ShuffleBytes-ChangeBit-ChangeByte-CrossOver-EraseBytes-
+#8957868	REDUCE cov: 49 ft: 202 corp: 47/8910b lim: 4096 exec/s: 43911 rss: 472Mb L: 899/899 MS: 1 EraseBytes-
+#9306200	REDUCE cov: 49 ft: 202 corp: 47/8880b lim: 4096 exec/s: 43691 rss: 472Mb L: 869/869 MS: 2 ChangeASCIIInt-EraseBytes-
+#9505212	REDUCE cov: 49 ft: 202 corp: 47/8860b lim: 4096 exec/s: 43601 rss: 472Mb L: 384/869 MS: 2 ChangeASCIIInt-EraseBytes-
+#10174684	REDUCE cov: 49 ft: 202 corp: 47/8840b lim: 4096 exec/s: 43481 rss: 472Mb L: 384/869 MS: 2 ChangeBit-EraseBytes-
+#10815967	REDUCE cov: 49 ft: 202 corp: 47/8811b lim: 4096 exec/s: 43437 rss: 472Mb L: 840/840 MS: 3 ChangeBit-EraseBytes-CopyPart-
+#11161404	REDUCE cov: 49 ft: 202 corp: 47/8805b lim: 4096 exec/s: 43429 rss: 472Mb L: 378/840 MS: 2 EraseBytes-CopyPart-
+#11256900	REDUCE cov: 49 ft: 202 corp: 47/8785b lim: 4096 exec/s: 43462 rss: 472Mb L: 358/840 MS: 1 EraseBytes-
+#11423062	REDUCE cov: 49 ft: 202 corp: 47/8780b lim: 4096 exec/s: 43599 rss: 472Mb L: 353/840 MS: 2 ShuffleBytes-EraseBytes-
+#11500038	REDUCE cov: 49 ft: 202 corp: 47/8777b lim: 4096 exec/s: 43560 rss: 472Mb L: 350/840 MS: 1 EraseBytes-
+#12044728	REDUCE cov: 49 ft: 202 corp: 47/8773b lim: 4096 exec/s: 43799 rss: 472Mb L: 346/840 MS: 5 ShuffleBytes-PersAutoDict-ChangeBit-ChangeByte-EraseBytes- DE: "\001\000\000\000"-
+#12138085	REDUCE cov: 49 ft: 202 corp: 47/8753b lim: 4096 exec/s: 43819 rss: 472Mb L: 644/840 MS: 2 ChangeBit-EraseBytes-
+#12310906	REDUCE cov: 49 ft: 202 corp: 47/8722b lim: 4096 exec/s: 43811 rss: 472Mb L: 809/809 MS: 1 EraseBytes-
+#14322852	REDUCE cov: 49 ft: 202 corp: 47/8702b lim: 4096 exec/s: 44343 rss: 472Mb L: 364/809 MS: 1 EraseBytes-
+#16777216	pulse  cov: 49 ft: 202 corp: 47/8702b lim: 4096 exec/s: 44620 rss: 472Mb
+#17876888	REDUCE cov: 49 ft: 202 corp: 47/8700b lim: 4096 exec/s: 44692 rss: 472Mb L: 807/807 MS: 1 EraseBytes-
+#18315295	REDUCE cov: 49 ft: 202 corp: 47/8680b lim: 4096 exec/s: 44780 rss: 472Mb L: 344/807 MS: 2 EraseBytes-InsertByte-
+#23026061	REDUCE cov: 49 ft: 202 corp: 47/8660b lim: 4096 exec/s: 45149 rss: 472Mb L: 324/807 MS: 1 EraseBytes-
+#24494722	DONE   cov: 49 ft: 202 corp: 47/8660b lim: 4096 exec/s: 45276 rss: 472Mb
+###### Recommended dictionary. ######
+"\001\000\000\000" # Uses: 1137272
+"\001\000" # Uses: 1090934
+###### End of recommended dictionary. ######
+Done 24494722 runs in 541 second(s)

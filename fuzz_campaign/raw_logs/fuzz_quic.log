@@ -1,0 +1,19 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3232536843
+INFO: Loaded 1 modules   (74 inline 8-bit counters): 74 [0x55bc0e009160, 0x55bc0e0091aa), 
+INFO: Loaded 1 PC tables (74 PCs): 74 [0x55bc0e0091b0,0x55bc0e009650), 
+INFO:       30 files found in /home/claude/conduitscope/fuzz/corpus/quic
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 30 min: 1b max: 1204b total: 2953b rss: 34Mb
+#31	INITED cov: 24 ft: 31 corp: 4/1223b exec/s: 0 rss: 37Mb
+#16384	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 1364 exec/s: 5461 rss: 128Mb
+#32768	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 1524 exec/s: 4681 rss: 216Mb
+#65536	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 1854 exec/s: 4369 rss: 397Mb
+#131072	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 2505 exec/s: 4096 rss: 469Mb
+#262144	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 3803 exec/s: 4161 rss: 469Mb
+#524288	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 4096 exec/s: 4096 rss: 469Mb
+#1048576	pulse  cov: 24 ft: 31 corp: 4/1223b lim: 4096 exec/s: 4002 rss: 472Mb
+#1072835	REDUCE cov: 24 ft: 31 corp: 4/1222b lim: 4096 exec/s: 3988 rss: 472Mb L: 10/1204 MS: 4 EraseBytes-ChangeBit-CopyPart-ShuffleBytes-
+#1187902	REDUCE cov: 24 ft: 31 corp: 4/1221b lim: 4096 exec/s: 3959 rss: 473Mb L: 9/1204 MS: 5 ChangeByte-ShuffleBytes-CopyPart-ShuffleBytes-EraseBytes-
+#2075128	DONE   cov: 24 ft: 31 corp: 4/1221b lim: 4096 exec/s: 3835 rss: 476Mb
+Done 2075128 runs in 541 second(s)

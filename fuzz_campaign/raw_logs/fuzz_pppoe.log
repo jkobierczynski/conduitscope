@@ -1,0 +1,18 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2087563048
+INFO: Loaded 1 modules   (45 inline 8-bit counters): 45 [0x55597ed3efa0, 0x55597ed3efcd), 
+INFO: Loaded 1 PC tables (45 PCs): 45 [0x55597ed3efd0,0x55597ed3f2a0), 
+INFO:       15 files found in /home/claude/conduitscope/fuzz/corpus/pppoe
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 15 min: 1b max: 12b total: 102b rss: 34Mb
+#16	INITED cov: 24 ft: 37 corp: 4/21b exec/s: 0 rss: 35Mb
+#1048576	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 524288 rss: 479Mb
+#2097152	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 524288 rss: 481Mb
+#4194304	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 466033 rss: 481Mb
+#8388608	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 466033 rss: 481Mb
+#16777216	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 453438 rss: 481Mb
+#33554432	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 447392 rss: 481Mb
+#67108864	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 441505 rss: 481Mb
+#134217728	pulse  cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 434361 rss: 481Mb
+#233752616	DONE   cov: 24 ft: 37 corp: 4/21b lim: 4096 exec/s: 432075 rss: 481Mb
+Done 233752616 runs in 541 second(s)

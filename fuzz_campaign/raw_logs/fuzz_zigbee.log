@@ -1,0 +1,41 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 4193157271
+INFO: Loaded 1 modules   (106 inline 8-bit counters): 106 [0x563e5a9a3a60, 0x563e5a9a3aca), 
+INFO: Loaded 1 PC tables (106 PCs): 106 [0x563e5a9a3ad0,0x563e5a9a4170), 
+INFO:      193 files found in /home/claude/conduitscope/fuzz/corpus/zigbee
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 193 min: 1b max: 187b total: 5025b rss: 35Mb
+#194	INITED cov: 77 ft: 217 corp: 37/570b exec/s: 0 rss: 46Mb
+#9138	REDUCE cov: 77 ft: 217 corp: 37/567b lim: 192 exec/s: 0 rss: 76Mb L: 102/102 MS: 4 ChangeByte-CrossOver-InsertRepeatedBytes-CrossOver-
+#27823	REDUCE cov: 77 ft: 217 corp: 37/566b lim: 374 exec/s: 27823 rss: 133Mb L: 101/101 MS: 5 ShuffleBytes-ChangeByte-ChangeBinInt-EraseBytes-ShuffleBytes-
+#65536	pulse  cov: 77 ft: 217 corp: 37/566b lim: 743 exec/s: 32768 rss: 252Mb
+#131072	pulse  cov: 77 ft: 217 corp: 37/566b lim: 1391 exec/s: 32768 rss: 459Mb
+#262144	pulse  cov: 77 ft: 217 corp: 37/566b lim: 2700 exec/s: 29127 rss: 474Mb
+#350319	REDUCE cov: 77 ft: 217 corp: 37/565b lim: 3580 exec/s: 31847 rss: 475Mb L: 6/101 MS: 3 EraseBytes-ShuffleBytes-ChangeByte-
+#461803	REDUCE cov: 77 ft: 217 corp: 37/564b lim: 4096 exec/s: 30786 rss: 480Mb L: 20/101 MS: 4 ChangeBit-ShuffleBytes-InsertByte-EraseBytes-
+#524288	pulse  cov: 77 ft: 217 corp: 37/564b lim: 4096 exec/s: 29127 rss: 480Mb
+#1048576	pulse  cov: 77 ft: 217 corp: 37/564b lim: 4096 exec/s: 29959 rss: 480Mb
+#1194530	REDUCE cov: 77 ft: 217 corp: 37/563b lim: 4096 exec/s: 29863 rss: 480Mb L: 11/101 MS: 2 ChangeBit-EraseBytes-
+#1565963	REDUCE cov: 77 ft: 217 corp: 37/562b lim: 4096 exec/s: 30114 rss: 480Mb L: 23/101 MS: 3 CopyPart-EraseBytes-ChangeBit-
+#1770276	REDUCE cov: 77 ft: 217 corp: 37/556b lim: 4096 exec/s: 30004 rss: 480Mb L: 17/101 MS: 3 CMP-ChangeBit-EraseBytes- DE: "\001\000\000\000"-
+#2097152	pulse  cov: 77 ft: 217 corp: 37/556b lim: 4096 exec/s: 30393 rss: 482Mb
+#2178674	REDUCE cov: 77 ft: 217 corp: 37/550b lim: 4096 exec/s: 30259 rss: 482Mb L: 37/101 MS: 2 CrossOver-EraseBytes-
+#4194304	pulse  cov: 77 ft: 217 corp: 37/550b lim: 4096 exec/s: 29959 rss: 485Mb
+#4745271	REDUCE cov: 77 ft: 217 corp: 37/549b lim: 4096 exec/s: 29844 rss: 487Mb L: 14/101 MS: 2 EraseBytes-ChangeBit-
+#5541490	REDUCE cov: 77 ft: 217 corp: 37/548b lim: 4096 exec/s: 29633 rss: 487Mb L: 20/101 MS: 4 CopyPart-InsertByte-PersAutoDict-EraseBytes- DE: "\001\000\000\000"-
+#5772715	REDUCE cov: 77 ft: 217 corp: 37/547b lim: 4096 exec/s: 29756 rss: 487Mb L: 23/101 MS: 5 ChangeBinInt-CrossOver-InsertRepeatedBytes-EraseBytes-CrossOver-
+#5796906	REDUCE cov: 77 ft: 217 corp: 37/546b lim: 4096 exec/s: 29727 rss: 487Mb L: 22/101 MS: 1 EraseBytes-
+#5800157	REDUCE cov: 77 ft: 217 corp: 37/545b lim: 4096 exec/s: 29744 rss: 487Mb L: 21/101 MS: 1 EraseBytes-
+#6167428	REDUCE cov: 77 ft: 217 corp: 37/539b lim: 4096 exec/s: 29651 rss: 487Mb L: 24/101 MS: 4 ChangeBit-CrossOver-EraseBytes-EraseBytes-
+#6176274	REDUCE cov: 77 ft: 217 corp: 37/538b lim: 4096 exec/s: 29693 rss: 487Mb L: 23/101 MS: 1 EraseBytes-
+#6188260	REDUCE cov: 77 ft: 217 corp: 37/537b lim: 4096 exec/s: 29751 rss: 487Mb L: 22/101 MS: 1 EraseBytes-
+#6500431	REDUCE cov: 77 ft: 217 corp: 37/536b lim: 4096 exec/s: 29818 rss: 487Mb L: 16/101 MS: 4 ShuffleBytes-ChangeBinInt-EraseBytes-CopyPart-
+#7417523	REDUCE cov: 77 ft: 217 corp: 37/535b lim: 4096 exec/s: 29670 rss: 487Mb L: 19/101 MS: 2 EraseBytes-InsertByte-
+#8209651	NEW    cov: 77 ft: 218 corp: 38/555b lim: 4096 exec/s: 29637 rss: 487Mb L: 20/101 MS: 3 InsertByte-ChangeBit-InsertByte-
+#8388608	pulse  cov: 77 ft: 218 corp: 38/555b lim: 4096 exec/s: 29641 rss: 487Mb
+#15058288	REDUCE cov: 77 ft: 218 corp: 38/553b lim: 4096 exec/s: 29642 rss: 490Mb L: 9/101 MS: 2 ChangeByte-EraseBytes-
+#15984873	DONE   cov: 77 ft: 218 corp: 38/553b lim: 4096 exec/s: 29546 rss: 490Mb
+###### Recommended dictionary. ######
+"\001\000\000\000" # Uses: 1315128
+###### End of recommended dictionary. ######
+Done 15984873 runs in 541 second(s)

@@ -1,0 +1,44 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 549125418
+INFO: Loaded 1 modules   (113 inline 8-bit counters): 113 [0x564ab7eef9c8, 0x564ab7eefa39), 
+INFO: Loaded 1 PC tables (113 PCs): 113 [0x564ab7eefa40,0x564ab7ef0150), 
+INFO:      144 files found in /home/claude/conduitscope/fuzz/corpus/amqp091
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 144 min: 1b max: 222b total: 5622b rss: 34Mb
+#145	INITED cov: 78 ft: 158 corp: 36/1015b exec/s: 145 rss: 42Mb
+#29682	REDUCE cov: 78 ft: 158 corp: 36/1014b lim: 470 exec/s: 29682 rss: 92Mb L: 177/177 MS: 2 ChangeBit-EraseBytes-
+#65536	pulse  cov: 78 ft: 158 corp: 36/1014b lim: 824 exec/s: 32768 rss: 147Mb
+#131072	pulse  cov: 78 ft: 158 corp: 36/1014b lim: 1471 exec/s: 43690 rss: 247Mb
+#262144	pulse  cov: 78 ft: 158 corp: 36/1014b lim: 2777 exec/s: 43690 rss: 448Mb
+#524288	pulse  cov: 78 ft: 158 corp: 36/1014b lim: 4096 exec/s: 47662 rss: 476Mb
+#863484	REDUCE cov: 78 ft: 158 corp: 36/1013b lim: 4096 exec/s: 50793 rss: 477Mb L: 176/176 MS: 2 CopyPart-EraseBytes-
+#1048576	pulse  cov: 78 ft: 158 corp: 36/1013b lim: 4096 exec/s: 52428 rss: 477Mb
+#1639118	REDUCE cov: 78 ft: 158 corp: 36/1012b lim: 4096 exec/s: 52874 rss: 477Mb L: 53/176 MS: 3 CopyPart-ShuffleBytes-EraseBytes-
+#2097152	pulse  cov: 78 ft: 158 corp: 36/1012b lim: 4096 exec/s: 53773 rss: 478Mb
+#3343192	REDUCE cov: 78 ft: 158 corp: 36/1011b lim: 4096 exec/s: 53066 rss: 478Mb L: 16/176 MS: 4 ChangeBit-ChangeByte-ChangeBit-EraseBytes-
+#3352533	REDUCE cov: 78 ft: 158 corp: 36/1010b lim: 4096 exec/s: 53214 rss: 478Mb L: 15/176 MS: 1 EraseBytes-
+#3597396	REDUCE cov: 78 ft: 158 corp: 36/1008b lim: 4096 exec/s: 53692 rss: 479Mb L: 31/176 MS: 3 ChangeBinInt-ChangeBit-EraseBytes-
+#3644763	REDUCE cov: 78 ft: 158 corp: 36/1007b lim: 4096 exec/s: 53599 rss: 479Mb L: 30/176 MS: 1 EraseBytes-
+#4194304	pulse  cov: 78 ft: 158 corp: 36/1007b lim: 4096 exec/s: 53092 rss: 479Mb
+#4631249	REDUCE cov: 78 ft: 158 corp: 36/1000b lim: 4096 exec/s: 53232 rss: 479Mb L: 169/169 MS: 5 EraseBytes-CopyPart-InsertRepeatedBytes-ChangeBinInt-CopyPart-
+#4693380	REDUCE cov: 78 ft: 158 corp: 36/999b lim: 4096 exec/s: 53333 rss: 479Mb L: 168/168 MS: 1 EraseBytes-
+#5187873	REDUCE cov: 78 ft: 158 corp: 36/998b lim: 4096 exec/s: 53483 rss: 479Mb L: 29/168 MS: 2 CrossOver-EraseBytes-
+#6873193	REDUCE cov: 78 ft: 158 corp: 36/992b lim: 4096 exec/s: 53280 rss: 480Mb L: 162/162 MS: 5 ShuffleBytes-EraseBytes-ChangeBinInt-CopyPart-CopyPart-
+#7236676	REDUCE cov: 78 ft: 158 corp: 36/990b lim: 4096 exec/s: 53210 rss: 480Mb L: 160/160 MS: 3 ShuffleBytes-CrossOver-EraseBytes-
+#7262538	REDUCE cov: 78 ft: 158 corp: 36/989b lim: 4096 exec/s: 53401 rss: 480Mb L: 159/159 MS: 1 EraseBytes-
+#8388608	pulse  cov: 78 ft: 158 corp: 36/989b lim: 4096 exec/s: 53092 rss: 482Mb
+#12120848	REDUCE cov: 78 ft: 158 corp: 36/988b lim: 4096 exec/s: 52699 rss: 483Mb L: 52/159 MS: 5 ChangeBinInt-ShuffleBytes-ChangeBinInt-ChangeBit-EraseBytes-
+#14975211	REDUCE cov: 78 ft: 158 corp: 36/986b lim: 4096 exec/s: 52544 rss: 483Mb L: 50/159 MS: 2 ChangeBit-EraseBytes-
+#16777216	pulse  cov: 78 ft: 158 corp: 36/986b lim: 4096 exec/s: 52428 rss: 484Mb
+#18828440	REDUCE cov: 78 ft: 158 corp: 36/984b lim: 4096 exec/s: 52156 rss: 484Mb L: 75/159 MS: 3 ChangeASCIIInt-ChangeASCIIInt-EraseBytes-
+#27090185	REDUCE cov: 78 ft: 158 corp: 36/983b lim: 4096 exec/s: 51600 rss: 485Mb L: 158/158 MS: 5 CrossOver-ShuffleBytes-CopyPart-InsertByte-EraseBytes-
+#27258115	REDUCE cov: 78 ft: 158 corp: 36/979b lim: 4096 exec/s: 51625 rss: 485Mb L: 154/154 MS: 5 ChangeByte-EraseBytes-CMP-CMP-CMP- DE: "\377\377"-"\000\000\000\000\000\000\000\017"-"\001\000"-
+#27261802	REDUCE cov: 78 ft: 158 corp: 36/967b lim: 4096 exec/s: 51632 rss: 485Mb L: 142/142 MS: 2 CrossOver-EraseBytes-
+#27444002	REDUCE cov: 78 ft: 158 corp: 36/966b lim: 4096 exec/s: 51586 rss: 487Mb L: 141/141 MS: 3 PersAutoDict-ShuffleBytes-EraseBytes- DE: "\377\377"-
+#27847524	DONE   cov: 78 ft: 158 corp: 36/966b lim: 4096 exec/s: 51474 rss: 488Mb
+###### Recommended dictionary. ######
+"\377\377" # Uses: 18159
+"\000\000\000\000\000\000\000\017" # Uses: 17604
+"\001\000" # Uses: 18148
+###### End of recommended dictionary. ######
+Done 27847524 runs in 541 second(s)

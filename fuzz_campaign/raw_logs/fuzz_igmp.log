@@ -1,0 +1,50 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 555828365
+INFO: Loaded 1 modules   (65 inline 8-bit counters): 65 [0x55c153244e80, 0x55c153244ec1), 
+INFO: Loaded 1 PC tables (65 PCs): 65 [0x55c153244ec8,0x55c1532452d8), 
+INFO:       95 files found in /home/claude/conduitscope/fuzz/corpus/igmp
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 95 min: 1b max: 976b total: 19873b rss: 34Mb
+#96	INITED cov: 45 ft: 179 corp: 44/5440b exec/s: 0 rss: 39Mb
+#63117	REDUCE cov: 45 ft: 179 corp: 44/5439b lim: 1506 exec/s: 63117 rss: 421Mb L: 881/881 MS: 1 EraseBytes-
+#72918	REDUCE cov: 45 ft: 179 corp: 44/5438b lim: 1596 exec/s: 36459 rss: 424Mb L: 144/881 MS: 1 EraseBytes-
+#131072	pulse  cov: 45 ft: 179 corp: 44/5438b lim: 2166 exec/s: 43690 rss: 426Mb
+#262144	pulse  cov: 45 ft: 179 corp: 44/5438b lim: 3475 exec/s: 37449 rss: 430Mb
+#524288	pulse  cov: 45 ft: 179 corp: 44/5438b lim: 4096 exec/s: 37449 rss: 431Mb
+#1002066	REDUCE cov: 45 ft: 179 corp: 44/5435b lim: 4096 exec/s: 35788 rss: 431Mb L: 200/881 MS: 3 ChangeASCIIInt-ChangeByte-EraseBytes-
+#1048576	pulse  cov: 45 ft: 179 corp: 44/5435b lim: 4096 exec/s: 34952 rss: 432Mb
+#1208966	REDUCE cov: 45 ft: 179 corp: 44/5430b lim: 4096 exec/s: 35557 rss: 432Mb L: 547/881 MS: 5 CMP-ChangeByte-EraseBytes-CMP-InsertByte- DE: "\001\000\000\000\000\000\000\000"-"\377\377"-
+#1270303	REDUCE cov: 45 ft: 179 corp: 44/5427b lim: 4096 exec/s: 35286 rss: 432Mb L: 544/881 MS: 2 PersAutoDict-EraseBytes- DE: "\377\377"-
+#1328765	REDUCE cov: 45 ft: 179 corp: 44/5426b lim: 4096 exec/s: 34967 rss: 433Mb L: 400/881 MS: 1 EraseBytes-
+#2097152	pulse  cov: 45 ft: 179 corp: 44/5426b lim: 4096 exec/s: 34952 rss: 434Mb
+#2377801	REDUCE cov: 45 ft: 179 corp: 44/5418b lim: 4096 exec/s: 34967 rss: 434Mb L: 384/881 MS: 1 EraseBytes-
+#4194304	pulse  cov: 45 ft: 179 corp: 44/5418b lim: 4096 exec/s: 34100 rss: 434Mb
+#5432118	REDUCE cov: 45 ft: 179 corp: 44/5410b lim: 4096 exec/s: 33739 rss: 436Mb L: 873/873 MS: 2 ChangeBinInt-EraseBytes-
+#5495287	REDUCE cov: 45 ft: 179 corp: 44/5409b lim: 4096 exec/s: 33713 rss: 436Mb L: 872/872 MS: 4 ShuffleBytes-ChangeBit-ChangeASCIIInt-EraseBytes-
+#5911891	REDUCE cov: 45 ft: 179 corp: 44/5408b lim: 4096 exec/s: 33590 rss: 436Mb L: 43/872 MS: 3 ChangeBit-EraseBytes-CopyPart-
+#5916113	REDUCE cov: 45 ft: 179 corp: 44/5407b lim: 4096 exec/s: 33614 rss: 436Mb L: 42/872 MS: 2 ChangeByte-EraseBytes-
+#5963831	REDUCE cov: 45 ft: 179 corp: 44/5405b lim: 4096 exec/s: 33693 rss: 436Mb L: 40/872 MS: 2 ChangeASCIIInt-EraseBytes-
+#7489259	REDUCE cov: 45 ft: 179 corp: 44/5389b lim: 4096 exec/s: 33434 rss: 436Mb L: 856/856 MS: 1 EraseBytes-
+#8165299	REDUCE cov: 45 ft: 181 corp: 45/8732b lim: 4096 exec/s: 33327 rss: 436Mb L: 3343/3343 MS: 5 CrossOver-CrossOver-InsertRepeatedBytes-CopyPart-InsertByte-
+#8166060	REDUCE cov: 45 ft: 181 corp: 45/8413b lim: 4096 exec/s: 33330 rss: 436Mb L: 3024/3024 MS: 1 EraseBytes-
+#8182305	REDUCE cov: 45 ft: 181 corp: 45/8125b lim: 4096 exec/s: 33261 rss: 441Mb L: 2736/2736 MS: 5 ShuffleBytes-ChangeByte-InsertRepeatedBytes-ShuffleBytes-CrossOver-
+#8388608	pulse  cov: 45 ft: 181 corp: 45/8125b lim: 4096 exec/s: 33288 rss: 452Mb
+#8436672	REDUCE cov: 45 ft: 181 corp: 45/8105b lim: 4096 exec/s: 33215 rss: 452Mb L: 2716/2716 MS: 2 CMP-EraseBytes- DE: "\017\000\000\000\000\000\000\000"-
+#8682725	REDUCE cov: 45 ft: 181 corp: 45/8067b lim: 4096 exec/s: 33267 rss: 452Mb L: 2678/2678 MS: 3 ChangeByte-PersAutoDict-EraseBytes- DE: "\377\377"-
+#9299818	REDUCE cov: 45 ft: 181 corp: 45/8059b lim: 4096 exec/s: 33213 rss: 452Mb L: 2670/2670 MS: 3 ChangeBinInt-ChangeASCIIInt-EraseBytes-
+#10441915	REDUCE cov: 45 ft: 181 corp: 45/7999b lim: 4096 exec/s: 33044 rss: 452Mb L: 2610/2610 MS: 2 ChangeBit-EraseBytes-
+#11802152	REDUCE cov: 45 ft: 181 corp: 45/7995b lim: 4096 exec/s: 32875 rss: 452Mb L: 2606/2606 MS: 2 CrossOver-EraseBytes-
+#12449713	REDUCE cov: 45 ft: 181 corp: 45/7983b lim: 4096 exec/s: 32762 rss: 452Mb L: 2594/2594 MS: 1 EraseBytes-
+#12648786	REDUCE cov: 45 ft: 181 corp: 45/7979b lim: 4096 exec/s: 32684 rss: 452Mb L: 852/2594 MS: 3 EraseBytes-ChangeByte-InsertRepeatedBytes-
+#13726964	REDUCE cov: 45 ft: 181 corp: 45/7955b lim: 4096 exec/s: 32528 rss: 452Mb L: 2570/2570 MS: 3 ChangeASCIIInt-ChangeBit-EraseBytes-
+#14658189	REDUCE cov: 45 ft: 181 corp: 45/7951b lim: 4096 exec/s: 32286 rss: 452Mb L: 848/2570 MS: 5 ChangeByte-CrossOver-InsertByte-CopyPart-EraseBytes-
+#15841372	REDUCE cov: 45 ft: 181 corp: 45/7943b lim: 4096 exec/s: 32002 rss: 452Mb L: 2562/2562 MS: 3 CrossOver-ChangeASCIIInt-EraseBytes-
+#16777216	pulse  cov: 45 ft: 181 corp: 45/7943b lim: 4096 exec/s: 31775 rss: 452Mb
+#16845355	REDUCE cov: 45 ft: 181 corp: 45/7935b lim: 4096 exec/s: 31723 rss: 452Mb L: 2554/2554 MS: 3 ShuffleBytes-ChangeASCIIInt-EraseBytes-
+#17130585	DONE   cov: 45 ft: 181 corp: 45/7935b lim: 4096 exec/s: 31664 rss: 452Mb
+###### Recommended dictionary. ######
+"\001\000\000\000\000\000\000\000" # Uses: 606084
+"\377\377" # Uses: 608674
+"\017\000\000\000\000\000\000\000" # Uses: 268999
+###### End of recommended dictionary. ######
+Done 17130585 runs in 541 second(s)

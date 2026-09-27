@@ -1,0 +1,48 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1880226484
+INFO: Loaded 1 modules   (100 inline 8-bit counters): 100 [0x55c1b3a368f8, 0x55c1b3a3695c), 
+INFO: Loaded 1 PC tables (100 PCs): 100 [0x55c1b3a36960,0x55c1b3a36fa0), 
+INFO:      354 files found in /home/claude/conduitscope/fuzz/corpus/winrm
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 354 min: 1b max: 1418b total: 88744b rss: 35Mb
+#355	INITED cov: 72 ft: 106 corp: 14/888b exec/s: 0 rss: 49Mb
+#131072	pulse  cov: 72 ft: 106 corp: 14/888b lim: 1415 exec/s: 65536 rss: 292Mb
+#262144	pulse  cov: 72 ft: 106 corp: 14/888b lim: 2715 exec/s: 52428 rss: 478Mb
+#524288	pulse  cov: 72 ft: 106 corp: 14/888b lim: 4096 exec/s: 52428 rss: 481Mb
+#676968	REDUCE cov: 72 ft: 106 corp: 14/887b lim: 4096 exec/s: 52074 rss: 481Mb L: 47/112 MS: 3 EraseBytes-ChangeBinInt-CMP- DE: "PUT "-
+#846554	REDUCE cov: 72 ft: 106 corp: 14/886b lim: 4096 exec/s: 49797 rss: 483Mb L: 104/112 MS: 1 EraseBytes-
+#897266	REDUCE cov: 72 ft: 106 corp: 14/885b lim: 4096 exec/s: 49848 rss: 483Mb L: 111/111 MS: 2 PersAutoDict-EraseBytes- DE: "PUT "-
+#1048576	pulse  cov: 72 ft: 106 corp: 14/885b lim: 4096 exec/s: 49932 rss: 484Mb
+#1099859	REDUCE cov: 72 ft: 106 corp: 14/884b lim: 4096 exec/s: 49993 rss: 484Mb L: 66/111 MS: 3 ChangeBit-EraseBytes-PersAutoDict- DE: "PUT "-
+#1193276	REDUCE cov: 72 ft: 106 corp: 14/883b lim: 4096 exec/s: 49719 rss: 484Mb L: 77/111 MS: 2 EraseBytes-PersAutoDict- DE: "PUT "-
+#1347137	REDUCE cov: 72 ft: 106 corp: 14/882b lim: 4096 exec/s: 49893 rss: 484Mb L: 81/111 MS: 1 EraseBytes-
+#1585428	REDUCE cov: 72 ft: 106 corp: 14/881b lim: 4096 exec/s: 49544 rss: 484Mb L: 103/111 MS: 1 EraseBytes-
+#2097152	pulse  cov: 72 ft: 106 corp: 14/881b lim: 4096 exec/s: 49932 rss: 484Mb
+#2702850	REDUCE cov: 72 ft: 106 corp: 14/880b lim: 4096 exec/s: 49142 rss: 484Mb L: 81/111 MS: 2 EraseBytes-PersAutoDict- DE: "PUT "-
+#3137972	REDUCE cov: 72 ft: 106 corp: 14/879b lim: 4096 exec/s: 49030 rss: 485Mb L: 77/111 MS: 2 EraseBytes-PersAutoDict- DE: "PUT "-
+#3877113	REDUCE cov: 72 ft: 106 corp: 14/878b lim: 4096 exec/s: 48463 rss: 485Mb L: 80/111 MS: 1 EraseBytes-
+#4194304	pulse  cov: 72 ft: 106 corp: 14/878b lim: 4096 exec/s: 48770 rss: 485Mb
+#5576989	REDUCE cov: 72 ft: 106 corp: 14/877b lim: 4096 exec/s: 48495 rss: 486Mb L: 102/111 MS: 1 EraseBytes-
+#6413517	REDUCE cov: 72 ft: 106 corp: 14/875b lim: 4096 exec/s: 48221 rss: 486Mb L: 29/111 MS: 3 ChangeASCIIInt-CMP-EraseBytes- DE: " HTTP/2"-
+#6426199	REDUCE cov: 72 ft: 106 corp: 14/872b lim: 4096 exec/s: 48317 rss: 486Mb L: 26/111 MS: 2 ChangeByte-EraseBytes-
+#6535546	REDUCE cov: 72 ft: 106 corp: 14/871b lim: 4096 exec/s: 48411 rss: 486Mb L: 25/111 MS: 1 EraseBytes-
+#7252027	REDUCE cov: 72 ft: 106 corp: 14/870b lim: 4096 exec/s: 48346 rss: 487Mb L: 80/111 MS: 5 CMP-EraseBytes-CopyPart-ShuffleBytes-PersAutoDict- DE: "\377\377\377\377"-" HTTP/2"-
+#8388608	pulse  cov: 72 ft: 106 corp: 14/870b lim: 4096 exec/s: 48489 rss: 487Mb
+#8561657	REDUCE cov: 72 ft: 106 corp: 14/869b lim: 4096 exec/s: 48370 rss: 488Mb L: 46/111 MS: 5 CopyPart-ChangeASCIIInt-ChangeASCIIInt-ShuffleBytes-EraseBytes-
+#9050734	REDUCE cov: 72 ft: 106 corp: 14/867b lim: 4096 exec/s: 48399 rss: 488Mb L: 75/111 MS: 2 ChangeBinInt-EraseBytes-
+#9195771	REDUCE cov: 72 ft: 106 corp: 14/866b lim: 4096 exec/s: 48145 rss: 488Mb L: 110/110 MS: 2 PersAutoDict-EraseBytes- DE: " HTTP/2"-
+#9473593	REDUCE cov: 72 ft: 106 corp: 14/861b lim: 4096 exec/s: 48334 rss: 488Mb L: 70/110 MS: 2 EraseBytes-PersAutoDict- DE: " HTTP/2"-
+#9732922	REDUCE cov: 72 ft: 106 corp: 14/859b lim: 4096 exec/s: 48182 rss: 488Mb L: 73/110 MS: 4 ChangeASCIIInt-ChangeBit-InsertByte-EraseBytes-
+#9852103	REDUCE cov: 72 ft: 106 corp: 14/858b lim: 4096 exec/s: 48294 rss: 488Mb L: 69/110 MS: 1 EraseBytes-
+#10789749	REDUCE cov: 72 ft: 106 corp: 14/856b lim: 4096 exec/s: 48168 rss: 488Mb L: 67/110 MS: 1 EraseBytes-
+#16777216	pulse  cov: 72 ft: 106 corp: 14/856b lim: 4096 exec/s: 47527 rss: 489Mb
+#19057968	REDUCE cov: 72 ft: 106 corp: 14/854b lim: 4096 exec/s: 47290 rss: 489Mb L: 78/110 MS: 3 PersAutoDict-ChangeBit-EraseBytes- DE: " HTTP/2"-
+#19137959	REDUCE cov: 72 ft: 106 corp: 14/853b lim: 4096 exec/s: 47254 rss: 489Mb L: 77/110 MS: 1 EraseBytes-
+#19340031	REDUCE cov: 72 ft: 106 corp: 14/850b lim: 4096 exec/s: 47286 rss: 489Mb L: 74/110 MS: 1 EraseBytes-
+#25369767	DONE   cov: 72 ft: 106 corp: 14/850b lim: 4096 exec/s: 46894 rss: 491Mb
+###### Recommended dictionary. ######
+"PUT " # Uses: 1075898
+" HTTP/2" # Uses: 571420
+"\377\377\377\377" # Uses: 536541
+###### End of recommended dictionary. ######
+Done 25369767 runs in 541 second(s)

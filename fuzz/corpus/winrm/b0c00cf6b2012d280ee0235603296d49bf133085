@@ -1,5 +1,0 @@
-POST HTTP/2
-Content-Type: application/soap+xmlv
-Authorization:Basic 
-
-<:Action>Command<:Command><s:Fault>l

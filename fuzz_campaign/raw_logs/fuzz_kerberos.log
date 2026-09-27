@@ -1,0 +1,35 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2868479627
+INFO: Loaded 1 modules   (216 inline 8-bit counters): 216 [0x5612b6dfee40, 0x5612b6dfef18), 
+INFO: Loaded 1 PC tables (216 PCs): 216 [0x5612b6dfef18,0x5612b6dffc98), 
+INFO:      179 files found in /home/claude/conduitscope/fuzz/corpus/kerberos
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 179 min: 1b max: 158b total: 12184b rss: 34Mb
+/home/claude/conduitscope/src/kerberos.cpp:86:56: runtime error: left shift of negative value -1
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /home/claude/conduitscope/src/kerberos.cpp:86:56 
+#180	INITED cov: 127 ft: 369 corp: 65/4968b exec/s: 0 rss: 44Mb
+#65536	pulse  cov: 127 ft: 369 corp: 65/4968b lim: 809 exec/s: 21845 rss: 176Mb
+#131072	pulse  cov: 127 ft: 369 corp: 65/4968b lim: 1455 exec/s: 18724 rss: 303Mb
+#262144	pulse  cov: 127 ft: 369 corp: 65/4968b lim: 2759 exec/s: 18724 rss: 457Mb
+#471262	NEW    cov: 127 ft: 370 corp: 66/5106b lim: 4096 exec/s: 19635 rss: 458Mb L: 138/158 MS: 2 ChangeBinInt-ChangeBinInt-
+#524288	pulse  cov: 127 ft: 370 corp: 66/5106b lim: 4096 exec/s: 19418 rss: 460Mb
+#832019	REDUCE cov: 127 ft: 370 corp: 66/5104b lim: 4096 exec/s: 19349 rss: 464Mb L: 136/158 MS: 1 EraseBytes-
+#1048576	pulse  cov: 127 ft: 370 corp: 66/5104b lim: 4096 exec/s: 19418 rss: 464Mb
+#1365193	NEW    cov: 127 ft: 371 corp: 67/5312b lim: 4096 exec/s: 19228 rss: 464Mb L: 208/208 MS: 4 CrossOver-CopyPart-ShuffleBytes-CrossOver-
+#1391156	REDUCE cov: 127 ft: 371 corp: 67/5301b lim: 4096 exec/s: 19056 rss: 464Mb L: 197/197 MS: 3 ChangeBit-ChangeByte-EraseBytes-
+#1391787	REDUCE cov: 127 ft: 371 corp: 67/5274b lim: 4096 exec/s: 19065 rss: 464Mb L: 170/170 MS: 1 EraseBytes-
+#1464009	REDUCE cov: 127 ft: 371 corp: 67/5273b lim: 4096 exec/s: 19013 rss: 464Mb L: 169/169 MS: 2 ShuffleBytes-EraseBytes-
+#1473141	REDUCE cov: 127 ft: 371 corp: 67/5271b lim: 4096 exec/s: 19131 rss: 464Mb L: 167/167 MS: 2 CrossOver-EraseBytes-
+#1491379	REDUCE cov: 127 ft: 371 corp: 67/5266b lim: 4096 exec/s: 19120 rss: 464Mb L: 162/162 MS: 3 CMP-EraseBytes-CMP- DE: "\012\000\000\000\000\000\000\000"-"\017\000\000\000\000\000\000\000"-
+#1582916	REDUCE cov: 127 ft: 371 corp: 67/5263b lim: 4096 exec/s: 19071 rss: 464Mb L: 159/159 MS: 2 ShuffleBytes-EraseBytes-
+#1728492	REDUCE cov: 127 ft: 371 corp: 67/5262b lim: 4096 exec/s: 19205 rss: 464Mb L: 158/158 MS: 1 EraseBytes-
+#2097152	pulse  cov: 127 ft: 371 corp: 67/5262b lim: 4096 exec/s: 19599 rss: 475Mb
+#4194304	pulse  cov: 127 ft: 371 corp: 67/5262b lim: 4096 exec/s: 20164 rss: 481Mb
+#5059438	REDUCE cov: 127 ft: 371 corp: 67/5261b lim: 4096 exec/s: 20237 rss: 486Mb L: 137/158 MS: 1 EraseBytes-
+#8388608	pulse  cov: 127 ft: 371 corp: 67/5261b lim: 4096 exec/s: 20020 rss: 489Mb
+#10781918	DONE   cov: 127 ft: 371 corp: 67/5261b lim: 4096 exec/s: 19929 rss: 489Mb
+###### Recommended dictionary. ######
+"\012\000\000\000\000\000\000\000" # Uses: 347699
+"\017\000\000\000\000\000\000\000" # Uses: 346190
+###### End of recommended dictionary. ######
+Done 10781918 runs in 541 second(s)

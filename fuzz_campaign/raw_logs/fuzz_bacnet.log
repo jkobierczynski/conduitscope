@@ -1,0 +1,19 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3144108684
+INFO: Loaded 1 modules   (110 inline 8-bit counters): 110 [0x55cdaff74970, 0x55cdaff749de), 
+INFO: Loaded 1 PC tables (110 PCs): 110 [0x55cdaff749e0,0x55cdaff750c0), 
+INFO:       99 files found in /home/claude/conduitscope/fuzz/corpus/bacnet
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 99 min: 1b max: 1284b total: 3628b rss: 34Mb
+#100	INITED cov: 83 ft: 178 corp: 32/2569b exec/s: 0 rss: 41Mb
+#65536	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 1934 exec/s: 32768 rss: 453Mb
+#131072	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 2582 exec/s: 43690 rss: 461Mb
+#262144	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 3891 exec/s: 37449 rss: 462Mb
+#524288	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 40329 rss: 463Mb
+#1048576	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 40329 rss: 465Mb
+#2097152	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 41120 rss: 468Mb
+#4194304	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 40329 rss: 469Mb
+#8388608	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 38479 rss: 472Mb
+#16777216	pulse  cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 35469 rss: 474Mb
+#18930965	DONE   cov: 83 ft: 178 corp: 32/2569b lim: 4096 exec/s: 34992 rss: 474Mb
+Done 18930965 runs in 541 second(s)

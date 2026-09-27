@@ -1,0 +1,20 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3784290609
+INFO: Loaded 1 modules   (44 inline 8-bit counters): 44 [0x55f0fc14e2e0, 0x55f0fc14e30c), 
+INFO: Loaded 1 PC tables (44 PCs): 44 [0x55f0fc14e310,0x55f0fc14e5d0), 
+INFO:       40 files found in /home/claude/conduitscope/fuzz/corpus/twincat
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 40 min: 1b max: 82b total: 1617b rss: 34Mb
+#41	INITED cov: 30 ft: 39 corp: 6/195b exec/s: 0 rss: 37Mb
+#524288	pulse  cov: 30 ft: 39 corp: 6/195b lim: 4096 exec/s: 174762 rss: 356Mb
+#1048576	pulse  cov: 30 ft: 39 corp: 6/195b lim: 4096 exec/s: 209715 rss: 472Mb
+#2097152	pulse  cov: 30 ft: 39 corp: 6/195b lim: 4096 exec/s: 209715 rss: 473Mb
+#4194304	pulse  cov: 30 ft: 39 corp: 6/195b lim: 4096 exec/s: 199728 rss: 473Mb
+#8388608	pulse  cov: 30 ft: 39 corp: 6/195b lim: 4096 exec/s: 199728 rss: 473Mb
+#15910783	REDUCE cov: 30 ft: 39 corp: 6/192b lim: 4096 exec/s: 198884 rss: 474Mb L: 39/39 MS: 2 EraseBytes-ChangeBit-
+#15920604	REDUCE cov: 30 ft: 39 corp: 6/191b lim: 4096 exec/s: 196550 rss: 474Mb L: 38/38 MS: 1 EraseBytes-
+#16777216	pulse  cov: 30 ft: 39 corp: 6/191b lim: 4096 exec/s: 195083 rss: 490Mb
+#33554432	pulse  cov: 30 ft: 39 corp: 6/191b lim: 4096 exec/s: 172960 rss: 491Mb
+#67108864	pulse  cov: 30 ft: 39 corp: 6/191b lim: 4096 exec/s: 164482 rss: 491Mb
+#87329225	DONE   cov: 30 ft: 39 corp: 6/191b lim: 4096 exec/s: 161421 rss: 491Mb
+Done 87329225 runs in 541 second(s)

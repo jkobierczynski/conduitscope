@@ -1,0 +1,30 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3762632465
+INFO: Loaded 1 modules   (90 inline 8-bit counters): 90 [0x55684f839dd8, 0x55684f839e32), 
+INFO: Loaded 1 PC tables (90 PCs): 90 [0x55684f839e38,0x55684f83a3d8), 
+INFO:       52 files found in /home/claude/conduitscope/fuzz/corpus/ntlm
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 52 min: 1b max: 206b total: 3174b rss: 34Mb
+#54	INITED cov: 67 ft: 141 corp: 22/884b exec/s: 0 rss: 38Mb
+#262144	pulse  cov: 67 ft: 141 corp: 22/884b lim: 2673 exec/s: 131072 rss: 387Mb
+#373957	REDUCE cov: 67 ft: 141 corp: 22/876b lim: 3784 exec/s: 186978 rss: 460Mb L: 64/72 MS: 3 ChangeBit-EraseBytes-ChangeBinInt-
+#524288	pulse  cov: 67 ft: 141 corp: 22/876b lim: 4096 exec/s: 174762 rss: 462Mb
+#578435	REDUCE cov: 67 ft: 141 corp: 22/875b lim: 4096 exec/s: 144608 rss: 463Mb L: 71/72 MS: 3 ChangeBinInt-ChangeBit-EraseBytes-
+#584446	REDUCE cov: 67 ft: 141 corp: 22/874b lim: 4096 exec/s: 146111 rss: 463Mb L: 70/72 MS: 1 EraseBytes-
+#594347	REDUCE cov: 67 ft: 141 corp: 22/872b lim: 4096 exec/s: 148586 rss: 463Mb L: 68/72 MS: 1 EraseBytes-
+#1048576	pulse  cov: 67 ft: 141 corp: 22/872b lim: 4096 exec/s: 149796 rss: 464Mb
+#2097152	pulse  cov: 67 ft: 141 corp: 22/872b lim: 4096 exec/s: 139810 rss: 464Mb
+#3854703	REDUCE cov: 67 ft: 141 corp: 22/864b lim: 4096 exec/s: 142766 rss: 465Mb L: 64/71 MS: 4 InsertByte-ChangeBit-ChangeASCIIInt-EraseBytes-
+#4194304	pulse  cov: 67 ft: 141 corp: 22/864b lim: 4096 exec/s: 139810 rss: 465Mb
+#8388608	pulse  cov: 67 ft: 141 corp: 22/864b lim: 4096 exec/s: 137518 rss: 466Mb
+#12062792	REDUCE cov: 67 ft: 141 corp: 22/861b lim: 4096 exec/s: 137077 rss: 466Mb L: 68/68 MS: 2 CrossOver-EraseBytes-
+#12085659	REDUCE cov: 67 ft: 141 corp: 22/860b lim: 4096 exec/s: 135793 rss: 466Mb L: 67/68 MS: 2 ChangeASCIIInt-EraseBytes-
+#12288145	REDUCE cov: 67 ft: 141 corp: 22/859b lim: 4096 exec/s: 136534 rss: 467Mb L: 66/68 MS: 1 EraseBytes-
+#12455343	REDUCE cov: 67 ft: 141 corp: 22/858b lim: 4096 exec/s: 136871 rss: 467Mb L: 65/68 MS: 1 EraseBytes-
+#12923876	REDUCE cov: 67 ft: 141 corp: 22/857b lim: 4096 exec/s: 136040 rss: 467Mb L: 64/68 MS: 2 ChangeByte-EraseBytes-
+#16777216	pulse  cov: 67 ft: 141 corp: 22/857b lim: 4096 exec/s: 135300 rss: 468Mb
+#33554432	pulse  cov: 67 ft: 141 corp: 22/857b lim: 4096 exec/s: 132626 rss: 468Mb
+#41476574	REDUCE cov: 67 ft: 141 corp: 22/856b lim: 4096 exec/s: 131254 rss: 469Mb L: 63/68 MS: 2 EraseBytes-ChangeBinInt-
+#67108864	pulse  cov: 67 ft: 141 corp: 22/856b lim: 4096 exec/s: 127826 rss: 469Mb
+#69043600	DONE   cov: 67 ft: 141 corp: 22/856b lim: 4096 exec/s: 127622 rss: 469Mb
+Done 69043600 runs in 541 second(s)

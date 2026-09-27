@@ -1,0 +1,18 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 517783926
+INFO: Loaded 1 modules   (80 inline 8-bit counters): 80 [0x55c3f212da48, 0x55c3f212da98), 
+INFO: Loaded 1 PC tables (80 PCs): 80 [0x55c3f212da98,0x55c3f212df98), 
+INFO:       21 files found in /home/claude/conduitscope/fuzz/corpus/homeplug_av
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 21 min: 1b max: 44b total: 345b rss: 34Mb
+#23	INITED cov: 55 ft: 80 corp: 10/161b exec/s: 0 rss: 35Mb
+#262144	pulse  cov: 55 ft: 80 corp: 10/161b lim: 2644 exec/s: 131072 rss: 438Mb
+#524288	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 104857 rss: 438Mb
+#1048576	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 104857 rss: 439Mb
+#2097152	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 110376 rss: 439Mb
+#4194304	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 107546 rss: 439Mb
+#8388608	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 106184 rss: 440Mb
+#16777216	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 103563 rss: 441Mb
+#33554432	pulse  cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 100162 rss: 441Mb
+#52712108	DONE   cov: 55 ft: 80 corp: 10/161b lim: 4096 exec/s: 97434 rss: 441Mb
+Done 52712108 runs in 541 second(s)

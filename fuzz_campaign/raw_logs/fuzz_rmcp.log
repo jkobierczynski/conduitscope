@@ -1,0 +1,28 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1395878936
+INFO: Loaded 1 modules   (369 inline 8-bit counters): 369 [0x560f5fe7e740, 0x560f5fe7e8b1), 
+INFO: Loaded 1 PC tables (369 PCs): 369 [0x560f5fe7e8b8,0x560f5fe7ffc8), 
+INFO:       93 files found in /home/claude/conduitscope/fuzz/corpus/rmcp
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 93 min: 1b max: 248b total: 3033b rss: 34Mb
+#94	INITED cov: 202 ft: 306 corp: 49/1677b exec/s: 0 rss: 40Mb
+#131072	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 1551 exec/s: 65536 rss: 302Mb
+#262144	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 2854 exec/s: 87381 rss: 478Mb
+#524288	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 4096 exec/s: 104857 rss: 479Mb
+#1048576	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 4096 exec/s: 104857 rss: 480Mb
+#2097152	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 4096 exec/s: 104857 rss: 481Mb
+#4194304	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 4096 exec/s: 107546 rss: 482Mb
+#8388608	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 4096 exec/s: 107546 rss: 483Mb
+#16777216	pulse  cov: 202 ft: 306 corp: 49/1677b lim: 4096 exec/s: 106861 rss: 483Mb
+#22013488	REDUCE cov: 202 ft: 306 corp: 49/1673b lim: 4096 exec/s: 106345 rss: 484Mb L: 244/244 MS: 4 EraseBytes-ChangeBinInt-CrossOver-ChangeBinInt-
+#22016292	REDUCE cov: 202 ft: 306 corp: 49/1669b lim: 4096 exec/s: 106358 rss: 484Mb L: 240/240 MS: 4 EraseBytes-ChangeBinInt-InsertByte-InsertRepeatedBytes-
+#22100266	REDUCE cov: 202 ft: 306 corp: 49/1668b lim: 4096 exec/s: 106251 rss: 484Mb L: 239/239 MS: 4 InsertByte-CrossOver-CopyPart-EraseBytes-
+#24293878	REDUCE cov: 202 ft: 306 corp: 49/1663b lim: 4096 exec/s: 105625 rss: 484Mb L: 234/234 MS: 5 ChangeByte-ChangeASCIIInt-ChangeASCIIInt-ChangeByte-EraseBytes-
+#24296540	REDUCE cov: 202 ft: 306 corp: 49/1660b lim: 4096 exec/s: 105637 rss: 484Mb L: 231/231 MS: 2 ChangeASCIIInt-EraseBytes-
+#24301023	REDUCE cov: 202 ft: 306 corp: 49/1653b lim: 4096 exec/s: 105656 rss: 484Mb L: 224/224 MS: 3 InsertByte-InsertByte-EraseBytes-
+#24319330	REDUCE cov: 202 ft: 306 corp: 49/1652b lim: 4096 exec/s: 105736 rss: 484Mb L: 223/223 MS: 2 EraseBytes-InsertRepeatedBytes-
+#24396315	REDUCE cov: 202 ft: 306 corp: 49/1651b lim: 4096 exec/s: 105611 rss: 484Mb L: 222/222 MS: 1 EraseBytes-
+#33554432	pulse  cov: 202 ft: 306 corp: 49/1651b lim: 4096 exec/s: 104530 rss: 484Mb
+#47892034	REDUCE cov: 202 ft: 306 corp: 49/1650b lim: 4096 exec/s: 103438 rss: 485Mb L: 221/221 MS: 4 CrossOver-EraseBytes-ChangeBinInt-ChangeBinInt-
+#55429286	DONE   cov: 202 ft: 306 corp: 49/1650b lim: 4096 exec/s: 102457 rss: 485Mb
+Done 55429286 runs in 541 second(s)

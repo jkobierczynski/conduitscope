@@ -1,0 +1,30 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3821404560
+INFO: Loaded 1 modules   (62 inline 8-bit counters): 62 [0x561304796e88, 0x561304796ec6), 
+INFO: Loaded 1 PC tables (62 PCs): 62 [0x561304796ec8,0x5613047972a8), 
+INFO:       54 files found in /home/claude/conduitscope/fuzz/corpus/netlogon
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 54 min: 8b max: 620b total: 3567b rss: 35Mb
+#55	INITED cov: 40 ft: 45 corp: 7/210b exec/s: 0 rss: 42Mb
+#8192	pulse  cov: 40 ft: 45 corp: 7/210b lim: 133 exec/s: 4096 rss: 175Mb
+#16384	pulse  cov: 40 ft: 45 corp: 7/210b lim: 210 exec/s: 4096 rss: 307Mb
+#32768	pulse  cov: 40 ft: 45 corp: 7/210b lim: 371 exec/s: 4096 rss: 487Mb
+#65536	pulse  cov: 40 ft: 45 corp: 7/210b lim: 695 exec/s: 4369 rss: 489Mb
+#131072	pulse  cov: 40 ft: 45 corp: 7/210b lim: 1348 exec/s: 4228 rss: 489Mb
+#262144	pulse  cov: 40 ft: 45 corp: 7/210b lim: 2653 exec/s: 4228 rss: 489Mb
+#331473	REDUCE cov: 40 ft: 45 corp: 7/207b lim: 3346 exec/s: 4249 rss: 490Mb L: 37/52 MS: 3 CopyPart-ChangeBinInt-EraseBytes-
+#344886	REDUCE cov: 40 ft: 45 corp: 7/206b lim: 3478 exec/s: 4205 rss: 490Mb L: 36/52 MS: 3 ShuffleBytes-ChangeASCIIInt-EraseBytes-
+#524288	pulse  cov: 40 ft: 45 corp: 7/206b lim: 4096 exec/s: 4262 rss: 490Mb
+#560289	REDUCE cov: 40 ft: 45 corp: 7/201b lim: 4096 exec/s: 4277 rss: 490Mb L: 31/52 MS: 2 CrossOver-EraseBytes-
+#562345	REDUCE cov: 40 ft: 45 corp: 7/199b lim: 4096 exec/s: 4292 rss: 490Mb L: 29/52 MS: 1 EraseBytes-
+#630893	REDUCE cov: 40 ft: 45 corp: 7/198b lim: 4096 exec/s: 4262 rss: 490Mb L: 28/52 MS: 1 EraseBytes-
+#1048576	pulse  cov: 40 ft: 45 corp: 7/198b lim: 4096 exec/s: 4262 rss: 491Mb
+#1952005	REDUCE cov: 40 ft: 45 corp: 7/196b lim: 4096 exec/s: 4206 rss: 491Mb L: 50/50 MS: 5 EraseBytes-CrossOver-CrossOver-InsertByte-CopyPart-
+#1952680	REDUCE cov: 40 ft: 45 corp: 7/195b lim: 4096 exec/s: 4208 rss: 491Mb L: 49/49 MS: 5 ChangeBinInt-EraseBytes-ChangeByte-InsertByte-CMP- DE: "\010\000\000\000\000\000\000\000"-
+#1958748	REDUCE cov: 40 ft: 45 corp: 7/194b lim: 4096 exec/s: 4203 rss: 491Mb L: 48/48 MS: 2 ChangeASCIIInt-EraseBytes-
+#2097152	pulse  cov: 40 ft: 45 corp: 7/194b lim: 4096 exec/s: 4202 rss: 492Mb
+#2270685	DONE   cov: 40 ft: 45 corp: 7/194b lim: 4096 exec/s: 4197 rss: 492Mb
+###### Recommended dictionary. ######
+"\010\000\000\000\000\000\000\000" # Uses: 28666
+###### End of recommended dictionary. ######
+Done 2270685 runs in 541 second(s)

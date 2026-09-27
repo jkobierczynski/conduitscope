@@ -1,0 +1,24 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3785573333
+INFO: Loaded 1 modules   (54 inline 8-bit counters): 54 [0x564c1d27f340, 0x564c1d27f376), 
+INFO: Loaded 1 PC tables (54 PCs): 54 [0x564c1d27f378,0x564c1d27f6d8), 
+INFO:       26 files found in /home/claude/conduitscope/fuzz/corpus/tls_sni
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 26 min: 1b max: 97b total: 1882b rss: 34Mb
+#27	INITED cov: 37 ft: 71 corp: 16/1316b exec/s: 0 rss: 36Mb
+#1048576	pulse  cov: 37 ft: 71 corp: 16/1316b lim: 4096 exec/s: 349525 rss: 447Mb
+#2097152	pulse  cov: 37 ft: 71 corp: 16/1316b lim: 4096 exec/s: 419430 rss: 449Mb
+#4194304	pulse  cov: 37 ft: 71 corp: 16/1316b lim: 4096 exec/s: 381300 rss: 450Mb
+#8388608	pulse  cov: 37 ft: 71 corp: 16/1316b lim: 4096 exec/s: 381300 rss: 450Mb
+#16777216	pulse  cov: 37 ft: 71 corp: 16/1316b lim: 4096 exec/s: 372827 rss: 451Mb
+#33554432	pulse  cov: 37 ft: 71 corp: 16/1316b lim: 4096 exec/s: 372827 rss: 452Mb
+#39761262	REDUCE cov: 37 ft: 71 corp: 16/1315b lim: 4096 exec/s: 371600 rss: 452Mb L: 91/97 MS: 5 ChangeBinInt-CMP-ChangeBit-InsertByte-EraseBytes- DE: "\000\000"-
+#67108864	pulse  cov: 37 ft: 71 corp: 16/1315b lim: 4096 exec/s: 374909 rss: 455Mb
+#134217728	pulse  cov: 37 ft: 71 corp: 16/1315b lim: 4096 exec/s: 370767 rss: 456Mb
+#194698762	REDUCE cov: 37 ft: 71 corp: 16/1314b lim: 4096 exec/s: 363243 rss: 457Mb L: 91/97 MS: 5 InsertRepeatedBytes-ChangeBit-PersAutoDict-EraseBytes-EraseBytes- DE: "\000\000"-
+#194821026	REDUCE cov: 37 ft: 71 corp: 16/1313b lim: 4096 exec/s: 362795 rss: 457Mb L: 90/97 MS: 4 ChangeBit-ChangeBinInt-ChangeBit-EraseBytes-
+#196146002	DONE   cov: 37 ft: 71 corp: 16/1313b lim: 4096 exec/s: 362561 rss: 457Mb
+###### Recommended dictionary. ######
+"\000\000" # Uses: 13914419
+###### End of recommended dictionary. ######
+Done 196146002 runs in 541 second(s)

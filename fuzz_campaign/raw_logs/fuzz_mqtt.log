@@ -1,0 +1,39 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1639128066
+INFO: Loaded 1 modules   (94 inline 8-bit counters): 94 [0x55d53ae0c428, 0x55d53ae0c486), 
+INFO: Loaded 1 PC tables (94 PCs): 94 [0x55d53ae0c488,0x55d53ae0ca68), 
+INFO:      164 files found in /home/claude/conduitscope/fuzz/corpus/mqtt
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 164 min: 2b max: 197b total: 4923b rss: 34Mb
+#167	INITED cov: 62 ft: 170 corp: 32/863b exec/s: 0 rss: 44Mb
+#32768	pulse  cov: 62 ft: 170 corp: 32/863b lim: 452 exec/s: 16384 rss: 340Mb
+#65536	pulse  cov: 62 ft: 170 corp: 32/863b lim: 777 exec/s: 13107 rss: 461Mb
+#131072	pulse  cov: 62 ft: 170 corp: 32/863b lim: 1429 exec/s: 14563 rss: 468Mb
+#262144	pulse  cov: 62 ft: 170 corp: 32/863b lim: 2731 exec/s: 13797 rss: 469Mb
+#369823	REDUCE cov: 62 ft: 170 corp: 32/862b lim: 3809 exec/s: 13697 rss: 469Mb L: 37/134 MS: 1 EraseBytes-
+#371876	REDUCE cov: 62 ft: 170 corp: 32/861b lim: 3820 exec/s: 13773 rss: 469Mb L: 47/134 MS: 3 EraseBytes-CrossOver-ChangeByte-
+#397037	REDUCE cov: 62 ft: 170 corp: 32/858b lim: 4062 exec/s: 13690 rss: 469Mb L: 44/134 MS: 1 EraseBytes-
+#429592	REDUCE cov: 62 ft: 170 corp: 32/855b lim: 4096 exec/s: 13857 rss: 469Mb L: 46/134 MS: 4 ChangeByte-ChangeBit-ChangeBit-EraseBytes-
+#432168	REDUCE cov: 62 ft: 170 corp: 32/853b lim: 4096 exec/s: 13940 rss: 469Mb L: 42/134 MS: 1 EraseBytes-
+#436120	REDUCE cov: 62 ft: 170 corp: 32/852b lim: 4096 exec/s: 13628 rss: 469Mb L: 45/134 MS: 2 ShuffleBytes-EraseBytes-
+#437172	REDUCE cov: 62 ft: 170 corp: 32/848b lim: 4096 exec/s: 13661 rss: 469Mb L: 41/134 MS: 2 ChangeBit-EraseBytes-
+#524288	pulse  cov: 62 ft: 170 corp: 32/848b lim: 4096 exec/s: 13797 rss: 469Mb
+#1048576	pulse  cov: 62 ft: 170 corp: 32/848b lim: 4096 exec/s: 13617 rss: 471Mb
+#1886735	REDUCE cov: 62 ft: 170 corp: 32/847b lim: 4096 exec/s: 13671 rss: 474Mb L: 4/134 MS: 5 CrossOver-ChangeASCIIInt-ChangeBinInt-EraseBytes-EraseBytes-
+#2097152	pulse  cov: 62 ft: 170 corp: 32/847b lim: 4096 exec/s: 13706 rss: 475Mb
+#2403940	REDUCE cov: 62 ft: 170 corp: 32/842b lim: 4096 exec/s: 13736 rss: 475Mb L: 43/134 MS: 3 InsertRepeatedBytes-EraseBytes-ChangeBit-
+#2409992	REDUCE cov: 62 ft: 170 corp: 32/841b lim: 4096 exec/s: 13693 rss: 475Mb L: 42/134 MS: 2 EraseBytes-InsertByte-
+#2452719	REDUCE cov: 62 ft: 170 corp: 32/839b lim: 4096 exec/s: 13702 rss: 475Mb L: 40/134 MS: 1 EraseBytes-
+#4194304	pulse  cov: 62 ft: 170 corp: 32/839b lim: 4096 exec/s: 13486 rss: 476Mb
+#4542064	REDUCE cov: 62 ft: 170 corp: 32/838b lim: 4096 exec/s: 13477 rss: 478Mb L: 40/134 MS: 3 EraseBytes-InsertByte-ChangeByte-
+#4557891	REDUCE cov: 62 ft: 170 corp: 32/837b lim: 4096 exec/s: 13445 rss: 478Mb L: 39/134 MS: 2 CMP-EraseBytes- DE: "\377\377\377\377\377\377\377\377"-
+#4983449	REDUCE cov: 62 ft: 170 corp: 32/832b lim: 4096 exec/s: 13432 rss: 478Mb L: 41/134 MS: 2 ChangeBit-EraseBytes-
+#4983860	REDUCE cov: 62 ft: 170 corp: 32/830b lim: 4096 exec/s: 13433 rss: 478Mb L: 39/134 MS: 1 EraseBytes-
+#4989157	REDUCE cov: 62 ft: 170 corp: 32/829b lim: 4096 exec/s: 13447 rss: 478Mb L: 38/134 MS: 1 EraseBytes-
+#5086572	REDUCE cov: 62 ft: 170 corp: 32/828b lim: 4096 exec/s: 13421 rss: 478Mb L: 37/134 MS: 3 InsertByte-ChangeBit-EraseBytes-
+#5117696	REDUCE cov: 62 ft: 170 corp: 32/827b lim: 4096 exec/s: 13432 rss: 478Mb L: 36/134 MS: 3 EraseBytes-InsertByte-CrossOver-
+#7173212	DONE   cov: 62 ft: 170 corp: 32/827b lim: 4096 exec/s: 13259 rss: 480Mb
+###### Recommended dictionary. ######
+"\377\377\377\377\377\377\377\377" # Uses: 219634
+###### End of recommended dictionary. ######
+Done 7173212 runs in 541 second(s)

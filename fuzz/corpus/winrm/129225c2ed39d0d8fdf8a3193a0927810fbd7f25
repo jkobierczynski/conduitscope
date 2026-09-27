@@ -1,5 +1,0 @@
-POST HTTP/2C
-Content-Type:application/soap+xml
-Authorization:Basic
-
-<Command><Arguments>

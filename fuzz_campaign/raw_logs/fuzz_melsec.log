@@ -1,0 +1,49 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3007824414
+INFO: Loaded 1 modules   (81 inline 8-bit counters): 81 [0x55f90a6ee0a0, 0x55f90a6ee0f1), 
+INFO: Loaded 1 PC tables (81 PCs): 81 [0x55f90a6ee0f8,0x55f90a6ee608), 
+INFO:       69 files found in /home/claude/conduitscope/fuzz/corpus/melsec
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 69 min: 1b max: 173b total: 2324b rss: 34Mb
+#72	INITED cov: 56 ft: 119 corp: 23/1210b exec/s: 0 rss: 40Mb
+#262144	pulse  cov: 56 ft: 119 corp: 23/1210b lim: 2771 exec/s: 131072 rss: 363Mb
+#524288	pulse  cov: 56 ft: 119 corp: 23/1210b lim: 4096 exec/s: 131072 rss: 454Mb
+#1048576	pulse  cov: 56 ft: 119 corp: 23/1210b lim: 4096 exec/s: 131072 rss: 456Mb
+#1389072	REDUCE cov: 56 ft: 119 corp: 23/1206b lim: 4096 exec/s: 126279 rss: 457Mb L: 169/173 MS: 5 EraseBytes-InsertRepeatedBytes-EraseBytes-ChangeBit-CopyPart-
+#2097152	pulse  cov: 56 ft: 119 corp: 23/1206b lim: 4096 exec/s: 123361 rss: 459Mb
+#4194304	pulse  cov: 56 ft: 119 corp: 23/1206b lim: 4096 exec/s: 123361 rss: 459Mb
+#8388608	pulse  cov: 56 ft: 119 corp: 23/1206b lim: 4096 exec/s: 121574 rss: 459Mb
+#8835065	NEW    cov: 56 ft: 121 corp: 24/1470b lim: 4096 exec/s: 121028 rss: 459Mb L: 264/264 MS: 3 InsertRepeatedBytes-CMP-ShuffleBytes- DE: "\001\000\000\000"-
+#13715623	REDUCE cov: 56 ft: 121 corp: 24/1469b lim: 4096 exec/s: 120312 rss: 467Mb L: 172/264 MS: 3 ChangeBinInt-ChangeBinInt-EraseBytes-
+#15473363	REDUCE cov: 56 ft: 121 corp: 24/1465b lim: 4096 exec/s: 119948 rss: 467Mb L: 169/264 MS: 5 EraseBytes-ChangeBinInt-ShuffleBytes-InsertByte-CrossOver-
+#15662968	REDUCE cov: 56 ft: 121 corp: 24/1460b lim: 4096 exec/s: 120484 rss: 467Mb L: 100/264 MS: 5 ChangeBinInt-InsertRepeatedBytes-PersAutoDict-EraseBytes-PersAutoDict- DE: "\001\000\000\000"-"\001\000\000\000"-
+#15997545	REDUCE cov: 56 ft: 121 corp: 24/1458b lim: 4096 exec/s: 120282 rss: 467Mb L: 41/264 MS: 2 EraseBytes-ChangeBit-
+#16777216	pulse  cov: 56 ft: 121 corp: 24/1458b lim: 4096 exec/s: 119837 rss: 467Mb
+#21304479	REDUCE cov: 56 ft: 121 corp: 24/1456b lim: 4096 exec/s: 119688 rss: 467Mb L: 23/264 MS: 4 ChangeBinInt-CMP-ChangeByte-EraseBytes- DE: "\377\377\377\377\377\377\377\377"-
+#22161018	REDUCE cov: 56 ft: 121 corp: 24/1451b lim: 4096 exec/s: 119789 rss: 467Mb L: 168/264 MS: 4 ChangeBinInt-ShuffleBytes-ChangeBinInt-EraseBytes-
+#25558173	REDUCE cov: 56 ft: 121 corp: 24/1445b lim: 4096 exec/s: 118875 rss: 467Mb L: 94/264 MS: 5 EraseBytes-ChangeBinInt-CrossOver-InsertByte-PersAutoDict- DE: "\001\000\000\000"-
+#27897595	REDUCE cov: 56 ft: 121 corp: 24/1444b lim: 4096 exec/s: 118713 rss: 469Mb L: 37/264 MS: 2 ChangeBinInt-EraseBytes-
+#28686718	REDUCE cov: 56 ft: 121 corp: 24/1443b lim: 4096 exec/s: 118540 rss: 469Mb L: 171/264 MS: 3 ChangeBit-ChangeBit-EraseBytes-
+#31025886	REDUCE cov: 56 ft: 121 corp: 24/1441b lim: 4096 exec/s: 118419 rss: 469Mb L: 42/264 MS: 3 ChangeBit-ChangeByte-EraseBytes-
+#31247918	REDUCE cov: 56 ft: 121 corp: 24/1440b lim: 4096 exec/s: 118363 rss: 469Mb L: 19/264 MS: 2 ChangeBit-EraseBytes-
+#31963035	REDUCE cov: 56 ft: 121 corp: 24/1439b lim: 4096 exec/s: 118381 rss: 469Mb L: 41/264 MS: 2 EraseBytes-ChangeBinInt-
+#32409475	REDUCE cov: 56 ft: 121 corp: 24/1438b lim: 4096 exec/s: 118716 rss: 469Mb L: 93/264 MS: 5 InsertByte-EraseBytes-EraseBytes-InsertRepeatedBytes-ChangeBit-
+#33554432	pulse  cov: 56 ft: 121 corp: 24/1438b lim: 4096 exec/s: 118566 rss: 469Mb
+#34582558	REDUCE cov: 56 ft: 121 corp: 24/1430b lim: 4096 exec/s: 118433 rss: 469Mb L: 85/264 MS: 3 ChangeBinInt-InsertByte-EraseBytes-
+#36841243	REDUCE cov: 56 ft: 121 corp: 24/1426b lim: 4096 exec/s: 118080 rss: 469Mb L: 164/264 MS: 4 InsertRepeatedBytes-EraseBytes-ChangeBit-ChangeBit-
+#38923638	REDUCE cov: 56 ft: 121 corp: 24/1422b lim: 4096 exec/s: 118308 rss: 469Mb L: 81/264 MS: 5 ChangeByte-ChangeBinInt-ShuffleBytes-ChangeByte-EraseBytes-
+#44493622	REDUCE cov: 56 ft: 121 corp: 24/1414b lim: 4096 exec/s: 117397 rss: 469Mb L: 73/264 MS: 4 ShuffleBytes-ChangeByte-EraseBytes-ChangeBinInt-
+#50087173	REDUCE cov: 56 ft: 121 corp: 24/1407b lim: 4096 exec/s: 117026 rss: 470Mb L: 164/264 MS: 5 ChangeBinInt-InsertRepeatedBytes-ChangeASCIIInt-CopyPart-EraseBytes-
+#52645462	REDUCE cov: 56 ft: 121 corp: 24/1406b lim: 4096 exec/s: 116472 rss: 470Mb L: 72/264 MS: 4 ChangeByte-ChangeBinInt-EraseBytes-CMP- DE: "\377\377\377\377"-
+#52711987	REDUCE cov: 56 ft: 121 corp: 24/1404b lim: 4096 exec/s: 116619 rss: 470Mb L: 162/264 MS: 5 ChangeByte-EraseBytes-CrossOver-ShuffleBytes-ChangeBit-
+#53812967	REDUCE cov: 56 ft: 121 corp: 24/1388b lim: 4096 exec/s: 116478 rss: 470Mb L: 148/264 MS: 5 ChangeBit-ChangeBit-InsertByte-CMP-EraseBytes- DE: "\000\000"-
+#53901620	REDUCE cov: 56 ft: 121 corp: 24/1386b lim: 4096 exec/s: 116418 rss: 470Mb L: 146/264 MS: 3 EraseBytes-ChangeByte-ChangeBit-
+#60518175	REDUCE cov: 56 ft: 121 corp: 24/1382b lim: 4096 exec/s: 116157 rss: 472Mb L: 142/264 MS: 5 ChangeBinInt-EraseBytes-ChangeByte-ChangeBit-InsertRepeatedBytes-
+#62782117	DONE   cov: 56 ft: 121 corp: 24/1382b lim: 4096 exec/s: 116048 rss: 473Mb
+###### Recommended dictionary. ######
+"\001\000\000\000" # Uses: 2869384
+"\377\377\377\377\377\377\377\377" # Uses: 1705502
+"\377\377\377\377" # Uses: 245752
+"\000\000" # Uses: 211065
+###### End of recommended dictionary. ######
+Done 62782117 runs in 541 second(s)

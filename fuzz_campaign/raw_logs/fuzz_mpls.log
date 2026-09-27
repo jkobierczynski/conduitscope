@@ -1,0 +1,18 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 3377340760
+INFO: Loaded 1 modules   (43 inline 8-bit counters): 43 [0x5618ca452f60, 0x5618ca452f8b), 
+INFO: Loaded 1 PC tables (43 PCs): 43 [0x5618ca452f90,0x5618ca453240), 
+INFO:       21 files found in /home/claude/conduitscope/fuzz/corpus/mpls
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 21 min: 1b max: 64b total: 483b rss: 34Mb
+#22	INITED cov: 19 ft: 54 corp: 15/329b exec/s: 0 rss: 35Mb
+#262144	pulse  cov: 19 ft: 54 corp: 15/329b lim: 2671 exec/s: 131072 rss: 457Mb
+#524288	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 131072 rss: 458Mb
+#1048576	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 149796 rss: 459Mb
+#2097152	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 139810 rss: 459Mb
+#4194304	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 139810 rss: 461Mb
+#8388608	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 135300 rss: 461Mb
+#16777216	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 132104 rss: 462Mb
+#33554432	pulse  cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 128070 rss: 462Mb
+#66094637	DONE   cov: 19 ft: 54 corp: 15/329b lim: 4096 exec/s: 122171 rss: 463Mb
+Done 66094637 runs in 541 second(s)

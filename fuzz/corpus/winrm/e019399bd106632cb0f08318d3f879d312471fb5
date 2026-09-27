@@ -1,6 +1,0 @@
-POST HTTP/2
-Content-Type:application/soap+xml
-
-˜d<Command><Arguments>8U<Arguments>
-
-<Arguments><Arguments>

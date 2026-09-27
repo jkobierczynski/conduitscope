@@ -1,0 +1,32 @@
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 2970247226
+INFO: Loaded 1 modules   (126 inline 8-bit counters): 126 [0x5577ebd64ef8, 0x5577ebd64f76), 
+INFO: Loaded 1 PC tables (126 PCs): 126 [0x5577ebd64f78,0x5577ebd65758), 
+INFO:       81 files found in /home/claude/conduitscope/fuzz/corpus/ldap
+INFO: -max_len is not provided; libFuzzer will not generate inputs larger than 4096 bytes
+INFO: seed corpus: files: 81 min: 1b max: 211b total: 4052b rss: 34Mb
+/home/claude/conduitscope/src/ldap.cpp:86:56: runtime error: left shift of 72631539376062464 by 8 places cannot be represented in type 'int64_t' (aka 'long')
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /home/claude/conduitscope/src/ldap.cpp:86:56 
+#82	INITED cov: 91 ft: 174 corp: 24/1420b exec/s: 0 rss: 40Mb
+#65536	pulse  cov: 91 ft: 174 corp: 24/1420b lim: 804 exec/s: 32768 rss: 149Mb
+#131072	pulse  cov: 91 ft: 174 corp: 24/1420b lim: 1449 exec/s: 43690 rss: 251Mb
+#262144	pulse  cov: 91 ft: 174 corp: 24/1420b lim: 2753 exec/s: 37449 rss: 454Mb
+#438764	NEW    cov: 93 ft: 176 corp: 25/1488b lim: 4096 exec/s: 36563 rss: 458Mb L: 68/155 MS: 2 InsertRepeatedBytes-EraseBytes-
+#447555	REDUCE cov: 93 ft: 176 corp: 25/1487b lim: 4096 exec/s: 34427 rss: 458Mb L: 67/155 MS: 1 EraseBytes-
+#448508	REDUCE cov: 93 ft: 176 corp: 25/1484b lim: 4096 exec/s: 34500 rss: 458Mb L: 64/155 MS: 3 CopyPart-EraseBytes-CrossOver-
+#524288	pulse  cov: 93 ft: 176 corp: 25/1484b lim: 4096 exec/s: 34952 rss: 458Mb
+#566769	REDUCE cov: 93 ft: 176 corp: 25/1483b lim: 4096 exec/s: 35423 rss: 458Mb L: 63/155 MS: 1 EraseBytes-
+#783388	REDUCE cov: 93 ft: 176 corp: 25/1477b lim: 4096 exec/s: 35608 rss: 459Mb L: 32/155 MS: 4 InsertByte-ShuffleBytes-EraseBytes-CrossOver-
+#784245	REDUCE cov: 93 ft: 176 corp: 25/1466b lim: 4096 exec/s: 35647 rss: 459Mb L: 21/155 MS: 2 CMP-EraseBytes- DE: "\001\000"-
+#786634	REDUCE cov: 93 ft: 176 corp: 25/1459b lim: 4096 exec/s: 34201 rss: 459Mb L: 14/155 MS: 3 ChangeASCIIInt-CMP-EraseBytes- DE: "\001\000"-
+#1048576	pulse  cov: 93 ft: 176 corp: 25/1459b lim: 4096 exec/s: 34952 rss: 460Mb
+#1666695	REDUCE cov: 93 ft: 176 corp: 25/1458b lim: 4096 exec/s: 34722 rss: 460Mb L: 62/155 MS: 1 EraseBytes-
+#2097152	pulse  cov: 93 ft: 176 corp: 25/1458b lim: 4096 exec/s: 34952 rss: 460Mb
+#4194304	pulse  cov: 93 ft: 176 corp: 25/1458b lim: 4096 exec/s: 35544 rss: 461Mb
+#8388608	pulse  cov: 93 ft: 176 corp: 25/1458b lim: 4096 exec/s: 35098 rss: 463Mb
+#16777216	pulse  cov: 93 ft: 176 corp: 25/1458b lim: 4096 exec/s: 34663 rss: 464Mb
+#18717702	DONE   cov: 93 ft: 176 corp: 25/1458b lim: 4096 exec/s: 34598 rss: 464Mb
+###### Recommended dictionary. ######
+"\001\000" # Uses: 1597245
+###### End of recommended dictionary. ######
+Done 18717702 runs in 541 second(s)
