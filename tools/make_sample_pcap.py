@@ -6746,6 +6746,22 @@ def build_pcapng_malformed():
     (TESTS_DIR / "pcapng_bad_byte_order.pcapng").write_bytes(bytes([0x0A, 0x0D, 0x0D, 0x0A]) + b"\x00" * 28)
 
 
+def build_pcapng_truncated_after_shb():
+    """A well-formed Section Header Block (valid byte-order magic, correct length/trailer)
+    immediately followed by only 3 bytes -- less than a full 4-byte Block Type field for
+    whatever block was supposed to come next (an Interface Description Block in every real
+    capture, but this file never gets that far). Regression fixture for the pcap_reader.cpp
+    bug fixed alongside pcap_writer's `decode -w`-against-pcapng-source linktype fix: an
+    earlier version of PcapReader::prefetch_first_interface_linktype() (added by that same
+    fix) swallowed exactly this truncated-read case silently instead of leaving it for
+    next_pcapng() to raise its own "ends with a truncated pcapng block header" ParseError --
+    misreporting a genuinely corrupt file as a clean, empty (0-packet) capture instead of
+    erroring. Distinct from pcapng_bad_byte_order.pcapng above (which is corrupt in the SHB
+    itself): this file's SHB is completely valid, only what follows it is truncated."""
+    data = pcapng_shb() + bytes([0x01, 0x00, 0x00])  # 3 of the 4 Interface Description Block type bytes
+    (TESTS_DIR / "pcapng_truncated_after_shb.pcapng").write_bytes(data)
+
+
 def build_pcapng_basic_sample():
     """Same three Modbus/TCP packets as build_modbus_sample(), wrapped in pcapng blocks
     (one Section Header Block, one Interface Description Block, three Enhanced Packet
@@ -19875,6 +19891,7 @@ if __name__ == "__main__":
     build_ipv6_raw_link_sample()
     build_padded_ack_sample()
     build_pcapng_malformed()
+    build_pcapng_truncated_after_shb()
     build_pcapng_basic_sample()
     build_pcapng_nanosecond_sample()
     build_pcapng_implausible_tsresol_sample()

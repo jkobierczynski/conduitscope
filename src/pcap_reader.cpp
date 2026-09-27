@@ -189,6 +189,7 @@ PcapReader::PcapReader(const std::string& path) : path_(path) {
     // byte order). Detect it before assuming classic pcap's fixed-layout global header.
     if (header[0] == 0x0A && header[1] == 0x0D && header[2] == 0x0D && header[3] == 0x0A) {
         read_section_header_block();
+        prefetch_first_interface_linktype();
         return;
     }
 
@@ -307,6 +308,124 @@ void PcapReader::read_section_header_block() {
     pcapng_interfaces_.clear();
 }
 
+// See this method's own declaration (pcap_reader.hpp) for why it's shared between next_pcapng()
+// and prefetch_first_interface_linktype(). Precondition: the caller has already read this
+// block's 4-byte Block Type field; everything from Block Total Length onward follows, exactly
+// the same shape/validation next_pcapng() always inlined here before this was factored out.
+void PcapReader::read_pcapng_block_body(std::vector<uint8_t>& body) {
+    std::array<uint8_t, 4> len_raw{};
+    stream_.read(reinterpret_cast<char*>(len_raw.data()), 4);
+    if (stream_.gcount() != 4) {
+        throw ParseError("'" + path_ + "' ends mid pcapng block header");
+    }
+    uint32_t block_total_length = read_u32(len_raw, pcapng_little_endian_);
+    if (block_total_length < kMinBlockBytes || block_total_length % 4 != 0) {
+        throw ParseError("'" + path_ + "' has an invalid pcapng block length (" +
+                          std::to_string(block_total_length) + " bytes)");
+    }
+    if (block_total_length > kMaxPlausibleBlockBytes) {
+        throw ParseError("'" + path_ + "' reports an implausible pcapng block length (" +
+                          std::to_string(block_total_length) +
+                          " bytes) -- the file is likely truncated or corrupt");
+    }
+
+    uint32_t body_len = block_total_length - kMinBlockBytes;
+    body.assign(body_len, 0);
+    if (body_len > 0) {
+        stream_.read(reinterpret_cast<char*>(body.data()), body_len);
+        if (stream_.gcount() != static_cast<std::streamsize>(body_len)) {
+            throw ParseError("'" + path_ + "' ends mid pcapng block body");
+        }
+    }
+
+    std::array<uint8_t, 4> trailing_raw{};
+    stream_.read(reinterpret_cast<char*>(trailing_raw.data()), 4);
+    if (stream_.gcount() != 4) {
+        throw ParseError("'" + path_ + "' ends before its pcapng block's trailing length field");
+    }
+    uint32_t trailing_length = read_u32(trailing_raw, pcapng_little_endian_);
+    if (trailing_length != block_total_length) {
+        throw ParseError("'" + path_ + "' has a corrupt pcapng block (length mismatch: " +
+                          std::to_string(block_total_length) + " at the start, " +
+                          std::to_string(trailing_length) + " at the end)");
+    }
+}
+
+// See this method's own declaration (pcap_reader.hpp) for why info_ is updated here, immediately,
+// only for the FIRST interface declared in the current section -- a second/third/... interface
+// still only takes effect once a packet actually arrives on it, via next_pcapng()'s own
+// kEpbBlockType/kSpbBlockType cases, matching info()'s documented "most recently owned a packet"
+// behavior for the multi-interface case.
+void PcapReader::handle_idb_block(const std::vector<uint8_t>& body) {
+    if (body.size() < 8) {
+        throw ParseError("'" + path_ + "' has a truncated Interface Description Block");
+    }
+    PcapNgInterface iface;
+    iface.linktype = read_u16({body[0], body[1]}, pcapng_little_endian_);
+    iface.snaplen = read_u32({body[4], body[5], body[6], body[7]}, pcapng_little_endian_);
+    iface.units_per_second = parse_if_tsresol_option(body, 8, pcapng_little_endian_);
+    if (pcapng_interfaces_.empty()) {
+        info_.linktype = iface.linktype;
+        info_.snaplen = iface.snaplen;
+    }
+    pcapng_interfaces_.push_back(iface);
+}
+
+// See this method's own declaration (pcap_reader.hpp) for the bug it fixes and why. Walks forward
+// consuming ONLY Interface Description Blocks -- the normal shape of every real pcapng file
+// declares every interface immediately after the Section Header Block, before any packet data --
+// then rewinds the stream to exactly where it stood before the first block that wasn't an IDB, so
+// next_pcapng()'s own loop (invoked later, by the first real next() call) parses that block fresh,
+// with no awareness this prefetch ever ran. A file that (unusually) has no leading IDB at all, or
+// hits EOF while looking for one, simply leaves info_ at its already-set values (this method's own
+// loop below is a no-op in both cases) -- not an error, since a pcapng file with an EPB before any
+// IDB is next_pcapng()'s own error to raise (its kEpbBlockType case already throws
+// "references undeclared interface" for exactly that), not this prefetch's.
+void PcapReader::prefetch_first_interface_linktype() {
+    for (;;) {
+        std::streampos pos = stream_.tellg();
+        std::array<uint8_t, 4> type_raw{};
+        stream_.read(reinterpret_cast<char*>(type_raw.data()), 4);
+        if (stream_.gcount() != 4) {
+            // Truncated or clean EOF right here -- either way, nothing more to prefetch. A
+            // partial (non-zero, non-4-byte) read leaves failbit set AND the stream positioned
+            // mid-read, not at `pos` -- clear() the error state and seekg() back to `pos` so
+            // next_pcapng()'s own later read of this exact same position starts fresh and either
+            // cleanly hits real EOF (0 bytes: its own "clean end of file" return) or reproduces
+            // the identical truncated-read condition, raising its own already-correct "ends with
+            // a truncated pcapng block header" ParseError -- rather than silently inheriting a
+            // dead (failbit-set) stream here, which would make next_pcapng()'s next read return
+            // 0 bytes regardless of what's actually on disk and misreport a genuinely corrupt
+            // file as a clean, empty end of file.
+            stream_.clear();
+            stream_.seekg(pos);
+            return;
+        }
+
+        if (type_raw[0] == 0x0A && type_raw[1] == 0x0D && type_raw[2] == 0x0D && type_raw[3] == 0x0A) {
+            // A second Section Header Block immediately after the first, with no IDB in
+            // between -- unusual, but let next_pcapng()'s own loop handle it exactly as it
+            // always has (including re-bootstrapping byte order for the new section).
+            stream_.seekg(pos);
+            return;
+        }
+
+        uint32_t block_type = read_u32(type_raw, pcapng_little_endian_);
+        if (block_type != kIdbBlockType) {
+            // The first non-IDB block (almost always the first Enhanced Packet Block) -- stop
+            // here and rewind, so next_pcapng() picks up from this exact block.
+            stream_.seekg(pos);
+            return;
+        }
+
+        std::vector<uint8_t> body;
+        read_pcapng_block_body(body);
+        handle_idb_block(body);
+        // Loop again -- a section can (and in practice usually does, for a multi-NIC capture)
+        // declare more than one interface before its first packet block.
+    }
+}
+
 bool PcapReader::next_pcapng(PcapPacket& out) {
     for (;;) {
         std::array<uint8_t, 4> type_raw{};
@@ -327,54 +446,12 @@ bool PcapReader::next_pcapng(PcapPacket& out) {
         }
 
         uint32_t block_type = read_u32(type_raw, pcapng_little_endian_);
-
-        std::array<uint8_t, 4> len_raw{};
-        stream_.read(reinterpret_cast<char*>(len_raw.data()), 4);
-        if (stream_.gcount() != 4) {
-            throw ParseError("'" + path_ + "' ends mid pcapng block header");
-        }
-        uint32_t block_total_length = read_u32(len_raw, pcapng_little_endian_);
-        if (block_total_length < kMinBlockBytes || block_total_length % 4 != 0) {
-            throw ParseError("'" + path_ + "' has an invalid pcapng block length (" +
-                              std::to_string(block_total_length) + " bytes)");
-        }
-        if (block_total_length > kMaxPlausibleBlockBytes) {
-            throw ParseError("'" + path_ + "' reports an implausible pcapng block length (" +
-                              std::to_string(block_total_length) +
-                              " bytes) -- the file is likely truncated or corrupt");
-        }
-
-        uint32_t body_len = block_total_length - kMinBlockBytes;
-        std::vector<uint8_t> body(body_len);
-        if (body_len > 0) {
-            stream_.read(reinterpret_cast<char*>(body.data()), body_len);
-            if (stream_.gcount() != static_cast<std::streamsize>(body_len)) {
-                throw ParseError("'" + path_ + "' ends mid pcapng block body");
-            }
-        }
-
-        std::array<uint8_t, 4> trailing_raw{};
-        stream_.read(reinterpret_cast<char*>(trailing_raw.data()), 4);
-        if (stream_.gcount() != 4) {
-            throw ParseError("'" + path_ + "' ends before its pcapng block's trailing length field");
-        }
-        uint32_t trailing_length = read_u32(trailing_raw, pcapng_little_endian_);
-        if (trailing_length != block_total_length) {
-            throw ParseError("'" + path_ + "' has a corrupt pcapng block (length mismatch: " +
-                              std::to_string(block_total_length) + " at the start, " +
-                              std::to_string(trailing_length) + " at the end)");
-        }
+        std::vector<uint8_t> body;
+        read_pcapng_block_body(body);
 
         switch (block_type) {
             case kIdbBlockType: {
-                if (body.size() < 8) {
-                    throw ParseError("'" + path_ + "' has a truncated Interface Description Block");
-                }
-                PcapNgInterface iface;
-                iface.linktype = read_u16({body[0], body[1]}, pcapng_little_endian_);
-                iface.snaplen = read_u32({body[4], body[5], body[6], body[7]}, pcapng_little_endian_);
-                iface.units_per_second = parse_if_tsresol_option(body, 8, pcapng_little_endian_);
-                pcapng_interfaces_.push_back(iface);
+                handle_idb_block(body);
                 continue;
             }
             case kEpbBlockType: {

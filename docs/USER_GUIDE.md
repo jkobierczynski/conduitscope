@@ -4126,6 +4126,20 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   only matters for a file from an unusual/legacy writer, and even then only
   means `conduitscope info`'s packet count would read lower than an external
   tool's for that specific file. See "pcap vs. pcapng" above.
+- **`decode -w` against a multi-interface pcapng source writes every packet
+  under one link type.** pcapng (unlike classic pcap) allows a single file
+  to declare more than one Interface Description Block with different link
+  types -- a capture merging an Ethernet NIC and a raw-IP tunnel interface
+  into one file, for example (see `sample_pcapng_multi_interface.pcapng` in
+  this project's own test fixtures) -- and can tag each packet with which
+  interface captured it. `-w`'s output format is always classic pcap, which
+  has exactly one link type for the whole file, so `-w` picks the FIRST
+  interface declared in the source file and writes every packet under that
+  one type regardless of which interface actually captured it. A packet
+  from a differently-typed interface will be misinterpreted by whatever
+  reads the written file back (this tool included). This only matters for a
+  genuinely multi-interface, mixed-link-type pcapng source; the ordinary
+  single-interface case (the vast majority of real captures) is unaffected.
 - **General TCP stream reassembly is implemented, but narrowly scoped.**
   `Decoder::reassemble_tcp_payload` (`decoder.hpp`/`decoder.cpp`) buffers a
   single Modbus MBAP message, DNP3 data-link frame, IEC 104 APDU, EtherNet/IP

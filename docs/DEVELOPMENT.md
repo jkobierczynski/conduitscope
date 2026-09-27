@@ -12382,6 +12382,98 @@ it done as its own patch.
     81's own list, minus role classification (item 82) and tag/point/DB
     touch summarization (this item), both now complete.
 
+84. **Bug fix: `decode -w` against a pcapng source wrote a classic-pcap
+    file with the wrong link type.** Reported by Jurgen from a real
+    Windows build: `conduitscope.exe decode -r S7.pcap -w test.pcap`,
+    then opening `test.pcap` in Wireshark, showed every frame as
+    unrecognized "Null/Loopback" raw data instead of Ethernet/IP/TCP/
+    whatever protocol the source actually decoded as -- even though the
+    original file opened and decoded correctly. Root cause, confirmed by
+    reproduction with `tests/sample_modbus.pcapng` (a small, genuinely
+    Ethernet-linked pcapng fixture already in this repo): `cli_main.cpp`'s
+    `run_decode` constructs `PcapWriter` from `source.linktype()` once,
+    before its main packet loop's first `next()` call (`decode -w`'s own
+    file header comment already documents "Opened here, once, before the
+    main loop"). For a classic pcap source that's fine -- `PcapReader`'s
+    constructor reads the file's one global-header `linktype` field
+    up front. For a pcapng source it wasn't: `PcapFileInfo::linktype`
+    defaults to 0 (`LINKTYPE_NULL`), and the only place that was ever
+    overwritten with the real value was inside `next_pcapng()`'s
+    `kEpbBlockType`/`kSpbBlockType` cases -- i.e. not until the first
+    PACKET had actually been read -- even though `PcapReader`'s own
+    class-level doc comment already promised `info()` reflects "initially
+    the first interface declared in the file" for a pcapng source. Any
+    caller reading `info().linktype` between opening the file and its
+    first `next()` call (only `decode -w` does this anywhere in this
+    codebase today) silently got the wrong value instead.
+
+    **Fix** (`include/conduitscope/pcap_reader.hpp`/`src/pcap_reader.cpp`):
+    a new `PcapReader::prefetch_first_interface_linktype()`, called once
+    from the constructor right after `read_section_header_block()`
+    establishes byte order for the file's first section. It walks forward
+    consuming ONLY Interface Description Block(s) -- the normal shape of
+    every real pcapng file (dumpcap/Wireshark/tshark all declare every
+    interface immediately after the Section Header Block, before any
+    packet data) -- updating `info_.linktype`/`snaplen` from the FIRST one
+    declared, then seeks the stream back to exactly where it stood before
+    the first block that wasn't an IDB, so `next_pcapng()`'s own loop
+    (invoked later, by the first real `next()` call) parses that block
+    fresh, with no awareness this prefetch ever ran. Two small shared
+    helpers, `read_pcapng_block_body` (the generic Block Total Length/
+    body/trailer read+validate, previously inlined in `next_pcapng()`'s
+    loop) and `handle_idb_block` (the IDB-body-to-`PcapNgInterface`
+    parse, previously inlined in `next_pcapng()`'s `kIdbBlockType` case),
+    are factored out so both `next_pcapng()` and the new prefetch method
+    use the exact same, already-battle-tested parsing logic rather than a
+    second hand-copied version of it. A first attempt at this fix (adding
+    the `info_` update inline inside `next_pcapng()`'s own `kIdbBlockType`
+    case, without a prefetch) was caught as insufficient during this
+    item's own verification -- that case only runs once `next_pcapng()`
+    itself is entered, which is exactly what `decode -w`'s premature
+    `source.linktype()` call never triggers.
+
+    One correctness edge case caught during this item's own verification
+    (not by any existing test, since none previously exercised a
+    truncated pcapng file with zero IDBs): the prefetch loop's own
+    truncated-read branch initially just `return`ed without rewinding the
+    stream, leaving it mid-read with `failbit` set -- so a genuinely
+    corrupt pcapng file (cut off before any IDB) would have silently
+    reported a clean, empty (0-packet) capture instead of `next_pcapng()`
+    raising its already-correct "ends with a truncated pcapng block
+    header" `ParseError`, because a stream with `failbit` already set
+    makes every subsequent read return 0 bytes regardless of what's
+    actually on disk. Fixed by `stream_.clear()` + `stream_.seekg()` back
+    to the block's start in that branch too, covered by a new dedicated
+    fixture (see Testing below).
+
+    **Testing.** Three new CTest cases: `pcap_write_dash_w_from_pcapng_
+    source_produces_correct_linktype` (`sample_modbus.pcapng`, the exact
+    single-interface shape of the capture that surfaced this bug -- `-w`'s
+    output now correctly reports `link type: Ethernet`, not
+    `unsupported/unknown (0)`); `pcap_write_dash_w_from_multi_interface_
+    pcapng_uses_first_interface_linktype` (the existing `sample_pcapng_
+    multi_interface.pcapng` fixture -- interface 0 Ethernet, interface 1
+    Raw IP, both IDBs declared up front -- proving the prefetch picks up
+    the FIRST declared interface specifically, matching `PcapReader`'s own
+    documented contract, not e.g. the last IDB parsed; classic pcap has
+    exactly one link type for the whole file, so this also documents, in
+    both the test's own comment and a new `docs/USER_GUIDE.md` LIMITATIONS
+    entry, that `-w` against a genuinely multi-linktype pcapng source
+    necessarily reinterprets every packet under this one chosen type --
+    an inherent classic-pcap format limitation, not something this fix
+    does or could address); and `rejects_pcapng_truncated_immediately_
+    after_shb` (new fixture `tests/pcapng_truncated_after_shb.pcapng`,
+    `build_pcapng_truncated_after_shb` in `tools/make_sample_pcap.py` --
+    a valid Section Header Block followed by only 3 of the next block's 4
+    Block Type bytes) for the `stream_.clear()`/`seekg()` edge case above.
+    Full CTest suite: 2108/2108 (default GCC build, up from item 83's
+    2105 -- 3 new tests, net +3); ASan/UBSan 2184/2184; no-live-capture
+    2096/2096; MinGW-w64 cross-compile confirmed to still compile and
+    link cleanly with zero new warnings on either touched file. No new
+    fuzz harness/corpus work needed: this is a stream-position/state-
+    tracking fix in the pcapng reader's own already-fuzzed block-parsing
+    logic, not a new byte-parsing path of its own.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

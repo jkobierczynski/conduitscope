@@ -120,6 +120,33 @@ private:
     // Section Header Block is encountered (pcapng permits concatenating multiple captures,
     // potentially with different byte order, into one file).
     void read_section_header_block();
+    // pcapng-only: reads one generic block's Block Total Length, body, and trailing (repeated)
+    // Block Total Length, given that its 4-byte Block Type has already been read by the caller
+    // (this method never looks at the type itself, so it's shared verbatim by next_pcapng()'s
+    // own block loop and prefetch_first_interface_linktype() below). Throws ParseError on any
+    // of the same truncation/corruption conditions next_pcapng() has always enforced inline.
+    void read_pcapng_block_body(std::vector<uint8_t>& body);
+    // pcapng-only: parses one Interface Description Block's body (already read by the caller)
+    // into a new PcapNgInterface, appending it to pcapng_interfaces_ -- and, if this is the
+    // FIRST interface declared in the current section, also updates info_.linktype/snaplen
+    // immediately (see this method's own comment, pcap_reader.cpp, for why that immediacy
+    // matters). Shared by next_pcapng()'s own kIdbBlockType case and
+    // prefetch_first_interface_linktype() below.
+    void handle_idb_block(const std::vector<uint8_t>& body);
+    // pcapng-only: called once from the constructor, right after read_section_header_block()
+    // establishes byte order for the file's first section -- walks forward through any
+    // Interface Description Block(s) that precede the first packet block (the normal shape of
+    // every real pcapng file: dumpcap/Wireshark/tshark always declare every interface up front),
+    // parsing each via handle_idb_block so info() reflects the first interface's real link type
+    // immediately, THEN SEEKS THE STREAM BACK to right before the first block that wasn't an
+    // IDB -- so next_pcapng()'s own loop, invoked later by the first real next() call, resumes
+    // from that exact position and parses that block (and everything after it) exactly as it
+    // always has, with no awareness this prefetch ever ran. See pcap_reader.cpp's own comment on
+    // this method, and on PcapReader::info()'s class-level doc comment above, for the bug this
+    // fixes: info() reading PcapFileInfo's raw linktype=0 (LINKTYPE_NULL) default for any caller
+    // that queries it before ever calling next() -- e.g. cli_main.cpp's `decode -w`, which
+    // constructs PcapWriter from source.linktype() once, before its packet loop starts.
+    void prefetch_first_interface_linktype();
     // pcapng-only: the block loop driving next() for a pcapng file -- walks blocks from the
     // current stream position, updating interface_/info_ state as it goes, until it has a
     // packet to return (true) or reaches a clean end of file (false).

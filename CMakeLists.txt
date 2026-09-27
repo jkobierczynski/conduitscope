@@ -8272,6 +8272,19 @@ add_test(NAME rejects_malformed_pcapng
 set_tests_properties(rejects_malformed_pcapng PROPERTIES
   PASS_REGULAR_EXPRESSION "Section Header Block.*unrecognized byte-order magic")
 
+# Regression test for prefetch_first_interface_linktype() (see pcap_writer's `decode -w`-against-
+# pcapng-source linktype fix, this file's own "pcap_write_dash_w_from_pcapng_source..." tests
+# above): a well-formed Section Header Block followed by only 3 of the next block's 4 Block Type
+# bytes -- distinct from rejects_malformed_pcapng above, whose SHB itself is corrupt. An earlier
+# version of the prefetch fix swallowed exactly this truncated-read case silently (leaving the
+# stream mid-read, with failbit set, instead of rewinding it) instead of letting next_pcapng()
+# raise its own already-correct "ends with a truncated pcapng block header" ParseError --
+# misreporting a genuinely corrupt file as a clean, empty capture instead of erroring.
+add_test(NAME rejects_pcapng_truncated_immediately_after_shb
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/pcapng_truncated_after_shb.pcapng")
+set_tests_properties(rejects_pcapng_truncated_immediately_after_shb PROPERTIES
+  PASS_REGULAR_EXPRESSION "ends with a truncated pcapng block header")
+
 add_test(NAME pcapng_basic_decodes_same_as_classic_pcap
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcapng" --stats)
 set_tests_properties(pcapng_basic_decodes_same_as_classic_pcap PROPERTIES
@@ -12466,6 +12479,38 @@ add_test(NAME pcap_write_dash_w_produces_valid_pcap_header
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap' -w '${CMAKE_CURRENT_BINARY_DIR}/dash_w_header_check.pcap' --output /dev/null && '$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_BINARY_DIR}/dash_w_header_check.pcap'")
 set_tests_properties(pcap_write_dash_w_produces_valid_pcap_header PROPERTIES
   PASS_REGULAR_EXPRESSION "pcap version: +2\\.4\nlink type: +Ethernet\nsnaplen: .*\npackets: +6")
+
+# Regression test for a real-world bug report: `-w` against a PCAPNG source (not classic pcap --
+# see sample_arp.pcap's own test just above, which never exercised this) wrote a classic-pcap
+# output file with link type 0 (LINKTYPE_NULL) instead of the source interface's real declared
+# link type (Ethernet here), because PcapWriter is constructed from source.linktype() once,
+# before the main packet loop's first next() call -- and, before pcap_reader.cpp's
+# prefetch_first_interface_linktype() fix, a pcapng PcapReader's info().linktype wasn't populated
+# from the file's own Interface Description Block until the first PACKET had actually been read.
+# The practical symptom this reached the user as: Wireshark opening a `decode -w`-written file and
+# showing every frame as unrecognized "Null/Loopback" raw data instead of Ethernet/IP/TCP/Modbus.
+# sample_modbus.pcapng is a real pcapng fixture (build_pcapng_basic_sample, tools/make_sample_pcap.py)
+# with a single Ethernet-linked interface, matching the single-interface shape of the real capture
+# that surfaced this bug.
+add_test(NAME pcap_write_dash_w_from_pcapng_source_produces_correct_linktype
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcapng' -w '${CMAKE_CURRENT_BINARY_DIR}/dash_w_pcapng_header_check.pcap' --output /dev/null && '$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_BINARY_DIR}/dash_w_pcapng_header_check.pcap'")
+set_tests_properties(pcap_write_dash_w_from_pcapng_source_produces_correct_linktype PROPERTIES
+  PASS_REGULAR_EXPRESSION "pcap version: +2\\.4\nlink type: +Ethernet\nsnaplen: .*\npackets: +3")
+
+# Same bug, but for a multi-interface pcapng source (sample_pcapng_multi_interface.pcapng,
+# build_pcapng_multi_interface_sample -- interface 0: Ethernet, interface 1: Raw IP, both
+# Interface Description Blocks declared before either packet): proves
+# prefetch_first_interface_linktype() correctly picks up the FIRST declared interface (Ethernet)
+# specifically, matching PcapReader's own class-level doc comment ("initially the first interface
+# declared in the file"), not e.g. the last IDB parsed or some other value. Classic pcap has
+# exactly one link type for the whole file, so -w against a genuinely multi-linktype pcapng source
+# necessarily reinterprets every packet under this one chosen type -- see this test's own
+# surrounding comment for why that's an inherent classic-pcap format limitation, not something
+# this fix does or could address, and docs/USER_GUIDE.md's LIMITATIONS entry for the same.
+add_test(NAME pcap_write_dash_w_from_multi_interface_pcapng_uses_first_interface_linktype
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pcapng_multi_interface.pcapng' -w '${CMAKE_CURRENT_BINARY_DIR}/dash_w_pcapng_multi_header_check.pcap' --output /dev/null && '$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_BINARY_DIR}/dash_w_pcapng_multi_header_check.pcap'")
+set_tests_properties(pcap_write_dash_w_from_multi_interface_pcapng_uses_first_interface_linktype PROPERTIES
+  PASS_REGULAR_EXPRESSION "pcap version: +2\\.4\nlink type: +Ethernet\nsnaplen: .*\npackets: +2")
 
 # ---------------------------------------------------------------------------------------------
 # IPv6 support (docs/DEVELOPMENT.md ROADMAP item 24) -- ipv6.hpp/ipv6.cpp's own base-header and
