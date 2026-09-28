@@ -13493,6 +13493,85 @@ it done as its own patch.
     two new LIMITATIONS bullets), and `man/conduitscope.1` (`detect` COMMANDS entry updated to name
     all eighteen patterns across three batches) all updated in the same increment.
 
+94. **Batch 3: six more `detect` pattern extensions -- CVE-grounded protocol-field anomalies plus
+    cross-protocol weak-security/reconnaissance patterns.** Jurgen's direct follow-up after item 93
+    shipped -- "You can do batch 3", the same confirmation pattern as items 92 and 93's own "continue
+    with batch N". Sourced from two real, published NVD CVEs against Rockwell Allen-Bradley
+    controllers (CVE-2017-16740, CVE-2021-22659), Claroty Team82's own published OPC UA hardening
+    guidance, and Leargas Security's own CIP ruleset description. Full record in
+    [docs/design/detection-engine.md](design/detection-engine.md)'s own "Batch 3" section.
+
+    Unlike batches 1 and 2, every one of the six patterns reads a field this codebase already decodes
+    -- zero new decode work anywhere in this batch. The six: a Modbus MBAP declared-length anomaly,
+    firing when `mbap_length` sits above the decoder's own documented 254-byte ceiling (as far as its
+    own hard-reject ceiling of 300) or when a `notes` entry records the decoder's own "MBAP length
+    field implies... but this packet has..." mismatch (`ProtocolMisuse`/T0855, always-notable,
+    Moderate); a Modbus read/write `quantity` field exceeding its own function code's Modbus
+    Application Protocol Specification V1.1b3 maximum (2000/125/1968/123 for Read
+    Coils-or-Discrete-Inputs/Read Holding-or-Input-Registers/Write Multiple Coils/Write Multiple
+    Registers respectively) -- protocol-conformance-absolute, not baseline-relative, distinct from the
+    pre-existing "write outside every range ever read" pattern (`ProtocolMisuse`, T0855 for a read or
+    **T0831** (Manipulation of Control) for a write, always-notable, Critical); an OPC UA
+    OpenSecureChannel request negotiating `SecurityPolicy=None` and, independently, an ActivateSession
+    request carrying an anonymous identity token -- two fully independent always-notable findings
+    rather than one correlated check, a deliberate design choice since OPC UA's own decoder is
+    stateless-per-message with no channel/session correlation by design (`ProtocolMisuse`, **T0886**
+    unconditionally for both, always-notable, Moderate); a CIP Reset service addressed at the Identity
+    object (class 0x01), a direct CIP-native analog to DNP3 Cold Restart/S7 PLC Stop/UMAS STOP_PLC
+    (`FirmwareLogicChange`/T0816, always-notable, Critical); a new originator sending EtherNet/IP List
+    Identity/Services/Interfaces against a server already queried by a different client in the same
+    capture, tracked in its own dedicated map (kept separate from the existing CIP-Forward_Open
+    originator tracking, since these three encapsulation commands are a structurally different
+    capability signal -- `EnipFrame::has_cip` stays false for them)
+    (`EngineeringStationActivity`/T0888, new-vs-known, Informational); and an IEC 104 General
+    Interrogation (C_IC_NA_1, activation cause-of-transmission) addressed to the broadcast Common
+    Address of ASDU (0xFFFF), forcing every RTU on the segment to report full state at once, the IEC
+    104 analog of Batch 2's own DNP3 broadcast-command item (`ProtocolMisuse`/T0855, always-notable,
+    Critical).
+
+    Two genuine implementation bugs were found and fixed, both caught only by running the real CLI and
+    reading actual output -- never by code review alone, this project's own standing discipline paying
+    off again. First, the MBAP-anomaly fixture: padding a Read Holding Registers request's PDU to
+    reach an inflated declared length broke `ModbusFrame::is_request` classification entirely
+    (`decode_read_family` only sets it for a PDU whose data is exactly 4 bytes), silently preventing
+    the new check from ever firing; fixed by switching that fixture to Write Multiple Registers, whose
+    request classification tolerates arbitrary extra length. Second, `finish()`'s
+    `source_tag`-keyed description-template dispatch: its final `else` fallback assumed
+    `"cip-new-originator"` was the only remaining non-remote-access source tag, so adding
+    `"enip-new-originator-discovery"` without its own branch silently fell through to that stale
+    fallback and rendered the wrong description text (a CIP Forward_Open sentence for what was
+    actually a List* query); fixed with a dedicated branch, and `NewConduitCandidate::source_tag`'s
+    own doc comment updated to enumerate all six now-recognized tags.
+
+    Item 15 (OPC UA weak-session) needed **zero new fixture construction at all**, a first across all
+    three batches: this project's own pre-existing `tests/sample_opcua.pcap` decode fixture, built
+    long before this batch for `opcua.hpp`'s own coverage purposes, was found -- not assumed -- to
+    already exercise both weak-SecureChannel and anonymous-session sub-patterns simultaneously, and so
+    does the real capture `tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap`. One
+    genuine scope gap was found and documented rather than silently shipped: the List*-new-originator
+    finding only ever sees these commands over TCP, since this codebase's own EtherNet/IP UDP path
+    (`enip_udp_decoder()`) covers CIP I/O only, not encapsulation commands -- a UDP-broadcast discovery
+    scan, the more common real-world mechanism for this recon shape, is invisible to this finding.
+    Documented as a new `docs/USER_GUIDE.md` LIMITATIONS bullet.
+
+    New synthetic fixture `tests/sample_detect_snort_patterns_batch3.pcap`
+    (`build_detect_snort_patterns_batch3_sample`, 13 packets, 10 findings) covers all six patterns plus
+    five pure-negative contrast conduits (a Write Multiple Registers request sitting exactly at the
+    254-byte spec boundary; a Read Holding Registers request at exactly the 125-register quantity
+    boundary; a CIP Reset addressed at the Assembly object instead of Identity; an IEC 104 General
+    Interrogation addressed to a normal, non-broadcast common address; and the same broadcast
+    interrogation with a confirmation cause-of-transmission instead of activation).
+
+    Full CTest across all four standing build configurations (default GCC: 2189/2189; ASan/UBSan
+    `build-fuzz`: 2266/2266, including the 77-test fuzz corpus regression, 493.4s wall time;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2175/2175; MinGW-w64 cross-compile,
+    build-only there) -- 100% pass, zero regressions. `docs/design/detection-engine.md` (new "Batch 3"
+    section), `docs/USER_GUIDE.md` (new "Batch 3" subsection with a real-capture worked example, one
+    new LIMITATIONS bullet), `man/conduitscope.1` (`detect` COMMANDS entry updated to describe all
+    three batches' patterns by name), and
+    [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)'s
+    own "Cross-batch notes" section all updated in the same increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

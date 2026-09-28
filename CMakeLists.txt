@@ -16070,6 +16070,59 @@ set_tests_properties(detect_snort_patterns_batch2_all_findings PROPERTIES
 
 
 # ---------------------------------------------------------------------------------------------
+# Batch 3 -- six more CVE/advisory-grounded pattern extensions to `detect`, a direct follow-up to
+# Batch 2 (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 3 section has the
+# full research/scoping record, sourced from CVE-2017-16740/CVE-2021-22659 (NVD), Claroty Team82's
+# own published OPC UA hardening guidance, and Léargas Security's ruleset description).
+# tests/sample_detect_snort_patterns_batch3.pcap (build_detect_snort_patterns_batch3_sample,
+# tools/make_sample_pcap.py) covers five of the six (Modbus MBAP length anomaly, Modbus quantity
+# out-of-spec, CIP Identity Object Reset, CIP List Identity/Services/Interfaces new-originator, IEC
+# 104 broadcast General Interrogation) plus five negative/contrast conduits proving each pattern's
+# own condition really is required -- see that fixture's own docstring for the full scenario list.
+# The sixth (OPC UA weak-session pattern, item 15) needs no fixture of its own: this project's own
+# pre-existing tests/sample_opcua.pcap ALREADY exercises both of its sub-patterns, and a REAL
+# capture (tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap) genuinely contains both
+# too -- see the two opcua_detect_weak_session_findings tests below.
+# ---------------------------------------------------------------------------------------------
+
+# All 10 findings (5 Batch 3 sources plus 2 co-occurring modbus-write-without-read findings from
+# this engine's own pre-existing pattern, unavoidably and correctly tripped by scenarios 1/2/6's own
+# writes -- see the fixture's own docstring), first-seen order, plus a FAIL_REGULAR_EXPRESSION
+# proving none of the five negative-only conduits (.124 quantity-at-boundary, .128 CIP Reset to a
+# non-Identity class, .129 the first ListIdentity originator, .134 non-broadcast interrogation, .135
+# broadcast interrogation with a confirmation COT) produced any finding at all -- the "findings: 10"
+# total in the PASS expression is itself part of that same proof.
+add_test(NAME detect_snort_patterns_batch3_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch3.pcap")
+set_tests_properties(detect_snort_patterns_batch3_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 13.*findings: 10 \\(Critical 4, Moderate 2, Informational 4\\).*evidence: Confirmed 10, Heuristic 0.*Engineering-Station Activity: 1.*Firmware/Logic Change: 1.*Remote-Access Channel: 0.*Protocol Misuse: 8.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.126 -> 192\\.168\\.1\\.120:502 \\(modbus\\).*Modbus MBAP length field \\(260\\) exceeds the Modbus Application Protocol spec's own 254-byte maximum \\(253-byte PDU \\+ 1-byte unit ID\\).*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.126 -> 192\\.168\\.1\\.122:502 \\(modbus\\).*Modbus MBAP length field \\(3\\) does not match this packet's own actual remaining byte count.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.126 -> 192\\.168\\.1\\.123:502 \\(modbus\\).*Modbus Read Holding Registers request with quantity 200, exceeding this function's own Modbus Application Protocol Specification V1\\.1b3 maximum of 125.*\\[Protocol Misuse\\] T0831 \\(Manipulation of Control\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.126 -> 192\\.168\\.1\\.125:502 \\(modbus\\).*Modbus Write Multiple Registers request with quantity 200, exceeding this function's own Modbus Application Protocol Specification V1\\.1b3 maximum of 123.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.126 -> 192\\.168\\.1\\.127:44818 \\(enip\\).*CIP Reset service addressed at the Identity object \\(class 0x01\\) -- the target device is being power-cycled or reset from the process network.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.132 -> 192\\.168\\.1\\.133:2404 \\(iec104\\).*IEC 104 General Interrogation \\(C_IC_NA_1\\) addressed to the broadcast Common Address of ASDU \\(0xFFFF\\) -- forces every RTU on the segment to report full state at once.*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.130 -> 192\\.168\\.1\\.131:44818 \\(enip\\).*EtherNet/IP List Identity/Services/Interfaces from a new originator 192\\.168\\.1\\.130 to 192\\.168\\.1\\.131 -- a different client than the one\\(s\\) already seen querying this target's own device identity/services/interfaces in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\)"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.124|192\\.168\\.1\\.128|192\\.168\\.1\\.129|192\\.168\\.1\\.134|192\\.168\\.1\\.135")
+
+# Item 15 (OPC UA weak-session pattern) against this project's own pre-existing sample_opcua.pcap
+# (build_opcua_sample, tools/make_sample_pcap.py) -- that fixture's own OpenSecureChannel exchange
+# already negotiates SecurityPolicy=None and its own ActivateSession sequence already includes an
+# Anonymous identity token (both built for opcua.hpp's own decode-coverage purposes, well before
+# this batch existed), so no new fixture was needed for this item at all. Confirmed via this test's
+# own manual verification pass against the real CLI output before this assertion was written --
+# exactly two findings, nothing else in that fixture's own broader exchange (UserName/Password
+# sessions, Read/Write/Call traffic, and so on) trips either check.
+add_test(NAME opcua_detect_weak_session_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_detect_weak_session_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[Protocol Misuse\\] T0886 \\(Remote Services\\).*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840 \\(opcua\\).*OPC UA OpenSecureChannel request negotiating SecurityPolicy=None -- this channel carries no encryption or message signing at all.*\\[Protocol Misuse\\] T0886 \\(Remote Services\\).*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840 \\(opcua\\).*OPC UA ActivateSession request using an anonymous identity token -- no real authentication for this engineering session")
+
+# Item 15 AGAIN, this time against a REAL capture (tests/real_captures/opcua/opc-ua-ap-method-
+# wireshark-freeze.pcap) -- confirmed during this batch's own research/implementation pass to
+# genuinely contain both an OpenSecureChannel negotiating SecurityPolicy=None and an Anonymous
+# ActivateSession, giving this item real-traffic evidence rather than only a synthetic/pre-existing
+# fixture, the same "check real captures too" discipline every prior batch's own work established.
+add_test(NAME real_opcua_detect_weak_session_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap")
+set_tests_properties(real_opcua_detect_weak_session_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[Protocol Misuse\\] T0886 \\(Remote Services\\).*192\\.168\\.41\\.176 -> 192\\.168\\.41\\.212:12001 \\(opcua\\).*OPC UA OpenSecureChannel request negotiating SecurityPolicy=None -- this channel carries no encryption or message signing at all.*\\[Protocol Misuse\\] T0886 \\(Remote Services\\).*192\\.168\\.41\\.176 -> 192\\.168\\.41\\.212:12001 \\(opcua\\).*OPC UA ActivateSession request using an anonymous identity token -- no real authentication for this engineering session")
+
+
+# ---------------------------------------------------------------------------------------------
 # UMAS-over-Modbus/TCP (umas.hpp/cpp, Grok gap #4 Phase 5 -- "Unity Pro/UMAS is in scope as new
 # decode work", docs/design/detection-engine.md's own UMAS research section). Dispatched from
 # modbus.cpp's own function-code switch on 0x5A/90 (ModbusFrame::umas) -- see umas.hpp's header

@@ -18757,6 +18757,231 @@ def build_detect_snort_patterns_batch2_sample():
     (TESTS_DIR / "sample_detect_snort_patterns_batch2.pcap").write_bytes(data)
 
 
+def build_detect_snort_patterns_batch3_sample():
+    """Batch 3 -- six more Snort/CVE/advisory-grounded pattern extensions to `detect`, a direct
+    follow-up to Batch 2 (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 3
+    section has the full research/scoping record, sourced from CVE-2017-16740/CVE-2021-22659 (NVD),
+    Claroty Team82's own published OPC UA hardening guidance, and Léargas Security's ruleset
+    description). Item 15 (OPC UA weak-session pattern) needs no fixture of its own here: this
+    project's own pre-existing tests/sample_opcua.pcap ALREADY exercises both of its sub-patterns
+    (an OpenSecureChannel request negotiating SecurityPolicy=None, and an Anonymous ActivateSession),
+    confirmed during this batch's own implementation pass -- and, even better, a REAL capture (tests/
+    real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap) genuinely contains both too. This
+    fixture covers the remaining five: two Modbus field-anomaly patterns (items 13/14), CIP Identity
+    Object Reset (item 16), CIP List Identity/Services/Interfaces from a new originator (item 17),
+    and IEC 104 broadcast General Interrogation (item 18) -- each with at least one negative/contrast
+    case, the same "prove the false-positive path too" discipline every prior detect fixture's own
+    docstring establishes.
+
+    Scenarios:
+      1) Modbus Write Multiple Registers request, MBAP length inflated to 260 (past the true 254-byte
+         spec ceiling but under this decoder's own 300 slack cap) with the declared length matching
+         the packet's own actual remaining bytes (so only the ">254" condition is exercised, not the
+         mismatch one) -- fires modbus-mbap-length-anomaly (ProtocolMisuse/T0855, Moderate). Write
+         Multiple Registers used deliberately rather than a read function -- see this scenario's own
+         inline comment for why an inflated-length READ request can never actually reach this check.
+         Also, unavoidably and correctly, trips the pre-existing modbus-write-without-read pattern on
+         its own conduit (this scenario's own write has no prior read) -- expected collateral, not a
+         second bug, same as scenario 6 below.
+      2) The same shape but MBAP length exactly 254 (the true spec boundary, inclusive) -- must NOT
+         fire modbus-mbap-length-anomaly (its own write-without-read collateral finding, same as
+         scenario 1, still fires -- this scenario is a negative for the length check specifically,
+         not for every finding this fixture's writes happen to also trip).
+      3) A Read Holding Registers request whose declared MBAP length (3, implying only 2 bytes after
+         the unit ID) disagrees with the packet's own actual remaining byte count (5 bytes -- a
+         complete, ordinary request -- are actually present) -- fires modbus-mbap-length-anomaly (the
+         mismatch variant, independent of the ">254" ceiling). Declared SMALLER than actual,
+         deliberately -- see this scenario's own inline comment for why the reverse (declared LARGER)
+         can never reach this check either.
+      4) Modbus Read Holding Registers request, quantity=200 (over the Modbus Application Protocol
+         Specification V1.1b3's own 125-register maximum) -- fires modbus-quantity-out-of-spec
+         (ProtocolMisuse/T0855, Critical).
+      5) The same function, quantity=125 (exactly at the spec maximum, inclusive) -- must NOT fire.
+      6) Modbus Write Multiple Registers request, quantity=200 (over the spec's own 123-register
+         maximum) -- fires modbus-quantity-out-of-spec (ManipulationOfControl/T0831, Critical) --
+         proves the write-side technique selection, distinct from scenario 4's read-side T0855. Also,
+         unavoidably and correctly, trips the pre-existing modbus-write-without-read pattern (no prior
+         read on this conduit either) -- expected collateral, not a bug.
+      7) CIP Reset (service 0x05) addressed at the Identity object (class 0x01, instance 1) -- fires
+         cip-identity-reset (FirmwareLogicChange/T0816, Critical).
+      8) CIP Reset addressed at the Assembly object (class 0x04, instance 1) instead -- must NOT fire
+         (proves the class_id==0x01 gate matters, not just the service name).
+      9) ListIdentity from the FIRST originator ever seen querying a given server -- no finding yet
+         (nothing to be "new" relative to within this capture).
+      10) ListServices from a SECOND, DIFFERENT originator querying the SAME server -- fires
+          enip-new-originator-discovery (EngineeringStationActivity/T0888, Informational). Uses a
+          DIFFERENT List command than scenario 9 deliberately, proving the three commands share one
+          originator-tracking bucket rather than one each.
+      11) IEC 104 General Interrogation (C_IC_NA_1, COT=activation) addressed to the broadcast Common
+          Address of ASDU (0xFFFF) -- fires iec104-broadcast-interrogation (ProtocolMisuse/T0855,
+          Critical).
+      12) The same General Interrogation addressed to a normal, non-broadcast Common Address (1) --
+          must NOT fire.
+      13) A General Interrogation addressed to the broadcast Common Address (0xFFFF) again, but with
+          COT=activation confirmation (7, the RTU's own reply shape) rather than activation -- must
+          NOT fire (proves the COT gate matters, not just the broadcast address -- the same "isolate
+          the actual command from its own confirmation" discipline the pre-existing iec104-reset-
+          process finding already established).
+    """
+    ENG_IP, ENG_MAC = "192.168.1.126", mac("00:0c:29:cd:20:36")
+    MB_CEIL_IP, MB_CEIL_MAC = "192.168.1.120", mac("00:0c:29:cd:20:30")
+    MB_CEIL_NEG_IP, MB_CEIL_NEG_MAC = "192.168.1.121", mac("00:0c:29:cd:20:31")
+    MB_MISMATCH_IP, MB_MISMATCH_MAC = "192.168.1.122", mac("00:0c:29:cd:20:32")
+    MB_QTY_READ_IP, MB_QTY_READ_MAC = "192.168.1.123", mac("00:0c:29:cd:20:33")
+    MB_QTY_READ_NEG_IP, MB_QTY_READ_NEG_MAC = "192.168.1.124", mac("00:0c:29:cd:20:34")
+    MB_QTY_WRITE_IP, MB_QTY_WRITE_MAC = "192.168.1.125", mac("00:0c:29:cd:20:35")
+
+    CIP_RESET_IP, CIP_RESET_MAC = "192.168.1.127", mac("00:0c:29:cd:20:37")
+    CIP_RESET_NEG_IP, CIP_RESET_NEG_MAC = "192.168.1.128", mac("00:0c:29:cd:20:38")
+
+    ENIP_LIST_CLIENT_A_IP, ENIP_LIST_CLIENT_A_MAC = "192.168.1.129", mac("00:0c:29:cd:20:39")
+    ENIP_LIST_CLIENT_B_IP, ENIP_LIST_CLIENT_B_MAC = "192.168.1.130", mac("00:0c:29:cd:20:3a")
+    ENIP_LIST_SERVER_IP, ENIP_LIST_SERVER_MAC = "192.168.1.131", mac("00:0c:29:cd:20:3b")
+
+    IEC_MASTER_IP, IEC_MASTER_MAC = "192.168.1.132", mac("00:0c:29:cd:20:3c")
+    IEC_BCAST_IP, IEC_BCAST_MAC = "192.168.1.133", mac("00:0c:29:cd:20:3d")
+    IEC_NORMAL_IP, IEC_NORMAL_MAC = "192.168.1.134", mac("00:0c:29:cd:20:3e")
+    IEC_BCAST_CONF_IP, IEC_BCAST_CONF_MAC = "192.168.1.135", mac("00:0c:29:cd:20:3f")
+
+    packets = []
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident):
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4600 + ident) + tcp
+        pkt = eth_header(dst_mac, src_mac, 0x0800) + ip
+        packets.append(pkt)
+
+    ident = 1
+
+    # 1) Write Multiple Registers, MBAP length inflated to 260 -- consistent with the packet's own
+    #    actual size (byte_count/data padded so the whole frame is genuinely 260 bytes past the unit
+    #    ID, matching the declared length exactly) -- only the ">254" ceiling condition fires, not
+    #    the mismatch one. Write Multiple Registers deliberately used here rather than Read Holding
+    #    Registers: decode_read_family (modbus.cpp) only ever classifies a PDU as a request when it
+    #    is EXACTLY 4 bytes (address+quantity) -- any padding added to reach an inflated mbap_length
+    #    makes it fall into the "unrecognized payload shape" branch instead, leaving is_request unset
+    #    and this whole check silently unable to fire (caught during this fixture's own manual
+    #    verification pass against the real conduitscope decode output -- an initial Read Holding
+    #    Registers-based version of this scenario produced NO finding at all). decode_write_multiple's
+    #    own request branch has no such exact-length requirement (data.size() >= 5 is enough), so a
+    #    large byte_count/data blob still decodes as is_request=true. quantity is kept small (1) so
+    #    this scenario doesn't also trip modbus-quantity-out-of-spec (scenario 6 below tests that
+    #    combination on its own conduit). This scenario's own write also has no prior read on its
+    #    conduit, so it additionally (and correctly) trips the pre-existing modbus-write-without-read
+    #    pattern -- expected collateral, not a bug, same as scenario 6 below.
+    mb_ceil_data = bytes(253)
+    write_ceil_pdu = bytes([0x10]) + struct.pack("!HHB", 0, 1, len(mb_ceil_data)) + mb_ceil_data
+    mbap_260 = struct.pack("!HHHB", 300, 0, 1 + len(write_ceil_pdu), 1) + write_ceil_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_CEIL_IP, MB_CEIL_MAC, 49600, 502, mbap_260, ident)
+    ident += 1
+
+    # 2) Same shape, MBAP length exactly 254 (the true spec boundary, inclusive) -- must NOT fire.
+    mb_ceil_neg_data = bytes(247)
+    write_ceil_neg_pdu = bytes([0x10]) + struct.pack("!HHB", 0, 1, len(mb_ceil_neg_data)) + mb_ceil_neg_data
+    mbap_254 = struct.pack("!HHHB", 301, 0, 1 + len(write_ceil_neg_pdu), 1) + write_ceil_neg_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_CEIL_NEG_IP, MB_CEIL_NEG_MAC, 49601, 502, mbap_254, ident)
+    ident += 1
+
+    # 3) Read Holding Registers, declared MBAP length (3, implying only 2 bytes after the unit ID)
+    #    disagreeing with the packet's own actual remaining byte count (5 bytes -- a complete,
+    #    ordinary 4-byte read request plus the function code byte -- are actually present) -- fires
+    #    the mismatch variant. DECLARED SMALLER than actual, not larger: this decoder's own TCP
+    #    reassembly (modbus_tcp_declared_length) only calls try_parse_modbus_tcp once at least
+    #    "6 + mbap_length" bytes have arrived -- a declared length LARGER than what's actually sent
+    #    leaves the reassembler waiting forever for bytes that will never come (confirmed during this
+    #    fixture's own manual verification pass: an initial larger-than-actual version of this
+    #    scenario produced no finding at all, only a "buffering ... waiting for more" decode note).
+    #    A SMALLER declared length is instead already-complete from the reassembler's point of view,
+    #    so try_parse_modbus_tcp runs immediately against the full actual payload and its own
+    #    length-consistency check (unaffected by the declared boundary, since it reads whatever bytes
+    #    are actually there) is what produces the mismatch note this scenario is exercising.
+    read_req = bytes([0x03]) + struct.pack("!HH", 100, 5)
+    mbap_mismatch = struct.pack("!HHHB", 302, 0, 3, 1) + read_req
+    add_tcp(ENG_IP, ENG_MAC, MB_MISMATCH_IP, MB_MISMATCH_MAC, 49602, 502, mbap_mismatch, ident)
+    ident += 1
+
+    # 4) Read Holding Registers, quantity=200 (over the 125-register spec maximum) -- fires
+    #    modbus-quantity-out-of-spec, T0855 (read side).
+    read_over_pdu = bytes([0x03]) + struct.pack("!HH", 0, 200)
+    read_over_mbap = struct.pack("!HHHB", 303, 0, 1 + len(read_over_pdu), 1) + read_over_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_QTY_READ_IP, MB_QTY_READ_MAC, 49603, 502, read_over_mbap, ident)
+    ident += 1
+
+    # 5) Same function, quantity=125 (exactly at the spec maximum, inclusive) -- must NOT fire.
+    read_at_max_pdu = bytes([0x03]) + struct.pack("!HH", 0, 125)
+    read_at_max_mbap = struct.pack("!HHHB", 304, 0, 1 + len(read_at_max_pdu), 1) + read_at_max_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_QTY_READ_NEG_IP, MB_QTY_READ_NEG_MAC, 49604, 502, read_at_max_mbap, ident)
+    ident += 1
+
+    # 6) Write Multiple Registers, quantity=200 (over the 123-register spec maximum) -- fires
+    #    modbus-quantity-out-of-spec, T0831 (write side). byte_count/data are deliberately minimal
+    #    (1 byte) -- decode_write_multiple (modbus.cpp) reads quantity from its own dedicated field
+    #    regardless of whether byte_count matches the actual data length (a mismatch there only adds
+    #    a note, never rejects the frame), so a realistic 400-byte byte_count for 200 registers isn't
+    #    needed to exercise this check.
+    write_over_pdu = bytes([0x10]) + struct.pack("!HHB", 0, 200, 1) + bytes([0xAA])
+    write_over_mbap = struct.pack("!HHHB", 305, 0, 1 + len(write_over_pdu), 1) + write_over_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_QTY_WRITE_IP, MB_QTY_WRITE_MAC, 49605, 502, write_over_mbap, ident)
+    ident += 1
+
+    # 7) CIP Reset (service 0x05) addressed at the Identity object (class 0x01, instance 1) -- fires
+    #    cip-identity-reset.
+    reset_identity_cip = bytes([0x05, 0x02, 0x20, 0x01, 0x24, 0x01])
+    reset_identity_msg = enip_message(0x006F, data=enip_cpf_unconnected(reset_identity_cip),
+                                       session_handle=0x3001, sender_context=b"BATCH3R1")
+    add_tcp(ENG_IP, ENG_MAC, CIP_RESET_IP, CIP_RESET_MAC, 49606, ENIP_PORT, reset_identity_msg, ident)
+    ident += 1
+
+    # 8) CIP Reset addressed at the Assembly object (class 0x04, instance 1) instead -- must NOT
+    #    fire (proves the class_id==0x01 gate, not just the service name).
+    reset_assembly_cip = bytes([0x05, 0x02, 0x20, 0x04, 0x24, 0x01])
+    reset_assembly_msg = enip_message(0x006F, data=enip_cpf_unconnected(reset_assembly_cip),
+                                       session_handle=0x3002, sender_context=b"BATCH3R2")
+    add_tcp(ENG_IP, ENG_MAC, CIP_RESET_NEG_IP, CIP_RESET_NEG_MAC, 49607, ENIP_PORT, reset_assembly_msg,
+            ident)
+    ident += 1
+
+    # 9) ListIdentity from the FIRST originator ever seen querying this server -- no finding yet.
+    add_tcp(ENIP_LIST_CLIENT_A_IP, ENIP_LIST_CLIENT_A_MAC, ENIP_LIST_SERVER_IP, ENIP_LIST_SERVER_MAC,
+            49608, ENIP_PORT,
+            enip_message(0x0063, data=b"", session_handle=0, sender_context=b"BATCH3L1"), ident)
+    ident += 1
+
+    # 10) ListServices from a SECOND, DIFFERENT originator querying the SAME server -- fires
+    #     enip-new-originator-discovery. Deliberately a DIFFERENT List command than scenario 9,
+    #     proving all three share one originator-tracking bucket.
+    add_tcp(ENIP_LIST_CLIENT_B_IP, ENIP_LIST_CLIENT_B_MAC, ENIP_LIST_SERVER_IP, ENIP_LIST_SERVER_MAC,
+            49609, ENIP_PORT,
+            enip_message(0x0004, data=b"", session_handle=0, sender_context=b"BATCH3L2"), ident)
+    ident += 1
+
+    # 11) IEC 104 General Interrogation (C_IC_NA_1, COT=activation) addressed to the broadcast Common
+    #     Address of ASDU (0xFFFF) -- fires iec104-broadcast-interrogation.
+    gi_bcast = iec104_asdu(100, 0x01, 6, 0xFFFF, ioa(0) + bytes([20]))
+    add_tcp(IEC_MASTER_IP, IEC_MASTER_MAC, IEC_BCAST_IP, IEC_BCAST_MAC, 49610, IEC104_PORT,
+            iec104_apdu(iec104_i_control(0, 0), gi_bcast), ident)
+    ident += 1
+
+    # 12) The same General Interrogation addressed to a normal, non-broadcast Common Address (1) --
+    #     must NOT fire.
+    gi_normal = iec104_asdu(100, 0x01, 6, 1, ioa(0) + bytes([20]))
+    add_tcp(IEC_MASTER_IP, IEC_MASTER_MAC, IEC_NORMAL_IP, IEC_NORMAL_MAC, 49611, IEC104_PORT,
+            iec104_apdu(iec104_i_control(0, 0), gi_normal), ident)
+    ident += 1
+
+    # 13) A General Interrogation addressed to the broadcast Common Address (0xFFFF) again, but with
+    #     COT=activation confirmation (7) rather than activation -- must NOT fire.
+    gi_bcast_conf = iec104_asdu(100, 0x01, 7, 0xFFFF, ioa(0) + bytes([20]))
+    add_tcp(IEC_MASTER_IP, IEC_MASTER_MAC, IEC_BCAST_CONF_IP, IEC_BCAST_CONF_MAC, 49612, IEC104_PORT,
+            iec104_apdu(iec104_i_control(0, 0), gi_bcast_conf), ident)
+    ident += 1
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_070_000 + i, i * 1000)
+    (TESTS_DIR / "sample_detect_snort_patterns_batch3.pcap").write_bytes(data)
+
+
 def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
     """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
     umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
@@ -20794,6 +21019,7 @@ if __name__ == "__main__":
     build_detect_bacnet_who_is_flood_sample()
     build_detect_snort_patterns_batch1_sample()
     build_detect_snort_patterns_batch2_sample()
+    build_detect_snort_patterns_batch3_sample()
     build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()

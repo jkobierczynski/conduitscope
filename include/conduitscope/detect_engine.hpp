@@ -202,6 +202,74 @@
 //     detect_engine.cpp's own call-site comment for the full byte-level derivation. Resolved purely
 //     from already-decoded BacnetApdu::values entries ("object=device,4194303"/"property=<name>"),
 //     no raw-byte matching needed here either.
+//
+// Six more patterns ("Batch 3"), a direct follow-up to Batch 2 -- public CVE/advisory-grounded
+// protocol-field anomalies and cross-protocol weak-security/recon patterns (docs/research/2026-09-
+// detect-pattern-candidates-batch2.md's own Batch 3 section has the full research/scoping record for
+// each, including exact CVE/advisory citations):
+//   - Modbus MBAP declared-length anomaly (CVE-2017-16740, a real Rockwell Allen-Bradley MicroLogix
+//     buffer overflow from a crafted MBAP length field) -- always-notable, ProtocolMisuse/T0855,
+//     Moderate severity. Fires on a request whose mbap_length exceeds the Modbus Application Protocol
+//     spec's own true 254-byte ceiling (this decoder's own kMaxPlausibleMbapLength, modbus.cpp,
+//     already rejects anything above 300 outright, so 255-300 is the only anomalous-but-decoded window
+//     this check can ever see) OR whose declared length disagrees with the packet's own actual
+//     remaining byte count (already surfaced as a "MBAP length field implies..." note, modbus.cpp).
+//     Pure wiring against an already-decoded field, no new decode work.
+//   - Modbus read/write quantity out-of-spec (CVE-2021-22659, a real Rockwell MicroLogix 1400 buffer
+//     overflow from an out-of-spec quantity value) -- always-notable, ProtocolMisuse/T0855 (read) or
+//     ManipulationOfControl/T0831 (write), Critical severity. Fires when a request's already-decoded
+//     `quantity` field exceeds ITS OWN function's Modbus Application Protocol Specification V1.1b3
+//     maximum (2000 Read Coils/Discrete Inputs, 125 Read Holding/Input Registers, 1968 Write Multiple
+//     Coils, 123 Write Multiple Registers) -- a spec violation regardless of what any specific device's
+//     firmware does with it, distinct from the pre-existing baseline-relative "write outside every
+//     range ever read" pattern (this one needs no baseline at all). Pure wiring.
+//   - OPC UA weak-session pattern (Claroty Team82's own published OPC UA hardening guidance) -- TWO
+//     deliberately separate always-notable findings, ProtocolMisuse/T0886, Moderate severity: an
+//     OpenSecureChannel request negotiating SecurityPolicy=None (no encryption/signing at all), and an
+//     ActivateSession request using an anonymous identity token (no real authentication). Kept as two
+//     independent checks rather than one combined "weak session" finding because this decoder is
+//     stateless-per-message (no channel/session correlation -- see opcua.hpp's own "Deliberately NOT
+//     implemented" paragraph) -- there is no reliable way to confirm a given ActivateSession's own
+//     SecureChannel actually used SecurityPolicy=None without adding real cross-message state tracking
+//     this codebase has for no protocol today; each condition is independently a real, citable OPC UA
+//     security finding on its own regardless. T0886 is used unconditionally, WITHOUT the T0822
+//     (External Remote Services) zone-crossing upgrade the pre-existing RemoteAccessChannel new-vs-
+//     known source gets -- a deliberate, documented scope departure from the research doc's own
+//     suggestion to reuse that mechanism: the zone-crossing check lives entirely inside finish()'s own
+//     new-conduit-candidate resolution (NewConduitCandidate::is_remote_access), coupled to baseline-
+//     relative "new vs. known" novelty resolution; these two findings are always-notable (novelty
+//     N/A -- a weak configuration is worth flagging every time it's seen, not just the first), so
+//     reusing that path would mean either bolting policy-dependent technique resolution onto the
+//     always-notable path for the first time in this engine, or duplicating the zone-crossing logic --
+//     disproportionate complexity for one item among six, when a weak/anonymous OPC UA session is
+//     worth flagging regardless of whether it happens to cross a declared zone boundary. Needed no new
+//     decode work: security_policy_uri (OpcUaMessage, asymmetric OpenSecureChannel messages) and the
+//     "identity=anonymous" values entry (ActivateSessionRequest) were both already exposed.
+//   - EtherNet/IP CIP Identity Object Reset (service 0x05, "Reset", addressed at CIP class 0x01) --
+//     always-notable, FirmwareLogicChange/T0816, Critical severity. A direct CIP-native analog to DNP3
+//     Cold Restart/S7 PLC Stop/UMAS STOP_PLC. Needed ZERO new decode work -- src/enip.cpp already
+//     named and classified this service before this batch; the single most implementation-ready item
+//     in this whole 18-item candidate list.
+//   - EtherNet/IP CIP List Identity/Services/Interfaces from a new originator (Léargas Security's own
+//     ruleset description names this exact recon shape) -- deliberately a NEW-VS-KNOWN candidate (not
+//     always-notable), EngineeringStationActivity/T0888, Informational severity: exactly how legitimate
+//     engineering tools (RSLinx, Studio 5000) discover CIP devices on a segment, and exactly how a
+//     scanner enumerates one too, so only a SECOND, DIFFERENT originator querying the SAME target
+//     within this capture is flagged -- the same cip_originators_by_server_-style "first is not new"
+//     asymmetry as the pre-existing CIP Forward_Open source. Needed zero new decode work (enip_command_
+//     name already named all three encapsulation commands). Scope note: this only sees these three
+//     commands when carried over TCP -- this codebase's own EtherNet/IP UDP path (enip_udp_decoder())
+//     covers CIP I/O (implicit real-time messaging) only, not encapsulation commands, so a UDP-
+//     broadcast discovery scan (the more common real-world mechanism for this specific recon shape)
+//     is not seen by this finding; see docs/USER_GUIDE.md's own LIMITATIONS entry.
+//   - IEC 60870-5-104 General Interrogation (C_IC_NA_1, COT "activation") addressed to the broadcast
+//     Common Address of ASDU (0xFFFF, the standard's own reserved global/broadcast value) -- always-
+//     notable, ProtocolMisuse/T0855, Critical severity (forces every RTU on the segment to report full
+//     state at once, the same kind of outsized blast radius as Batch 2's DNP3 broadcast-command
+//     finding, but for IEC 104). Deliberately a separate finding from the pre-existing iec104-
+//     unexpected-cot/iec104-reset-process sources -- a distinct wire condition, not a variant of
+//     either. Pure wiring against iec104_common_address, already decoded and tracked per-ASDU since
+//     item 3's own type/COT/IOA-range work.
 #pragma once
 
 #include <cstdint>
@@ -398,9 +466,11 @@ private:
         // The exact `source_tag` record_new_conduit_candidate (detect_engine.cpp) was called
         // with -- carried onto the candidate itself (not just folded into the map key) so
         // finish() can pick the right description template for a non-remote-access candidate:
-        // "cip-new-originator", "umas-new-originator-reservation", or
-        // "umas-new-originator-discovery" each read differently even though they share the same
-        // category/technique shape in some cases. Remote-access candidates render from
+        // "cip-new-originator", "umas-new-originator-reservation",
+        // "umas-new-originator-discovery", "modbus-new-originator-read-device-id",
+        // "modbus-new-originator-report-server-id", or "enip-new-originator-discovery" (Batch 3
+        // item 17) each read differently even though they share the same category/technique shape
+        // in some cases. Remote-access candidates render from
         // is_remote_access instead (their own source_tag is always "remote-access", never checked).
         std::string source_tag;
     };
@@ -537,6 +607,15 @@ private:
         std::set<std::pair<uint8_t, uint8_t>> distinct_group_variations;  // (group, variation)
     };
     std::unordered_map<std::string, Dnp3EnumerationSweepState> dnp3_enumeration_sweep_state_;
+
+    // EtherNet/IP List Identity/Services/Interfaces originator tracking (Batch 3 item 17) -- the same
+    // "second-plus originator to a given server is new, first is not" mechanism as
+    // cip_originators_by_server_ above, kept as its own separate map (not folded into
+    // cip_originators_by_server_) because these three encapsulation commands are a structurally
+    // different signal (no CIP message at all, EnipFrame::has_cip stays false) from a Forward_Open --
+    // a client credited here for a List* query isn't implicitly credited as a known CIP originator, and
+    // vice versa, since each is a genuinely separate capability/activity being observed.
+    std::unordered_map<std::string, std::vector<std::string>> enip_list_discovery_originators_by_server_;
 
     size_t total_packets_ = 0;
 };

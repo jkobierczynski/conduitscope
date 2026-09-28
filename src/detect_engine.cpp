@@ -17,6 +17,7 @@
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/notable_it_protocols.hpp"
+#include "conduitscope/opcua.hpp"
 #include "conduitscope/resolver.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/time_format.hpp"
@@ -529,6 +530,29 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        "IEC 104 Reset Process command (C_RP_NA_1) -- a controlling station "
                                        "commanded a process reset");
             }
+
+            // --- General Interrogation addressed to the broadcast Common Address (protocol misuse,
+            // --- Batch 3 item 18) ---------------------------------------------------------------
+            // The IEC 60870-5-101/104 standard itself reserves Common Address of ASDU 0xFFFF as the
+            // global/broadcast address -- a General Interrogation (C_IC_NA_1, COT "activation", the
+            // same gating the Reset Process check above uses to isolate the actual command from its
+            // own confirmation/termination ASDUs) addressed there forces EVERY RTU on the segment to
+            // report full state at once: a single message with the same kind of outsized blast radius
+            // as this engine's own DNP3 broadcast-command finding (Batch 2 item 8), but for IEC 104.
+            // iec104_common_address is already decoded and tracked per-ASDU (Iec104AsduInfo, item 3's
+            // own type/COT/IOA-range work) -- pure wiring, no new decode work. Deliberately a SEPARATE
+            // finding from iec104-unexpected-cot/iec104-reset-process above -- a distinct wire
+            // condition, not a variant of either.
+            if (ir.iec104_asdu_type_short_name == "C_IC_NA_1" && ir.iec104_cot_name == "activation" &&
+                ir.iec104_common_address == 0xFFFF) {
+                record_always_notable(
+                    "iec104-broadcast-interrogation", DetectionCategory::ProtocolMisuse,
+                    mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip, "iec104",
+                    dp.dst_port,
+                    "IEC 104 General Interrogation (C_IC_NA_1) addressed to the broadcast Common "
+                    "Address of ASDU (0xFFFF) -- forces every RTU on the segment to report full state "
+                    "at once");
+            }
         }
     }
 
@@ -630,6 +654,52 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         }
     }
 
+    // --- OPC UA: weak-session pattern -- SecurityPolicy=None channel, or anonymous session identity
+    // --- (protocol misuse, Batch 3 item 15) -----------------------------------------------------
+    // Grounded in Claroty Team82's own published OPC UA hardening guidance, which names
+    // SecurityPolicy=None and anonymous UserIdentityToken authentication as the two most
+    // consequential network-observable OPC UA misconfigurations. Two independent, deliberately
+    // SEPARATE checks rather than one combined finding: this decoder is stateless-per-message (no
+    // channel/session correlation -- see opcua.hpp's own "Deliberately NOT implemented" paragraph),
+    // so there is no reliable way to confirm a given ActivateSession's own SecureChannel actually
+    // used SecurityPolicy=None without adding real cross-message state tracking this codebase has
+    // for no protocol today -- each condition is independently a real, citable OPC UA security
+    // finding on its own regardless (Claroty's own guidance treats them as two separate checks too).
+    // Both use mitre_t0886_remote_services() unconditionally -- deliberately WITHOUT the T0822
+    // zone-crossing upgrade the RemoteAccessChannel new-vs-known source gets below, since that
+    // upgrade lives entirely inside finish()'s own new-conduit-candidate/baseline resolution and
+    // these two findings are always-notable (a weak configuration is worth flagging every time it's
+    // seen, not just the first) -- see this file's own header comment (detect_engine.hpp) for the
+    // full reasoning behind this scope departure. Needed no new decode work: security_policy_uri
+    // (asymmetric OpenSecureChannel messages) and the "identity=anonymous" values entry
+    // (ActivateSessionRequest) were both already exposed by opcua.hpp/opcua.cpp before this batch.
+    if (dp.protocol == "opcua" && dp.result) {
+        const OpcUaResult& our = dp.result->as<OpcUaResult>();
+        const OpcUaMessage& msg = our.first;
+        if (msg.service_name == "OpenSecureChannelRequest" && msg.is_asymmetric &&
+            msg.security_policy_uri == "http://opcfoundation.org/UA/SecurityPolicy#None") {
+            record_always_notable(
+                "opcua-weak-securechannel", DetectionCategory::ProtocolMisuse,
+                mitre_t0886_remote_services(), dp.src_ip, dp.dst_ip, "opcua", dp.dst_port,
+                "OPC UA OpenSecureChannel request negotiating SecurityPolicy=None -- this channel "
+                "carries no encryption or message signing at all",
+                DetectionSeverity::Moderate);
+        }
+        if (msg.service_name == "ActivateSessionRequest") {
+            for (const auto& v : msg.values) {
+                if (v.rfind("identity=anonymous", 0) == 0) {
+                    record_always_notable(
+                        "opcua-anonymous-session", DetectionCategory::ProtocolMisuse,
+                        mitre_t0886_remote_services(), dp.src_ip, dp.dst_ip, "opcua", dp.dst_port,
+                        "OPC UA ActivateSession request using an anonymous identity token -- no real "
+                        "authentication for this engineering session",
+                        DetectionSeverity::Moderate);
+                    break;
+                }
+            }
+        }
+    }
+
     // --- EtherNet/IP: CIP Forward_Open/Large_Forward_Open from a new originator (protocol misuse) --
     // Request side only (CipMessage::is_response == false) -- the response carries no originator
     // identity of its own to track. The FIRST originator ever seen opening a connection to a given
@@ -688,6 +758,59 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                     "for that wire format), so every write to this object is flagged rather than "
                     "guessing at one");
         }
+
+        // --- CIP Identity Object Reset (firmware/logic change, Batch 3 item 16) -------------------
+        // CIP service 0x05 ("Reset"), addressed at the Identity object (class 0x01, ODVA Vol.1
+        // Ch.5-2) -- already decoded and named by this codebase's own src/enip.cpp
+        // (cip_service_name's own case 0x05 -> "Reset", already classified a Write-access service)
+        // before this batch. A direct CIP-native analog to DNP3 Cold Restart / S7 PLC Stop / UMAS
+        // STOP_PLC -- zero new decode work needed. Request side only (response carries no path at
+        // all, same as cip-identity-write above).
+        if (ef.has_cip && !ef.cip.is_response && ef.cip.service_name == "Reset" &&
+            ef.cip.path.class_id && *ef.cip.path.class_id == 0x01) {
+            record_always_notable(
+                "cip-identity-reset", DetectionCategory::FirmwareLogicChange,
+                mitre_t0816_device_restart_shutdown(), dp.src_ip, dp.dst_ip, "enip", dp.dst_port,
+                "CIP Reset service addressed at the Identity object (class 0x01) -- the target "
+                "device is being power-cycled or reset from the process network");
+        }
+
+        // --- CIP List Identity/Services/Interfaces from a new originator (engineering-station
+        // --- reconnaissance, Batch 3 item 17) ------------------------------------------------------
+        // Léargas Security's own ruleset description names this exact recon shape ("List Identity/
+        // Services/Interfaces recon"). Already decoded and named by this codebase's own src/enip.cpp
+        // (enip_command_name's own case 0x0004/0x0063/0x0064) before this batch -- zero new decode
+        // work. This is exactly how legitimate engineering tools (RSLinx, Studio 5000) discover CIP
+        // devices on a segment, and exactly how a scanner enumerates one too -- so, like the CIP
+        // Forward_Open pattern above, only a SECOND, DIFFERENT originator querying the SAME target
+        // within this capture is flagged (the first originator ever seen has nothing to be "new"
+        // relative to). Deliberately outside the `ef.has_cip` condition -- these three encapsulation
+        // commands carry no CIP message of their own at all (EnipFrame::has_cip stays false for
+        // them), so checking has_cip first would silently skip every one. Scope note: this only sees
+        // these commands when carried over TCP, since this codebase's own EtherNet/IP UDP path
+        // (enip_udp_decoder()) covers CIP I/O implicit messaging only, not encapsulation commands --
+        // see this file's own header comment (detect_engine.hpp) and docs/USER_GUIDE.md's LIMITATIONS.
+        if (ef.header.command_name == "ListServices" || ef.header.command_name == "ListIdentity" ||
+            ef.header.command_name == "ListInterfaces") {
+            auto& originators = enip_list_discovery_originators_by_server_[dp.dst_ip];
+            bool already_seen = false;
+            for (const auto& o : originators) {
+                if (o == dp.src_ip) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                if (!originators.empty()) {
+                    record_new_conduit_candidate(
+                        DetectionCategory::EngineeringStationActivity,
+                        mitre_t0888_remote_system_information_discovery(),
+                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "enip", dp.dst_port,
+                        "enip-new-originator-discovery", DetectionSeverity::Informational);
+                }
+                originators.push_back(dp.src_ip);
+            }
+        }
     }
 
     // --- UMAS (umas.hpp): START_PLC/STOP_PLC (mode change), download sequence (firmware/logic
@@ -702,6 +825,114 @@ void DetectEngine::observe(const DecodedPacket& dp) {
     // same "request side only" posture S7/DNP3/IEC104/BACnet above all take.
     if (dp.protocol == "modbus" && dp.result) {
         const ModbusFrame& mb = dp.result->as<ModbusFrame>();
+
+        // --- Modbus: MBAP declared-length anomaly (CVE-2017-16740-grounded, Batch 3 item 13) -------
+        // CVE-2017-16740 (NVD) is a real, published Rockwell Allen-Bradley MicroLogix buffer overflow
+        // triggered by a crafted Modbus/TCP MBAP header length field. mbap_length is already decoded
+        // (ModbusFrame::mbap_length), and this decoder's own kMaxPlausibleMbapLength (modbus.cpp)
+        // already rejects anything above 300 outright -- such a frame never even reaches DetectEngine
+        // -- so the only anomalous-but-decoded window this check can ever see is 255-300: past the
+        // Modbus Application Protocol spec's own true 254-byte ceiling (253-byte max PDU + 1-byte unit
+        // ID) but under the decoder's own generous "maybe a nonstandard/extended real device" slack. A
+        // length field genuinely inconsistent with the packet's own actual remaining byte count (mb.
+        // notes already carries this as a "MBAP length field implies ... but this packet has ..." note,
+        // see try_parse_modbus_tcp) is flagged the same way -- both are the same underlying wire-
+        // condition (a client's declared MBAP length disagreeing with reality), so they share one
+        // finding_kind rather than two. Request side only (mb.is_request, the same payload-shape
+        // heuristic every other request-side check in this file already relies on) -- CVE-2017-16740's
+        // own threat model is a crafted CLIENT request reaching the device, not a server's own
+        // response framing.
+        if (mb.is_request) {
+            bool length_mismatch = false;
+            for (const auto& note : mb.notes) {
+                if (note.rfind("MBAP length field implies", 0) == 0) {
+                    length_mismatch = true;
+                    break;
+                }
+            }
+            if (mb.mbap_length > 254 || length_mismatch) {
+                record_always_notable(
+                    "modbus-mbap-length-anomaly", DetectionCategory::ProtocolMisuse,
+                    mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip, "modbus",
+                    dp.dst_port,
+                    length_mismatch
+                        ? "Modbus MBAP length field (" + std::to_string(mb.mbap_length) +
+                              ") does not match this packet's own actual remaining byte count -- the "
+                              "same wire-level anomaly shape as CVE-2017-16740 (Rockwell Allen-Bradley "
+                              "MicroLogix, crafted MBAP length triggering a buffer overflow)"
+                        : "Modbus MBAP length field (" + std::to_string(mb.mbap_length) +
+                              ") exceeds the Modbus Application Protocol spec's own 254-byte maximum "
+                              "(253-byte PDU + 1-byte unit ID) -- the same wire-level anomaly shape as "
+                              "CVE-2017-16740 (Rockwell Allen-Bradley MicroLogix, crafted MBAP length "
+                              "triggering a buffer overflow)",
+                    DetectionSeverity::Moderate);
+            }
+        }
+
+        // --- Modbus: read/write quantity exceeds its own function's spec maximum (CVE-2021-22659-
+        // --- grounded, Batch 3 item 14) -------------------------------------------------------------
+        // CVE-2021-22659 (NVD) is a real, published Rockwell MicroLogix 1400 buffer overflow from an
+        // out-of-spec Read/Write Multiple Coils/Registers quantity value. The Modbus Application
+        // Protocol Specification V1.1b3 defines a hard per-function maximum quantity (2000 Read
+        // Coils/Discrete Inputs, 125 Read Holding/Input Registers, 1968 Write Multiple Coils, 123
+        // Write Multiple Registers) -- a request's own already-decoded `quantity` field
+        // (ModbusFrame::quantity) exceeding its OWN function's maximum is a spec violation regardless
+        // of what any specific device's firmware actually does with it, so this fires unconditionally
+        // (no baseline needed), unlike the pre-existing "write outside every range ever read" pattern
+        // below, which is baseline-relative. Request side only (mb.is_request && mb.quantity) --
+        // quantity is populated on both read requests and write-multiple requests/responses
+        // (ModbusFrame's own comment), but only the REQUEST's quantity is the attacker/client-
+        // controlled value CVE-2021-22659's own threat model is about.
+        if (mb.is_request && mb.quantity) {
+            uint8_t base_fc = mb.function_code & 0x7F;
+            std::optional<uint16_t> max_quantity;
+            const char* function_label = nullptr;
+            switch (base_fc) {
+                case 0x01:
+                    max_quantity = 2000;
+                    function_label = "Read Coils";
+                    break;
+                case 0x02:
+                    max_quantity = 2000;
+                    function_label = "Read Discrete Inputs";
+                    break;
+                case 0x03:
+                    max_quantity = 125;
+                    function_label = "Read Holding Registers";
+                    break;
+                case 0x04:
+                    max_quantity = 125;
+                    function_label = "Read Input Registers";
+                    break;
+                case 0x0F:
+                    max_quantity = 1968;
+                    function_label = "Write Multiple Coils";
+                    break;
+                case 0x10:
+                    max_quantity = 123;
+                    function_label = "Write Multiple Registers";
+                    break;
+                default:
+                    break;
+            }
+            if (max_quantity && *mb.quantity > *max_quantity) {
+                bool is_write = (base_fc == 0x0F || base_fc == 0x10);
+                record_always_notable(
+                    "modbus-quantity-out-of-spec", DetectionCategory::ProtocolMisuse,
+                    is_write ? mitre_t0831_manipulation_of_control()
+                             : mitre_t0855_unauthorized_command_message(),
+                    dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                    std::string("Modbus ") + function_label + " request with quantity " +
+                        std::to_string(*mb.quantity) +
+                        ", exceeding this function's own Modbus Application Protocol Specification "
+                        "V1.1b3 maximum of " +
+                        std::to_string(*max_quantity) +
+                        " -- the same wire-level anomaly shape as CVE-2021-22659 (Rockwell MicroLogix "
+                        "1400, out-of-spec quantity triggering a buffer overflow)",
+                    DetectionSeverity::Critical);
+            }
+        }
+
         if (mb.umas && !mb.umas->is_response) {
             uint8_t fc = mb.umas->function_code;
             if (fc == UMAS_START_PLC || fc == UMAS_STOP_PLC) {
@@ -1128,8 +1359,20 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
             } else if (c.source_tag == "modbus-new-originator-report-server-id") {
                 d << "Modbus Report Server ID (function 0x11) from " << c.client_ip << " to " << c.server_ip
                   << " -- an engineering-tool-shaped device-identity query";
+            } else if (c.source_tag == "enip-new-originator-discovery") {
+                // Batch 3 item 17 -- List Identity/Services/Interfaces from a second, different
+                // originator (enip_list_discovery_originators_by_server_, detect_engine.hpp).
+                // Deliberately its own branch, not folded into the cip-new-originator fallback below:
+                // these three encapsulation commands carry no CIP message at all (no Forward_Open of
+                // any kind), so that description would be actively wrong here.
+                d << "EtherNet/IP List Identity/Services/Interfaces from a new originator " << c.client_ip
+                  << " to " << c.server_ip
+                  << " -- a different client than the one(s) already seen querying this target's own "
+                     "device identity/services/interfaces in this capture";
             } else {
-                // "cip-new-originator" -- the only other non-remote-access source this engine has.
+                // "cip-new-originator" -- the remaining, original non-remote-access source (the
+                // fallback here, not because it's the only other one, but because it was this
+                // engine's first such source and every branch above already covers the rest by name).
                 d << "CIP Forward_Open from a new originator " << c.client_ip << " to " << c.server_ip
                   << " -- a different engineering/control client than the one(s) already seen opening a "
                      "connection to this target in this capture";

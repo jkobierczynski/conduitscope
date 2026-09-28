@@ -83,10 +83,35 @@ All six of these come from Digital Bond's `modbus.rules` (SIDs 1111001-1111011);
   about whether byte-exact fingerprinting would need new raw-frame-byte exposure was also resolved:
   it did not -- every byte both fingerprints touch was already an individually-decoded `ModbusFrame`
   field or available via the pre-existing `raw_pdu_data`.
-  Batch 3 (items 13-18) remains candidate-only, not implemented -- nothing there has been wired into
-  `detect_engine.cpp`, `mitre_attack_ics.hpp`, or any CTest case. A follow-up implementation pass
-  would pick some or all of these, following this project's own standing rules: verify every CTest
-  assertion against real CLI output, verify every new MITRE ID directly against `attack.mitre.org`
-  before adding it, and build/fixture new decode-field exposure (batch 3's OPC UA
-  SecurityPolicy/UserIdentityToken fields) the same way batch 1's Modbus diagnostic sub-functions/MEI
-  type were added.
+- **Batch 3 (items 13-18) is now implemented too.** Jurgen confirmed "You can do batch 3" as a direct
+  follow-up; all six now ship in `detect_engine.cpp`/`detect_engine.hpp` with verified CTest coverage,
+  including against this project's own real `opc-ua-ap-method-wireshark-freeze.pcap` capture AND,
+  unexpectedly, the pre-existing `sample_opcua.pcap` decode fixture -- both were found (not assumed)
+  to already exercise item 15's weak-SecureChannel and anonymous-session findings simultaneously,
+  meaning item 15 needed zero new fixture construction at all, a first across all three batches -- see
+  `docs/design/detection-engine.md`'s own "Batch 3" section for the full implementation record and
+  `docs/DEVELOPMENT.md`'s item 94 for the ROADMAP entry. Item 15's own "needs confirming whether the
+  fields are already exposed" readiness question above resolved the same direction as items 10/11 in
+  batch 2: they were, via direct source reading of `opcua.hpp`/`opcua.cpp` -- `security_policy_uri`,
+  `service_name`, `is_asymmetric`, and a `"identity=anonymous (policy-id=...)"` entry in `values` were
+  all already decoded, so item 15 needed zero new decode-field-exposure work either, contrary to this
+  document's own "likely a small decode-field-exposure addition" guess above.
+
+  Two genuine implementation-pass bugs were found and fixed, both caught only by running the real CLI
+  and reading actual output, never by code review alone. First, item 13's ceiling check: the first
+  fixture attempt padded a Read Holding Registers request's PDU to reach an inflated declared MBAP
+  length, which broke `ModbusFrame::is_request` classification entirely (`decode_read_family` only
+  sets it for a PDU whose data is exactly 4 bytes) -- switched the fixture to Write Multiple Registers
+  instead, whose request classification tolerates arbitrary extra length. Second, item 17's
+  description-template dispatch: `finish()`'s `source_tag`-keyed `if`/`else if`/.../`else` chain's
+  final `else` fallback assumed `"cip-new-originator"` was the only remaining non-remote-access source
+  tag; adding `"enip-new-originator-discovery"` without its own branch silently fell through to that
+  stale fallback, rendering the wrong description text (a CIP Forward_Open sentence for what was
+  actually a List* query) -- fixed with a dedicated branch, and `NewConduitCandidate::source_tag`'s own
+  doc comment updated to enumerate all six recognized tags so the next addition doesn't repeat this.
+
+  One genuine scope gap was found and documented rather than silently shipped: item 17's finding only
+  ever sees List Identity/Services/Interfaces over TCP, since this codebase's own EtherNet/IP UDP path
+  (`enip_udp_decoder()`) covers CIP I/O only, not encapsulation commands -- the more common real-world
+  mechanism (a UDP-broadcast discovery scan) is not seen by this finding at all. Documented as a
+  LIMITATIONS bullet in `docs/USER_GUIDE.md` rather than left implicit.

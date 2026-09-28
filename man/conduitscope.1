@@ -431,7 +431,18 @@ write/operate command addressed to a reserved DNP3 broadcast destination,
 a DNP3 object\-group/variation enumeration sweep, and known Modbus
 (Metasploit/nmap) and BACnet (nmap) scanner\-tool byte\-exact
 fingerprints \-\- distinct from the flood/scan\-shaped signatures this
-tool already detects elsewhere. Every finding
+tool already detects elsewhere, and (Batch 3, grounded in two published
+NVD CVEs against Rockwell Allen\-Bradley controllers plus Claroty
+Team82's OPC UA hardening guidance and Leargas Security's own CIP
+ruleset description) a Modbus MBAP declared\-length anomaly (CVE\-2017\-16740),
+a Modbus read/write quantity outside its own function code's protocol
+maximum (CVE\-2021\-22659), an OPC UA SecureChannel negotiated with
+SecurityPolicy=None and a session activated with an anonymous identity
+token, a CIP Reset addressed at the Identity object, a new originator
+sending EtherNet/IP List Identity/Services/Interfaces (TCP only \-\- see
+\fBLIMITATIONS\fR in \fBdocs/USER_GUIDE.md\fR), and an IEC 104 General
+Interrogation addressed to the broadcast Common Address of ASDU
+(0xFFFF). Every finding
 cites exactly one MITRE ATT&CK for ICS technique and carries three
 independent, labeled dimensions \-\-
 never a single conflated "confidence" field, and never a claim about
@@ -447,8 +458,10 @@ impact if the observed action is genuine, independent of the other two;
 most always\-notable findings are \fBCritical\fR, except a handful of
 deliberately weaker signals \-\- the Modbus write\-without\-prior\-read
 pattern, the BACnet Who\-Is flood, S7comm Setup Communication probing,
-DNP3 unsolicited\-response misuse, and an unexpected IEC 104
-cause\-of\-transmission \-\- which are \fBModerate\fR or
+DNP3 unsolicited\-response misuse, an unexpected IEC 104
+cause\-of\-transmission, a Modbus MBAP declared\-length anomaly, an OPC UA
+weak SecureChannel/anonymous\-session finding, and a new\-originator
+EtherNet/IP List Identity/Services/Interfaces \-\- which are \fBModerate\fR or
 \fBInformational\fR instead). With \fB\-\-policy\fR, a new remote\-access
 finding's own technique is further resolved between T0886 (Remote
 Services) and T0822 (External Remote Services) depending on whether it
