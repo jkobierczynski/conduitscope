@@ -15761,6 +15761,55 @@ set_tests_properties(detect_policy_bad_path_rejected PROPERTIES
 
 
 # ---------------------------------------------------------------------------------------------
+# Six Snort-style pattern extensions to `detect` (docs/design/detection-engine.md's own "Snort-
+# style pattern extensions" section has the full research/scoping record for each pattern --
+# Jurgen's own follow-up ask after gap #4 shipped, "how do I add more detection patterns like
+# those of Snort"). tests/sample_detect_snort_patterns.pcap (build_detect_snort_patterns_sample,
+# tools/make_sample_pcap.py) covers five of the six in one 16-packet capture, each on its own
+# conduit, each paired with a negative/contrast conduit proving the pattern does NOT fire when its
+# own condition isn't met: CIP Set_Attribute_Single write to the Identity object; DNP3 Operate with
+# no prior Select (contrasted with a Select-then-Operate conduit that must NOT flag); Modbus Write
+# Multiple Registers outside every prior read (contrasted with a fully-covered write that must NOT
+# flag); S7comm Setup Communication probing, resolved in finish() (contrasted with a pair that also
+# does a PLC Stop, whose OWN T0858 finding fires but the probing finding must NOT); and the
+# download-then-restart composite (an S7 Request Download and PLC Stop against the same server,
+# 10s apart, producing the two individual findings PLUS one T0831 composite). The sixth -- a BACnet
+# Who-Is volumetric flood -- is in its OWN fixture, tests/sample_detect_bacnet_who_is_flood.pcap
+# (build_detect_bacnet_who_is_flood_sample): it genuinely needs kBacnetWhoIsFloodThreshold-worth of
+# packets (100, detect_engine.cpp), which would make the other five scenarios' exact packet-count
+# assertions brittle to that threshold constant if interleaved into the same capture.
+# ---------------------------------------------------------------------------------------------
+
+# Every finding source in sample_detect_snort_patterns.pcap, pinned in first-seen order (see this
+# section's own header comment for what each scenario is) -- one large regex, same style as
+# detect_sample_detect_text_all_findings above, rather than one add_test per finding: these 8
+# findings are one coherent, order-dependent report, and the exact "findings: 8" total is itself
+# what proves none of the four negative/contrast conduits (DNP3 Select-then-Operate, Modbus fully-
+# covered write, S7 probing-pair-that-also-did-real-work) produced an extra finding.
+add_test(NAME detect_snort_patterns_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns.pcap")
+set_tests_properties(detect_snort_patterns_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 16.*findings: 8 \\(High 7, Medium 0, Low 1\\).*  Engineering-Station Activity: 3.*  Firmware/Logic Change: 2.*  Remote-Access Channel: 0.*  Protocol Misuse: 3.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.71:44818 \\(enip\\).*CIP Set_Attribute_Single write to the Identity object \\(class 0x01\\) -- broadened-scope stand-in for a ControlLogix-style remote run/program/remote mode change: this engine cannot confirm which specific Identity attribute was written \\(no citable primary source for that wire format\\), so every write to this object is flagged rather than guessing at one.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.72:20000 \\(dnp3\\).*DNP3 Operate \\(0x04\\) with no matching Select \\(0x03\\) ever seen for this master/outstation pair in this capture -- either the Select happened before this capture began, or the outstation is accepting Operate without requiring Select-before-Operate first \\(not the same thing as Direct Operate 0x05, which this engine never flags -- Direct Operate is a legitimate, intentional bypass of Select-before-Operate, not a violation of it\\).*\\[Protocol Misuse\\] T0831 \\(Manipulation of Control\\) -- confidence: Low.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.74:502 \\(modbus\\).*Modbus Write Multiple Registers to address range \\[100, 105\\) not fully covered by any prior read \\(same conduit, same address table\\) in this capture -- a genuinely weak signal on its own \\(many legitimate deployments write setpoints without reading them back first\\): treat as a prompt to check this range's purpose, not as confirmed misuse.*\\[Engineering-Station Activity\\] T0858 \\(Change Operating Mode\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.77:102 \\(s7comm\\).*S7comm PLC Stop command -- CPU commanded to STOP from the process network.*\\[Firmware/Logic Change\\] T0843 \\(Program Download\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.78:102 \\(s7comm\\).*S7comm block download \\(Request Download\\) -- a program/logic block is being written TO the CPU from an engineering station.*\\[Engineering-Station Activity\\] T0858 \\(Change Operating Mode\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.78:102 \\(s7comm\\).*S7comm PLC Stop command -- CPU commanded to STOP from the process network.*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.76:102 \\(s7comm\\).*S7comm Setup Communication \\(function 0xF0\\) seen 3 times from 192\\.168\\.1\\.70 to 192\\.168\\.1\\.76 with no other S7comm function ever observed between them in this capture -- consistent with connection/session probing rather than genuine engineering-station use \\(a real engineering session does more than repeat the handshake\\).*\\[Firmware/Logic Change\\] T0831 \\(Manipulation of Control\\) -- confidence: High.*192\\.168\\.1\\.70 -> 192\\.168\\.1\\.78:102 \\(s7comm\\).*Composite finding: a firmware/logic download \\(T0843 Program Download, s7comm\\) and a restart/mode-change \\(T0858 Change Operating Mode, s7comm\\) both observed against 192\\.168\\.1\\.78 within 300s of each other -- consistent with a download-then-activate attack pattern, not necessarily two unrelated findings; see the individual findings above for each event's own detail"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.73.*Operate|192\\.168\\.1\\.75.*Write Multiple Registers|Setup Communication \\(function 0xF0\\) seen [0-9]+ times from 192\\.168\\.1\\.70 to 192\\.168\\.1\\.77")
+
+# JSON shape: summary counts and the first finding's full field set -- everything else already
+# covered by the text report's own exact-order assertion above.
+add_test(NAME detect_snort_patterns_json_shape
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns.pcap" --format json)
+set_tests_properties(detect_snort_patterns_json_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 16,.*\"summary\": \\{.*\"total\": 8,.*\"high\": 7,.*\"medium\": 0,.*\"low\": 1,.*\"engineering_station_activity\": 3,.*\"firmware_logic_change\": 2,.*\"remote_access_channel\": 0,.*\"protocol_misuse\": 3.*\"findings\": \\[.*\"category\": \"Protocol Misuse\",.*\"technique_id\": \"T0855\",.*\"technique_name\": \"Unauthorized Command Message\",.*\"confidence\": \"High\",.*\"client_ip\": \"192\\.168\\.1\\.70\",.*\"server_ip\": \"192\\.168\\.1\\.71\",.*\"protocol\": \"enip\",.*\"server_port\": 44818,")
+
+# BACnet Who-Is flood: FLOOD_IP crosses kBacnetWhoIsFloodThreshold (100) and is flagged;
+# QUIET_IP's own 5 Who-Is requests (well under threshold) produce no finding at all -- the "findings:
+# 1" total is itself the proof QUIET_IP never fires.
+add_test(NAME detect_bacnet_who_is_flood
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_bacnet_who_is_flood.pcap")
+set_tests_properties(detect_bacnet_who_is_flood PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 105.*findings: 1 \\(High 1, Medium 0, Low 0\\).*  Protocol Misuse: 1.*\\[Protocol Misuse\\] T0888 \\(Remote System Information Discovery\\) -- confidence: High.*192\\.168\\.1\\.79 -> 255\\.255\\.255\\.255:47808 \\(bacnet\\).*BACnet Who-Is flood/device-enumeration sweep from this source -- at least 100 Who-Is requests observed in this capture \\(destination shown is only the most recent one -- Who-Is is routinely broadcast, so this source may have targeted several destinations\\)"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.80")
+
+
+# ---------------------------------------------------------------------------------------------
 # UMAS-over-Modbus/TCP (umas.hpp/cpp, Grok gap #4 Phase 5 -- "Unity Pro/UMAS is in scope as new
 # decode work", docs/design/detection-engine.md's own UMAS research section). Dispatched from
 # modbus.cpp's own function-code switch on 0x5A/90 (ModbusFrame::umas) -- see umas.hpp's header

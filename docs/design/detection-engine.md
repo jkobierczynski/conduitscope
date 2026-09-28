@@ -1,14 +1,20 @@
 # Detection that OT IR teams recognize -- design record
 
-Status: **implemented, all 8 phases (0-7), current release.** Written at Jurgen's request to scope
-Grok review item 4 (`docs/reviews/2026-09-grok-ics-ot-improvement-areas.md`) into something
-buildable, after items 1-3 (zoning, asset inventory, baseline process behavior) were already fully
-closed -- see `docs/DEVELOPMENT.md`'s "External review: Grok's ten improvement areas" section for
-where this sits among the ten. The `detect` subcommand (`include/conduitscope/detect_engine.hpp`,
+Status: **implemented, all 8 phases (0-7), current release, plus six Snort-style pattern
+extensions (own section below).** Written at Jurgen's request to scope Grok review item 4
+(`docs/reviews/2026-09-grok-ics-ot-improvement-areas.md`) into something buildable, after items 1-3
+(zoning, asset inventory, baseline process behavior) were already fully closed -- see
+`docs/DEVELOPMENT.md`'s "External review: Grok's ten improvement areas" section for where this sits
+among the ten. The `detect` subcommand (`include/conduitscope/detect_engine.hpp`,
 `src/detect_engine.cpp`) and its supporting MITRE ATT&CK-for-ICS lookup table
 (`include/conduitscope/mitre_attack_ics.hpp`) and UMAS-over-Modbus/TCP decoder
 (`include/conduitscope/umas.hpp`, `src/umas.cpp`) now exist and are covered by CTest, exactly as
-scoped below.
+scoped below. After gap #4 shipped, Jurgen asked a direct follow-up -- "how do I add more detection
+patterns like those of Snort?" -- and, after confirming he wanted to keep extending this same
+curated-C++-findings model rather than build a generic runtime rules engine (see "Snort-style
+pattern extensions" below for that scoping conversation), asked for six specific new patterns, all
+now implemented the same way as gap #4's own original findings: hardcoded, compiled-in C++ over
+already-decoded fields, not a new rule language.
 
 ## The pitch, restated
 
@@ -393,6 +399,126 @@ feature was considered done -- matching this project's "every decoder gets fuzze
 transitively-reachable sub-decoder still gets its own dedicated harness for full per-iteration
 coverage density" conventions (`fuzz/README.md`'s own `fuzz_dnp3`/`fuzz_umas` entries).
 
+## Snort-style pattern extensions
+
+Jurgen's own question, verbatim: "How do I add more detection patterns like those of Snort?" The
+honest answer first: Snort/Suricata evaluate a runtime rules file (no recompile to add a rule);
+conduitscope has no such mechanism anywhere -- `attack_detect.hpp`/`ipv6_attack_detect.hpp`
+(flood/scan signatures) and `detect_engine.hpp` (this file's own OT findings) are both entirely
+hardcoded, compiled-in C++, and `policy.yaml`/`baseline.json` are the only user-editable declarative
+files this project has, neither a detection-pattern language. Presented with that choice, Jurgen
+picked **keep extending the curated C++ findings model** over building a generic rule engine (via
+`AskUserQuestion`) -- so every pattern below is implemented exactly the way gap #4's own original
+findings are: a new `observe()`/`finish()` branch reading fields this codebase already decodes, not
+a new file format or a plugin mechanism.
+
+Jurgen then named six candidate patterns explicitly (starting with one -- CIP `Set_Attribute_Single`
+to a controller's run/idle mode attribute -- then expanding mid-conversation to "you can implement
+them all"). Two of the six, as first proposed, didn't survive contact with this project's own
+"never guess at wire-format/mechanism specifics without a citable primary source" discipline, and
+were rescoped with Jurgen's own explicit sign-off (`AskUserQuestion`, both times choosing the
+"Recommended" -- honestly narrower -- option):
+
+- **CIP run/idle mode change.** The real-world precedent (Digital Bond's "Basecamp"-era
+  ControlLogix remote-mode-change research) uses an undocumented Rockwell mechanism -- no citable
+  primary source for the specific CIP class/attribute/value that changes a ControlLogix's run/
+  program/remote mode was found (a CISA advisory that might have had it, `ICSA-13-011-03`, 403'd on
+  fetch; further searches were inconclusive). Rather than hardcode a guessed attribute number,
+  rescoped to **any write to the Identity object (class 0x01)** -- broader than the real mode-change
+  mechanism specifically, but every part of it (the class ID, the service codes) is directly
+  confirmed against this codebase's own `enip.cpp`/`enip.hpp`, nothing guessed.
+- **S7comm password/authentication bypass.** No password/authentication PDU is decoded anywhere in
+  this codebase at all (confirmed by grep -- `_N_LOGIN_`/`_N_LOGOUT` in `s7comm.cpp`'s own
+  `kPiServiceNames` are Sinumerik NC login services, not a CPU authentication mechanism), so
+  "repeated failed auth attempts" would need new, unsourced decode work. Rescoped to **Setup
+  Communication (function 0xF0) probing** instead: a real, already-decoded S7comm function, and
+  "this pair only ever did the handshake, never anything real" is a genuinely observable,
+  honestly-scoped signal without inventing a password mechanism this project can't verify.
+
+A third pattern was corrected without needing to ask -- the original framing, "DNP3 Direct Operate
+bypassing Select-before-Operate," mischaracterizes real DNP3 semantics: Direct Operate (0x05) is a
+legitimate, intentional, routinely-used mechanism that deliberately skips Select, not a bypass of
+one. The defensible signal is the other function code entirely: an **Operate (0x04) with no
+matching prior Select (0x03)** on the same master/outstation pair -- flagged in the message that
+proposed it, before Jurgen's "implement them all," and never revisited.
+
+The final six, all shipped:
+
+| # | Pattern (as implemented) | Category / technique | Confidence |
+|---|---|---|---|
+| 1 | CIP `Set_Attribute_Single`/`Set_Attributes_All` write to the Identity object (class 0x01) | ProtocolMisuse / T0855 | High (always-notable) |
+| 2 | DNP3 Operate (0x04) with no Select (0x03) ever seen for that master/outstation pair | ProtocolMisuse / T0855 | High (always-notable) |
+| 3 | Modbus Write Multiple Coils/Registers outside every range ever read (same conduit, same table) | ProtocolMisuse / T0831 | **Low, unconditionally** -- the one deliberate exception to "always-notable is always High," see below |
+| 4 | BACnet Who-Is flood/device-enumeration sweep, per source IP, past a threshold | ProtocolMisuse / T0888 | High (always-notable, fires once per source at threshold) |
+| 5 | S7comm Setup Communication (0xF0) probing: repeated, with no other S7comm function ever seen for that pair | EngineeringStationActivity / T0888 | High (resolved in `finish()`, not `observe()`) |
+| 6 | Composite: a Program Download (T0843) finding and a restart/mode-change (T0858/T0816) finding both against the same server within a short window | FirmwareLogicChange / T0831 | High (resolved in `finish()`, over this SAME call's own already-produced findings) |
+
+Implementation notes, by pattern:
+
+- **Pattern 3 (Modbus write-without-read) is the one place this feature deliberately breaks its own
+  "always-notable is always High confidence" rule.** Every other always-notable source in this file
+  earns High because the traffic SHAPE alone is structurally notable regardless of context (a PLC
+  Stop is always worth a human's attention). "A write to a range nobody read first" is a genuinely
+  weaker signal on its own -- plenty of legitimate deployments write setpoints/commands without ever
+  reading them back, especially in a short single-pcap capture that may simply not contain the read
+  traffic that exists elsewhere in a plant's normal polling cycle. `record_always_notable`
+  (`detect_engine.cpp`) grew an optional trailing `DetectionConfidence` parameter (default `High`,
+  every pre-existing call site unaffected) specifically so this one pattern could pass `Low`
+  explicitly rather than either lying about confidence or needing a whole second mechanism. Only the
+  two writable Modbus data tables are tracked (Coils, via Write Multiple Coils/Read Coils; Holding
+  Registers, via Write Multiple Registers/Read Holding Registers) -- Discrete Inputs and Input
+  Registers are read-only tables nothing ever writes to, so they're never tracked at all, and Write
+  Single Coil/Register are excluded entirely (`ModbusFrame::start_address`/`quantity`'s own comment,
+  `modbus.hpp`, documents why that pair has no request/response-confirmed shape to key on in the
+  first place -- a pre-existing, unrelated scope boundary, not something this pattern introduces).
+- **Pattern 5 (S7 Setup Communication probing) and pattern 6 (the composite) are the only two of the
+  six resolved in `finish()` rather than `observe()`.** Both genuinely need whole-capture knowledge:
+  "no other S7comm function was EVER seen for this pair" can't be confirmed until the capture ends (a
+  later packet could always introduce a real function), and the composite is by definition a
+  relationship between two OTHER findings this same `finish()` call already produced. Both still
+  follow this file's own "deterministic report regardless of `unordered_map` iteration order"
+  discipline: each collects its own qualifying entries into a `std::vector`, sorts it (by key/
+  server_ip), then appends -- the same pattern `always_notable_order_`/`new_conduit_order_` already
+  established for `observe()`-time findings.
+- **The composite (pattern 6) is a post-pass over already-produced findings, not new tracked
+  state.** It scans `report.findings` (everything already pushed by the always-notable loop, the
+  resolved new-conduit loop, and pattern 5's own post-pass, all of which run first) for a T0843
+  finding and a T0858/T0816 finding sharing a `server_ip`, picks the closest-in-time pair per server
+  (so a server with several downloads and restarts produces at most one composite, not a combinatorial
+  spam of them), and cites T0831 (Manipulation of Control) rather than reusing either source
+  finding's own technique -- a composite is a claim about the SEQUENCE, not a restatement of either
+  half. The window (`kCompositeWindowSeconds`, 300s/5 minutes) is a small, documented judgment-call
+  default, not vendor-sourced -- the same "modest default I pick and document as a judgment call"
+  posture `attack_detect.hpp`'s own `DEFAULT_FLOOD_THRESHOLD` established for this project.
+- **Pattern 4 (BACnet Who-Is flood) reuses `attack_detect.hpp`'s own flood-threshold value (100)**
+  for consistency across this codebase's two independent flood-shaped detectors, not because 100 is
+  researched or vendor-sourced for Who-Is specifically -- see `kBacnetWhoIsFloodThreshold`'s own
+  comment (`detect_engine.cpp`). Grouped by source IP alone, not source+destination: Who-Is is
+  routinely sent as a BACnet/IP broadcast, so splitting by destination would fragment one real sweep
+  across however many broadcast/unicast destinations it happened to use.
+- **None of the six add new raw-byte decode work.** Every one reads a field a decoder this codebase
+  already had (and already fuzzes) produces -- `CipPath::class_id`, `ModbusFrame::start_address`/
+  `quantity`/`function_name`, `S7CommResult::function_name`, `Dnp3Result::dnp3_function_name`,
+  `BacnetFrame`'s own `service_choice_name`. So, matching the precedent `baseline.cpp`/
+  `asset_inventory.cpp`/`policy.cpp` (which also only ever read already-decoded, already-fuzzed
+  structures) already set, none of the six needed a new libFuzzer harness of their own -- unlike gap
+  #4's own UMAS decoder, which parses raw bytes and does have one (`fuzz/fuzz_umas.cpp`).
+
+Fixtures: `tests/sample_detect_snort_patterns.pcap`
+(`build_detect_snort_patterns_sample()`) covers patterns 1, 2, 3, 5, and 6 in one 16-packet capture,
+each finding source on its own conduit, each paired with a negative/contrast conduit proving the
+pattern does NOT fire when its own condition isn't met (a DNP3 Select-then-Operate pair; a Modbus
+write fully covered by a prior read; an S7 pair that also did a real PLC Stop -- whose OWN T0858
+finding still fires, just not the probing finding). Pattern 4 (the BACnet flood) is in its own
+fixture, `tests/sample_detect_bacnet_who_is_flood.pcap`
+(`build_detect_bacnet_who_is_flood_sample()`), specifically because it genuinely needs
+`kBacnetWhoIsFloodThreshold`-worth of packets (100) -- interleaving that many into the other five
+scenarios' own exact-packet-count assertions would make them brittle to a threshold constant that
+may change later. `detect_snort_patterns_all_findings`/`detect_snort_patterns_json_shape`/
+`detect_bacnet_who_is_flood` in `CMakeLists.txt` pin every finding end to end, the same "write the
+assertion only after running the real CLI binary and inspecting its actual output" discipline
+"Testing and fixtures" above already establishes.
+
 ## Explicitly out of scope
 
 - **Confidence retrofit onto pre-existing engines.** See "Confidence" above.
@@ -407,3 +533,15 @@ coverage density" conventions (`fuzz/README.md`'s own `fuzz_dnp3`/`fuzz_umas` en
   is no persisted `DetectEngine` state the way `BaselineStore` persists across `baseline learn` runs.
   A caller wanting trend-over-time detection today combines `detect --baseline-file` (kept current
   via `baseline learn`) with their own external run-history tooling.
+- **A specific CIP run/idle mode-change attribute/value for the Identity-object write pattern.** See
+  "Snort-style pattern extensions" above -- deliberately broadened to "any write to class 0x01"
+  instead, since no citable primary source for the exact wire format exists.
+- **An S7comm password/authentication decoder.** See "Snort-style pattern extensions" above --
+  Setup Communication probing was substituted; a genuine fix (decoding whatever real Application
+  Password PDU actually looks like on the wire) needs a primary source this project doesn't have
+  yet, not a guess.
+- **A generic runtime detection-rules file/language (a "Snort mode" for conduitscope).** Jurgen's
+  own explicit choice (`AskUserQuestion`, "Snort-style pattern extensions" above) -- every new
+  pattern is hardcoded, compiled-in C++ over already-decoded fields, the same model gap #4's own
+  original findings use, not a new file format, DSL, or plugin mechanism a user could load without
+  recompiling.

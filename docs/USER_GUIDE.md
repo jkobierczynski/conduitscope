@@ -1160,12 +1160,18 @@ exactly how confidence is decided.
 
 **Always-notable** findings need no "new vs. known" judgment at all -- the traffic shape itself is
 notable every time it's seen: a PLC/controller mode change, a firmware/logic download, a device
-restart, an unsolicited or unexpected protocol message. These always get **High** confidence.
-Currently sourced from S7comm (PLC Control/Stop, block download), DNP3 (Cold/Warm Restart,
-Enable-then-later-Unsolicited-Response-with-none-enabled), IEC 104 (an ASDU whose own
-cause-of-transmission is one of the four error codes, a Reset Process command), BACnet
-(ReinitializeDevice, DeviceCommunicationControl), and UMAS (START_PLC/STOP_PLC,
-INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/END_STRATEGY_DOWNLOAD -- see "UMAS decode" below).
+restart, an unsolicited or unexpected protocol message. Almost all of these get **High**
+confidence -- the one deliberate exception is the Modbus write-without-prior-read pattern below,
+which is always-notable but unconditionally **Low** (see "Snort-style pattern extensions" below for
+why). Currently sourced from S7comm (PLC Control/Stop, block download, Setup Communication
+probing), DNP3 (Cold/Warm Restart, Enable-then-later-Unsolicited-Response-with-none-enabled,
+Operate with no prior Select), IEC 104 (an ASDU whose own cause-of-transmission is one of the four
+error codes, a Reset Process command), BACnet (ReinitializeDevice, DeviceCommunicationControl,
+Who-Is flood/enumeration sweep), EtherNet/IP (a CIP write to the Identity object), Modbus (a write
+outside every range ever read on the same conduit), and UMAS (START_PLC/STOP_PLC,
+INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/END_STRATEGY_DOWNLOAD -- see "UMAS decode" below), plus one
+composite finding (a Program Download and a restart/mode-change finding both against the same
+server within a short window).
 
 **New-vs-known** findings -- a remote-access protocol (RDP/VNC/TeamViewer/AnyDesk/Zoom) reaching a
 conduit, a CIP Forward_Open or UMAS engineering-station command from a client not seen doing that
@@ -1188,6 +1194,73 @@ crosses a declared zone boundary) -- independent of confidence, which is decided
 Confidence is new-findings-only for now: it is not retrofitted onto `attack_detect.hpp`'s
 flood/scan findings or onto `baseline check`'s own new-conduit/new-operation findings -- see
 `docs/design/detection-engine.md`'s own "explicitly out of scope" note.
+
+#### Snort-style pattern extensions
+
+Six patterns added as a direct follow-up (`docs/design/detection-engine.md`'s own "Snort-style
+pattern extensions" section has the full research/scoping record, including two that were
+deliberately rescoped -- broadened, not invented -- when no citable primary source existed for
+the originally-proposed wire-format specifics):
+
+- **CIP Identity Object write** -- any `Set_Attribute_Single`/`Set_Attributes_All` write addressed
+  at CIP class 0x01 (the Identity object every CIP device has). A broadened-scope stand-in for a
+  ControlLogix-style remote run/program/remote mode change: this project could not confirm a
+  citable wire format for the specific attribute a real mode change uses, so every write to the
+  object is flagged instead of guessing at one.
+- **DNP3 Operate without a prior Select** -- an Operate (0x04) with no Select (0x03) ever seen for
+  that master/outstation pair in this capture. Deliberately NOT "Direct Operate observed" -- Direct
+  Operate (0x05) is a legitimate, routinely-used DNP3 mechanism that intentionally skips Select, not
+  a bypass of one, and is never flagged by this pattern.
+- **Modbus write outside every range ever read** -- a Write Multiple Coils/Registers request whose
+  address range isn't covered by any prior read (same conduit, same address table -- Coils and
+  Holding Registers tracked separately) in this capture. Unconditionally **Low** confidence: many
+  legitimate deployments write setpoints/commands without ever reading them back first, so this is
+  honestly a much weaker signal than every other always-notable finding here.
+- **BACnet Who-Is flood/device-enumeration sweep** -- a running per-source-IP count of Who-Is
+  requests (grouped by source alone, since Who-Is is routinely broadcast); fires once a source
+  crosses 100 requests in this capture (the same small, documented, not-vendor-sourced default
+  `attack_detect.hpp`'s own flood detector uses, reused here for consistency).
+- **S7comm Setup Communication probing** -- a (client, server) pair whose only S7comm traffic in
+  this whole capture is repeated Setup Communication (0xF0) requests, with no other S7comm function
+  ever seen between them. A real engineering session does more than repeat the handshake, so "never
+  anything else" is the notable part -- resolved once the whole capture has been read, not per
+  packet (a later packet could always introduce a real function).
+- **Download-then-restart composite** -- when a Program Download finding (T0843) and a
+  restart/mode-change finding (T0858/T0816) are both produced against the same server within 300
+  seconds of each other, an additional composite finding (FirmwareLogicChange, T0831 Manipulation
+  of Control) is emitted alongside the two individual ones -- the classic "install then activate"
+  sequence, not necessarily two unrelated events.
+
+```
+$ conduitscope detect -r tests/sample_detect_snort_patterns.pcap
+=== conduitscope detect report ===
+capture: tests/sample_detect_snort_patterns.pcap
+total packets: 16
+findings: 8 (High 7, Medium 0, Low 1)
+  Engineering-Station Activity: 3
+  Firmware/Logic Change: 2
+  Remote-Access Channel: 0
+  Protocol Misuse: 3
+
+--- findings (first-seen order) ---
+
+[Protocol Misuse] T0855 (Unauthorized Command Message) -- confidence: High
+  192.168.1.70 -> 192.168.1.71:44818 (enip)
+  CIP Set_Attribute_Single write to the Identity object (class 0x01) -- broadened-scope stand-in for a ControlLogix-style remote run/program/remote mode change: this engine cannot confirm which specific Identity attribute was written (no citable primary source for that wire format), so every write to this object is flagged rather than guessing at one
+  first seen: 2023-11-15 09:20:01.000000Z  last seen: 2023-11-15 09:20:01.000000Z  packets: 1
+
+[Protocol Misuse] T0831 (Manipulation of Control) -- confidence: Low
+  192.168.1.70 -> 192.168.1.74:502 (modbus)
+  Modbus Write Multiple Registers to address range [100, 105) not fully covered by any prior read (same conduit, same address table) in this capture -- a genuinely weak signal on its own (many legitimate deployments write setpoints without reading them back first): treat as a prompt to check this range's purpose, not as confirmed misuse
+  first seen: 2023-11-15 09:20:05.000000Z  last seen: 2023-11-15 09:20:05.000000Z  packets: 1
+```
+
+(Six more findings -- a DNP3 Operate-without-Select, two S7comm PLC Stop findings, an S7comm
+Request Download, an S7comm Setup Communication probing finding, and the download-then-restart
+composite -- are omitted above for brevity; every one of the 8 findings this capture produces, plus
+the BACnet Who-Is flood pattern's own separate fixture, is exercised by this project's own CTest
+suite (`detect_snort_patterns_all_findings`/`detect_snort_patterns_json_shape`/
+`detect_bacnet_who_is_flood`).)
 
 #### Worked example
 
@@ -5891,6 +5964,32 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   check`'s own new-conduit/new-operation findings -- a deliberate scope
   boundary, not an oversight. See `docs/design/detection-engine.md`'s
   "explicitly out of scope" note.
+- **`detect`'s Modbus write-without-prior-read pattern is a genuinely weak
+  signal, unconditionally Low confidence.** Many legitimate deployments
+  write setpoints/commands without ever reading them back first, especially
+  in a single short capture that may simply not include the read traffic
+  that exists elsewhere in a plant's own normal polling cycle -- treat this
+  finding as a prompt to check a range's purpose, not as confirmed misuse.
+  See "Snort-style pattern extensions" in the `detect` section above.
+- **`detect`'s CIP Identity Object write pattern is deliberately broader
+  than a real ControlLogix run/program/remote mode change.** This project
+  could not find a citable primary source for the specific class/attribute
+  a real mode change uses over the wire, so every write to CIP class 0x01
+  is flagged rather than guessing at one -- a finding here does not
+  necessarily mean a mode change actually happened.
+- **`detect`'s S7comm Setup Communication probing and download-then-restart
+  composite findings are resolved only once the whole capture has been
+  read**, not per packet -- unlike every other `detect` finding source. A
+  truncated capture that stops right after a legitimate handshake, or right
+  before a download's matching restart arrives, can under-report these two
+  specifically. See `docs/design/detection-engine.md`'s "Snort-style
+  pattern extensions" section.
+- **`detect`'s BACnet Who-Is flood threshold (100) is a small,
+  documented judgment-call default, not vendor-sourced or configurable on
+  the CLI today** -- reused from `attack_detect.hpp`'s own
+  `DEFAULT_FLOOD_THRESHOLD` for consistency across this codebase's two
+  independent flood detectors, not because 100 is researched for Who-Is
+  specifically.
 
 ## EXIT STATUS
 

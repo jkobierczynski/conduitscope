@@ -410,20 +410,29 @@ section for a worked example.
 .TP
 .B detect (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Detection findings OT incident\-response teams recognize (Grok review item
-4): engineering\-station mode changes, firmware/logic downloads and device
+4, plus six Snort\-style pattern extensions added as a direct follow\-up):
+engineering\-station mode changes, firmware/logic downloads and device
 restarts, protocol misuse (unsolicited/unexpected commands, a new
-engineering\-station originator), and new remote\-access channels into the
-plant \-\- distinct from the flood/scan\-shaped signatures this tool
+engineering\-station originator, a CIP Identity Object write, a DNP3
+Operate with no prior Select, a Modbus write outside every range ever
+read on the same conduit, a BACnet Who\-Is flood/enumeration sweep, S7comm
+Setup Communication probing), new remote\-access channels into the plant,
+and a download\-then\-restart composite (a firmware/logic download and a
+restart/mode\-change finding both against the same server within a short
+window) \-\- distinct from the flood/scan\-shaped signatures this tool
 already detects elsewhere. Every finding cites exactly one MITRE ATT&CK
-for ICS technique and carries a labeled confidence (\fBHigh\fR for an
-always\-notable finding needing no "new vs. known" judgment; \fBMedium\fR/
-\fBLow\fR for a new\-vs\-known finding, resolved against \fB\-\-baseline\-file\fR
-when given, or first\-occurrence\-within\-this\-capture otherwise). With
-\fB\-\-policy\fR, a new remote\-access finding's own technique is further
-resolved between T0886 (Remote Services) and T0822 (External Remote
-Services) depending on whether it crosses a declared zone boundary.
-\fBdetect\fR always exits 0 on a successful run, regardless of findings \-\-
-see \fBEXIT STATUS\fR. See \fBOPTIONS (detect)\fR below,
+for ICS technique and carries a labeled confidence: \fBHigh\fR for most
+always\-notable findings (the traffic shape itself needs no "new vs.
+known" judgment), except the Modbus write\-without\-prior\-read pattern,
+which is always\-notable but deliberately \fBLow\fR unconditionally (many
+legitimate deployments write setpoints without reading them back first);
+\fBMedium\fR/\fBLow\fR for a new\-vs\-known finding, resolved against
+\fB\-\-baseline\-file\fR when given, or first\-occurrence\-within\-this\-capture
+otherwise. With \fB\-\-policy\fR, a new remote\-access finding's own
+technique is further resolved between T0886 (Remote Services) and T0822
+(External Remote Services) depending on whether it crosses a declared
+zone boundary. \fBdetect\fR always exits 0 on a successful run, regardless
+of findings \-\- see \fBEXIT STATUS\fR. See \fBOPTIONS (detect)\fR below,
 \fBdocs/design/detection-engine.md\fR for the full design record, and
 \fBdocs/USER_GUIDE.md\fR's \fBdetect\fR section for a worked example.
 .TP

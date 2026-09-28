@@ -13073,6 +13073,71 @@ it done as its own patch.
     `docs/PROTOCOL_COVERAGE.md` (new UMAS entry) all updated in the same
     increment.
 
+89. **Six Snort-style pattern extensions to `detect`.** Jurgen's own direct
+    follow-up after item 88 shipped -- "how do I add more detection
+    patterns like those of Snort?" Presented with the real architectural
+    choice (Snort/Suricata evaluate a runtime rules file with no recompile;
+    this codebase has no such mechanism anywhere), Jurgen chose to keep
+    extending the curated, hardcoded-C++ findings model rather than build a
+    generic rule engine -- see
+    [docs/design/detection-engine.md](design/detection-engine.md)'s own
+    "Snort-style pattern extensions" section for that scoping conversation
+    and the full research record, including two patterns that were
+    honestly rescoped (broadened, not invented) when no citable primary
+    source existed for the originally-proposed wire-format specifics (a
+    ControlLogix run/idle mode-change attribute; an S7comm
+    password/authentication mechanism), and a third corrected before
+    implementation once real DNP3 semantics were checked (Direct Operate is
+    a legitimate mechanism, not a Select-before-Operate bypass).
+
+    All six read fields this codebase's decoders already produce -- no new
+    raw-byte decode work, so (matching the precedent `baseline.cpp`/
+    `asset_inventory.cpp`/`policy.cpp` already set) none needed a dedicated
+    libFuzzer harness: a CIP write to the Identity object (class 0x01,
+    `ProtocolMisuse`/T0855); a DNP3 Operate (0x04) with no Select (0x03)
+    ever seen for that master/outstation pair (`ProtocolMisuse`/T0855); a
+    Modbus Write Multiple Coils/Registers request outside every range ever
+    read from the same conduit/table (`ProtocolMisuse`/T0831, the one
+    pattern that is always-notable yet deliberately `Low` confidence
+    unconditionally -- `record_always_notable` grew an optional trailing
+    `DetectionConfidence` parameter, default `High`, for this); a BACnet
+    Who-Is volumetric flood/enumeration sweep past a threshold reused from
+    `attack_detect.hpp`'s own `DEFAULT_FLOOD_THRESHOLD` (100) for
+    consistency (`ProtocolMisuse`/T0888); S7comm Setup Communication (0xF0)
+    probing, resolved in `finish()` rather than `observe()` since "no other
+    function ever seen" can only be known once the whole capture is read
+    (`EngineeringStationActivity`/T0888); and a download-then-restart
+    composite -- a Program Download finding (T0843) and a restart/
+    mode-change finding (T0858/T0816) both against the same server within
+    300s of each other, itself a `finish()`-time post-pass over this same
+    call's own already-produced findings, citing T0831 (Manipulation of
+    Control) as its own distinct claim about the sequence rather than
+    restating either source finding.
+
+    New `tests/sample_detect_snort_patterns.pcap`
+    (`build_detect_snort_patterns_sample`, 16 packets, 8 findings) covers
+    five of the six, each on its own conduit paired with a negative/
+    contrast conduit proving the pattern doesn't fire when its own
+    condition isn't met; the BACnet flood is in its own
+    `tests/sample_detect_bacnet_who_is_flood.pcap`
+    (`build_detect_bacnet_who_is_flood_sample`, 105 packets) since it
+    genuinely needs threshold-worth (100) of packets that would make the
+    other five scenarios' exact-count assertions brittle if interleaved.
+    `detect_snort_patterns_all_findings`/`detect_snort_patterns_json_shape`/
+    `detect_bacnet_who_is_flood` (`CMakeLists.txt`) pin every finding end
+    to end, written only after running the real CLI binary and inspecting
+    its actual output. Full CTest across all four standing build
+    configurations (default GCC, ASan/UBSan `build-fuzz`,
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`, MinGW-w64
+    cross-compile, build-only there). `docs/design/detection-engine.md`
+    (new "Snort-style pattern extensions" section plus three new
+    "explicitly out of scope" bullets), `docs/USER_GUIDE.md` (new
+    "Snort-style pattern extensions" subsection, always-notable-findings
+    paragraph updated, five new LIMITATIONS bullets), and
+    `man/conduitscope.1` (`detect` COMMANDS entry updated to name the six
+    patterns and the Modbus confidence exception) all updated in the same
+    increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

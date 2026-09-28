@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/detect_engine.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ostream>
 #include <sstream>
+#include <utility>
 
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/dnp3.hpp"
@@ -93,23 +96,86 @@ std::string new_conduit_key(const std::string& client_ip, const std::string& ser
     return k.str();
 }
 
+// A small local copy of baseline.cpp's own merge_range_into (same linear-scan-then-sort-and-
+// coalesce approach, same "a handful of intervals per operation in practice, no interval tree
+// needed" reasoning) -- used by the Modbus write-without-prior-read pattern below to decide whether
+// a write's range is fully covered by the union of everything read so far on the same conduit/
+// table, even when the reads themselves arrived as several separate, now-adjacent/overlapping
+// requests. Kept as its own copy rather than exported from baseline.cpp/.hpp, matching this file's
+// own established per-translation-unit-copy convention for small helpers (see json_escape/
+// format_epoch_seconds above).
+void modbus_merge_range_into(std::vector<std::pair<uint32_t, uint32_t>>& ranges,
+                              std::pair<uint32_t, uint32_t> r) {
+    if (r.first >= r.second) return;  // empty/invalid range -- nothing to add
+    ranges.push_back(r);
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<std::pair<uint32_t, uint32_t>> merged;
+    merged.reserve(ranges.size());
+    for (const auto& cur : ranges) {
+        if (!merged.empty() && cur.first <= merged.back().second) {
+            merged.back().second = std::max(merged.back().second, cur.second);
+        } else {
+            merged.push_back(cur);
+        }
+    }
+    ranges = std::move(merged);
+}
+
+// True iff [start, end) is fully contained in one single already-coalesced entry of `ranges` --
+// same "no need to union multiple entries, they're already coalesced" reasoning as baseline.cpp's
+// own range-containment check.
+bool modbus_range_fully_read(const std::vector<std::pair<uint32_t, uint32_t>>& ranges, uint32_t start,
+                              uint32_t end) {
+    for (const auto& r : ranges) {
+        if (r.first <= start && end <= r.second) return true;
+    }
+    return false;
+}
+
+// BACnet Who-Is flood/enumeration-sweep threshold -- deliberately the SAME small, admittedly-
+// arbitrary illustrative default attack_detect.hpp's own DEFAULT_FLOOD_THRESHOLD already documents
+// (100), for consistency across this codebase's two independent flood-shaped detectors, not because
+// 100 is a vendor-sourced or researched number for Who-Is specifically -- see that constant's own
+// comment (attack_detect.hpp) for the full reasoning this reuses.
+constexpr size_t kBacnetWhoIsFloodThreshold = 100;
+
+// S7comm Setup Communication probing threshold -- a small, documented judgment-call default (NOT
+// vendor-sourced, matching kBacnetWhoIsFloodThreshold/DEFAULT_FLOOD_THRESHOLD's own precedent):
+// low enough that a handful of repeated bare handshakes with no real S7comm function ever following
+// them is still caught, high enough that a single truncated capture (one legitimate Setup
+// Communication, then the capture simply ends before the engineering tool's next request) doesn't
+// trip it on its own.
+constexpr size_t kS7SetupCommProbeThreshold = 3;
+
+// Download-then-restart composite window, seconds -- another small, documented judgment-call
+// default, not vendor-sourced: long enough to cover a realistic "download, then a deliberate pause
+// before activating it" gap, short enough that two genuinely unrelated findings against the same
+// server hours apart aren't linked together as if they were one event.
+constexpr double kCompositeWindowSeconds = 300.0;
+
 }  // namespace
 
 void DetectEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
     if (!dp.has_ip) return;
 
+    // `confidence` defaults to High -- every original (gap #4) always-notable source relies on that
+    // default and passes nothing here. The Modbus write-without-prior-read pattern below is the one
+    // always-notable source that deliberately passes DetectionConfidence::Low instead (see its own
+    // call site comment for why "the traffic shape is structurally notable" doesn't hold as strongly
+    // for that pattern as it does for every other always-notable finding).
     auto record_always_notable = [&](const char* finding_kind, DetectionCategory category,
                                       const MitreAttackTechnique& technique, const std::string& client_ip,
                                       const std::string& server_ip, const std::string& protocol,
-                                      uint16_t server_port, const std::string& description) {
+                                      uint16_t server_port, const std::string& description,
+                                      DetectionConfidence confidence = DetectionConfidence::High) {
         std::string key = always_notable_key(finding_kind, client_ip, server_ip, protocol, server_port);
         auto it = always_notable_.find(key);
         if (it == always_notable_.end()) {
             DetectionFinding f;
             f.category = category;
             f.technique = technique;
-            f.confidence = DetectionConfidence::High;
+            f.confidence = confidence;
             f.client_ip = client_ip;
             f.server_ip = server_ip;
             f.protocol = protocol;
@@ -193,6 +259,20 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                            ") -- a program/logic block is being written TO the CPU from an "
                                            "engineering station");
             }
+
+            // Setup Communication (0xF0) probing state -- see s7_setup_comm_state_'s own comment
+            // (detect_engine.hpp) for why this is only TRACKED here and resolved later, in finish().
+            // Every branch of this whole if/else-if chain above (including the three not otherwise
+            // named here) counts as "some other function was seen" except Setup Communication itself
+            // -- a genuine engineering-station session does real work beyond the initial handshake.
+            if (sr.function_name == "Setup Communication") {
+                S7SetupCommProbeState& st = s7_setup_comm_state_[dp.src_ip + "|" + dp.dst_ip];
+                if (st.setup_comm_count == 0) st.first_seen = dp.timestamp;
+                st.last_seen = dp.timestamp;
+                ++st.setup_comm_count;
+            } else {
+                s7_setup_comm_state_[dp.src_ip + "|" + dp.dst_ip].other_function_seen = true;
+            }
         }
     }
 
@@ -231,6 +311,32 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                         "DNP3 Unsolicited Response from an outstation this capture never saw a master "
                         "enable unsolicited responses on (Enable Unsolicited Responses, function 0x14) -- "
                         "either enabled before this capture began, or genuinely unexpected");
+                }
+            } else if (dr.dnp3_function_name == "Select") {
+                dnp3_select_seen_[dp.src_ip + "|" + dp.dst_ip] = true;
+            } else if (dr.dnp3_function_name == "Operate") {
+                // Direct Operate (0x05) is deliberately NOT checked here at all -- see
+                // dnp3_select_seen_'s own comment (detect_engine.hpp) for why flagging it would be
+                // wrong. Only a plain Operate (0x04, the second half of the Select-before-Operate
+                // pair) with no Select EVER recorded for this exact master/outstation pair in this
+                // capture is the misuse-shaped case -- an outstation genuinely accepting a bare
+                // Operate with no prior Select is either misconfigured (accepting Operate without
+                // requiring SBO) or the master skipped straight to Operate, either way worth an
+                // analyst's attention. Coarse by design (per-pair, not per-object-index) -- see
+                // dnp3_select_seen_'s own comment for why.
+                std::string skey = dp.src_ip + "|" + dp.dst_ip;
+                auto it = dnp3_select_seen_.find(skey);
+                if (it == dnp3_select_seen_.end() || !it->second) {
+                    record_always_notable(
+                        "dnp3-operate-without-select", DetectionCategory::ProtocolMisuse,
+                        mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip, "dnp3",
+                        dp.dst_port,
+                        "DNP3 Operate (0x04) with no matching Select (0x03) ever seen for this master/"
+                        "outstation pair in this capture -- either the Select happened before this "
+                        "capture began, or the outstation is accepting Operate without requiring "
+                        "Select-before-Operate first (not the same thing as Direct Operate 0x05, "
+                        "which this engine never flags -- Direct Operate is a legitimate, "
+                        "intentional bypass of Select-before-Operate, not a violation of it)");
                 }
             }
         }
@@ -300,6 +406,31 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        "communication can be silenced or re-enabled by this service");
             }
         }
+
+        // --- BACnet Who-Is flood / device-enumeration sweep (protocol misuse) --------------------
+        // Who-Is (unconfirmed service choice 8, "who-Is") is routinely sent as a BACnet/IP
+        // broadcast, so this is grouped by SOURCE ip alone -- see
+        // bacnet_who_is_count_by_source_'s own comment (detect_engine.hpp) for why destination is
+        // deliberately not part of the key. Fires exactly once, the moment a source's own running
+        // count reaches kBacnetWhoIsFloodThreshold (mirroring attack_detect.hpp's own
+        // DEFAULT_FLOOD_THRESHOLD "fires exactly once" behavior) -- record_always_notable's own
+        // dedup-by-key handles every count past the threshold as an ordinary last_seen/packet_count
+        // update to that same finding, so nothing extra is needed here for that.
+        if (bf.has_npdu && bf.npdu.has_apdu && bf.npdu.apdu.pdu_type_name == "Unconfirmed-Request" &&
+            bf.npdu.apdu.service_choice_name == "who-Is") {
+            size_t count = ++bacnet_who_is_count_by_source_[dp.src_ip];
+            if (count >= kBacnetWhoIsFloodThreshold) {
+                record_always_notable(
+                    "bacnet-who-is-flood", DetectionCategory::ProtocolMisuse,
+                    mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip, "bacnet",
+                    dp.dst_port,
+                    "BACnet Who-Is flood/device-enumeration sweep from this source -- at least " +
+                        std::to_string(kBacnetWhoIsFloodThreshold) +
+                        " Who-Is requests observed in this capture (destination shown is only the "
+                        "most recent one -- Who-Is is routinely broadcast, so this source may have "
+                        "targeted several destinations)");
+            }
+        }
     }
 
     // --- EtherNet/IP: CIP Forward_Open/Large_Forward_Open from a new originator (protocol misuse) --
@@ -330,6 +461,35 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 }
                 originators.push_back(dp.src_ip);
             }
+        }
+
+        // --- CIP Identity Object write (protocol misuse) -----------------------------------------
+        // Any Set_Attribute_Single (0x10) or Set_Attributes_All (0x02) WRITE (request side --
+        // response carries no path at all, see CipMessage::path's own comment) addressed at CIP
+        // class 0x01 (the Identity object -- every CIP device has one, ODVA Vol.1 Ch.5-2). Scoped
+        // deliberately BROAD -- "any write to the Identity object" -- rather than a specific
+        // run/program/remote-mode attribute number: the real-world precedent for this pattern
+        // (Digital Bond's "Basecamp"-era ControlLogix remote-mode-change research) uses an
+        // undocumented Rockwell mechanism with no citable primary source for the exact wire format
+        // (attribute ID/value), and this codebase's own standing discipline is to not hardcode a
+        // guessed wire-format detail -- Jurgen's own explicit scoping choice when this ambiguity was
+        // raised (docs/design/detection-engine.md has the full record). The Identity object's own
+        // writable attributes are narrow in practice (mostly vendor-specific/configuration, not
+        // routine process-data attributes any legitimate HMI/SCADA polling loop would ever touch),
+        // so "any write here" is still a meaningfully narrow, genuinely-suspicious signal even
+        // without pinning down which attribute a mode change actually uses.
+        if (ef.has_cip && !ef.cip.is_response &&
+            (ef.cip.service_name == "Set_Attribute_Single" || ef.cip.service_name == "Set_Attributes_All") &&
+            ef.cip.path.class_id && *ef.cip.path.class_id == 0x01) {
+            record_always_notable(
+                "cip-identity-write", DetectionCategory::ProtocolMisuse,
+                mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip, "enip", dp.dst_port,
+                "CIP " + ef.cip.service_name +
+                    " write to the Identity object (class 0x01) -- broadened-scope stand-in for a "
+                    "ControlLogix-style remote run/program/remote mode change: this engine cannot "
+                    "confirm which specific Identity attribute was written (no citable primary source "
+                    "for that wire format), so every write to this object is flagged rather than "
+                    "guessing at one");
         }
     }
 
@@ -391,6 +551,49 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                             is_reservation ? "umas-new-originator-reservation" : "umas-new-originator-discovery");
                     }
                     originators.push_back(dp.src_ip);
+                }
+            }
+        }
+
+        // --- Modbus: write to a range never covered by a prior read on this conduit (protocol
+        // --- misuse, deliberately Low confidence) -------------------------------------------------
+        // Only the two write-multiple functions carry a structured, request-confirmed
+        // start_address/quantity at all (mb.is_request && mb.start_address && mb.quantity) -- Write
+        // Single Coil/Register are excluded, see modbus_read_ranges_by_conduit_table_'s own comment
+        // (detect_engine.hpp) for why. Deliberately Low confidence unconditionally, via
+        // record_always_notable's own confidence parameter -- unlike every other always-notable
+        // source in this file, "write without a matching prior read" is a genuinely weak signal on
+        // its own: plenty of legitimate deployments write setpoints/commands without ever reading
+        // them back, especially in a short single-pcap capture that may simply not include the read
+        // traffic that exists elsewhere in the plant's normal polling cycle. Two separate address
+        // tables (coils vs. holding registers), never cross-checked against each other -- see
+        // modbus_read_ranges_by_conduit_table_'s own comment.
+        if (mb.is_request && mb.start_address && mb.quantity &&
+            (mb.function_name == "Read Coils" || mb.function_name == "Read Holding Registers" ||
+             mb.function_name == "Write Multiple Coils" || mb.function_name == "Write Multiple Registers")) {
+            bool is_coils_table =
+                (mb.function_name == "Read Coils" || mb.function_name == "Write Multiple Coils");
+            std::string conduit_key = dp.src_ip + "|" + dp.dst_ip + "|" + std::to_string(dp.dst_port) + "|" +
+                                       (is_coils_table ? "coils" : "holding_registers");
+            uint32_t start = *mb.start_address;
+            uint32_t end = start + static_cast<uint32_t>(*mb.quantity);
+            if (mb.function_name == "Read Coils" || mb.function_name == "Read Holding Registers") {
+                modbus_merge_range_into(modbus_read_ranges_by_conduit_table_[conduit_key], {start, end});
+            } else {
+                const auto& read_ranges = modbus_read_ranges_by_conduit_table_[conduit_key];
+                if (!modbus_range_fully_read(read_ranges, start, end)) {
+                    record_always_notable(
+                        mb.function_name == "Write Multiple Coils" ? "modbus-write-without-read-coils"
+                                                                    : "modbus-write-without-read-registers",
+                        DetectionCategory::ProtocolMisuse, mitre_t0831_manipulation_of_control(), dp.src_ip,
+                        dp.dst_ip, "modbus", dp.dst_port,
+                        "Modbus " + mb.function_name + " to address range [" + std::to_string(start) + ", " +
+                            std::to_string(end) +
+                            ") not fully covered by any prior read (same conduit, same address table) in "
+                            "this capture -- a genuinely weak signal on its own (many legitimate "
+                            "deployments write setpoints without reading them back first): treat as a "
+                            "prompt to check this range's purpose, not as confirmed misuse",
+                        DetectionConfidence::Low);
                 }
             }
         }
@@ -518,6 +721,116 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
             f.description = d.str();
         }
         report.findings.push_back(std::move(f));
+    }
+
+    // --- S7comm Setup Communication probing (EngineeringStationActivity/T0888) -- resolved HERE,
+    // not in observe(), because "no other S7comm function was ever seen for this pair" can only be
+    // confirmed once the whole capture has been read (see s7_setup_comm_state_'s own comment,
+    // detect_engine.hpp). Collected into a vector and sorted by key before appending, so the report
+    // stays deterministic independent of s7_setup_comm_state_'s own unordered_map iteration order --
+    // the same discipline always_notable_order_/new_conduit_order_ already established for
+    // observe()-time findings above.
+    {
+        std::vector<std::pair<std::string, S7SetupCommProbeState>> qualifying;
+        for (const auto& entry : s7_setup_comm_state_) {
+            if (entry.second.setup_comm_count >= kS7SetupCommProbeThreshold && !entry.second.other_function_seen) {
+                qualifying.emplace_back(entry.first, entry.second);
+            }
+        }
+        std::sort(qualifying.begin(), qualifying.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (const auto& entry : qualifying) {
+            const std::string& key = entry.first;
+            const S7SetupCommProbeState& st = entry.second;
+            size_t sep = key.find('|');
+            std::string client_ip = sep == std::string::npos ? key : key.substr(0, sep);
+            std::string server_ip = sep == std::string::npos ? "" : key.substr(sep + 1);
+            DetectionFinding f;
+            f.category = DetectionCategory::EngineeringStationActivity;
+            f.technique = mitre_t0888_remote_system_information_discovery();
+            f.confidence = DetectionConfidence::High;
+            f.client_ip = client_ip;
+            f.server_ip = server_ip;
+            f.protocol = "s7comm";
+            f.server_port = 102;
+            f.first_seen = st.first_seen;
+            f.last_seen = st.last_seen;
+            f.packet_count = st.setup_comm_count;
+            std::ostringstream d;
+            d << "S7comm Setup Communication (function 0xF0) seen " << st.setup_comm_count << " times from "
+              << client_ip << " to " << server_ip
+              << " with no other S7comm function ever observed between them in this capture -- consistent "
+                 "with connection/session probing rather than genuine engineering-station use (a real "
+                 "engineering session does more than repeat the handshake)";
+            f.description = d.str();
+            report.findings.push_back(std::move(f));
+        }
+    }
+
+    // --- Composite: a Program Download (T0843) and a restart/mode-change (T0858/T0816) finding both
+    // against the same server within kCompositeWindowSeconds -- the classic "download then activate"
+    // attack sequence, not necessarily two unrelated events. A post-pass over this SAME finish()
+    // call's own already-produced findings (everything pushed to report.findings above, from every
+    // source: always-notable, resolved new-conduit, S7 probing) -- needs no new observe()-time
+    // tracking of its own. At most ONE composite per server_ip (the closest-in-time download/restart
+    // pair), so a server with several downloads and restarts doesn't spam several overlapping
+    // composites for what's realistically one incident.
+    {
+        std::unordered_map<std::string, std::vector<const DetectionFinding*>> downloads_by_server;
+        std::unordered_map<std::string, std::vector<const DetectionFinding*>> restarts_by_server;
+        for (const auto& f : report.findings) {
+            if (f.technique.id == "T0843") {
+                downloads_by_server[f.server_ip].push_back(&f);
+            } else if (f.technique.id == "T0858" || f.technique.id == "T0816") {
+                restarts_by_server[f.server_ip].push_back(&f);
+            }
+        }
+        std::vector<DetectionFinding> composites;
+        for (const auto& entry : downloads_by_server) {
+            const std::string& server_ip = entry.first;
+            const std::vector<const DetectionFinding*>& downloads = entry.second;
+            auto rit = restarts_by_server.find(server_ip);
+            if (rit == restarts_by_server.end()) continue;
+            const DetectionFinding* best_download = nullptr;
+            const DetectionFinding* best_restart = nullptr;
+            double best_gap = -1.0;
+            for (const auto* d : downloads) {
+                for (const auto* r : rit->second) {
+                    double gap = std::fabs(d->first_seen - r->first_seen);
+                    if (gap <= kCompositeWindowSeconds && (best_gap < 0.0 || gap < best_gap)) {
+                        best_gap = gap;
+                        best_download = d;
+                        best_restart = r;
+                    }
+                }
+            }
+            if (!best_download || !best_restart) continue;
+            DetectionFinding f;
+            f.category = DetectionCategory::FirmwareLogicChange;
+            f.technique = mitre_t0831_manipulation_of_control();
+            f.confidence = DetectionConfidence::High;
+            f.client_ip = best_download->client_ip;
+            f.server_ip = server_ip;
+            f.protocol = best_download->protocol;
+            f.server_port = best_download->server_port;
+            f.first_seen = std::min(best_download->first_seen, best_restart->first_seen);
+            f.last_seen = std::max(best_download->last_seen, best_restart->last_seen);
+            f.packet_count = best_download->packet_count + best_restart->packet_count;
+            std::ostringstream d;
+            d << "Composite finding: a firmware/logic download (" << best_download->technique.id << " "
+              << best_download->technique.name << ", " << best_download->protocol
+              << ") and a restart/mode-change (" << best_restart->technique.id << " "
+              << best_restart->technique.name << ", " << best_restart->protocol << ") both observed against "
+              << server_ip << " within " << static_cast<long>(kCompositeWindowSeconds)
+              << "s of each other -- consistent with a download-then-activate attack pattern, not "
+                 "necessarily two unrelated findings; see the individual findings above for each event's "
+                 "own detail";
+            f.description = d.str();
+            composites.push_back(std::move(f));
+        }
+        std::sort(composites.begin(), composites.end(),
+                  [](const DetectionFinding& a, const DetectionFinding& b) { return a.server_ip < b.server_ip; });
+        for (auto& c : composites) report.findings.push_back(std::move(c));
     }
 
     for (const auto& f : report.findings) {

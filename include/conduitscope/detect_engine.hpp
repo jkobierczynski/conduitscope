@@ -37,12 +37,45 @@
 // onto attack_detect.hpp/ipv6_attack_detect.hpp/baseline's own existing findings is a separate,
 // larger effort across already-shipped, already-tested code, and wasn't part of what Jurgen asked
 // to start here -- see docs/design/detection-engine.md's own "explicitly out of scope" note.
+//
+// Six Snort-style patterns added as a direct follow-up (docs/design/detection-engine.md's own
+// "Snort-style pattern extensions" section has the full research/scoping record for each):
+//   - CIP Identity Object write (any Set_Attribute_Single/Set_Attributes_All WRITE addressed at CIP
+//     class 0x01) -- always-notable, ProtocolMisuse/T0855. Deliberately scoped to "any write to the
+//     Identity object" rather than a specific run/idle-mode attribute/value, since no citable
+//     primary source for a ControlLogix mode-change wire format could be found -- see
+//     detect_engine.cpp's own call-site comment.
+//   - DNP3 Operate (0x04) with no matching prior Select (0x03) on the same master/outstation pair --
+//     always-notable, ProtocolMisuse/T0855. Deliberately NOT "Direct Operate observed" (Direct
+//     Operate is a legitimate, routinely-used DNP3 mechanism, not a bypass) -- see
+//     dnp3_select_seen_'s own comment.
+//   - A Modbus Write Multiple Coils/Registers request whose address range was never covered by any
+//     prior read (same function family, same conduit) in this capture -- always-notable but
+//     DetectionConfidence::Low unconditionally (not the usual unconditional High every other
+//     always-notable finding gets): many legitimate deployments write setpoints without ever
+//     reading them back first, so this is honestly a much weaker signal -- see
+//     modbus_read_ranges_by_conduit_table_'s own comment and record_always_notable's own
+//     confidence parameter (detect_engine.cpp).
+//   - A BACnet Who-Is volumetric flood/enumeration sweep from one source, past a threshold --
+//     always-notable, ProtocolMisuse/T0888 -- see bacnet_who_is_count_by_source_'s own comment.
+//   - S7comm Setup Communication (0xF0) probing: a (client, server) pair with Setup Communication
+//     seen repeatedly and NO other S7comm function ever seen between them in this whole capture --
+//     resolved in finish() (not observe(), since "no other function ever seen" can only be known
+//     once the whole capture has been read), EngineeringStationActivity/T0888 -- see
+//     s7_setup_comm_state_'s own comment.
+//   - A composite: a Program Download finding (T0843) and a restart/mode-change finding (T0858/
+//     T0816) both seen against the same server within a short window -- the classic "install then
+//     activate" sabotage sequence, not necessarily two unrelated findings. Resolved in finish() as a
+//     post-pass over this engine's OWN already-produced findings (needs no new observe()-time
+//     tracking) -- FirmwareLogicChange/T0831, see finish()'s own implementation comment
+//     (detect_engine.cpp).
 #pragma once
 
 #include <cstdint>
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "conduitscope/baseline.hpp"  // BaselineStore -- optional finish() input
@@ -115,14 +148,17 @@ public:
     // Folds one already-decoded packet into this engine's state. Call once per packet, in capture
     // order (same discipline as Decoder::decode/PolicyEngine::observe/AssetInventoryEngine::observe).
     //
-    // Produces an ALWAYS-NOTABLE finding immediately (High confidence) the first time a given
-    // (category, technique, client_ip, server_ip, protocol, server_port) combination is observed;
-    // a later packet matching the same combination only updates that finding's own last_seen/
-    // packet_count, never creates a second finding for the same combination -- see
-    // detect_engine.cpp's own per-protocol wiring for exactly which decoded fields produce these
-    // (S7 PLC Control/PLC Stop/block-download, DNP3 Cold/Warm Restart/Enable-Unsolicited-then-
-    // Unsolicited-Response-with-none-seen/an ASDU with an "unknown ..." IEC 104 COT/a C_RP_NA_1
-    // Reset Process command, BACnet ReinitializeDevice/DeviceCommunicationControl).
+    // Produces an ALWAYS-NOTABLE finding immediately (usually High confidence -- the Modbus
+    // write-without-prior-read pattern below is the one deliberate exception, see its own comment)
+    // the first time a given (category, technique, client_ip, server_ip, protocol, server_port)
+    // combination is observed; a later packet matching the same combination only updates that
+    // finding's own last_seen/packet_count, never creates a second finding for the same combination
+    // -- see detect_engine.cpp's own per-protocol wiring for exactly which decoded fields produce
+    // these (S7 PLC Control/PLC Stop/block-download, DNP3 Cold/Warm Restart/Enable-Unsolicited-then-
+    // Unsolicited-Response-with-none-seen/Operate-with-no-prior-Select, an ASDU with an "unknown ..."
+    // IEC 104 COT/a C_RP_NA_1 Reset Process command, BACnet ReinitializeDevice/
+    // DeviceCommunicationControl/a Who-Is flood past threshold, a CIP Identity Object write, a
+    // Modbus write outside every range ever read on the same conduit/table).
     //
     // Tracks a NEW-VS-KNOWN candidate (see this file's own header comment) the first time a given
     // (client_ip, server_ip, protocol, server_port) conduit is observed carrying a Tier-1
@@ -145,6 +181,13 @@ public:
     // entirely, no finding produced); a candidate genuinely absent gets DetectionConfidence::Medium.
     // With `baseline` null, every tracked candidate becomes a DetectionConfidence::Low finding
     // instead (first-occurrence-within-this-capture -- see this file's own header comment).
+    //
+    // Also resolves the two finding sources that genuinely need whole-capture knowledge and so
+    // can't be decided in observe() alone: S7comm Setup Communication probing
+    // (s7_setup_comm_state_ -- "no other function ever seen" can't be confirmed mid-capture), and
+    // the download-then-restart composite (a post-pass over this SAME call's own already-produced
+    // findings, so it always sees the complete set -- see detect_engine.cpp's own implementation
+    // comment for both).
     //
     // Safe to call more than once; does not reset state.
     DetectionReport finish(const Policy* policy = nullptr, const BaselineStore* baseline = nullptr) const;
@@ -208,6 +251,74 @@ private:
     // that was never enabled is the misuse-shaped case -- see detect_engine.cpp's own call site.
     // Keyed "<master_ip>|<outstation_ip>".
     std::unordered_map<std::string, bool> dnp3_unsolicited_enabled_;
+
+    // DNP3 Select-before-Operate tracking: every (master_ip, outstation_ip) pair that has seen a
+    // Select (0x03) request, so a later Operate (0x04) with no Select ever recorded for that same
+    // pair is the misuse-shaped case. Deliberately does NOT flag Direct Operate (0x05) at all --
+    // Direct Operate is a real, spec-legal, routinely-used DNP3 mechanism that intentionally skips
+    // Select, not a bypass of one; flagging every Direct Operate would be pure noise, not a real
+    // finding (this was this engine's own original, imprecise framing of this pattern -- corrected
+    // before implementation once DNP3's actual semantics were checked, see docs/design/
+    // detection-engine.md). Also deliberately coarse: a "Select ever seen for this pair" boolean,
+    // not per-object-index Select/Operate pairing (DNP3's own spec pairs a Select with a SPECIFIC
+    // point/index, immediately followed by the matching Operate) -- the same "per-pair, not
+    // per-object" granularity dnp3_unsolicited_enabled_ above already uses for this same reason:
+    // this engine has no cross-request object-index correlation state today, and a coarser signal
+    // that's honestly scoped beats a falsely-precise one this codebase can't actually back. Never
+    // reset to false (unlike dnp3_unsolicited_enabled_, which DOES toggle off on Disable Unsolicited
+    // Responses -- there is no DNP3 "un-select" concept to mirror that with). Keyed
+    // "<master_ip>|<outstation_ip>", same ordering convention as dnp3_unsolicited_enabled_.
+    std::unordered_map<std::string, bool> dnp3_select_seen_;
+
+    // Modbus write-without-prior-read tracking: every address range ([start, start+quantity)) a
+    // Read Coils or Read Holding Registers request has observed, per conduit AND per address-space
+    // table -- so a Write Multiple Coils/Registers request whose range isn't covered by any prior
+    // read from the SAME table on the SAME conduit is the notable case. Deliberately two separate
+    // per-conduit maps in spirit (one keyed table per Modbus's own two writable data tables, Coils
+    // and Holding Registers -- Discrete Inputs and Input Registers are read-only tables nothing ever
+    // writes to, so they're never tracked here at all), folded into one map keyed
+    // "<client_ip>|<server_ip>|<server_port>|<table>" (table is "coils" or "holding_registers")
+    // rather than two separate members, mirroring extract_modbus_operations' own (baseline.cpp)
+    // "one address space per function" framing so a Coils read never silences a Holding-Registers
+    // write or vice versa. Write Single Coil/Write Single Register are NOT covered by this pattern
+    // at all -- modbus.hpp's own ModbusFrame::start_address/quantity comment documents why those two
+    // functions have no is_request-confirmed direction signal to key on in the first place. Ranges
+    // are merge-on-insert coalesced (see detect_engine.cpp's own modbus_merge_range_into, a small
+    // local copy of baseline.cpp's own merge_range_into -- this file's own per-translation-unit-copy
+    // convention, matching json_escape/format_epoch_seconds above) so a write spanning what were
+    // originally two separate, now-adjacent/overlapping reads is still correctly recognized as fully
+    // covered.
+    std::unordered_map<std::string, std::vector<std::pair<uint32_t, uint32_t>>>
+        modbus_read_ranges_by_conduit_table_;
+
+    // BACnet Who-Is volumetric flood/device-enumeration-sweep tracking: a running count of Who-Is
+    // (unconfirmed service choice 8, "who-Is") requests seen from a given source IP across this
+    // whole capture, regardless of destination (Who-Is is routinely sent as a BACnet/IP broadcast,
+    // so grouping by source alone -- not source+destination -- is the right granularity: the same
+    // sweep would otherwise be split across however many distinct broadcast/unicast destinations it
+    // happened to use). Once a source's count reaches kBacnetWhoIsFloodThreshold
+    // (detect_engine.cpp), every Who-Is from that source (including ones already counted before the
+    // threshold was reached) becomes part of one always-notable finding -- see detect_engine.cpp's
+    // own call site for exactly how the threshold check is done. Keyed by bare source IP.
+    std::unordered_map<std::string, size_t> bacnet_who_is_count_by_source_;
+
+    // S7comm Setup Communication (function code 0xF0) probing state, per (client_ip, server_ip)
+    // pair -- see this struct's own two fields for exactly what's tracked. Deliberately resolved in
+    // finish(), not observe(): "no other S7comm function was EVER seen between this pair" can only
+    // be known once the whole capture has been read (a later packet could always introduce a real
+    // function), unlike every other always-notable source in this engine, which only ever needs the
+    // CURRENT packet plus already-settled prior state to decide. Keyed "<client_ip>|<server_ip>".
+    struct S7SetupCommProbeState {
+        size_t setup_comm_count = 0;
+        bool other_function_seen = false;  // true once ANY S7comm function other than Setup
+                                             // Communication has been seen from this client to this
+                                             // server -- PLC Stop/Control, Read/Write Var, block
+                                             // download, anything at all; a pair that goes on to do
+                                             // real engineering-station work is not probing.
+        double first_seen = 0.0;
+        double last_seen = 0.0;
+    };
+    std::unordered_map<std::string, S7SetupCommProbeState> s7_setup_comm_state_;
 
     size_t total_packets_ = 0;
 };

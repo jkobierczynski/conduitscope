@@ -18238,6 +18238,169 @@ def build_detect_sample():
     (TESTS_DIR / "sample_detect.pcap").write_bytes(data)
 
 
+def build_detect_snort_patterns_sample():
+    """Six Snort-style pattern extensions to the `detect` subcommand, added as a direct follow-up to
+    Grok gap #4 (docs/design/detection-engine.md's own "Snort-style pattern extensions" section has
+    the full research/scoping record for each pattern; see detect_engine.cpp for exactly which
+    decoded fields each reads). One standalone fixture, separate from sample_detect.pcap, so none of
+    that fixture's own exact-order/exact-count CTest assertions need to change -- each new pattern
+    gets its own conduit here, plus a negative/contrast case proving it does NOT fire when the
+    pattern's own condition isn't met (the same "prove the false-positive path too" discipline
+    sample_umas.pcap's own scenario-1-vs-scenario-7 originator distinction already established).
+
+    Scenarios:
+      1) CIP Set_Attribute_Single write to the Identity object (class 0x01) -- ProtocolMisuse/T0855.
+      2) DNP3 Operate (0x04) with NO prior Select on this master/outstation pair -- ProtocolMisuse/
+         T0855 ("bad" conduit).
+      3) DNP3 Select (0x03) THEN Operate (0x04) on a DIFFERENT conduit -- must NOT flag ("ok"
+         conduit, proving Select really does suppress the finding).
+      4) Modbus Write Multiple Registers to a range with NO prior read on this conduit -- ProtocolMisuse/
+         T0831, Low confidence ("bad" conduit).
+      5) Modbus Read Holding Registers [200,210) THEN Write Multiple Registers [202,205) (fully
+         covered) on a DIFFERENT conduit -- must NOT flag ("ok" conduit).
+      6) S7comm Setup Communication x3, no other function ever seen on this pair -- EngineeringStationActivity/
+         T0888 ("bad" pair, resolved in finish()).
+      7) S7comm Setup Communication x3 PLUS a PLC Stop on a DIFFERENT pair -- the probing finding
+         must NOT fire for this pair (the PLC Stop itself still produces its OWN, separate T0858
+         finding -- expected, not a contradiction).
+      8) S7comm Request Download (T0843) THEN PLC Stop (T0858) against the SAME server, 10s apart
+         (well within kCompositeWindowSeconds/300s) -- the two individual findings PLUS one
+         composite FirmwareLogicChange/T0831 finding.
+    """
+    ENG_IP, ENG_MAC = "192.168.1.70", mac("00:0c:29:cd:10:01")
+    CIP_S_IP, CIP_S_MAC = "192.168.1.71", mac("00:0c:29:cd:10:02")
+    DNP3_BAD_IP, DNP3_BAD_MAC = "192.168.1.72", mac("00:0c:29:cd:10:03")
+    DNP3_OK_IP, DNP3_OK_MAC = "192.168.1.73", mac("00:0c:29:cd:10:04")
+    MB_BAD_IP, MB_BAD_MAC = "192.168.1.74", mac("00:0c:29:cd:10:05")
+    MB_OK_IP, MB_OK_MAC = "192.168.1.75", mac("00:0c:29:cd:10:06")
+    S7_PROBE_IP, S7_PROBE_MAC = "192.168.1.76", mac("00:0c:29:cd:10:07")
+    S7_PROBE_OK_IP, S7_PROBE_OK_MAC = "192.168.1.77", mac("00:0c:29:cd:10:08")
+    COMPOSITE_IP, COMPOSITE_MAC = "192.168.1.78", mac("00:0c:29:cd:10:09")
+
+    packets = []  # list of (payload_bytes, offset_seconds) -- offset_seconds lets scenario 8 place
+                  # its two packets close together in wall-clock time (10s apart) regardless of
+                  # packet-list position, since kCompositeWindowSeconds is judged on dp.timestamp,
+                  # not packet order.
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident, offset_seconds=None):
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4100 + ident) + tcp
+        pkt = eth_header(dst_mac, src_mac, 0x0800) + ip
+        packets.append((pkt, ident if offset_seconds is None else offset_seconds))
+
+    # 1) CIP Set_Attribute_Single (service 0x10) write to Identity object (class 0x01, instance 1,
+    #    attribute 1) -- path: Class(0x20,0x01) Instance(0x24,0x01) Attribute(0x30,0x01), same
+    #    8-bit-logical-segment encoding sample_detect.pcap's own Forward_Open path already uses.
+    identity_write_cip = bytes([0x10, 0x03, 0x20, 0x01, 0x24, 0x01, 0x30, 0x01, 0xAA])
+    identity_write_msg = enip_message(0x006F, data=enip_cpf_unconnected(identity_write_cip),
+                                       session_handle=0x2001, sender_context=b"SNORT001")
+    add_tcp(ENG_IP, ENG_MAC, CIP_S_IP, CIP_S_MAC, 49500, ENIP_PORT, identity_write_msg, 1)
+
+    # 2) DNP3 Operate (0x04), no Select ever seen on this ENG_IP<->DNP3_BAD_IP pair -- must flag.
+    operate_bad = dnp3_link_frame(source=10, destination=20, user_data=bytes([0xC0, 0xC0, 0x04]))
+    add_tcp(ENG_IP, ENG_MAC, DNP3_BAD_IP, DNP3_BAD_MAC, 49501, 20000, operate_bad, 2)
+
+    # 3) DNP3 Select (0x03) then Operate (0x04) on a DIFFERENT pair (ENG_IP<->DNP3_OK_IP) -- must
+    #    NOT flag: this pair's own Select IS on record before its Operate arrives.
+    select_ok = dnp3_link_frame(source=10, destination=21, user_data=bytes([0xC0, 0xC0, 0x03]))
+    add_tcp(ENG_IP, ENG_MAC, DNP3_OK_IP, DNP3_OK_MAC, 49502, 20000, select_ok, 3)
+    operate_ok = dnp3_link_frame(source=10, destination=21, user_data=bytes([0xC0, 0xC0, 0x04]))
+    add_tcp(ENG_IP, ENG_MAC, DNP3_OK_IP, DNP3_OK_MAC, 49502, 20000, operate_ok, 4)
+
+    # 4) Modbus Write Multiple Registers [100,105) on ENG_IP<->MB_BAD_IP, no prior read at all on
+    #    this conduit -- must flag, Low confidence.
+    write_bad_pdu = bytes([0x10]) + struct.pack("!HHB", 100, 5, 10) + bytes(range(10))
+    write_bad_mbap = struct.pack("!HHHB", 201, 0, 1 + len(write_bad_pdu), 1) + write_bad_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_BAD_IP, MB_BAD_MAC, 49503, 502, write_bad_mbap, 5)
+
+    # 5) Modbus Read Holding Registers [200,210) THEN Write Multiple Registers [202,205) (fully
+    #    inside the just-read range) on a DIFFERENT conduit (ENG_IP<->MB_OK_IP) -- must NOT flag.
+    read_ok_pdu = bytes([0x03]) + struct.pack("!HH", 200, 10)
+    read_ok_mbap = struct.pack("!HHHB", 202, 0, 1 + len(read_ok_pdu), 1) + read_ok_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_OK_IP, MB_OK_MAC, 49504, 502, read_ok_mbap, 6)
+    write_ok_pdu = bytes([0x10]) + struct.pack("!HHB", 202, 3, 6) + bytes(range(6))
+    write_ok_mbap = struct.pack("!HHHB", 203, 0, 1 + len(write_ok_pdu), 1) + write_ok_pdu
+    add_tcp(ENG_IP, ENG_MAC, MB_OK_IP, MB_OK_MAC, 49504, 502, write_ok_mbap, 7)
+
+    # 6) S7comm Setup Communication (function 0xF0) x3, ENG_IP -> S7_PROBE_IP:102, no other S7comm
+    #    function ever seen between this pair -- must flag (resolved in finish(), not observe()).
+    setup_comm_param = bytes([0xF0])
+    for n in range(3):
+        s7_req = s7_header(0x01, 310 + n, len(setup_comm_param), 0) + setup_comm_param
+        s7_cotp = tpkt_frame(COTP_DT_HEADER, s7_req)
+        add_tcp(ENG_IP, ENG_MAC, S7_PROBE_IP, S7_PROBE_MAC, 49505, 102, s7_cotp, 8 + n)
+
+    # 7) S7comm Setup Communication x3 PLUS a PLC Stop (0x29), ENG_IP -> S7_PROBE_OK_IP:102 -- the
+    #    probing finding must NOT fire for this pair (PLC Stop's OWN T0858 finding still does, and
+    #    that's correct -- a real engineering session doing real work is exactly what "no other
+    #    function ever seen" is meant to tell apart from bare repeated handshakes).
+    for n in range(3):
+        s7_req = s7_header(0x01, 320 + n, len(setup_comm_param), 0) + setup_comm_param
+        s7_cotp = tpkt_frame(COTP_DT_HEADER, s7_req)
+        add_tcp(ENG_IP, ENG_MAC, S7_PROBE_OK_IP, S7_PROBE_OK_MAC, 49506, 102, s7_cotp, 11 + n)
+    plc_stop_ok_param = bytes([0x29])
+    s7_stop_ok_req = s7_header(0x01, 330, len(plc_stop_ok_param), 0) + plc_stop_ok_param
+    s7_stop_ok_cotp = tpkt_frame(COTP_DT_HEADER, s7_stop_ok_req)
+    add_tcp(ENG_IP, ENG_MAC, S7_PROBE_OK_IP, S7_PROBE_OK_MAC, 49506, 102, s7_stop_ok_cotp, 14)
+
+    # 8) S7comm Request Download (0x1A, T0843) then PLC Stop (0x29, T0858), same server
+    #    (COMPOSITE_IP), 10s apart -- well within kCompositeWindowSeconds (300s) -- triggers the
+    #    download-then-restart composite finding (FirmwareLogicChange/T0831) IN ADDITION TO the two
+    #    individual always-notable findings.
+    download_param = bytes([0x1A])
+    s7_download_req = s7_header(0x01, 340, len(download_param), 0) + download_param
+    s7_download_cotp = tpkt_frame(COTP_DT_HEADER, s7_download_req)
+    add_tcp(ENG_IP, ENG_MAC, COMPOSITE_IP, COMPOSITE_MAC, 49507, 102, s7_download_cotp, 15,
+            offset_seconds=15)
+    plc_stop_param = bytes([0x29])
+    s7_stop_req = s7_header(0x01, 341, len(plc_stop_param), 0) + plc_stop_param
+    s7_stop_cotp = tpkt_frame(COTP_DT_HEADER, s7_stop_req)
+    add_tcp(ENG_IP, ENG_MAC, COMPOSITE_IP, COMPOSITE_MAC, 49507, 102, s7_stop_cotp, 16, offset_seconds=25)
+
+    data = pcap_global_header()
+    for pkt, offset_seconds in packets:
+        data += pcap_record(pkt, 1_700_040_000 + offset_seconds, 0)
+    (TESTS_DIR / "sample_detect_snort_patterns.pcap").write_bytes(data)
+
+
+def build_detect_bacnet_who_is_flood_sample():
+    """BACnet Who-Is volumetric flood/device-enumeration-sweep pattern (Snort-style pattern
+    extension #4 to Grok gap #4 -- see build_detect_snort_patterns_sample's own docstring and
+    detect_engine.cpp's own bacnet_who_is_count_by_source_ call site). Kept as its OWN fixture
+    (rather than folded into sample_detect_snort_patterns.pcap) since it genuinely needs
+    kBacnetWhoIsFloodThreshold-worth of packets (100, detect_engine.cpp) -- interleaving that many
+    packets into a fixture whose other scenarios rely on exact packet-count assertions would make
+    every one of those brittle to a threshold constant that may change later.
+
+    FLOOD_IP sends 100 Who-Is broadcasts (0xFF broadcast destination) -- exactly
+    kBacnetWhoIsFloodThreshold -- crossing the threshold on the very last one. QUIET_IP sends only 5
+    (deliberately well under threshold) to prove the pattern genuinely needs the volume, not just
+    "any Who-Is at all" (BACnet Who-Is/I-Am is completely ordinary, low-volume device-discovery
+    traffic in a real network -- flagging it unconditionally would be pure noise)."""
+    FLOOD_IP, FLOOD_MAC = "192.168.1.79", mac("00:0c:29:cd:10:0a")
+    QUIET_IP, QUIET_MAC = "192.168.1.80", mac("00:0c:29:cd:10:0b")
+    BCAST_IP, BCAST_MAC = "255.255.255.255", mac("ff:ff:ff:ff:ff:ff")
+
+    packets = []
+    who_is = apdu_unconfirmed_request(8, b"")  # service choice 8, "who-Is", no device-instance range
+
+    def add_who_is(src_ip, src_mac, port_offset, ident):
+        msg = bvlc_message(0x0B, npdu_header() + who_is)  # 0x0B: Original-Broadcast-NPDU
+        udp = udp_header(47800 + port_offset, BACNET_PORT, msg)
+        ip = ipv4_header(src_ip, BCAST_IP, 17, len(udp), 0x4200 + ident) + udp
+        packets.append(eth_header(BCAST_MAC, src_mac, 0x0800) + ip)
+
+    for i in range(100):
+        add_who_is(FLOOD_IP, FLOOD_MAC, 0, i)
+    for i in range(5):
+        add_who_is(QUIET_IP, QUIET_MAC, 1, 100 + i)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_041_000 + i, i * 1000)
+    (TESTS_DIR / "sample_detect_bacnet_who_is_flood.pcap").write_bytes(data)
+
+
 def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
     """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
     umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
@@ -20271,6 +20434,8 @@ if __name__ == "__main__":
     build_baseline_opcua_new_nodeid_sample()
     build_baseline_iec104_new_ioa_sample()
     build_detect_sample()
+    build_detect_snort_patterns_sample()
+    build_detect_bacnet_who_is_flood_sample()
     build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()
