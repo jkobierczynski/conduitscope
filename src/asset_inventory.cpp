@@ -2,12 +2,16 @@
 #include "conduitscope/asset_inventory.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <iomanip>
 #include <map>
 #include <ostream>
 #include <sstream>
 #include <tuple>
+#include <utility>
 
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/cotp.hpp"
@@ -17,6 +21,7 @@
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/notable_it_protocols.hpp"
+#include "conduitscope/portable_time.hpp"
 #include "conduitscope/resolver.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/time_format.hpp"
@@ -250,6 +255,107 @@ std::string json_escape(const std::string& s) {
     }
     return out;
 }
+
+// Phase 8 of Grok gap #2 (CSV/CMDB export) -- RFC 4180 quoting, byte-identical to output.cpp's own
+// `csv_escape` (decode --format csv), kept as this file's own local copy rather than shared across
+// translation units -- same "each writer keeps its own escaper" convention json_escape above
+// already follows in this file (and json_escape's own precedent in policy_engine.cpp/baseline.cpp).
+std::string csv_escape(const std::string& s) {
+    bool needs_quotes = s.find_first_of(",\"\n\r") != std::string::npos;
+    if (!needs_quotes) return s;
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+// Phase 9 of Grok gap #2 (STIX/TAXII-lite export) -- see write_inventory_stix_json's own doc
+// comment (asset_inventory.hpp) for why this is a deterministic, non-cryptographic identifier
+// rather than sha256.hpp or a real random UUID source. A standard 64-bit FNV-1a (the public-domain
+// Fowler/Noll/Vo hash, offset basis/prime below are its published constants) run twice with two
+// different, arbitrarily-chosen-but-fixed seeds gives 128 independent-enough bits for a stable
+// identifier -- this is explicitly NOT a security hash (no collision resistance is needed or
+// claimed; a STIX id only has to be stable and vanishingly unlikely to collide across the assets
+// in one report, not resist a deliberate attacker), so FNV-1a's simplicity is the right tool here,
+// not a shortcut around a stronger one.
+uint64_t fnv1a64(const std::string& s, uint64_t seed) {
+    uint64_t h = seed;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 0x100000001b3ULL;  // FNV-1a's own published 64-bit prime
+    }
+    return h;
+}
+
+// Formats `key` as a deterministic RFC 9562 version-8 ("custom") UUID -- see
+// write_inventory_stix_json's own doc comment for why version 8 (reserved specifically for
+// implementation-defined deterministic UUIDs) is the honest choice here, not a claim of RFC 4122
+// UUIDv5 name-based-hash semantics this doesn't actually implement.
+std::string deterministic_uuid(const std::string& key) {
+    uint64_t h1 = fnv1a64(key, 0xcbf29ce484222325ULL);            // FNV-1a's own published offset basis
+    uint64_t h2 = fnv1a64(key, 0x9e3779b97f4a7c15ULL);            // an arbitrary, fixed second seed
+    uint8_t bytes[16];
+    for (int i = 0; i < 8; ++i) bytes[i] = static_cast<uint8_t>(h1 >> (56 - 8 * i));
+    for (int i = 0; i < 8; ++i) bytes[8 + i] = static_cast<uint8_t>(h2 >> (56 - 8 * i));
+    bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0F) | 0x80);  // version nibble = 8 ("custom")
+    bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3F) | 0x80);  // RFC 4122 variant bits = 10
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0], bytes[1],
+                  bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+                  bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+    return std::string(buf);
+}
+
+// STIX 2.1's `timestamp` type: RFC 3339, UTC only, exactly millisecond precision ("T" separator,
+// 3 fractional digits, "Z" suffix) -- distinct from every other timestamp renderer in this
+// codebase (time_format.hpp's own convention is space-separated with microsecond precision, see
+// format_epoch_seconds above), so this is its own small local formatter rather than a
+// time_format.hpp mode change that every OTHER writer would have to stay indifferent to.
+std::string format_stix_timestamp(double ts) {
+    double whole_d = std::floor(ts);
+    std::time_t tt = static_cast<std::time_t>(whole_d);
+    long millis = static_cast<long>(std::llround((ts - whole_d) * 1000.0));
+    if (millis >= 1000) {
+        millis -= 1000;
+        tt += 1;
+    }
+    std::tm tmv{};
+    if (!portable_gmtime(tt, tmv)) {
+        // Same "never fabricate a date" posture format_calendar (time_format.cpp) takes for a `ts`
+        // outside std::tm's representable range -- there is no valid STIX timestamp to produce, so
+        // this deliberately renders something that is visibly NOT a valid STIX timestamp rather
+        // than silently emitting a wrong one.
+        return "INVALID-TIMESTAMP-OUT-OF-RANGE";
+    }
+    // 64, not the tight ~25 this always actually needs: GCC's -Wformat-truncation sizes %d against
+    // tm_year/tm_mon/etc.'s full int range, not the real, calendar-clamped values portable_gmtime
+    // actually produces -- same oversized-buffer accommodation offset_suffix (time_format.cpp) already
+    // uses for the identical warning.
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ", tmv.tm_year + 1900, tmv.tm_mon + 1,
+                  tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec, millis);
+    return std::string(buf);
+}
+
+// Phase 10 of Grok gap #2 (firewall ACL draft export) -- prefix length to dotted-decimal subnet
+// mask (Cisco's `network-object`/FortiGate's `set subnet` both want this form, not CIDR notation
+// -- Palo Alto's `ip-netmask` takes CIDR notation directly, so it just reuses CidrBlock::text
+// as-is instead). ipv4.hpp's format_ipv4 already exists for the uint32 -> dotted-decimal half;
+// this is just the missing prefix-length -> netmask bit math, kept minimal (host-order uint32,
+// matching CidrBlock::network's own convention) rather than a general subnetting utility.
+std::string prefix_len_to_netmask(uint8_t prefix_len) {
+    uint32_t mask = prefix_len == 0 ? 0u : (prefix_len >= 32 ? 0xFFFFFFFFu : (~0u << (32 - prefix_len)));
+    return format_ipv4(mask);
+}
+
+// See write_inventory_acl_cisco's own doc comment (asset_inventory.hpp) for why this is exactly
+// is_known_target_port's own two UDP ports (BACNET_UDP_PORT/ENIP_IO_UDP_PORT) -- every other
+// conduit in this report is necessarily TCP.
+bool conduit_is_udp(const InventoryConduit& c) { return c.port == BACNET_UDP_PORT || c.port == ENIP_IO_UDP_PORT; }
 
 }  // namespace
 
@@ -1307,6 +1413,219 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
     }
     out << "  ]\n";
     out << "}\n";
+}
+
+void write_inventory_report_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver) {
+    out << "ip,mac,mac_vendor,vendor,product,firmware_revision,serial_number,plant_identification,"
+           "security_posture,inferred_role,protocols,ever_client,ever_server,first_seen,last_seen,"
+           "packet_count\n";
+    for (const auto& a : report.assets) {
+        std::string mac_vendor;
+        if (a.has_mac) {
+            if (auto v = resolver.oui_vendor(a.mac)) mac_vendor = *v;
+        }
+        out << csv_escape(a.ip) << ',' << (a.has_mac ? csv_escape(a.mac) : "") << ',' << csv_escape(mac_vendor)
+            << ',' << csv_escape(a.vendor) << ',' << csv_escape(a.product) << ',' << csv_escape(a.firmware_revision)
+            << ',' << csv_escape(a.serial_number) << ',' << csv_escape(a.plant_identification) << ','
+            << csv_escape(a.security_posture) << ',' << csv_escape(a.inferred_role) << ','
+            << csv_escape(protocol_list_text(a.protocols)) << ',' << (a.ever_client ? "true" : "false") << ','
+            << (a.ever_server ? "true" : "false") << ',' << csv_escape(format_epoch_seconds(a.first_seen)) << ','
+            << csv_escape(format_epoch_seconds(a.last_seen)) << ',' << a.packet_count << "\n";
+    }
+}
+
+void write_inventory_stix_json(std::ostream& out, const AssetInventoryReport& report, const std::string& capture_path,
+                                const Resolver& resolver) {
+    out << "{\n";
+    out << "  \"type\": \"bundle\",\n";
+    out << "  \"id\": \"bundle--" << deterministic_uuid("bundle:" + capture_path) << "\",\n";
+    out << "  \"objects\": [";
+    for (size_t i = 0; i < report.assets.size(); ++i) {
+        const InventoryAsset& a = report.assets[i];
+        out << (i == 0 ? "\n" : "");
+        out << "    {\n";
+        out << "      \"type\": \"infrastructure\",\n";
+        out << "      \"spec_version\": \"2.1\",\n";
+        out << "      \"id\": \"infrastructure--" << deterministic_uuid("infrastructure:" + a.ip) << "\",\n";
+        out << "      \"created\": \"" << format_stix_timestamp(a.first_seen) << "\",\n";
+        out << "      \"modified\": \"" << format_stix_timestamp(a.last_seen) << "\",\n";
+        out << "      \"name\": \"" << json_escape(a.ip) << "\",\n";
+        // See this function's own doc comment (asset_inventory.hpp) for why "unknown" is the only
+        // honest value here -- STIX's own infrastructure-type-ov has no ICS/OT vocabulary entry.
+        out << "      \"infrastructure_types\": [\"unknown\"],\n";
+        out << "      \"x_conduitscope_ip\": \"" << json_escape(a.ip) << "\"";
+        if (auto h = resolver.hostname(a.ip)) out << ",\n      \"x_conduitscope_hostname\": \"" << json_escape(*h) << "\"";
+        out << ",\n      \"x_conduitscope_mac\": " << (a.has_mac ? ("\"" + json_escape(a.mac) + "\"") : "null");
+        if (a.has_mac) {
+            if (auto v = resolver.oui_vendor(a.mac)) {
+                out << ",\n      \"x_conduitscope_mac_vendor\": \"" << json_escape(*v) << "\"";
+            }
+        }
+        if (!a.vendor.empty()) out << ",\n      \"x_conduitscope_vendor\": \"" << json_escape(a.vendor) << "\"";
+        if (!a.product.empty()) out << ",\n      \"x_conduitscope_product\": \"" << json_escape(a.product) << "\"";
+        if (!a.firmware_revision.empty()) {
+            out << ",\n      \"x_conduitscope_firmware_revision\": \"" << json_escape(a.firmware_revision) << "\"";
+        }
+        if (!a.serial_number.empty()) {
+            out << ",\n      \"x_conduitscope_serial_number\": \"" << json_escape(a.serial_number) << "\"";
+        }
+        if (!a.plant_identification.empty()) {
+            out << ",\n      \"x_conduitscope_plant_identification\": \"" << json_escape(a.plant_identification)
+                << "\"";
+        }
+        if (!a.security_posture.empty()) {
+            out << ",\n      \"x_conduitscope_security_posture\": \"" << json_escape(a.security_posture) << "\"";
+        }
+        // Always present -- see InventoryAsset::inferred_role's own comment for why "Unknown" is a
+        // real conclusion here, not an absence, same reasoning write_inventory_report_json follows.
+        out << ",\n      \"x_conduitscope_inferred_role\": \"" << json_escape(a.inferred_role) << "\"";
+        out << ",\n      \"x_conduitscope_protocols\": [";
+        for (size_t j = 0; j < a.protocols.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(a.protocols[j]) << "\"";
+        }
+        out << "]";
+        out << ",\n      \"x_conduitscope_ever_client\": " << (a.ever_client ? "true" : "false");
+        out << ",\n      \"x_conduitscope_ever_server\": " << (a.ever_server ? "true" : "false");
+        out << ",\n      \"x_conduitscope_packet_count\": " << a.packet_count;
+        out << "\n    }" << (i + 1 < report.assets.size() ? "," : "") << "\n";
+    }
+    out << (report.assets.empty() ? "]\n" : "  ]\n");
+    out << "}\n";
+}
+
+// Shared by all three ACL renderers below -- the identical "first-draft, review before deploying"
+// warning every dialect needs, just spelled with that dialect's own comment character.
+void write_acl_draft_header(std::ostream& out, char comment_char) {
+    out << comment_char << " Auto-generated by `conduitscope inventory` -- a FIRST-DRAFT firewall ACL derived from\n";
+    out << comment_char << " observed traffic (inferred zones/conduits), NOT a reviewed, ready-to-deploy ruleset.\n";
+    out << comment_char << " Review before deploying -- especially whether the inferred zones/conduits actually\n";
+    out << comment_char << " reflect intended segmentation, not just what this capture happened to see. See\n";
+    out << comment_char << " docs/MANUAL.md's ROADMAP item 17 (Grok gap #2, phase 10).\n";
+}
+
+void write_inventory_acl_cisco(std::ostream& out, const AssetInventoryReport& report) {
+    write_acl_draft_header(out, '!');
+    if (report.zones.empty()) {
+        out << "!\n! No asset was observed in this capture, so there are no zones/conduits to derive\n"
+               "! address objects or rules from.\n";
+        return;
+    }
+    out << "!\n";
+    for (const auto& z : report.zones) {
+        out << "object-group network " << z.name << "\n";
+        out << " network-object " << format_ipv4(z.network.network) << " "
+            << prefix_len_to_netmask(z.network.prefix_len) << "\n";
+        out << "!\n";
+    }
+    out << "ip access-list extended conduitscope-draft\n";
+    if (report.conduits.empty()) {
+        out << " remark no conduit was observed -- nothing to add to this access list\n";
+        return;
+    }
+    for (const auto& c : report.conduits) {
+        out << " remark " << c.name << "\n";
+        out << " permit " << (conduit_is_udp(c) ? "udp" : "tcp") << " object-group " << c.from_zone
+            << " object-group " << c.to_zone << " eq " << c.port << "\n";
+    }
+}
+
+void write_inventory_acl_fortinet(std::ostream& out, const AssetInventoryReport& report) {
+    write_acl_draft_header(out, '#');
+    if (report.zones.empty()) {
+        out << "#\n# No asset was observed in this capture, so there are no zones/conduits to derive\n"
+               "# address/service/policy objects from.\n";
+        return;
+    }
+    out << "#\n";
+    out << "config firewall address\n";
+    for (const auto& z : report.zones) {
+        out << "    edit \"" << z.name << "\"\n";
+        out << "        set subnet " << format_ipv4(z.network.network) << " "
+            << prefix_len_to_netmask(z.network.prefix_len) << "\n";
+        out << "    next\n";
+    }
+    out << "end\n";
+    if (report.conduits.empty()) {
+        out << "#\n# No conduit was observed -- nothing to add to firewall service/policy below.\n";
+        return;
+    }
+    // One service object per distinct (port, transport) actually observed -- not per conduit, so
+    // two zone-pairs sharing the same port/transport (e.g. two independent Modbus conduits) share
+    // one service object rather than getting a duplicate. Keyed on (port, transport) alone, not
+    // protocol name too: a same-port conduit with a different protocol name across zone pairs is
+    // not expected in practice (each of this engine's ten protocols has its own conventional
+    // port), so this is a deliberate, documented simplification, not an oversight.
+    out << "#\n";
+    out << "config firewall service custom\n";
+    std::map<std::pair<uint16_t, bool>, std::string> service_names;
+    for (const auto& c : report.conduits) {
+        auto key = std::make_pair(c.port, conduit_is_udp(c));
+        if (service_names.count(key)) continue;
+        std::string svc_name = "conduitscope-draft-" + c.protocol + "-" + std::to_string(c.port);
+        service_names[key] = svc_name;
+        out << "    edit \"" << svc_name << "\"\n";
+        out << "        set " << (key.second ? "udp" : "tcp") << "-portrange " << c.port << "\n";
+        out << "    next\n";
+    }
+    out << "end\n";
+    out << "#\n";
+    out << "config firewall policy\n";
+    int policy_id = 1;
+    for (const auto& c : report.conduits) {
+        const std::string& svc_name = service_names.at(std::make_pair(c.port, conduit_is_udp(c)));
+        out << "    edit " << policy_id++ << "\n";
+        out << "        set name \"" << c.name << "\"\n";
+        out << "        set srcintf \"any\"\n";
+        out << "        set dstintf \"any\"\n";
+        out << "        set srcaddr \"" << c.from_zone << "\"\n";
+        out << "        set dstaddr \"" << c.to_zone << "\"\n";
+        out << "        set action accept\n";
+        out << "        set schedule \"always\"\n";
+        out << "        set service \"" << svc_name << "\"\n";
+        out << "        set logtraffic all\n";
+        out << "    next\n";
+    }
+    out << "end\n";
+}
+
+void write_inventory_acl_paloalto(std::ostream& out, const AssetInventoryReport& report) {
+    write_acl_draft_header(out, '#');
+    if (report.zones.empty()) {
+        out << "#\n# No asset was observed in this capture, so there are no zones/conduits to derive\n"
+               "# address/service/rule commands from.\n";
+        return;
+    }
+    out << "#\n";
+    for (const auto& z : report.zones) {
+        // PAN-OS's 'ip-netmask' takes CIDR notation directly -- CidrBlock::text is already exactly
+        // that ("10.0.5.0/24"), unlike Cisco/FortiGate above, which both need a separate dotted
+        // subnet mask instead.
+        out << "set address \"" << z.name << "\" ip-netmask " << z.network.text << "\n";
+    }
+    if (report.conduits.empty()) {
+        out << "#\n# No conduit was observed -- nothing to add below.\n";
+        return;
+    }
+    out << "#\n";
+    std::map<std::pair<uint16_t, bool>, std::string> service_names;  // see the FortiGate renderer's
+                                                                      // own comment on this dedup key
+    for (const auto& c : report.conduits) {
+        auto key = std::make_pair(c.port, conduit_is_udp(c));
+        if (service_names.count(key)) continue;
+        std::string svc_name = "conduitscope-draft-" + c.protocol + "-" + std::to_string(c.port);
+        service_names[key] = svc_name;
+        out << "set service \"" << svc_name << "\" protocol " << (key.second ? "udp" : "tcp") << " port " << c.port
+            << "\n";
+    }
+    out << "#\n";
+    for (const auto& c : report.conduits) {
+        const std::string& svc_name = service_names.at(std::make_pair(c.port, conduit_is_udp(c)));
+        std::string rule_name = c.from_zone + "-to-" + c.to_zone + "-" + c.protocol + "-" + std::to_string(c.port);
+        out << "set rulebase security rules \"" << rule_name << "\" from any to any source \"" << c.from_zone
+            << "\" destination \"" << c.to_zone << "\" application any service \"" << svc_name
+            << "\" action allow\n";
+    }
 }
 
 void write_inventory_diagram_mermaid(std::ostream& out, const AssetInventoryReport& report) {

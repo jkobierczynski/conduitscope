@@ -1,14 +1,15 @@
 # Asset inventory: a real OT asset record -- design document
 
-Status: **Phases 0-7 (last-seen/identity scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus
-dispatch, OPC UA identity promotion, S7comm SZL decode + wiring, BACnet ReadPropertyMultiple decode +
-Device-object identity correlation, DNP3 Device Attributes decode + identity correlation, role
-classification, tag/point/DB touch summarization) implemented and shipped.** Phases 8-10 (CSV/CMDB
-export, STIX/TAXII-lite export, firewall-ACL-draft export) are scoped below but not yet started. Written in response to
+Status: **All eleven phases implemented and shipped: the prerequisite/Phase 0-7 (last-seen/identity
+scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus dispatch, OPC UA identity promotion,
+S7comm SZL decode + wiring, BACnet ReadPropertyMultiple decode + Device-object identity correlation,
+DNP3 Device Attributes decode + identity correlation, role classification, tag/point/DB touch
+summarization), Phase 8 (CSV/CMDB export), Phase 9 (STIX/TAXII-lite export), and Phase 10
+(firewall-ACL-draft export). Grok review item 2 is now fully closed.** Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
 fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76,
-79, 81-83 for the changelog-style writeup of what shipped and its exact verification numbers.
+79, 81-83, and 86 for the changelog-style writeup of what shipped and its exact verification numbers.
 
 ## Context
 
@@ -606,27 +607,103 @@ plus the 2 pre-existing regex fixes just described, net +12); ASan/UBSan 2181/21
 cross-compile confirmed to still compile and link cleanly (same standing no-Wine-here limitation as
 every prior phase).
 
-## Phase 8 -- CSV / CMDB export
+## Phase 8 -- CSV / CMDB export (shipped)
 
-New `inventory --format csv` (extend `cli_main.cpp`'s `CLI::IsMember({"text","json"})` to include
-`"csv"`), one row per `InventoryAsset` -- mirroring `decode`'s own CSV quoting rules exactly, reusing
-its existing CSV-field-quoting helper rather than writing a second one. Confirm with Jurgen whether
-edges/conduits need their own export before building a second writer speculatively.
+`inventory --format csv` (`cli_main.cpp`'s `CLI::IsMember` widened to `{"text","json","csv","stix"}`
+-- `stix` landed in the same increment as Phase 9 below, sharing this same CLI plumbing) -- new
+`write_inventory_report_csv` renders `report.assets` ONLY (asset-centric, not edge-centric -- a CMDB
+import is a device inventory, one row per device, matching Grok's own ask exactly; `report.edges`/
+`zones`/`conduits` are never rendered here -- `text`/`json` still cover those), one row per
+`InventoryAsset`: ip, mac, mac_vendor, vendor, product, firmware_revision, serial_number,
+plant_identification, security_posture, inferred_role, protocols, ever_client, ever_server,
+first_seen, last_seen, packet_count. `first_seen`/`last_seen` render as the same human-readable text
+the `_text` JSON fields already use (one column per fact, not JSON's raw+rendered pair). Confirmed
+with Jurgen: asset-centric CSV only, no separate edges/conduits CSV (open question #2 below is now
+resolved, not open).
 
-## Phase 9 -- STIX/TAXII-lite export
+Quoting/escaping is `decode --format csv`'s own RFC 4180 rules, reimplemented as this file's own
+local `csv_escape` (kept local rather than shared across translation units, matching this file's own
+pre-existing local `json_escape` and every other writer's own local escaper in this codebase --
+output.cpp/policy_engine.cpp/baseline.cpp each keep their own copy too) -- proven against a real
+multi-protocol asset (`protocols` rendering as `"dnp3, modbus, s7comm"`, correctly quoted because it
+contains commas) rather than assumed correct by inspection.
 
-New `write_inventory_stix_json` producing a minimal STIX 2.1 bundle: one `infrastructure` SDO per
-asset carrying vendor/product/firmware as `x_`-prefixed custom properties, no TAXII *server* (a
-transport protocol out of scope for a decoder/analysis tool) -- "lite" means "a valid STIX bundle
-file." Confirm this framing matches what Jurgen actually wants before building it.
+## Phase 9 -- STIX/TAXII-lite export (shipped)
 
-## Phase 10 -- Firewall ACL draft export
+`inventory --format stix` -- new `write_inventory_stix_json` renders a minimal, valid STIX 2.1
+bundle: one `infrastructure` SDO per asset (again asset-only, same scope and reasoning as Phase 8),
+`infrastructure_types: ["unknown"]` (STIX's own `infrastructure-type-ov` has no ICS/OT vocabulary
+entry -- deliberately not forced into a mismatched attacker-infrastructure value), every populated
+`InventoryAsset` field as an `x_conduitscope_`-prefixed custom property (STIX 2.1 section 3.6
+explicitly permits this), `protocols` as a real JSON array (no CSV-style comma-join problem to work
+around here). Confirmed with Jurgen: a standalone STIX 2.1 JSON bundle file is the whole scope --
+conduitscope implements no TAXII client or server itself (open question #3 below is now resolved).
 
-New `write_inventory_acl_cisco`/`_fortinet`/`_paloalto` deriving object-group/address-group + rule
-drafts directly from `InventoryZone`/`InventoryConduit` (already exist) -- needs zero new asset
-fields, since Grok's ask here is "propose an ACL matching the zones/conduits I already observed."
-Output is explicitly a **draft for a human to review**, never something conduitscope claims is ready
-to deploy.
+`id`/`created`/`modified` are real STIX requirements this bundle has to satisfy honestly. There is no
+random-UUID source anywhere in this codebase (deliberately -- see below), so every id is
+**deterministic**: `deterministic_uuid` (this file's own new local helper) hashes a stable per-object
+key (`"bundle:" + capture_path` for the bundle, `"infrastructure:" + ip` per asset) with a public-
+domain 64-bit FNV-1a run twice under two different fixed seeds for 128 bits, formatted as a real RFC
+9562 **version-8 ("custom")** UUID -- version 8 is specifically reserved for implementation-defined
+deterministic UUIDs, so this is a spec-conformant UUID, just not a spec-required *random* one.
+Deliberately NOT built on `sha256.hpp`: that module exists for exactly one purpose (QUIC key
+derivation -- see its own file header, "NOT a general-purpose crypto library") and a stable
+identifier has no cryptographic requirement at all, so reusing it here would be scope creep on a
+narrowly-scoped module for zero benefit; FNV-1a's non-cryptographic simplicity is the right tool.
+Re-running the same capture twice was confirmed byte-for-byte identical during development (`diff`
+on two runs), matching Grok item 7's "reproducible report" property even though this phase's own
+scope is item 2, not item 7. `created`/`modified` use a new local `format_stix_timestamp` (STIX's
+required millisecond-precision, "T"-separated RFC 3339 shape -- distinct from every other timestamp
+renderer in this codebase, which all follow `time_format.hpp`'s space-separated, microsecond-
+precision convention instead).
+
+## Phase 10 -- Firewall ACL draft export (shipped)
+
+`inventory --acl-out FILE [--acl-format cisco|fortinet|paloalto]` -- three new renderers,
+`write_inventory_acl_cisco`/`_fortinet`/`_paloalto`, drawing ONLY from `report.zones`/
+`report.conduits` (this is the one export phase needing zero asset-identity fields at all, per
+Grok's own ask here: "propose an ACL matching the zones/conduits I already observed," not asset
+identity -- same scope as `write_inventory_diagram_mermaid`/`_dot`, not Phase 8/9's asset-centric
+scope). One address object per `InventoryZone` (its own CIDR), one rule per `InventoryConduit`
+(its own zone pair, protocol, and port); transport (tcp/udp) is derived from the conduit's own port
+via the exact same two UDP ports `AssetInventoryEngine::observe` itself treats specially
+(`BACNET_UDP_PORT`/`ENIP_IO_UDP_PORT`) -- every other conduit in this report is necessarily TCP,
+since this engine recognizes no other UDP traffic at all.
+
+Drafted as three independent renderers rather than one shared intermediate representation with three
+back-ends: Cisco's nested `object-group`/extended-ACL syntax, FortiGate's `edit`/`next` numbered
+`config firewall` blocks, and Palo Alto's flat `set` command list differ enough in shape that a
+generic IR would mostly just get re-serialized per dialect anyway, without meaningfully cutting the
+real per-dialect logic -- revisit only if a fourth dialect is ever requested and the duplication
+starts to actually hurt. A service object is created per distinct (port, transport) actually
+observed, not per conduit, so multiple zone-pairs sharing a port (e.g. two independent Modbus
+conduits) share one service object rather than duplicating it -- documented as a deliberate
+simplification (keyed on port+transport, not protocol name, since a same-port conduit with a
+different protocol name across zone pairs isn't expected in practice with this engine's ten
+protocols, each carrying its own conventional port).
+
+Every line of every dialect's output is prominently labeled a **first draft for human review** --
+never something conduitscope claims is ready to deploy -- in both a shared header-comment block
+(`write_acl_draft_header`, one function, three comment-character variants) and
+`docs/USER_GUIDE.md`. An empty capture (no asset ever observed) renders header comments only, same
+"don't emit a file that looks loadable but isn't" posture `write_inventory_policy_yaml` already
+takes for the identical case, with the same stderr note `--policy-out` already prints.
+
+**Verification bar met for Phases 8-10** (shipped together in one increment): 2137/2137 (default GCC
+build, up from Phase 7's 2124 -- 6 new CSV tests (Phase 8) + 6 new STIX tests (Phase 9) + 1 new ACL
+test (Phase 10, plus the pre-existing `inventory_diagram_and_policy_out_smoke` extended in place to
+also cover all three ACL dialects and the empty-capture case), net +13); ASan/UBSan 2213/2213
+(including all 76 `fuzz_*_corpus_regression` cases -- no new fuzz harness needed, since nothing here
+parses new untrusted bytes: Phases 8-10 are pure post-processing/rendering over already-decoded,
+already-validated `AssetInventoryReport` structures, exactly like Phase 6's role inference and Phase
+7's touch summarization before them); no-live-capture 2124/2124 (this config's own stable, pre-
+existing gap from live-capture-only tests, unrelated to this phase); MinGW-w64 cross-compile
+confirmed to still compile and link cleanly; plus a clean-room extract-rebuild-test before delivery.
+`docs/USER_GUIDE.md` (new CSV/STIX output-format subsections, `--acl-out`/`--acl-format` under
+INVENTORY, updated JSON/report schema sections, LIMITATIONS additions for the ACL dedup
+simplification and the deterministic-not-random UUID choice), `docs/DEVELOPMENT.md` (ROADMAP), and
+`man/conduitscope.1` all updated in the same increment. **Grok gap #2 is now fully closed** -- all
+ten phases across items 0-10 are implemented and shipped.
 
 ## Testing & fixtures (every phase)
 
@@ -643,15 +720,18 @@ message type (SZL, BACnet RPM, DNP3 Device Attributes).
 LIMITATIONS, `docs/DEVELOPMENT.md`'s ROADMAP, and `docs/PROTOCOL_COVERAGE.md` (for newly-decoded
 message types) all updated in the same phase as the code, per this project's standing convention.
 
-## Open questions for Jurgen (not blocking Phases 0-3, which already shipped)
+## Open questions -- all resolved, kept for the record
 
 1. Rack/slot: confirmed nothing passively discoverable exists for it in any protocol this project
-   decodes -- OK to scope out entirely (as this plan now does), or does Jurgen want CIP's
-   path-addressable rack/slot surfaced only when a scanner's own explicit-messaging *request* names
-   one?
-2. Phase 8: asset-centric CSV only, or also an edges/conduits CSV for the CMDB use case?
+   decodes. **Resolved (implicitly, by this plan's own Phase 0 scoping): scoped out entirely** --
+   no protocol here ever surfaced a rack/slot value to promote, so the question never came back up
+   during Phases 1-10.
+2. Phase 8: asset-centric CSV only, or also an edges/conduits CSV for the CMDB use case? **Resolved:
+   asset-centric CSV only** -- confirmed with Jurgen before implementing (see Phase 8 above).
 3. Phase 9: is a STIX 2.1 JSON bundle file sufficient ("TAXII-lite"), or was actual TAXII transport
-   part of the ask?
+   part of the ask? **Resolved: a standalone STIX 2.1 bundle file is the whole scope** -- confirmed
+   with Jurgen before implementing (see Phase 9 above); conduitscope implements no TAXII client or
+   server.
 
 ## Critical files
 
@@ -680,7 +760,8 @@ message types) all updated in the same phase as the code, per this project's sta
 - `include/conduitscope/iec104.hpp` / `src/iec104.cpp` -- Phase 7's small, additive
   `Iec104Result::iec104_object_ioas` field (shipped), populated alongside the already-existing
   `iec104_object_values` in `Iec104Decoder::decode`'s `merge_asdu` lambda; no new decode.
-- `src/cli_main.cpp` -- Phase 8's `--format csv` CLI plumbing for `inventory`.
+- `src/cli_main.cpp` -- Phase 8/9's `--format csv`/`stix` and Phase 10's `--acl-out`/`--acl-format`
+  CLI plumbing for `inventory` (all shipped); `run_inventory`'s own dispatch to the new writers.
 - `tools/make_sample_pcap.py`, `tools/extract_fuzz_corpus.py`, `CMakeLists.txt`, `fuzz/fuzz_*.cpp`.
 - `docs/USER_GUIDE.md`, `docs/DEVELOPMENT.md`, `docs/PROTOCOL_COVERAGE.md`.
 

@@ -1460,8 +1460,11 @@ Write the report here instead of stdout. Caution: a single-dash typo of a
 double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
-.BR \-T ", " \-\-format " " {text,json}
-Report format. Default: text.
+.BR \-T ", " \-\-format " " {text,json,csv,stix}
+Report format. \fBcsv\fR and \fBstix\fR are both deliberately asset-only
+(one row/object per device, for CMDB import or a STIX 2.1 bundle) \-\- use
+\fBtext\fR/\fBjson\fR for the full asset/communications/zones/conduits
+picture. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
@@ -1491,6 +1494,22 @@ file, directly loadable by \fBpolicy validate \-\-policy\fR \-\- closing the
 loop: discover, then enforce. If no asset was observed at all, the file
 contains only explanatory comments, no \fBzones:\fR/\fBconduits:\fR keys
 (not a validly-loadable policy as-is), and a note is printed saying so.
+.TP
+.B \-\-acl\-out \fIFILE\fR
+Also write the inferred zone/conduit model as a firewall ACL \fBDRAFT\fR
+here (format controlled by \fB\-\-acl\-format\fR) \-\- a starting point for a
+human to review, \fBnever\fR something to deploy as-is; the generated
+file's own header comment says so too. If no asset was observed at all,
+the file contains only explanatory comments and a note is printed saying
+so, same convention as \fB\-\-policy\-out\fR.
+.TP
+.BR \-\-acl\-format " " {cisco,fortinet,paloalto}
+ACL dialect for \fB\-\-acl\-out\fR: Cisco IOS/ASA \fBobject-group\fR +
+extended ACL, FortiGate \fBconfig firewall\fR blocks, or Palo Alto PAN-OS
+\fBset\fR commands. One address object per inferred zone, one rule per
+inferred conduit; transport (tcp/udp) follows the same port-based rule
+\fBinventory\fR itself uses to recognize UDP traffic (BACnet/IP,
+EtherNet/IP CIP I/O) \-\- every other conduit is TCP. Default: cisco.
 .TP
 .B \-\-mac\-vendor
 Same meaning as \fBdecode\fR's \fB\-\-mac\-vendor\fR, applied to the report's

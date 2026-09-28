@@ -2147,21 +2147,36 @@ what's a confirmed real gap, and what needs its own follow-up check before being
 [docs/reviews/2026-09-grok-response.md](reviews/2026-09-grok-response.md). Jurgen chose to work
 through its ten points in order, starting with items 1-3, one at a time:
 
-- **Item 1 (make the policy engine match how plants are zoned) is underway.** See
+- **Item 1 (make the policy engine match how plants are zoned) is fully done.** See
   [docs/design/policy-engine-zoning.md](design/policy-engine-zoning.md) for the full phased design
-  and current status. As of this entry: the `Zone`/`Conduit` kind-enum prerequisite refactor, Phase
-  1 (IPv6-flow reason-string honesty, Purdue-level zone labels, `type: idmz` conduits), Phase 2
-  (hostname zones), and Phase 3 (BACnet/IP + CIP I/O UDP flow evaluation) are implemented and
-  shipped (items 70-71 below); Phases 4-6 (operation-level read/write direction, MAC-source
-  restriction on VLAN conduits, multi-homed assets/jump hosts) are approved and scoped but not yet
-  started.
-- **Items 2 (turn inventory into a real OT asset record) and 3 (baseline process behavior beyond
-  ports)** are next in Jurgen's own ordering, after item 1. Both are partially stale as written --
-  see the response document for exactly which of Grok's own bullet points under each are already
-  implemented (e.g. `inventory` already recognizes MMS/OPC UA/MQTT/BACnet, and the baseline engine
-  already covers EtherNet/IP and DNP3 at the operation level) versus genuinely still open (vendor/
-  firmware/serial extraction, IEC 104 IOA-range and OPC UA NodeId baselining, S7 block-download as
-  its own severity class).
+  and current status. All six phases are implemented and shipped (items 70-74 below): the
+  `Zone`/`Conduit` kind-enum prerequisite refactor, Phase 1 (IPv6-flow reason-string honesty,
+  Purdue-level zone labels, `type: idmz` conduits), Phase 2 (hostname zones), Phase 3 (BACnet/IP +
+  CIP I/O UDP flow evaluation), Phase 4 (operation-level read/write direction -- a
+  Read/Write/Other function-access classification for all five function-table protocols, plus
+  `read`/`write` group keywords in a conduit's `functions:` list), Phase 5 (MAC-source restriction
+  on VLAN conduits via `from_macs:`, matching GOOSE/SV/PROFINET-RT/EtherCAT publisher restriction),
+  and Phase 6 (multi-homed assets/jump hosts as first-class, policy-declared objects with their own
+  zone-coverage and jump-host-flow reporting). Grok review item 1 is now fully closed.
+- **Item 2 (turn inventory into a real OT asset record) is fully done.** See
+  [docs/design/asset-inventory-real-record.md](design/asset-inventory-real-record.md) for the full
+  ten-phase design and current status. All ten phases are implemented and shipped (items 75-76, 79,
+  81-83, and 86 below): Phases 0-7 (last-seen/identity scaffolding, EtherNet/IP CIP Identity
+  wiring, S7comm-Plus dispatch, OPC UA identity promotion, S7 SZL decode, BACnet
+  ReadPropertyMultiple decode + Device-object identity correlation, DNP3 Device Attributes decode +
+  identity correlation, role classification, tag/point/DB touch summarization), Phase 8 (CSV/CMDB
+  export), Phase 9 (STIX/TAXII-lite export), and Phase 10 (firewall-ACL-draft export). Grok review
+  item 2 is now fully closed.
+- **Item 3 (baseline process behavior beyond ports) is fully done.** All three of Grok's own
+  sub-items under it that this codebase's design doc actually scoped -- S7comm PLC Control/PLC Stop
+  as an always-flag control-plane class, OPC UA service+NodeId tracking, and IEC 104
+  type/COT/IOA-range tracking -- have shipped, alongside EtherNet/IP and DNP3 operation-level
+  tracking that already existed by review time. See
+  [docs/design/baseline-engine.md](design/baseline-engine.md)'s own "Follow-up" sections and item 41
+  below for the full writeup. The only pieces of item 3's territory deliberately left out are
+  outside what Grok's own bullets under item 3 asked for: statistical/confidence thresholds (a
+  Phase-1-era scope decision, see the design doc's own "Explicitly out of scope" section) and
+  CODESYS's `CmpIecVarAccess` (a separate, unrelated decode gap, not a baseline-engine one).
 - **Items 4-10** (OT-IR-recognizable detection and ATT&CK-for-ICS mapping, continuous SPAN/TAP
   sensor mode, decode depth on process-critical protocols, a 62443/NIS2 evidence pack, Zeek/CEF/
   syslog integration, parser trustworthiness, and product packaging) are not yet scheduled. The
@@ -12748,6 +12763,103 @@ it done as its own patch.
     real behavioral proof (the intersection genuinely selects nothing).
     Re-verified: 2115/2115 (default GCC build, unchanged -- this was a
     test-assertion fix, not a behavior change, so the count doesn't move).
+
+86. **Asset inventory: a real OT asset record -- Grok gap #2, eighth
+    through tenth increments (Phases 8-10: CSV/CMDB export, STIX/
+    TAXII-lite export, firewall-ACL-draft export).** Direct continuation
+    of items 75-76, 79-83 above -- see
+    docs/design/asset-inventory-real-record.md's own Phase 8/9/10
+    sections for the full scoped plan. **This closes Grok gap #2
+    entirely** -- all ten phases across items 75-76, 79-83, and this item
+    are now implemented and shipped. Two open design questions the plan
+    itself flagged were resolved with Jurgen before implementing: Phase 8
+    ships asset-centric CSV only, no separate edges/conduits export;
+    Phase 9 ships a standalone STIX 2.1 bundle file only, no TAXII client
+    or server (a transport protocol genuinely out of scope for a passive
+    analysis CLI).
+
+    **Phase 8 (`inventory --format csv`)**: new `write_inventory_report_csv`
+    renders `report.assets` ONLY (deliberately asset-centric, not
+    edge-centric -- a CMDB import is a device inventory, one row per
+    device; `text`/`json` still cover the full communications/zones/
+    conduits picture), one row per `InventoryAsset` -- ip, mac,
+    mac_vendor, vendor, product, firmware_revision, serial_number,
+    plant_identification, security_posture, inferred_role, protocols,
+    ever_client, ever_server, first_seen, last_seen, packet_count.
+    Quoting/escaping is `decode --format csv`'s own RFC 4180 rules,
+    reimplemented as this file's own local `csv_escape` (matching every
+    other writer's own local escaper convention in this codebase, rather
+    than sharing one across translation units).
+
+    **Phase 9 (`inventory --format stix`)**: new `write_inventory_stix_json`
+    renders a minimal, valid STIX 2.1 bundle -- one `infrastructure` SDO
+    per asset (asset-only, same scope as Phase 8), `infrastructure_types:
+    ["unknown"]` (STIX's own vocabulary has no ICS/OT entry), every
+    populated `InventoryAsset` field as an `x_conduitscope_`-prefixed
+    custom property (STIX 2.1 explicitly permits this), `protocols` as a
+    real JSON array. `id`/`created`/`modified` are real STIX
+    requirements: with no random-UUID source anywhere in this codebase,
+    every id is **deterministic** -- a new local `deterministic_uuid`
+    helper hashes a stable per-object key with a public-domain 64-bit
+    FNV-1a (run twice under different fixed seeds for 128 bits),
+    formatted as a real RFC 9562 **version-8 ("custom")** UUID, the
+    version specifically reserved for implementation-defined deterministic
+    UUIDs -- so this is a spec-conformant UUID, just not a
+    spec-required *random* one. Deliberately not built on `sha256.hpp`
+    (that module exists for exactly one purpose, QUIC key derivation --
+    see its own file header, "NOT a general-purpose crypto library" --
+    and a stable identifier has no cryptographic requirement, so reusing
+    it would be scope creep for zero benefit). Re-running the same
+    capture twice was confirmed byte-for-byte identical during
+    development. `created`/`modified` use a new local
+    `format_stix_timestamp` (STIX's required millisecond-precision,
+    "T"-separated RFC 3339 shape -- distinct from this codebase's usual
+    space-separated, microsecond-precision convention).
+
+    **Phase 10 (`inventory --acl-out FILE --acl-format
+    cisco|fortinet|paloalto`)**: three new renderers,
+    `write_inventory_acl_cisco`/`_fortinet`/`_paloalto`, drawing ONLY from
+    `report.zones`/`report.conduits` (the one export phase needing zero
+    asset-identity fields, per Grok's own ask: "propose an ACL matching
+    the zones/conduits I already observed" -- same scope as
+    `write_inventory_diagram_mermaid`/`_dot`). One address object per
+    zone, one rule per conduit; transport (tcp/udp) follows the exact
+    same two UDP ports `AssetInventoryEngine::observe` itself treats
+    specially (`BACNET_UDP_PORT`/`ENIP_IO_UDP_PORT`) -- every other
+    conduit is necessarily TCP. Drafted as three independent renderers
+    rather than one shared intermediate representation: each dialect's
+    address-object/service-object/rule shape (Cisco's nested
+    `object-group` syntax vs. FortiGate's `edit`/`next` numbered blocks
+    vs. Palo Alto's flat `set` commands) differs enough that a generic IR
+    would mostly just be re-serialized per format, without meaningfully
+    cutting the real per-dialect logic. A service object is created per
+    distinct (port, transport) actually observed, not per conduit, so
+    multiple zone-pairs sharing a port share one service object -- a
+    documented simplification. Every line of every dialect's output is
+    prominently labeled a **first draft for human review**, never
+    something this project claims is ready to deploy, in both a shared
+    header-comment block and `docs/USER_GUIDE.md`; an empty capture
+    renders header comments only, same posture `write_inventory_policy_yaml`
+    already takes, with the same stderr note `--policy-out` already
+    prints.
+
+    **Verification bar met** (all three phases shipped together in one
+    increment): 2137/2137 (default GCC build, up from item 83's 2124 --
+    6 new CSV tests + 6 new STIX tests + 1 new ACL test, plus the
+    pre-existing inventory diagram/policy-out smoke test extended in
+    place to also cover all three ACL dialects and the empty-capture
+    case, net +13); ASan/UBSan 2213/2213 (including all 76
+    `fuzz_*_corpus_regression` cases -- no new fuzz harness needed, since
+    nothing here parses new untrusted bytes: all three phases are pure
+    post-processing/rendering over already-decoded, already-validated
+    `AssetInventoryReport` structures, exactly like Phase 6/7 before
+    them); no-live-capture 2124/2124 (this config's own stable,
+    pre-existing gap from live-capture-only tests); MinGW-w64
+    cross-compile confirmed to still compile and link cleanly; plus a
+    clean-room extract-rebuild-test before delivery. `docs/USER_GUIDE.md`,
+    `docs/design/asset-inventory-real-record.md` (Phase 8/9/10 sections
+    and Status line), and `man/conduitscope.1` all updated in the same
+    increment.
 
 ### Protocols not covered at all
 

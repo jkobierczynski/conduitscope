@@ -16,7 +16,11 @@ MMD="$(mktemp)"
 DOT="$(mktemp)"
 POLICY="$(mktemp)"
 EMPTY_POLICY="$(mktemp)"
-trap 'rm -f "$MMD" "$DOT" "$POLICY" "$EMPTY_POLICY"' EXIT
+ACL_CISCO="$(mktemp)"
+ACL_FORTINET="$(mktemp)"
+ACL_PALOALTO="$(mktemp)"
+EMPTY_ACL="$(mktemp)"
+trap 'rm -f "$MMD" "$DOT" "$POLICY" "$EMPTY_POLICY" "$ACL_CISCO" "$ACL_FORTINET" "$ACL_PALOALTO" "$EMPTY_ACL"' EXIT
 
 echo "=== mermaid diagram ==="
 "$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --diagram "$MMD" --output /dev/null
@@ -36,3 +40,19 @@ echo "=== round-trip through policy validate ==="
 echo "=== empty-capture policy-out ==="
 "$CONDUITSCOPE" inventory --read "$EMPTY_PCAP" --policy-out "$EMPTY_POLICY" --output /dev/null
 cat "$EMPTY_POLICY"
+
+echo "=== acl-out (cisco) ==="
+"$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --acl-out "$ACL_CISCO" --output /dev/null
+cat "$ACL_CISCO"
+
+echo "=== acl-out (fortinet) ==="
+"$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --acl-out "$ACL_FORTINET" --acl-format fortinet --output /dev/null
+cat "$ACL_FORTINET"
+
+echo "=== acl-out (paloalto) ==="
+"$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --acl-out "$ACL_PALOALTO" --acl-format paloalto --output /dev/null
+cat "$ACL_PALOALTO"
+
+echo "=== empty-capture acl-out ==="
+"$CONDUITSCOPE" inventory --read "$EMPTY_PCAP" --acl-out "$EMPTY_ACL" --output /dev/null
+cat "$EMPTY_ACL"

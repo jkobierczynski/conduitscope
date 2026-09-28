@@ -15,6 +15,10 @@ cmake_install.cmake
 Makefile
 __pycache__/
 *.pyc
+oom-*
+*.1
+*.inc
+*.txt
 
 # libFuzzer scratch output -- raw console logs from ad hoc fuzzing runs
 # (fuzz-0.log style, one per parallel worker) and each target's own crash-
@@ -31,4 +35,3 @@ fuzz/artifacts/
 crash-*
 leak-*
 timeout-*
-oom-*

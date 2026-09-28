@@ -726,6 +726,108 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
 void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& report,
                                   const std::string& capture_path, const Resolver& resolver);
 
+// Phase 8 of Grok gap #2 ("turn inventory into a real OT asset record" -- CSV/CMDB export, see
+// docs/design/asset-inventory-real-record.md). Renders `report.assets` (ONLY the asset list --
+// deliberately asset-centric, not edge-centric: a CMDB import is a device inventory, one row per
+// device, matching exactly what Grok's own review asked for; `report.edges`/`zones`/`conduits`
+// have no place in a flat asset-per-row shape and are not rendered here at all -- use
+// write_inventory_report_text/_json for the full communication-matrix/zone/conduit picture) as
+// CSV to `out`, one row per InventoryAsset. `resolver`: see write_inventory_report_text's own
+// comment -- `mac_vendor` is populated the same OUI-lookup way in every writer. Columns (in
+// order): ip, mac, mac_vendor, vendor, product, firmware_revision, serial_number,
+// plant_identification, security_posture, inferred_role, protocols (same comma-joined
+// `protocol_list_text` rendering the text/JSON writers already use -- the embedded commas are not
+// a problem: `csv_escape` quotes the whole field whenever it contains one, exactly the same as any
+// other comma-bearing value, so this reuses the existing helper rather than inventing a second
+// join convention just for CSV), ever_client, ever_server, first_seen, last_seen, packet_count.
+// Quoting/escaping follows `decode --format csv`'s own
+// `csv_escape` rules exactly (RFC 4180: a field is double-quoted only when it contains a comma,
+// quote, or newline, with internal quotes doubled) via this file's own local copy of that helper
+// (every CSV/JSON writer in this codebase keeps its own local escaper rather than sharing one
+// across translation units -- see output.cpp/policy_engine.cpp/baseline.cpp's own `json_escape`
+// for the same precedent). first_seen/last_seen render as the same human-readable UTC text
+// format_epoch_seconds gives the text/JSON writers' own "_text" fields (not a raw epoch number --
+// CSV has one column per fact, unlike JSON's raw+rendered pair, matching `decode --format csv`'s
+// own single-"time"-column precedent rather than JSON's two-field one).
+void write_inventory_report_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver);
+
+// Phase 9 of Grok gap #2 ("STIX/TAXII-lite export", docs/design/asset-inventory-real-record.md).
+// Renders `report.assets` as a minimal, valid STIX 2.1 bundle to `out` -- ONE `infrastructure` SDO
+// per asset (again deliberately asset-only, same posture and same reasoning as
+// write_inventory_report_csv above; no edges/zones/conduits object exists in this bundle).
+// "Lite" means exactly this: a standalone STIX 2.1 JSON file a human or another tool can hand to a
+// TAXII server or any other STIX consumer -- conduitscope itself implements no TAXII client or
+// server (that's a transport protocol, out of scope for a passive analysis CLI; confirmed with
+// Jurgen before implementing).
+//
+// `infrastructure_types` is fixed to `["unknown"]` for every object -- STIX 2.1's own open
+// vocabulary (`infrastructure-type-ov`) has no ICS/OT-specific value (its members are all
+// attacker-infrastructure concepts: botnet, command-and-control, staging, etc.), so "unknown" is
+// the only honest choice rather than forcing a mismatch; this asset's actual nature lives in the
+// `x_conduitscope_*` custom properties below instead. Each SDO also carries every populated
+// InventoryAsset field as an `x_conduitscope_`-prefixed custom property (STIX 2.1 section 3.6
+// explicitly permits `x_`-prefixed custom properties on any SDO) -- ip, hostname (if resolved),
+// mac/mac_vendor (if has_mac), vendor/product/firmware_revision/serial_number/
+// plant_identification/security_posture (each omitted, never emitted empty/null, exactly the
+// omit-on-miss convention every other writer in this file already follows), inferred_role
+// (always present, same "Unknown is a real conclusion" reasoning as the JSON writer),
+// protocols (a real JSON array here, not a joined string -- STIX/JSON has no CSV-style delimiter
+// problem to work around), ever_client, ever_server, packet_count.
+//
+// `id`/`created`/`modified`: STIX requires every SDO id to match `<type>--<UUID>`, and every SDO
+// to carry `created`/`modified` timestamps. There is no random-UUID source anywhere in this
+// codebase (deliberately -- see below), so ids here are DETERMINISTIC, derived from a
+// non-cryptographic FNV-1a hash of a stable per-object key (`"bundle:" + capture_path` for the
+// bundle itself, `"infrastructure:" + ip` for each asset) via this file's own local
+// `deterministic_uuid` helper -- same capture, re-run twice, produces a byte-identical bundle
+// (Grok item 7's "reproducible report" property, applied here even though this phase's own scope
+// is item 2, not item 7). Formatted as a real RFC 9562 version-8 ("custom") UUID -- version 8 is
+// specifically reserved for implementation-defined deterministic UUIDs like this one, so the
+// result is a spec-conformant UUID, just not a spec-required *random* one. Deliberately NOT built
+// on sha256.hpp: that module exists for exactly one purpose (QUIC key derivation, see its own file
+// header, "NOT a general-purpose crypto library") and a stable identifier has no cryptographic
+// requirement at all, so reusing it here would be scope creep on a narrowly-scoped module for no
+// benefit. `created`/`modified` render as `first_seen`/`last_seen` through this file's own local
+// `format_stix_timestamp` (STIX's required millisecond-precision "T"-separated RFC 3339 shape --
+// distinct from every other timestamp renderer in this codebase, which all use
+// `time_format.hpp`'s space-separated, microsecond-precision convention instead).
+void write_inventory_stix_json(std::ostream& out, const AssetInventoryReport& report,
+                                const std::string& capture_path, const Resolver& resolver);
+
+// Phase 10 of Grok gap #2 ("firewall ACL draft export", docs/design/asset-inventory-real-record.md)
+// -- the one export phase that needs no asset identity fields at all (Grok's own ask here is
+// "propose an ACL matching the zones/conduits I already observed," not asset identity), so these
+// three renderers draw ONLY from `report.zones`/`report.conduits`, mirroring
+// write_inventory_diagram_mermaid/_dot's own "just the zone/conduit graph" scope exactly -- not
+// `write_inventory_report_csv`/`_stix_json`'s asset-centric scope.
+//
+// Each renders the SAME inferred zones-as-address-objects, conduits-as-rules model, one function
+// per vendor CLI dialect (Cisco IOS/ASA object-group + extended ACL; FortiGate `config firewall`
+// address/service/policy blocks; Palo Alto PAN-OS `set` CLI commands) -- drafted as three separate
+// renderers rather than one shared intermediate representation with three back-ends: each
+// dialect's own address-object/service-object/rule shape (Cisco's nested object-group syntax vs.
+// FortiGate's edit/next numbered-policy blocks vs. Palo Alto's flat `set` command list) differs
+// enough that a generic IR would mostly just be re-serialized per format anyway, without
+// meaningfully reducing the actual per-dialect logic -- revisit only if a fourth dialect is ever
+// requested and the duplication actually starts to hurt.
+//
+// One address object per InventoryZone (its own CIDR -- `network.text`/`network.network`+
+// `prefix_len`, already exactly the group this zone's own member IPs share); one rule per
+// InventoryConduit, naming its own zone-pair address objects and (protocol, port). Transport
+// (tcp/udp) is derived from the conduit's own `port`, matching exactly which two ports
+// AssetInventoryEngine::observe treats as UDP-carrying in the first place (BACNET_UDP_PORT,
+// ENIP_IO_UDP_PORT -- see is_known_target_port's own comment) -- every other conduit in this
+// report is necessarily TCP, since this engine only ever recognizes those two ports over UDP.
+//
+// EVERY line of output is explicitly, prominently labeled a first-draft for human review -- never
+// something this project claims is ready to deploy -- in both a header comment block (every
+// dialect supports `!`/`#`-style comments) and docs/USER_GUIDE.md. An empty `report.zones` (no
+// asset was ever observed) renders header comments only, same "don't emit a file that looks
+// loadable but isn't" posture write_inventory_policy_yaml already takes for the identical case.
+void write_inventory_acl_cisco(std::ostream& out, const AssetInventoryReport& report);
+void write_inventory_acl_fortinet(std::ostream& out, const AssetInventoryReport& report);
+void write_inventory_acl_paloalto(std::ostream& out, const AssetInventoryReport& report);
+
 // Renders just the zone/conduit graph (not the asset list or communication matrix) as a Mermaid
 // flowchart (`graph LR`) to `out` -- one node per zone, one edge per conduit, labeled
 // "<protocol>/<port>". Paste into any Mermaid-rendering surface (this project's own Artifact/docs
