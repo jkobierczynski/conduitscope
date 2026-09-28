@@ -13138,6 +13138,83 @@ it done as its own patch.
     patterns and the Modbus confidence exception) all updated in the same
     increment.
 
+90. **Four-axis detection model: `evidence`/`novelty`/`severity`, replacing
+    the single conflated `DetectionConfidence`.** Jurgen's own direct
+    architectural critique immediately after item 89 shipped, verbatim:
+    "Separate evidence confidence from maliciousness and severity. High
+    confidence should mean that the observed protocol event is reliably
+    established, not that the activity is malicious. Distinguish confirmed
+    protocol evidence, baseline deviation, operational severity, and
+    malicious intent." A mid-turn follow-up scoped the fix: "Make the
+    four-axis model the foundation of the detection and reporting
+    architecture, but keep the protocol decoding and rule execution
+    mechanisms simple and deterministic." Both together mean this is a
+    report-schema/labeling redesign, not a change to what `observe()`/
+    `finish()` decode or how a finding fires -- see
+    [docs/design/detection-engine.md](design/detection-engine.md)'s own
+    "Four-axis model" section for the full record.
+
+    `enum class DetectionConfidence { High, Medium, Low }` replaced by
+    three independent enums, plus an explicit non-claim: `DetectionEvidence
+    { Confirmed, Heuristic }` (decode reliability only -- `Heuristic` only
+    for the `RemoteAccessChannel` source, every other finding source
+    reading a genuinely decoded field stays `Confirmed`); `DetectionNovelty
+    { NotApplicable, ConfirmedNew, FirstOccurrence }` (the "new vs. known"
+    resolution, now its own field -- `NotApplicable` for every
+    always-notable finding, `ConfirmedNew`/`FirstOccurrence` for a
+    new-vs-known finding depending on whether `--baseline-file` was given,
+    exactly the old Medium/Low split's own logic, just no longer folded
+    into a word that also implied maliciousness); `DetectionSeverity
+    { Critical, Moderate, Informational }` (operational impact if genuine,
+    independent of both -- most always-notable sources default to
+    Critical, most new-vs-known sources default to Moderate; the Modbus
+    write-without-read pattern, the BACnet Who-Is flood, S7comm Setup
+    Communication probing, DNP3 unsolicited-response misuse, an unexpected
+    IEC 104 COT, and UMAS read-only discovery all pass a lower severity
+    explicitly at their own call site, same mechanism item 89's
+    `DetectionConfidence` trailing parameter already established, just
+    renamed/extended). `DetectionFinding` carries all three instead of one
+    `confidence` field; `DetectionSummary` now counts by severity
+    (critical/moderate/informational) and by evidence
+    (confirmed_evidence/heuristic_evidence) instead of high/medium/low.
+    Both report writers (`write_detection_report_text`/`_json`) print all
+    three per finding plus a one-line reminder that none of them assert
+    malicious intent.
+
+    **Deliberately did not touch**: any `observe()`/`finish()` decode
+    logic, dispatch condition, or the two `finish()`-time post-passes'
+    (S7 Setup Communication probing, the download-then-restart composite)
+    deterministic sorted-vector-then-append mechanics -- per Jurgen's own
+    mid-turn scope constraint, this stayed a schema/labeling change only.
+    `record_always_notable`/`record_new_conduit_candidate`
+    (`detect_engine.cpp`) grew `DetectionSeverity`/`DetectionEvidence`
+    trailing parameters (defaulted so most call sites needed no change) in
+    place of the old single `DetectionConfidence` parameter, the same
+    "optional trailing parameter, most call sites unaffected" shape item
+    89 already used for its one exception.
+
+    All 9 pre-existing `detect`-related CTest assertions in
+    `CMakeLists.txt` rewritten against freshly-captured real CLI output
+    (never hand-authored) -- including `detect_umas_all_findings`, which
+    turned out to have been asserting a stale 5-finding total: the
+    download-then-restart composite pattern (item 89) is protocol-agnostic
+    and was already firing for UMAS's own START_PLC/STOP_PLC +
+    INITIALIZE_DOWNLOAD sequence (6 findings), a pre-existing gap in that
+    one test's own assertion exposed by this redesign's re-verification
+    pass, not a behavior change introduced here. Full CTest across all
+    four standing build configurations (default GCC, ASan/UBSan
+    `build-fuzz`, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`,
+    MinGW-w64 cross-compile, build-only there).
+    `docs/design/detection-engine.md` ("Confidence" section rewritten as
+    "Four-axis model," `DetectionReport` shape/table updated, Snort-style
+    pattern extensions table gains an Evidence column), `docs/USER_GUIDE.md`
+    (DETECT section's "Two kinds of finding" rewritten as "Two kinds of
+    finding, three independent dimensions," all three worked-example
+    output blocks recaptured, LIMITATIONS bullets updated), and
+    `man/conduitscope.1` (`detect` COMMANDS entry, `--policy`/
+    `--baseline-file` OPTIONS entries, and the LIMITATIONS paragraph all
+    rewritten) updated in the same increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

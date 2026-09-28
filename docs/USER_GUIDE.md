@@ -1131,9 +1131,11 @@ engineering-station mode changes, firmware/logic downloads and device restarts, 
 channels into the plant -- distinct from `attack_detect.hpp`'s own flood/scan-shaped signatures
 (SYN/ACK/UDP/ICMP floods and similar), which `detect` does not duplicate or replace. Every finding
 cites exactly one MITRE ATT&CK for ICS technique (never a generic "something happened" note with no
-citation) and carries a labeled confidence level, never a bare "this looks unusual." See
-`docs/design/detection-engine.md` for the full design record, including the MITRE mapping table and
-exactly how confidence is decided.
+citation) and carries three independent, labeled dimensions -- **evidence** (how reliably the
+underlying protocol event was observed), **novelty** (new vs. known), and **severity** (impact if
+the observed action is genuine) -- never a bare "this looks unusual," and never a claim about
+malicious intent. See `docs/design/detection-engine.md` for the full design record, including the
+MITRE mapping table and exactly how each of the three dimensions is decided.
 
 | Option | Default | Description |
 |---|---|---|
@@ -1147,7 +1149,7 @@ exactly how confidence is decided.
 | `-T, --format {text,json}` | `text` | Report format. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first malformed packet instead of reporting a warning and continuing. |
 | `--policy FILE` | *(none)* | Zone/conduit policy YAML file (see `policy validate`) -- used only to tell a new remote-access session that stays within one declared zone (T0886, Remote Services) from one that crosses a zone boundary (T0822, External Remote Services). Every other finding is unaffected by this flag. Must exist. |
-| `--baseline-file FILE` | *(none)* | Baseline JSON file (see `baseline learn`) -- used to resolve every new-vs-known finding (a new remote-access channel, a new CIP/UMAS engineering-station originator) against real history instead of this capture's own first-occurrence order. A conduit already present in the baseline is not flagged at all; one genuinely absent gets Medium confidence. Without this flag, a new-vs-known finding is Low confidence (first occurrence within this capture only). Must exist. |
+| `--baseline-file FILE` | *(none)* | Baseline JSON file (see `baseline learn`) -- used to resolve every new-vs-known finding's **novelty** (a new remote-access channel, a new CIP/UMAS engineering-station originator) against real history instead of this capture's own first-occurrence order. A conduit already present in the baseline is not flagged at all; one genuinely absent gets novelty `Confirmed New`. Without this flag, a new-vs-known finding gets novelty `First Occurrence` (first occurrence within this capture only). Either way, the finding's own evidence and severity are unaffected by this flag. Must exist. |
 | `--max-baseline-file-bytes N` | 256 MiB | Cap how large `--baseline-file` may be before it's read into memory. |
 | `--mac-vendor` | off | Same meaning as `decode --mac-vendor`, applied to the report's endpoint MAC addresses. |
 | `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS** -- file-only. |
@@ -1156,44 +1158,64 @@ exactly how confidence is decided.
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
 | `--max-reassembly-bytes N`, `--max-reassembly-segments N`, `--max-recursion-depth N`, `--max-decoded-objects N`, `--max-coalesced-messages N` | *(compile-time defaults)* | Same five resource-exhaustion-limit overrides as `decode`'s own flags of the same name. |
 
-#### Two kinds of finding
+#### Two kinds of finding, three independent dimensions
+
+Every finding carries three deliberately independent, labeled dimensions instead of one conflated
+"confidence" field -- separating how reliably the event was observed from whether it's new from how
+much it would matter if genuine, and never claiming to know intent:
+
+- **evidence** (`Confirmed`/`Heuristic`) -- how reliably the underlying protocol event itself was
+  established from the decode. `Confirmed` means a protocol field was read directly and
+  unambiguously off the wire -- true for every finding source below except one: `RemoteAccessChannel`
+  is `Heuristic`, since Tier-1 protocol identification is port-only and client/server direction is a
+  "lower port is the server" guess, neither a decoded field.
+- **novelty** (`N/A`/`Confirmed New`/`First Occurrence`) -- the "new vs. known" resolution, see
+  below.
+- **severity** (`Critical`/`Moderate`/`Informational`) -- the operational impact IF the observed
+  action is genuine and intentional, independent of both of the above.
+
+None of the three, alone or combined, is a claim about malicious intent -- that judgment belongs to
+the human analyst reading the report. See `docs/design/detection-engine.md`'s own "Four-axis model"
+section for the full design record, including Jurgen's own critique that motivated this split.
 
 **Always-notable** findings need no "new vs. known" judgment at all -- the traffic shape itself is
 notable every time it's seen: a PLC/controller mode change, a firmware/logic download, a device
-restart, an unsolicited or unexpected protocol message. Almost all of these get **High**
-confidence -- the one deliberate exception is the Modbus write-without-prior-read pattern below,
-which is always-notable but unconditionally **Low** (see "Snort-style pattern extensions" below for
-why). Currently sourced from S7comm (PLC Control/Stop, block download, Setup Communication
-probing), DNP3 (Cold/Warm Restart, Enable-then-later-Unsolicited-Response-with-none-enabled,
-Operate with no prior Select), IEC 104 (an ASDU whose own cause-of-transmission is one of the four
-error codes, a Reset Process command), BACnet (ReinitializeDevice, DeviceCommunicationControl,
-Who-Is flood/enumeration sweep), EtherNet/IP (a CIP write to the Identity object), Modbus (a write
-outside every range ever read on the same conduit), and UMAS (START_PLC/STOP_PLC,
-INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/END_STRATEGY_DOWNLOAD -- see "UMAS decode" below), plus one
-composite finding (a Program Download and a restart/mode-change finding both against the same
-server within a short window).
+restart, an unsolicited or unexpected protocol message. These all get novelty `N/A`. Most get
+severity **Critical** -- a handful of deliberately weaker signals (the Modbus write-without-
+prior-read pattern, the BACnet Who-Is flood, the S7 Setup Communication probing pattern, DNP3
+unsolicited-response misuse, and an unexpected IEC 104 COT) get **Moderate** or **Informational**
+instead (see "Snort-style pattern extensions" below for the full severity table). Currently sourced
+from S7comm (PLC Control/Stop, block download, Setup Communication probing), DNP3 (Cold/Warm
+Restart, Enable-then-later-Unsolicited-Response-with-none-enabled, Operate with no prior Select),
+IEC 104 (an ASDU whose own cause-of-transmission is one of the four error codes, a Reset Process
+command), BACnet (ReinitializeDevice, DeviceCommunicationControl, Who-Is flood/enumeration sweep),
+EtherNet/IP (a CIP write to the Identity object), Modbus (a write outside every range ever read on
+the same conduit), and UMAS (START_PLC/STOP_PLC, INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/
+END_STRATEGY_DOWNLOAD -- see "UMAS decode" below), plus one composite finding (a Program Download
+and a restart/mode-change finding both against the same server within a short window).
 
 **New-vs-known** findings -- a remote-access protocol (RDP/VNC/TeamViewer/AnyDesk/Zoom) reaching a
 conduit, a CIP Forward_Open or UMAS engineering-station command from a client not seen doing that
-before -- are only notable when they're genuinely new, and "new" is decided honestly:
+before -- are only notable when they're genuinely new, and "new" (their `novelty`) is decided
+honestly:
 
 - With `--baseline-file` supplied: a conduit genuinely absent from the loaded baseline's known
-  conduits is real evidence of "new" -- **Medium** confidence. A conduit already present in the
+  conduits is real evidence of "new" -- novelty `Confirmed New`. A conduit already present in the
   baseline is not flagged at all.
 - Without `--baseline-file` (the common single-pcap assessment case): evaluated as
-  first-occurrence-within-this-capture -- **Low** confidence, and the finding's own description says
-  so and suggests re-running with `--baseline-file` for a stronger signal (the capture might simply
-  start after the channel was already long-established, which first-occurrence order can't tell
-  apart from genuinely new).
+  first-occurrence-within-this-capture -- novelty `First Occurrence`, and the finding's own
+  description says so and suggests re-running with `--baseline-file` for a stronger signal (the
+  capture might simply start after the channel was already long-established, which first-occurrence
+  order can't tell apart from genuinely new).
 
 With `--policy` also given, a new remote-access finding's own MITRE technique is further resolved
 between T0886 (Remote Services, stays within one declared zone) and T0822 (External Remote Services,
-crosses a declared zone boundary) -- independent of confidence, which is decided by
-`--baseline-file` alone.
+crosses a declared zone boundary) -- independent of all three dimensions, which are decided
+separately (`--baseline-file` resolves novelty only).
 
-Confidence is new-findings-only for now: it is not retrofitted onto `attack_detect.hpp`'s
-flood/scan findings or onto `baseline check`'s own new-conduit/new-operation findings -- see
-`docs/design/detection-engine.md`'s own "explicitly out of scope" note.
+Evidence/novelty/severity are new-findings-only for now: they are not retrofitted onto
+`attack_detect.hpp`'s flood/scan findings or onto `baseline check`'s own new-conduit/new-operation
+findings -- see `docs/design/detection-engine.md`'s own "explicitly out of scope" note.
 
 #### Snort-style pattern extensions
 
@@ -1213,9 +1235,11 @@ the originally-proposed wire-format specifics):
   a bypass of one, and is never flagged by this pattern.
 - **Modbus write outside every range ever read** -- a Write Multiple Coils/Registers request whose
   address range isn't covered by any prior read (same conduit, same address table -- Coils and
-  Holding Registers tracked separately) in this capture. Unconditionally **Low** confidence: many
-  legitimate deployments write setpoints/commands without ever reading them back first, so this is
-  honestly a much weaker signal than every other always-notable finding here.
+  Holding Registers tracked separately) in this capture. Unconditionally **Informational** severity
+  (evidence stays `Confirmed` -- the write and the missing prior read genuinely were observed exactly
+  as described; it's the severity of that observation that's deliberately low): many legitimate
+  deployments write setpoints/commands without ever reading them back first, so this is honestly a
+  much weaker signal than every other always-notable finding here.
 - **BACnet Who-Is flood/device-enumeration sweep** -- a running per-source-IP count of Who-Is
   requests (grouped by source alone, since Who-Is is routinely broadcast); fires once a source
   crosses 100 requests in this capture (the same small, documented, not-vendor-sourced default
@@ -1236,20 +1260,25 @@ $ conduitscope detect -r tests/sample_detect_snort_patterns.pcap
 === conduitscope detect report ===
 capture: tests/sample_detect_snort_patterns.pcap
 total packets: 16
-findings: 8 (High 7, Medium 0, Low 1)
+findings: 8 (Critical 6, Moderate 0, Informational 2)
+  evidence: Confirmed 8, Heuristic 0
   Engineering-Station Activity: 3
   Firmware/Logic Change: 2
   Remote-Access Channel: 0
   Protocol Misuse: 3
+note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT
+      section. That judgment belongs to the human analyst reading this report.
 
 --- findings (first-seen order) ---
 
-[Protocol Misuse] T0855 (Unauthorized Command Message) -- confidence: High
+[Protocol Misuse] T0855 (Unauthorized Command Message)
+  evidence: Confirmed  novelty: N/A  severity: Critical
   192.168.1.70 -> 192.168.1.71:44818 (enip)
   CIP Set_Attribute_Single write to the Identity object (class 0x01) -- broadened-scope stand-in for a ControlLogix-style remote run/program/remote mode change: this engine cannot confirm which specific Identity attribute was written (no citable primary source for that wire format), so every write to this object is flagged rather than guessing at one
   first seen: 2023-11-15 09:20:01.000000Z  last seen: 2023-11-15 09:20:01.000000Z  packets: 1
 
-[Protocol Misuse] T0831 (Manipulation of Control) -- confidence: Low
+[Protocol Misuse] T0831 (Manipulation of Control)
+  evidence: Confirmed  novelty: N/A  severity: Informational
   192.168.1.70 -> 192.168.1.74:502 (modbus)
   Modbus Write Multiple Registers to address range [100, 105) not fully covered by any prior read (same conduit, same address table) in this capture -- a genuinely weak signal on its own (many legitimate deployments write setpoints without reading them back first): treat as a prompt to check this range's purpose, not as confirmed misuse
   first seen: 2023-11-15 09:20:05.000000Z  last seen: 2023-11-15 09:20:05.000000Z  packets: 1
@@ -1269,25 +1298,31 @@ $ conduitscope detect -r tests/sample_detect.pcap
 === conduitscope detect report ===
 capture: tests/sample_detect.pcap
 total packets: 12
-findings: 9 (High 7, Medium 0, Low 2)
+findings: 9 (Critical 5, Moderate 4, Informational 0)
+  evidence: Confirmed 8, Heuristic 1
   Engineering-Station Activity: 0
   Firmware/Logic Change: 4
   Remote-Access Channel: 1
   Protocol Misuse: 4
+note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT
+      section. That judgment belongs to the human analyst reading this report.
 
 --- findings (first-seen order) ---
 
-[Firmware/Logic Change] T0843 (Program Download) -- confidence: High
+[Firmware/Logic Change] T0843 (Program Download)
+  evidence: Confirmed  novelty: N/A  severity: Critical
   192.168.1.60 -> 192.168.1.10:102 (s7comm)
   S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station
   first seen: 2023-11-15 03:46:40.000000Z  last seen: 2023-11-15 03:46:40.000000Z  packets: 1
 
-[Protocol Misuse] T0855 (Unauthorized Command Message) -- confidence: Low
+[Protocol Misuse] T0855 (Unauthorized Command Message)
+  evidence: Confirmed  novelty: First Occurrence  severity: Moderate
   192.168.1.67 -> 192.168.1.65:44818 (enip)
   CIP Forward_Open from a new originator 192.168.1.67 to 192.168.1.65 -- a different engineering/control client than the one(s) already seen opening a connection to this target in this capture (first occurrence within this capture; no --baseline-file was supplied)
   first seen: 2023-11-15 03:46:50.010000Z  last seen: 2023-11-15 03:46:50.010000Z  packets: 1
 
-[Remote-Access Channel] T0886 (Remote Services) -- confidence: Low
+[Remote-Access Channel] T0886 (Remote Services)
+  evidence: Heuristic  novelty: First Occurrence  severity: Moderate
   192.168.1.68 -> 192.168.1.69:3389 (rdp)
   New rdp (remote-access) session 192.168.1.68 -> 192.168.1.69:3389 -- first occurrence within this capture; no --baseline-file was supplied, so this may already be a normal, previously-established channel -- rerun with --baseline-file for a stronger signal
   first seen: 2023-11-15 03:46:51.011000Z  last seen: 2023-11-15 03:46:51.011000Z  packets: 1
@@ -1299,18 +1334,19 @@ above for brevity; every one of the 9 findings this capture produces is exercise
 own CTest suite.) Re-running the same capture against a baseline that has already learned the RDP
 conduit and the CIP originator (`baseline learn --baseline-file b.json tests/sample_detect.pcap`,
 then `detect -r tests/sample_detect.pcap --baseline-file b.json`) drops the CIP finding entirely
-(now a known originator) and upgrades the RDP finding from Low to **Medium**, its description
-changing to `"confirmed absent from the supplied baseline"`. Adding `--policy` with a policy file
-that places the RDP conduit's two endpoints in different declared zones upgrades that same finding's
-technique from T0886 to **T0822 (External Remote Services)**.
+(now a known originator) and upgrades the RDP finding's novelty from `First Occurrence` to
+**`Confirmed New`** (its severity stays Moderate throughout -- a baseline only ever resolves
+novelty), its description changing to `"confirmed absent from the supplied baseline"`. Adding
+`--policy` with a policy file that places the RDP conduit's two endpoints in different declared
+zones upgrades that same finding's technique from T0886 to **T0822 (External Remote Services)**.
 
 `-T json` mirrors the same data as a `findings` array (each entry: `category`, `technique_id`,
-`technique_name`, `confidence`, `client_ip`, `server_ip`, `protocol`, `server_port`, `description`,
-`first_seen`/`first_seen_text`, `last_seen`/`last_seen_text`, `packet_count`) plus a `summary` object
-(the same counts the text report's header shows) and a `techniques_referenced` array -- always the
-full ten-technique table from `docs/design/detection-engine.md`'s own MITRE mapping, not just the
-ones this particular report cites, so a consumer always has the full citation text on hand without a
-second lookup.
+`technique_name`, `evidence`, `novelty`, `severity`, `client_ip`, `server_ip`, `protocol`,
+`server_port`, `description`, `first_seen`/`first_seen_text`, `last_seen`/`last_seen_text`,
+`packet_count`) plus a `summary` object (the same counts the text report's header shows) and a
+`techniques_referenced` array -- always the full ten-technique table from
+`docs/design/detection-engine.md`'s own MITRE mapping, not just the ones this particular report
+cites, so a consumer always has the full citation text on hand without a second lookup.
 
 #### UMAS decode
 
@@ -1338,19 +1374,29 @@ $ conduitscope detect -r tests/sample_umas.pcap
 === conduitscope detect report ===
 capture: tests/sample_umas.pcap
 total packets: 15
-findings: 5 (High 3, Medium 0, Low 2)
+findings: 6 (Critical 4, Moderate 1, Informational 1)
+  evidence: Confirmed 6, Heuristic 0
   Engineering-Station Activity: 3
-  Firmware/Logic Change: 1
+  Firmware/Logic Change: 2
   Remote-Access Channel: 0
   Protocol Misuse: 1
+note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT
+      section. That judgment belongs to the human analyst reading this report.
 
 --- findings (first-seen order) ---
 
-[Engineering-Station Activity] T0858 (Change Operating Mode) -- confidence: High
+[Engineering-Station Activity] T0858 (Change Operating Mode)
+  evidence: Confirmed  novelty: N/A  severity: Critical
   192.168.1.50 -> 192.168.1.10:502 (modbus)
   UMAS START_PLC command -- an engineering station changed the PLC's own run/stop mode
   first seen: 2023-11-15 06:33:22.002000Z  last seen: 2023-11-15 06:33:22.002000Z  packets: 1
 ```
+
+(The sixth finding -- beyond the five UMAS-specific ones (START_PLC, STOP_PLC, INITIALIZE_DOWNLOAD,
+a new-originator TAKE_PLC_RESERVATION, and a new-originator read-only discovery command) -- is the
+same download-then-restart composite "Snort-style pattern extensions" describes above: it is
+protocol-agnostic, so UMAS's own START_PLC/STOP_PLC (T0858) findings against the same server as the
+INITIALIZE_DOWNLOAD (T0843) trigger it here too, exactly as an S7 PLC Stop + download does.)
 
 `baseline learn`/`baseline check` also treat UMAS START_PLC/STOP_PLC as always-flagged control-plane
 operations, the same treatment S7comm's own PLC Control/PLC Stop already gets -- `baseline check`
@@ -5952,25 +5998,32 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   cites the narrower T0886 -- "crossed a zone boundary" isn't inferable
   without a policy file that says where the boundaries are, so `detect`
   never guesses. See the `detect` section above.
-- **`detect`'s new-vs-known findings are Low confidence, honestly weaker
-  evidence, whenever no `--baseline-file` is supplied** -- evaluated as
+- **`detect`'s new-vs-known findings get novelty `First Occurrence`, honestly weaker
+  evidence of "new," whenever no `--baseline-file` is supplied** -- evaluated as
   first-occurrence-within-this-capture, which can't distinguish "genuinely
   new" from "the capture simply starts after this channel was already
   long-established." The finding's own description says so and suggests
   `--baseline-file`. See the `detect` section above.
-- **`detect`'s confidence field is new-findings-only.** It is not
+- **`detect`'s evidence/novelty/severity fields are new-findings-only.** They are not
   retrofitted onto the pre-existing flood/scan-shaped findings
   (`attack_detect.hpp`/`ipv6_attack_detect.hpp`) or onto `baseline
   check`'s own new-conduit/new-operation findings -- a deliberate scope
   boundary, not an oversight. See `docs/design/detection-engine.md`'s
   "explicitly out of scope" note.
 - **`detect`'s Modbus write-without-prior-read pattern is a genuinely weak
-  signal, unconditionally Low confidence.** Many legitimate deployments
+  signal, unconditionally Informational severity.** Many legitimate deployments
   write setpoints/commands without ever reading them back first, especially
   in a single short capture that may simply not include the read traffic
   that exists elsewhere in a plant's own normal polling cycle -- treat this
   finding as a prompt to check a range's purpose, not as confirmed misuse.
   See "Snort-style pattern extensions" in the `detect` section above.
+- **`detect`'s evidence/novelty/severity never assert malicious intent.**
+  `evidence` says how reliably this tool observed the event; `severity`
+  says how much it would matter if genuine; `novelty` says whether it
+  looks new. None of the three, alone or combined, says WHY the event
+  happened or WHO caused it -- that judgment belongs entirely to the human
+  analyst reading the report. See `docs/design/detection-engine.md`'s
+  "Four-axis model" section.
 - **`detect`'s CIP Identity Object write pattern is deliberately broader
   than a real ControlLogix run/program/remote mode change.** This project
   could not find a citable primary source for the specific class/attribute

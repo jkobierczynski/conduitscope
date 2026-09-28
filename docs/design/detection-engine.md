@@ -73,14 +73,15 @@ comment) but for a different reason:
 restart, an unsolicited/unexpected protocol message -- need no "new vs. known" judgment at all: the
 traffic SHAPE itself is what's notable, every single time it's seen, the same "always worth a
 human's attention regardless of baseline" concept `baseline.cpp`'s own `Operation::always_flag`
-already established for S7 PLC Control/PLC Stop. These get `DetectionConfidence::High`
-unconditionally and are produced entirely from fields this codebase already decodes (or, for UMAS,
-newly decodes -- see below).
+already established for S7 PLC Control/PLC Stop. These get `DetectionNovelty::NotApplicable`
+unconditionally (no "new vs. known" judgment is ever made for them) and are produced entirely from
+fields this codebase already decodes (or, for UMAS, newly decodes -- see below). Their `evidence`/
+`severity` are set per finding source -- see "Four-axis model" below.
 
 **NEW-VS-KNOWN findings** -- a remote-access protocol reaching a conduit, a CIP or UMAS
 engineering-station originator opening a connection -- are only notable when they're NEW, and "new"
 needs a concrete, honestly-labeled mechanism (Grok's own text: "keep the honesty: label
-confidence"). See "Confidence" below for exactly how that's decided.
+confidence"). See "Four-axis model" below for exactly how that's decided.
 
 `DetectEngine::observe` runs a two-stage pipeline per Jurgen's own approved design: per-packet, it
 either emits an always-notable finding immediately (deduplicated by a
@@ -89,8 +90,9 @@ the same combination only updates that finding's own `last_seen`/`packet_count`,
 second finding) or records a new-vs-known *candidate* into `new_conduit_candidates_` (deduplicated
 by a `(client_ip, server_ip, protocol, server_port, source_tag)` key, so two different sources --
 remote-access, CIP, UMAS -- about the same 4-tuple never collide onto one candidate). `finish()`
-then resolves every candidate against an optional `--baseline-file`/`--policy`, exactly once, at
-whole-capture time -- see "Confidence" below.
+then resolves every candidate's `novelty` against an optional `--baseline-file` (and a
+`RemoteAccessChannel` candidate's `technique` against an optional `--policy`), exactly once, at
+whole-capture time -- see "Four-axis model" below.
 
 ## Finding categories
 
@@ -104,8 +106,9 @@ enum class DetectionCategory {
 };
 ```
 
-Independent of confidence: a category says WHAT KIND of thing this is, confidence says HOW SURE
-this tool is it's genuinely notable.
+Independent of evidence/novelty/severity: a category says WHAT KIND of thing this is; the other
+three say how reliably it was observed, whether it's new, and how much it would matter if genuine
+(see "Four-axis model" below).
 
 ## MITRE ATT&CK for ICS mapping
 
@@ -138,8 +141,10 @@ this codebase can produce is one of these ten, never a stray/invented ID.
 
 A technique ID/name pair is a factual citation (MITRE's own naming), not a diagnosis -- a
 `DetectionFinding` citing T0858 says "this traffic has the SHAPE ATT&CK for ICS calls Change
-Operating Mode," not "this is malicious." `DetectionFinding::confidence` is the separate, honest
-signal about how sure this tool is the finding itself is notable at all.
+Operating Mode," not "this is malicious." `DetectionFinding::evidence`/`novelty`/`severity` are the
+separate, honest signals about how reliably this tool observed the event, whether it's new, and how
+much it would matter if genuine -- see "Four-axis model" below; none of them, individually or
+combined, is a claim about intent either.
 
 T0821 (Modify Controller Tasking) and T0831 (Manipulation of Control) are included in the table for
 completeness against Grok's own finding-shape list, but no current finding source actually cites
@@ -150,49 +155,94 @@ than removed) so a future finding source can cite them without a second MITRE-ve
 `write_detection_report_json`'s "techniques referenced" list will show them as available even when
 zero findings in a given report cite them.
 
-## Confidence: the "new vs. known" design
+## Four-axis model: evidence, novelty, severity -- and no claim of intent
 
-Grok's own text says "keep the honesty: label confidence" -- this needed a concrete mechanism, not
-just an enum:
+Grok's own text says "keep the honesty: label confidence" -- the first shipped version of this
+feature answered that with a single conflated field:
 
 ```cpp
 enum class DetectionConfidence { High, Medium, Low };
 ```
 
-- **High**: every always-notable finding (see "Two kinds of finding" above) -- no "new vs. known"
-  judgment needed at all. Same posture as `baseline.cpp`'s existing `always_flag`
-  `ControlPlaneOperation`.
-- **Medium**: a new-vs-known candidate evaluated against a caller-supplied baseline file via
-  `--baseline-file FILE` -- reusing `load_baseline_store`/`BaselineStore` (`baseline.hpp`)
-  read-only, mirroring `baseline check`'s own `--baseline-file` flag name for consistency. A
-  candidate's `(client_ip, server_ip, protocol, server_port)` key is checked against
-  `baseline->conduits`: genuinely absent is real evidence of "new," not a guess.
-  A candidate whose key IS present in the loaded baseline is dropped entirely -- not new at all, no
-  finding produced (never downgraded to Low; a known conduit doing a known-shaped thing isn't a
-  finding of any confidence).
-- **Low**: the same new-vs-known candidates when no `--baseline-file` is supplied (the common
-  single-pcap assessment case) -- evaluated as first-occurrence-within-this-capture. Honestly weaker
-  signal (the capture might just start after the channel was already long-established), so the
-  report text says so explicitly and suggests `--baseline-file` -- the same spirit as
-  `direction_source`'s own `PortHeuristic` low-confidence precedent elsewhere in this codebase.
+Jurgen reviewed the shipped feature and identified, precisely, that this quietly mixed three
+genuinely different questions into one word, and that "confidence" itself was the wrong frame
+because it invited a reader to hear "malicious" where the tool never claimed anything of the kind.
+His own critique, verbatim: "Separate evidence confidence from maliciousness and severity. High
+confidence should mean that the observed protocol event is reliably established, not that the
+activity is malicious. Distinguish confirmed protocol evidence, baseline deviation, operational
+severity, and malicious intent." A mid-turn follow-up scoped the fix: "Make the four-axis model the
+foundation of the detection and reporting architecture, but keep the protocol decoding and rule
+execution mechanisms simple and deterministic." Both instructions together are what this section
+documents -- a schema/labeling redesign, not a change to what `observe()`/`finish()` actually decode
+or how they decide a finding fires.
 
-**Explicitly out of scope**: retrofitting a confidence field onto
+`DetectionConfidence` was replaced by three independent fields, plus an explicit non-claim:
+
+```cpp
+enum class DetectionEvidence { Confirmed, Heuristic };
+enum class DetectionNovelty { NotApplicable, ConfirmedNew, FirstOccurrence };
+enum class DetectionSeverity { Critical, Moderate, Informational };
+```
+
+- **`evidence`** -- how reliably the underlying protocol event itself was established from the
+  decode, and ONLY that. `Confirmed` means a protocol field was read directly and unambiguously off
+  the wire (a function code, a service name, a CIP path segment) -- true for every finding source in
+  this file except one. `Heuristic` means part of the finding's own claim rests on an inference that
+  could be wrong -- today, only `RemoteAccessChannel`: Tier-1 protocol identification
+  (`notable_it_protocols.hpp`) is port-only, its own weakest tier, and client/server direction comes
+  from the "lower port number is the server" guess, not a decoded field. Every other finding source
+  (S7/DNP3/IEC104/BACnet/CIP/UMAS/Modbus) reads a genuine decoded field, so `evidence` stays
+  `Confirmed` throughout this codebase apart from that one case.
+- **`novelty`** -- exactly the "new vs. known" resolution the old Medium/Low split used to encode,
+  now its own field: `NotApplicable` for every always-notable finding (no such judgment is ever
+  made); `ConfirmedNew` when a new-vs-known candidate's `(client_ip, server_ip, protocol,
+  server_port)` key is checked against a caller-supplied `--baseline-file` (reusing
+  `load_baseline_store`/`BaselineStore`, `baseline.hpp`, read-only, mirroring `baseline check`'s own
+  flag name) and is genuinely absent from it; `FirstOccurrence` when no `--baseline-file` is
+  supplied (the common single-pcap assessment case) -- evaluated as
+  first-occurrence-within-this-capture, honestly weaker evidence (the capture might just start after
+  the channel was already long-established), so the report text says so explicitly and suggests
+  `--baseline-file`, the same spirit as `direction_source`'s own `PortHeuristic` low-confidence
+  precedent elsewhere in this codebase. A candidate whose key IS present in the loaded baseline is
+  dropped entirely -- not new at all, no finding produced.
+- **`severity`** -- the operational impact IF the observed action is genuine and intentional,
+  independent of both of the above: a PLC Stop is Critical whether or not the master that sent it
+  was authorized, and whether or not it's new, because the operational consequence (the CPU actually
+  stops) is the same either way. Set per finding source at the `record_always_notable`/
+  `record_new_conduit_candidate` call site (`detect_engine.cpp`) -- most always-notable sources
+  default to Critical (a real control/restart/download action), most new-vs-known sources default to
+  Moderate (a real but not immediately control-affecting event); a handful of deliberately weaker
+  signals -- the Modbus write-without-read pattern, the BACnet Who-Is flood, the S7 Setup
+  Communication probing post-pass, UMAS read-only discovery, DNP3 unsolicited misuse, and an
+  unexpected IEC 104 COT -- pass Moderate or Informational explicitly, documented at each call site.
+- **Nothing asserts malicious intent, and no field claims to.** A MITRE ATT&CK for ICS citation
+  names the traffic's SHAPE, not a verdict (`mitre_attack_ics.hpp`'s own header comment already
+  establishes this); `evidence` says how sure this tool is that shape was really observed; `severity`
+  says how much it would matter if genuine; `novelty` says whether it looks new. None of the three,
+  alone or combined, says WHY the event happened or WHO caused it -- this tool has no access to
+  change-management records, authorized-personnel lists, or asset criticality context, and does not
+  pretend otherwise. That judgment belongs entirely to the human analyst reading the report; both the
+  text and JSON writers (`write_detection_report_text`/`_json`) print a one-line reminder of this
+  alongside the summary, not just in code comments.
+
+**Explicitly out of scope**: retrofitting `evidence`/`novelty`/`severity` onto
 `attack_detect.hpp`/`ipv6_attack_detect.hpp`/baseline's own existing findings. That's a separate,
 larger effort across already-shipped, already-tested code and wasn't what Jurgen asked to start with
 this feature -- flagged here as a reasonable future follow-up, not silently left undone.
 
 ### RemoteAccessChannel's own T0886-vs-T0822 resolution
 
-A `RemoteAccessChannel` candidate additionally needs its *technique* resolved, independent of
-confidence: `finish(policy, ...)` -- `policy` optional, `nullptr` when `detect --policy` wasn't
+A `RemoteAccessChannel` candidate additionally needs its *technique* resolved, independent of all
+three axes: `finish(policy, ...)` -- `policy` optional, `nullptr` when `detect --policy` wasn't
 given -- decides between T0886 (Remote Services, no zone crossing) and T0822 (External Remote
 Services, crosses a zone boundary). When both endpoints resolve to a declared zone (via
 `Policy::zone_for`, reusing `policy validate`'s own machinery exactly, no second parser) and the
 zones differ, T0822; otherwise (no policy given, an endpoint outside every declared zone, or both
 endpoints in the same zone) the narrower T0886 claim, since "crossed a boundary" isn't inferable
 without a policy that says where the boundaries are. This is a technique upgrade only -- it never
-changes the finding's confidence (still Low/Medium exactly as the baseline-file resolution above
-decided) and never suppresses or creates a finding on its own.
+changes the finding's `evidence`/`novelty`/`severity` (still whatever the baseline-file resolution
+above and the candidate's own recorded `severity`/`evidence` already decided) and never suppresses
+or creates a finding on its own.
 
 ## Engineering-station originator tracking
 
@@ -315,7 +365,9 @@ Following this project's "a new decoder gets wired everywhere every other decode
 struct DetectionFinding {
     DetectionCategory category;
     MitreAttackTechnique technique;    // always populated -- every finding cites exactly one
-    DetectionConfidence confidence;
+    DetectionEvidence evidence;        // decode reliability only -- see "Four-axis model" above
+    DetectionNovelty novelty;          // new-vs-known only
+    DetectionSeverity severity;        // impact-if-genuine only
     std::string client_ip, server_ip;  // client_ip is the initiator/originator side
     std::string protocol;              // "s7comm"/"dnp3"/"iec104"/"bacnet"/"enip"/"modbus"/"rdp"/...
     uint16_t server_port;
@@ -325,7 +377,8 @@ struct DetectionFinding {
 };
 
 struct DetectionSummary {
-    size_t total, high, medium, low;
+    size_t total, critical, moderate, informational;      // by severity
+    size_t confirmed_evidence, heuristic_evidence;          // by evidence
     size_t engineering_station_activity, firmware_logic_change, remote_access_channel,
            protocol_misuse;
 };
@@ -357,7 +410,7 @@ One subcommand, matching every other report-producing subcommand's own `-r`/`-i`
 existing template, since `detect`, like `inventory`, supports both live capture and file input,
 unlike `baseline learn`/`baseline check` which are file-only). `--policy`/`--baseline-file` are
 both optional and independent of each other -- either, neither, or both may be given, and their
-effects (T0886-vs-T0822 resolution; Medium-vs-Low confidence) don't interact. See
+effects (T0886-vs-T0822 resolution; ConfirmedNew-vs-FirstOccurrence novelty) don't interact. See
 `man/conduitscope.1`'s OPTIONS (detect) section and `docs/USER_GUIDE.md`'s DETECT section for the
 full flag reference and a worked example.
 
@@ -379,7 +432,8 @@ scenario per always-notable finding source (S7 block download, DNP3 Cold Restart
 Response with no prior Enable, an IEC 104 ASDU with an error-shaped COT, IEC 104 Reset Process,
 BACnet ReinitializeDevice, BACnet DeviceCommunicationControl) plus one CIP Forward_Open new-originator
 case and one RDP new-remote-access-channel case -- 9 findings total from 12 packets, pinned end to
-end (category, technique, confidence, endpoints, description, in first-seen order) by
+end (category, technique, evidence, novelty, severity, endpoints, description, in first-seen order)
+by
 `detect_sample_detect_text_all_findings`/`detect_sample_detect_json_shape` in `CMakeLists.txt`.
 `tests/sample_umas.pcap` (`build_umas_sample()`) separately exercises every UMAS function code this
 decoder names, plus (added when Phase 6 wired UMAS into `DetectEngine`) a second and third
@@ -444,33 +498,42 @@ proposed it, before Jurgen's "implement them all," and never revisited.
 
 The final six, all shipped:
 
-| # | Pattern (as implemented) | Category / technique | Confidence |
-|---|---|---|---|
-| 1 | CIP `Set_Attribute_Single`/`Set_Attributes_All` write to the Identity object (class 0x01) | ProtocolMisuse / T0855 | High (always-notable) |
-| 2 | DNP3 Operate (0x04) with no Select (0x03) ever seen for that master/outstation pair | ProtocolMisuse / T0855 | High (always-notable) |
-| 3 | Modbus Write Multiple Coils/Registers outside every range ever read (same conduit, same table) | ProtocolMisuse / T0831 | **Low, unconditionally** -- the one deliberate exception to "always-notable is always High," see below |
-| 4 | BACnet Who-Is flood/device-enumeration sweep, per source IP, past a threshold | ProtocolMisuse / T0888 | High (always-notable, fires once per source at threshold) |
-| 5 | S7comm Setup Communication (0xF0) probing: repeated, with no other S7comm function ever seen for that pair | EngineeringStationActivity / T0888 | High (resolved in `finish()`, not `observe()`) |
-| 6 | Composite: a Program Download (T0843) finding and a restart/mode-change (T0858/T0816) finding both against the same server within a short window | FirmwareLogicChange / T0831 | High (resolved in `finish()`, over this SAME call's own already-produced findings) |
+| # | Pattern (as implemented) | Category / technique | Evidence | Severity |
+|---|---|---|---|---|
+| 1 | CIP `Set_Attribute_Single`/`Set_Attributes_All` write to the Identity object (class 0x01) | ProtocolMisuse / T0855 | Confirmed (always-notable) | Critical |
+| 2 | DNP3 Operate (0x04) with no Select (0x03) ever seen for that master/outstation pair | ProtocolMisuse / T0855 | Confirmed (always-notable) | Critical |
+| 3 | Modbus Write Multiple Coils/Registers outside every range ever read (same conduit, same table) | ProtocolMisuse / T0831 | Confirmed | **Informational, unconditionally** -- the one deliberate always-notable exception to "the default severity is Critical," see below |
+| 4 | BACnet Who-Is flood/device-enumeration sweep, per source IP, past a threshold | ProtocolMisuse / T0888 | Confirmed (always-notable, fires once per source at threshold) | Informational |
+| 5 | S7comm Setup Communication (0xF0) probing: repeated, with no other S7comm function ever seen for that pair | EngineeringStationActivity / T0888 | Confirmed (resolved in `finish()`, not `observe()`) | Informational |
+| 6 | Composite: a Program Download (T0843) finding and a restart/mode-change (T0858/T0816) finding both against the same server within a short window | FirmwareLogicChange / T0831 | Confirmed (resolved in `finish()`, over this SAME call's own already-produced findings) | Critical |
+
+Every one of the six keeps `evidence: Confirmed` -- each reads a decoded protocol field directly, the
+same "no source here needs Heuristic" posture every original gap #4 finding except
+`RemoteAccessChannel` already has (see "Four-axis model" above). `novelty` is `NotApplicable` for all
+six -- none of them is a new-vs-known finding.
 
 Implementation notes, by pattern:
 
 - **Pattern 3 (Modbus write-without-read) is the one place this feature deliberately breaks its own
-  "always-notable is always High confidence" rule.** Every other always-notable source in this file
-  earns High because the traffic SHAPE alone is structurally notable regardless of context (a PLC
-  Stop is always worth a human's attention). "A write to a range nobody read first" is a genuinely
-  weaker signal on its own -- plenty of legitimate deployments write setpoints/commands without ever
-  reading them back, especially in a short single-pcap capture that may simply not contain the read
-  traffic that exists elsewhere in a plant's normal polling cycle. `record_always_notable`
-  (`detect_engine.cpp`) grew an optional trailing `DetectionConfidence` parameter (default `High`,
-  every pre-existing call site unaffected) specifically so this one pattern could pass `Low`
-  explicitly rather than either lying about confidence or needing a whole second mechanism. Only the
-  two writable Modbus data tables are tracked (Coils, via Write Multiple Coils/Read Coils; Holding
-  Registers, via Write Multiple Registers/Read Holding Registers) -- Discrete Inputs and Input
-  Registers are read-only tables nothing ever writes to, so they're never tracked at all, and Write
-  Single Coil/Register are excluded entirely (`ModbusFrame::start_address`/`quantity`'s own comment,
-  `modbus.hpp`, documents why that pair has no request/response-confirmed shape to key on in the
-  first place -- a pre-existing, unrelated scope boundary, not something this pattern introduces).
+  "the default always-notable severity is Critical" rule.** Every other always-notable source in this
+  file earns Critical because the traffic SHAPE alone is structurally notable and operationally
+  significant regardless of context (a PLC Stop is always worth a human's attention and always stops
+  the CPU if genuine). "A write to a range nobody read first" is a genuinely weaker signal on its own
+  -- plenty of legitimate deployments write setpoints/commands without ever reading them back,
+  especially in a short single-pcap capture that may simply not contain the read traffic that exists
+  elsewhere in a plant's normal polling cycle. `record_always_notable` (`detect_engine.cpp`) grew
+  optional trailing `DetectionSeverity`/`DetectionEvidence` parameters (defaulting to `Critical`/
+  `Confirmed`, every pre-existing call site unaffected) specifically so patterns like this one could
+  pass a lower severity explicitly rather than either lying about it or needing a whole second
+  mechanism -- `evidence` stays `Confirmed` here: the write and the absence of a prior read genuinely
+  were observed exactly as described, it's the SEVERITY of that observation that's deliberately low,
+  a distinction the old single confidence field couldn't make. Only the two writable Modbus data
+  tables are tracked (Coils, via Write Multiple Coils/Read Coils; Holding Registers, via Write
+  Multiple Registers/Read Holding Registers) -- Discrete Inputs and Input Registers are read-only
+  tables nothing ever writes to, so they're never tracked at all, and Write Single Coil/Register are
+  excluded entirely (`ModbusFrame::start_address`/`quantity`'s own comment, `modbus.hpp`, documents
+  why that pair has no request/response-confirmed shape to key on in the first place -- a
+  pre-existing, unrelated scope boundary, not something this pattern introduces).
 - **Pattern 5 (S7 Setup Communication probing) and pattern 6 (the composite) are the only two of the
   six resolved in `finish()` rather than `observe()`.** Both genuinely need whole-capture knowledge:
   "no other S7comm function was EVER seen for this pair" can't be confirmed until the capture ends (a
@@ -521,14 +584,14 @@ assertion only after running the real CLI binary and inspecting its actual outpu
 
 ## Explicitly out of scope
 
-- **Confidence retrofit onto pre-existing engines.** See "Confidence" above.
+- **Evidence/novelty/severity retrofit onto pre-existing engines.** See "Four-axis model" above.
 - **Dragos-style activity-group attribution.** Jurgen's own scoping decision #2 -- MITRE ATT&CK for
   ICS technique citations only, never a named threat-actor/campaign label, since this project has no
   legitimate proprietary threat-intel data to correlate against.
 - **UMAS data-field decode.** See the UMAS scope-decision paragraph above -- function-code-level
   naming and request/response classification only, no memory-address/project-name/reservation-payload
   parsing.
-- **A confidence field that adapts over multiple `detect` runs.** Every `detect` invocation is a
+- **An evidence/novelty/severity field that adapts over multiple `detect` runs.** Every `detect` invocation is a
   fresh, stateless evaluation against whatever `--baseline-file`/`--policy` was given this run; there
   is no persisted `DetectEngine` state the way `BaselineStore` persists across `baseline learn` runs.
   A caller wanting trend-over-time detection today combines `detect --baseline-file` (kept current

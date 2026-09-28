@@ -421,18 +421,28 @@ and a download\-then\-restart composite (a firmware/logic download and a
 restart/mode\-change finding both against the same server within a short
 window) \-\- distinct from the flood/scan\-shaped signatures this tool
 already detects elsewhere. Every finding cites exactly one MITRE ATT&CK
-for ICS technique and carries a labeled confidence: \fBHigh\fR for most
-always\-notable findings (the traffic shape itself needs no "new vs.
-known" judgment), except the Modbus write\-without\-prior\-read pattern,
-which is always\-notable but deliberately \fBLow\fR unconditionally (many
-legitimate deployments write setpoints without reading them back first);
-\fBMedium\fR/\fBLow\fR for a new\-vs\-known finding, resolved against
-\fB\-\-baseline\-file\fR when given, or first\-occurrence\-within\-this\-capture
-otherwise. With \fB\-\-policy\fR, a new remote\-access finding's own
-technique is further resolved between T0886 (Remote Services) and T0822
-(External Remote Services) depending on whether it crosses a declared
-zone boundary. \fBdetect\fR always exits 0 on a successful run, regardless
-of findings \-\- see \fBEXIT STATUS\fR. See \fBOPTIONS (detect)\fR below,
+for ICS technique and carries three independent, labeled dimensions \-\-
+never a single conflated "confidence" field, and never a claim about
+malicious intent: \fBevidence\fR (\fBConfirmed\fR/\fBHeuristic\fR \-\- how
+reliably the underlying protocol event was observed; \fBHeuristic\fR only
+for the RemoteAccessChannel source), \fBnovelty\fR (\fBN/A\fR for every
+always\-notable finding, which needs no "new vs. known" judgment at all;
+\fBConfirmed New\fR/\fBFirst Occurrence\fR for a new\-vs\-known finding,
+resolved against \fB\-\-baseline\-file\fR when given, or
+first\-occurrence\-within\-this\-capture otherwise), and \fBseverity\fR
+(\fBCritical\fR/\fBModerate\fR/\fBInformational\fR \-\- the operational
+impact if the observed action is genuine, independent of the other two;
+most always\-notable findings are \fBCritical\fR, except a handful of
+deliberately weaker signals \-\- the Modbus write\-without\-prior\-read
+pattern, the BACnet Who\-Is flood, S7comm Setup Communication probing,
+DNP3 unsolicited\-response misuse, and an unexpected IEC 104
+cause\-of\-transmission \-\- which are \fBModerate\fR or
+\fBInformational\fR instead). With \fB\-\-policy\fR, a new remote\-access
+finding's own technique is further resolved between T0886 (Remote
+Services) and T0822 (External Remote Services) depending on whether it
+crosses a declared zone boundary, independent of all three dimensions.
+\fBdetect\fR always exits 0 on a successful run, regardless of findings
+\-\- see \fBEXIT STATUS\fR. See \fBOPTIONS (detect)\fR below,
 \fBdocs/design/detection-engine.md\fR for the full design record, and
 \fBdocs/USER_GUIDE.md\fR's \fBdetect\fR section for a worked example.
 .TP
@@ -1617,19 +1627,21 @@ declared zone boundary): when both endpoints resolve to a declared zone
 and the zones differ, T0822; otherwise (no policy given, an endpoint
 outside every declared zone, or both endpoints in the same zone) the
 narrower T0886 claim. Every other finding is unaffected by this flag, and
-this flag never changes a finding's confidence. Optional; omitted by
-default. Must exist.
+this flag never changes a finding's evidence, novelty, or severity.
+Optional; omitted by default. Must exist.
 .TP
 .B \-\-baseline\-file \fIFILE\fR
 Baseline JSON file (see \fBbaseline learn\fR), read\-only, never written \-\-
-used to resolve every new\-vs\-known finding (a new remote\-access channel,
-a new CIP/UMAS engineering\-station originator) against real history
-instead of this capture's own first\-occurrence order. A candidate whose
-conduit is already present in the loaded baseline is not flagged at all;
-one genuinely absent gets \fBMedium\fR confidence. Without this flag, every
-new\-vs\-known finding is \fBLow\fR confidence (first occurrence within this
-capture only \-\- honestly weaker evidence, since the capture might simply
-start after the channel was already long\-established). Optional; omitted
+used to resolve every new\-vs\-known finding's \fBnovelty\fR (a new
+remote\-access channel, a new CIP/UMAS engineering\-station originator)
+against real history instead of this capture's own first\-occurrence
+order. A candidate whose conduit is already present in the loaded
+baseline is not flagged at all; one genuinely absent gets novelty
+\fBConfirmed New\fR. Without this flag, every new\-vs\-known finding gets
+novelty \fBFirst Occurrence\fR (first occurrence within this capture only
+\-\- honestly weaker evidence, since the capture might simply start after
+the channel was already long\-established). Either way, the finding's own
+evidence and severity are unaffected by this flag. Optional; omitted
 by default. Must exist.
 .TP
 .B \-\-max\-baseline\-file\-bytes \fIN\fR
@@ -2414,8 +2426,9 @@ its data field's internal structure \-\- see \fBdocs/design/detection-engine.md\
 and \fBdocs/PROTOCOL_COVERAGE.md\fR's own UMAS entry;
 \fBdetect\fR's T0886-vs-T0822 zone-crossing distinction for a new
 remote-access finding depends entirely on \fB\-\-policy\fR being given, and
-every new-vs-known finding is Low confidence, honestly weaker evidence,
-whenever no \fB\-\-baseline\-file\fR is supplied. See the
+every new-vs-known finding gets novelty \fBFirst Occurrence\fR, honestly
+weaker evidence of "new," whenever no \fB\-\-baseline\-file\fR is supplied
+\-\- and its evidence/novelty/severity never assert malicious intent. See the
 "LIMITATIONS" section of \fBdocs/USER_GUIDE.md\fR and the "ROADMAP"
 section of \fBdocs/DEVELOPMENT.md\fR in the source tree for the full,
 current detail and what's planned next.

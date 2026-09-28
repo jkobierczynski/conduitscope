@@ -2583,7 +2583,9 @@ int main(int argc, char** argv) {
         "detect", "Detection findings OT incident-response teams recognize: engineering-station "
                    "mode changes, firmware/logic downloads and restarts, protocol misuse, and new "
                    "remote-access channels -- each finding cites a MITRE ATT&CK for ICS technique "
-                   "and a labeled confidence level. See docs/design/detection-engine.md.");
+                   "and three independent, labeled dimensions: evidence (how reliably the protocol "
+                   "event was observed), novelty (new vs. known), and severity (impact if genuine). "
+                   "Never asserts malicious intent. See docs/design/detection-engine.md.");
     std::string detect_input, detect_interface, detect_filter, detect_output;
     int detect_duration = 0;
     int detect_snaplen = 65535;
@@ -2643,11 +2645,13 @@ int main(int argc, char** argv) {
     detect_cmd
         ->add_option("--baseline-file", detect_baseline_file,
                       "Baseline JSON file (see 'baseline learn') -- used to resolve every "
-                      "new-vs-known finding (a new remote-access channel, a new CIP originator) "
-                      "against real history instead of this capture's own first-occurrence order. "
-                      "A conduit already present in the baseline is not flagged at all; one "
-                      "genuinely absent gets Medium confidence. Without this flag, a new-vs-known "
-                      "finding is Low confidence (first occurrence within this capture only)")
+                      "new-vs-known finding's novelty (a new remote-access channel, a new CIP "
+                      "originator) against real history instead of this capture's own "
+                      "first-occurrence order. A conduit already present in the baseline is not "
+                      "flagged at all; one genuinely absent gets novelty 'Confirmed New'. Without "
+                      "this flag, a new-vs-known finding gets novelty 'First Occurrence' (first "
+                      "occurrence within this capture only) -- either way, the finding's own "
+                      "evidence and severity are unaffected by this flag")
         ->check(CLI::ExistingFile);
     detect_cmd
         ->add_option("--max-baseline-file-bytes", detect_max_baseline_file_bytes,

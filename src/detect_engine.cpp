@@ -31,11 +31,28 @@ const char* detection_category_name(DetectionCategory category) {
     return "Unknown";
 }
 
-const char* detection_confidence_name(DetectionConfidence confidence) {
-    switch (confidence) {
-        case DetectionConfidence::High: return "High";
-        case DetectionConfidence::Medium: return "Medium";
-        case DetectionConfidence::Low: return "Low";
+const char* detection_evidence_name(DetectionEvidence evidence) {
+    switch (evidence) {
+        case DetectionEvidence::Confirmed: return "Confirmed";
+        case DetectionEvidence::Heuristic: return "Heuristic";
+    }
+    return "Unknown";
+}
+
+const char* detection_novelty_name(DetectionNovelty novelty) {
+    switch (novelty) {
+        case DetectionNovelty::NotApplicable: return "N/A";
+        case DetectionNovelty::ConfirmedNew: return "Confirmed New";
+        case DetectionNovelty::FirstOccurrence: return "First Occurrence";
+    }
+    return "Unknown";
+}
+
+const char* detection_severity_name(DetectionSeverity severity) {
+    switch (severity) {
+        case DetectionSeverity::Critical: return "Critical";
+        case DetectionSeverity::Moderate: return "Moderate";
+        case DetectionSeverity::Informational: return "Informational";
     }
     return "Unknown";
 }
@@ -159,23 +176,30 @@ void DetectEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
     if (!dp.has_ip) return;
 
-    // `confidence` defaults to High -- every original (gap #4) always-notable source relies on that
-    // default and passes nothing here. The Modbus write-without-prior-read pattern below is the one
-    // always-notable source that deliberately passes DetectionConfidence::Low instead (see its own
-    // call site comment for why "the traffic shape is structurally notable" doesn't hold as strongly
-    // for that pattern as it does for every other always-notable finding).
+    // `severity` defaults to Critical -- most always-notable sources are a real control/restart/
+    // download action, where Critical is the right "if genuine" impact call (see each call site's own
+    // comment for the handful of deliberate exceptions: dnp3-unsolicited-misuse and
+    // iec104-unexpected-cot pass Moderate, bacnet-who-is-flood and modbus-write-without-read pass
+    // Informational). `evidence` defaults to Confirmed -- every always-notable source reads a decoded
+    // protocol field directly, no source here needs Heuristic. Neither parameter says anything about
+    // "new vs. known" -- every always-notable finding gets DetectionNovelty::NotApplicable
+    // unconditionally, since no such judgment is ever made for this kind of finding (see this file's
+    // header comment, detect_engine.hpp).
     auto record_always_notable = [&](const char* finding_kind, DetectionCategory category,
                                       const MitreAttackTechnique& technique, const std::string& client_ip,
                                       const std::string& server_ip, const std::string& protocol,
                                       uint16_t server_port, const std::string& description,
-                                      DetectionConfidence confidence = DetectionConfidence::High) {
+                                      DetectionSeverity severity = DetectionSeverity::Critical,
+                                      DetectionEvidence evidence = DetectionEvidence::Confirmed) {
         std::string key = always_notable_key(finding_kind, client_ip, server_ip, protocol, server_port);
         auto it = always_notable_.find(key);
         if (it == always_notable_.end()) {
             DetectionFinding f;
             f.category = category;
             f.technique = technique;
-            f.confidence = confidence;
+            f.evidence = evidence;
+            f.novelty = DetectionNovelty::NotApplicable;
+            f.severity = severity;
             f.client_ip = client_ip;
             f.server_ip = server_ip;
             f.protocol = protocol;
@@ -193,16 +217,29 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         }
     };
 
+    // `severity`/`evidence` are recorded on the CANDIDATE here and carried straight through onto the
+    // eventual finding in finish() -- finish() only ever decides `novelty` (see NewConduitCandidate's
+    // own comment, detect_engine.hpp). `severity` defaults to Moderate -- a new engineering/remote-
+    // access originator is a real but not immediately control-affecting event (unlike, say, a PLC
+    // Stop) for most sources here; umas-new-originator-discovery (read-only enumeration) is the one
+    // deliberate Informational exception, see its own call site. `evidence` defaults to Confirmed;
+    // the RemoteAccessChannel source is this engine's one deliberate Heuristic exception (port-only
+    // Tier-1 identification plus a port-comparison direction guess, neither a decoded field) -- see
+    // its own call site and this file's header comment.
     auto record_new_conduit_candidate = [&](DetectionCategory category, const MitreAttackTechnique& technique,
                                              bool is_remote_access, const std::string& client_ip,
                                              const std::string& server_ip, const std::string& protocol,
-                                             uint16_t server_port, const char* source_tag) {
+                                             uint16_t server_port, const char* source_tag,
+                                             DetectionSeverity severity = DetectionSeverity::Moderate,
+                                             DetectionEvidence evidence = DetectionEvidence::Confirmed) {
         std::string key = new_conduit_key(client_ip, server_ip, protocol, server_port, source_tag);
         auto it = new_conduit_candidates_.find(key);
         if (it == new_conduit_candidates_.end()) {
             NewConduitCandidate c;
             c.category = category;
             c.technique = technique;
+            c.evidence = evidence;
+            c.severity = severity;
             c.is_remote_access = is_remote_access;
             c.client_ip = client_ip;
             c.server_ip = server_ip;
@@ -310,7 +347,8 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                         mitre_t0855_unauthorized_command_message(), dp.dst_ip, dp.src_ip, "dnp3", dp.src_port,
                         "DNP3 Unsolicited Response from an outstation this capture never saw a master "
                         "enable unsolicited responses on (Enable Unsolicited Responses, function 0x14) -- "
-                        "either enabled before this capture began, or genuinely unexpected");
+                        "either enabled before this capture began, or genuinely unexpected",
+                        DetectionSeverity::Moderate);
                 }
             } else if (dr.dnp3_function_name == "Select") {
                 dnp3_select_seen_[dp.src_ip + "|" + dp.dst_ip] = true;
@@ -362,7 +400,8 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        "IEC 104 ASDU with cause-of-transmission \"" + ir.iec104_cot_name +
                                            "\" (type " + ir.iec104_asdu_type_short_name +
                                            ") -- the receiving end's own reported COT is one of IEC "
-                                           "60870-5-101/104's four error codes");
+                                           "60870-5-101/104's four error codes",
+                                       DetectionSeverity::Moderate);
             }
             // C_RP_NA_1's own type ID is shared by the command itself (COT 6, "activation") and its
             // own confirmation/termination ASDUs sent back the OTHER direction (COT 7/10) -- IEC 104
@@ -428,7 +467,8 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                         std::to_string(kBacnetWhoIsFloodThreshold) +
                         " Who-Is requests observed in this capture (destination shown is only the "
                         "most recent one -- Who-Is is routinely broadcast, so this source may have "
-                        "targeted several destinations)");
+                        "targeted several destinations)",
+                    DetectionSeverity::Informational);
             }
         }
     }
@@ -542,13 +582,21 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 if (!already_seen) {
                     if (!originators.empty()) {
                         bool is_reservation = (fc == UMAS_TAKE_PLC_RESERVATION);
+                        // TAKE_PLC_RESERVATION actually claims exclusive engineering access -- a real
+                        // (if not immediately destructive) control-plane event, so it keeps the
+                        // record_new_conduit_candidate default of Moderate severity. The three
+                        // READ_ID/READ_PROJECT_INFO/READ_PLC_INFO commands are read-only enumeration
+                        // with no control effect at all if genuine, so they're deliberately
+                        // Informational instead -- the same "evidence stays Confirmed, only severity
+                        // drops" posture as the Modbus write-without-read pattern above.
                         record_new_conduit_candidate(
                             is_reservation ? DetectionCategory::ProtocolMisuse
                                            : DetectionCategory::EngineeringStationActivity,
                             is_reservation ? mitre_t0855_unauthorized_command_message()
                                            : mitre_t0888_remote_system_information_discovery(),
                             /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
-                            is_reservation ? "umas-new-originator-reservation" : "umas-new-originator-discovery");
+                            is_reservation ? "umas-new-originator-reservation" : "umas-new-originator-discovery",
+                            is_reservation ? DetectionSeverity::Moderate : DetectionSeverity::Informational);
                     }
                     originators.push_back(dp.src_ip);
                 }
@@ -556,18 +604,21 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         }
 
         // --- Modbus: write to a range never covered by a prior read on this conduit (protocol
-        // --- misuse, deliberately Low confidence) -------------------------------------------------
+        // --- misuse, deliberately Informational severity) ------------------------------------------
         // Only the two write-multiple functions carry a structured, request-confirmed
         // start_address/quantity at all (mb.is_request && mb.start_address && mb.quantity) -- Write
         // Single Coil/Register are excluded, see modbus_read_ranges_by_conduit_table_'s own comment
-        // (detect_engine.hpp) for why. Deliberately Low confidence unconditionally, via
-        // record_always_notable's own confidence parameter -- unlike every other always-notable
-        // source in this file, "write without a matching prior read" is a genuinely weak signal on
-        // its own: plenty of legitimate deployments write setpoints/commands without ever reading
-        // them back, especially in a short single-pcap capture that may simply not include the read
-        // traffic that exists elsewhere in the plant's normal polling cycle. Two separate address
-        // tables (coils vs. holding registers), never cross-checked against each other -- see
-        // modbus_read_ranges_by_conduit_table_'s own comment.
+        // (detect_engine.hpp) for why. Deliberately Informational severity unconditionally, via
+        // record_always_notable's own severity parameter -- unlike every other always-notable source
+        // in this file, "write without a matching prior read" is a genuinely weak signal on its own:
+        // plenty of legitimate deployments write setpoints/commands without ever reading them back,
+        // especially in a short single-pcap capture that may simply not include the read traffic that
+        // exists elsewhere in the plant's normal polling cycle. Evidence stays Confirmed -- the write
+        // and the absence of a prior read genuinely were observed exactly as described; it's the
+        // SEVERITY of that observation, not its reliability, that's deliberately low, a distinction
+        // the old single confidence field couldn't make (see this file's own header comment,
+        // detect_engine.hpp). Two separate address tables (coils vs. holding registers), never
+        // cross-checked against each other -- see modbus_read_ranges_by_conduit_table_'s own comment.
         if (mb.is_request && mb.start_address && mb.quantity &&
             (mb.function_name == "Read Coils" || mb.function_name == "Read Holding Registers" ||
              mb.function_name == "Write Multiple Coils" || mb.function_name == "Write Multiple Registers")) {
@@ -593,7 +644,7 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                             "this capture -- a genuinely weak signal on its own (many legitimate "
                             "deployments write setpoints without reading them back first): treat as a "
                             "prompt to check this range's purpose, not as confirmed misuse",
-                        DetectionConfidence::Low);
+                        DetectionSeverity::Informational);
                 }
             }
         }
@@ -620,9 +671,15 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             server_ip = dp.src_ip;
             server_port = dp.src_port;
         }
+        // Heuristic evidence (not Confirmed, the default) -- Tier-1 identification here is
+        // notable_it_protocols.hpp's own weakest, port-only tier, and client/server direction is the
+        // "lower port number is the server" guess above, neither a field actually decoded off the
+        // wire. Severity stays the record_new_conduit_candidate default (Moderate) -- a new
+        // remote-access session is a real but not immediately control-affecting event.
         record_new_conduit_candidate(DetectionCategory::RemoteAccessChannel, mitre_t0886_remote_services(),
                                       /*is_remote_access=*/true, client_ip, server_ip, dp.protocol,
-                                      server_port, "remote-access");
+                                      server_port, "remote-access", DetectionSeverity::Moderate,
+                                      DetectionEvidence::Heuristic);
     }
 }
 
@@ -652,7 +709,9 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
 
         DetectionFinding f;
         f.category = c.category;
-        f.confidence = baseline ? DetectionConfidence::Medium : DetectionConfidence::Low;
+        f.evidence = c.evidence;
+        f.novelty = baseline ? DetectionNovelty::ConfirmedNew : DetectionNovelty::FirstOccurrence;
+        f.severity = c.severity;
         f.client_ip = c.client_ip;
         f.server_ip = c.server_ip;
         f.protocol = c.protocol;
@@ -748,7 +807,12 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
             DetectionFinding f;
             f.category = DetectionCategory::EngineeringStationActivity;
             f.technique = mitre_t0888_remote_system_information_discovery();
-            f.confidence = DetectionConfidence::High;
+            f.evidence = DetectionEvidence::Confirmed;
+            f.novelty = DetectionNovelty::NotApplicable;
+            // Informational, not Critical/Moderate -- probing (repeated handshake, nothing else) is
+            // reconnaissance-shaped with no direct control action, the same posture as
+            // bacnet-who-is-flood/modbus-write-without-read above.
+            f.severity = DetectionSeverity::Informational;
             f.client_ip = client_ip;
             f.server_ip = server_ip;
             f.protocol = "s7comm";
@@ -808,7 +872,9 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
             DetectionFinding f;
             f.category = DetectionCategory::FirmwareLogicChange;
             f.technique = mitre_t0831_manipulation_of_control();
-            f.confidence = DetectionConfidence::High;
+            f.evidence = DetectionEvidence::Confirmed;
+            f.novelty = DetectionNovelty::NotApplicable;
+            f.severity = DetectionSeverity::Critical;  // the classic "install then activate" sequence
             f.client_ip = best_download->client_ip;
             f.server_ip = server_ip;
             f.protocol = best_download->protocol;
@@ -835,10 +901,14 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
 
     for (const auto& f : report.findings) {
         ++report.summary.total;
-        switch (f.confidence) {
-            case DetectionConfidence::High: ++report.summary.high; break;
-            case DetectionConfidence::Medium: ++report.summary.medium; break;
-            case DetectionConfidence::Low: ++report.summary.low; break;
+        switch (f.severity) {
+            case DetectionSeverity::Critical: ++report.summary.critical; break;
+            case DetectionSeverity::Moderate: ++report.summary.moderate; break;
+            case DetectionSeverity::Informational: ++report.summary.informational; break;
+        }
+        switch (f.evidence) {
+            case DetectionEvidence::Confirmed: ++report.summary.confirmed_evidence; break;
+            case DetectionEvidence::Heuristic: ++report.summary.heuristic_evidence; break;
         }
         switch (f.category) {
             case DetectionCategory::EngineeringStationActivity: ++report.summary.engineering_station_activity; break;
@@ -857,12 +927,16 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
     out << "=== conduitscope detect report ===\n";
     out << "capture: " << capture_path << "\n";
     out << "total packets: " << report.total_packets << "\n";
-    out << "findings: " << report.summary.total << " (High " << report.summary.high << ", Medium "
-        << report.summary.medium << ", Low " << report.summary.low << ")\n";
+    out << "findings: " << report.summary.total << " (Critical " << report.summary.critical << ", Moderate "
+        << report.summary.moderate << ", Informational " << report.summary.informational << ")\n";
+    out << "  evidence: Confirmed " << report.summary.confirmed_evidence << ", Heuristic "
+        << report.summary.heuristic_evidence << "\n";
     out << "  Engineering-Station Activity: " << report.summary.engineering_station_activity << "\n";
     out << "  Firmware/Logic Change: " << report.summary.firmware_logic_change << "\n";
     out << "  Remote-Access Channel: " << report.summary.remote_access_channel << "\n";
     out << "  Protocol Misuse: " << report.summary.protocol_misuse << "\n";
+    out << "note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT\n";
+    out << "      section. That judgment belongs to the human analyst reading this report.\n";
 
     if (report.findings.empty()) {
         out << "\nno findings\n";
@@ -872,7 +946,10 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
     out << "\n--- findings (first-seen order) ---\n";
     for (const auto& f : report.findings) {
         out << "\n[" << detection_category_name(f.category) << "] " << f.technique.id << " ("
-            << f.technique.name << ") -- confidence: " << detection_confidence_name(f.confidence) << "\n";
+            << f.technique.name << ")\n";
+        out << "  evidence: " << detection_evidence_name(f.evidence)
+            << "  novelty: " << detection_novelty_name(f.novelty)
+            << "  severity: " << detection_severity_name(f.severity) << "\n";
         out << "  " << f.client_ip << " -> " << f.server_ip;
         if (f.server_port != 0) out << ":" << f.server_port;
         out << " (" << f.protocol << ")\n";
@@ -891,14 +968,18 @@ void write_detection_report_json(std::ostream& out, const DetectionReport& repor
     out << "  \"total_packets\": " << report.total_packets << ",\n";
     out << "  \"summary\": {\n";
     out << "    \"total\": " << report.summary.total << ",\n";
-    out << "    \"high\": " << report.summary.high << ",\n";
-    out << "    \"medium\": " << report.summary.medium << ",\n";
-    out << "    \"low\": " << report.summary.low << ",\n";
+    out << "    \"critical\": " << report.summary.critical << ",\n";
+    out << "    \"moderate\": " << report.summary.moderate << ",\n";
+    out << "    \"informational\": " << report.summary.informational << ",\n";
+    out << "    \"confirmed_evidence\": " << report.summary.confirmed_evidence << ",\n";
+    out << "    \"heuristic_evidence\": " << report.summary.heuristic_evidence << ",\n";
     out << "    \"engineering_station_activity\": " << report.summary.engineering_station_activity << ",\n";
     out << "    \"firmware_logic_change\": " << report.summary.firmware_logic_change << ",\n";
     out << "    \"remote_access_channel\": " << report.summary.remote_access_channel << ",\n";
     out << "    \"protocol_misuse\": " << report.summary.protocol_misuse << "\n";
     out << "  },\n";
+    out << "  \"note\": \"evidence/novelty/severity never assert malicious intent -- that judgment "
+           "belongs to the human analyst reading this report\",\n";
 
     out << "  \"techniques_referenced\": [\n";
     auto techniques = all_mitre_attack_ics_techniques();
@@ -917,7 +998,9 @@ void write_detection_report_json(std::ostream& out, const DetectionReport& repor
         out << "      \"category\": \"" << json_escape(detection_category_name(f.category)) << "\",\n";
         out << "      \"technique_id\": \"" << json_escape(f.technique.id) << "\",\n";
         out << "      \"technique_name\": \"" << json_escape(f.technique.name) << "\",\n";
-        out << "      \"confidence\": \"" << json_escape(detection_confidence_name(f.confidence)) << "\",\n";
+        out << "      \"evidence\": \"" << json_escape(detection_evidence_name(f.evidence)) << "\",\n";
+        out << "      \"novelty\": \"" << json_escape(detection_novelty_name(f.novelty)) << "\",\n";
+        out << "      \"severity\": \"" << json_escape(detection_severity_name(f.severity)) << "\",\n";
         out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
         out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
         out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
