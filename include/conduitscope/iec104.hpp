@@ -206,6 +206,47 @@ std::vector<std::string> iec104_known_asdu_short_names();
 std::vector<std::string> iec104_read_asdu_short_names();
 std::vector<std::string> iec104_write_asdu_short_names();
 
+// One coalesced ASDU's own decoded operation-relevant fields, structured rather than flattened --
+// added for the baseline engine's Grok review item 3 IEC 104 sub-item (docs/design/baseline-
+// engine.md's own "Follow-up: IEC 104 type/COT/IOA-range tracking" section), mirroring
+// Dnp3ObjectRange's own role for DNP3 (dnp3.hpp) exactly: the real, structured numbers a caller
+// needs instead of a rendered display string to reparse. Unlike Iec104Result's own
+// iec104_asdu_type_name/iec104_asdu_type_short_name/iec104_cot_name/iec104_common_address/
+// iec104_has_asdu scalars (which reflect only the FIRST coalesced ASDU) and
+// iec104_object_values/iec104_object_ioas (a single list CUMULATIVE across every coalesced ASDU,
+// with no way to tell which ASDU or which type/COT a given IOA belongs to once several ASDUs are
+// coalesced into one TCP payload), one Iec104AsduInfo exists per I-format APDU's own ASDU actually
+// seen in a payload (Iec104Result::iec104_asdus, below) -- mirrors Dnp3Result::dnp3_objects' own
+// per-object-header, never-misattributed-across-boundaries granularity, each entry carrying THAT
+// ASDU's own type_short_name/cot_name/common_address/sq/object_count plus that SAME ASDU's own
+// object IOAs. Populated unconditionally in merge_asdu (Iec104Decoder::decode, iec104.cpp), for
+// both the first APDU and every additional coalesced one, including an ASDU whose own `decoded`
+// came back false (unrecognized type ID, or too short/malformed) -- type_short_name/cot_name are
+// still meaningful in that case (e.g. "Unknown(213)"/"spontaneous"), only object_ioas stays empty,
+// mirroring Dnp3ObjectRange's own "still recorded, just with has_range false" treatment of an
+// undecoded header.
+struct Iec104AsduInfo {
+    std::string type_short_name;
+    std::string cot_name;
+    uint16_t common_address = 0;
+    // VSQ bit8/bits7-1, copied straight from Iec104Asdu::sq/object_count -- see that struct's own
+    // comment. object_count is the WIRE-DECLARED count (not object_ioas.size(), which may be
+    // shorter than this if kMaxDecodedObjects truncated the individual per-object walk) -- using
+    // the declared count for a sequential (sq true) ASDU's own range width is deliberate: the wire
+    // still genuinely addresses this many consecutive points even when this decoder didn't
+    // individually decode every one of them.
+    bool sq = false;
+    uint8_t object_count = 0;
+    // This ASDU's own object IOAs, same order as Iec104Asdu::objects (already capped at
+    // kMaxDecodedObjects there, before merge_asdu ever sees it -- no separate cap applied here).
+    // Empty when object_count is 0 (a legitimate case, e.g. an activation confirmation with no
+    // addressed points), the type ID wasn't recognized, or the ASDU was too short/malformed to
+    // decode (Iec104Asdu::decoded false) -- extract_iec104_operations (baseline.cpp) treats an
+    // empty list as "track the type/COT pairing itself, but no target range" in every one of those
+    // cases alike, rather than distinguishing why it's empty.
+    std::vector<uint32_t> object_ioas;
+};
+
 // Migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp): everything decoder.cpp's
 // IEC 104 call site dual-writes into DecodedPacket, gathered from however many APDUs were
 // coalesced in one TCP payload (see Iec104Decoder::decode below) -- mirrors exactly what the
@@ -236,6 +277,11 @@ struct Iec104Result {
     // directly rather than reparsing iec104_object_values' rendered "ioa=..." strings (see
     // InventoryEdge::top_touched_addresses' own comment, asset_inventory.hpp).
     std::vector<uint32_t> iec104_object_ioas;
+
+    // One entry per I-format APDU's own ASDU actually seen in this payload -- see Iec104AsduInfo's
+    // own comment (above, namespace scope) for the full rationale and exactly how it differs from
+    // the flattened/cumulative fields above.
+    std::vector<Iec104AsduInfo> iec104_asdus;
 };
 
 // id() == "iec104", gate_kind() == TcpPortIndependent. Wraps try_parse_iec104_apci/

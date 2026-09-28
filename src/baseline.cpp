@@ -13,6 +13,7 @@
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
 #include "conduitscope/fins.hpp"
+#include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/melsec.hpp"
 #include "conduitscope/modbus.hpp"
@@ -743,6 +744,94 @@ std::vector<Operation> extract_fins_operations(const DecodedPacket& dp) {
     return ops;
 }
 
+// IEC 60870-5-104: Grok review item 3's remaining sub-item (docs/reviews/2026-09-grok-response.md,
+// "baseline process behavior, not just ports"), deliberately deferred from the S7comm/OPC UA
+// follow-ups above until Iec104Result carried per-ASDU structured data to extract from without
+// misattribution -- see Iec104AsduInfo's own comment (iec104.hpp) and docs/design/baseline-
+// engine.md's own "Follow-up: IEC 104 type/COT/IOA-range tracking" section for the full story of
+// why this needed a small additive decoder-side extension first, mirroring exactly the same
+// Dnp3ObjectRange precedent DNP3's own extract_dnp3_operations already established.
+//
+// operation_key is "<type_short_name>/<cot_name>" (e.g. "M_SP_NA_1/spontaneous",
+// "C_SC_NA_1/activation") -- type AND cause of transmission folded together, per Grok's own explicit
+// "type/COT" ask: both are small, bounded enumerations (iec104_type_short_name's own known-type
+// table; iec104_cot_name's own switch), the same "fold a bounded, meaningful dimension into the key"
+// precedent S7's DB-number suffix and DNP3's group/variation suffix already establish -- never the
+// over-granular trap of keying on a raw per-call value. Cause of transmission matters here in a way
+// it doesn't for the protocols above: unlike Modbus's write echo (the SAME function code, address,
+// and quantity repeated verbatim on both sides -- exactly why Modbus/S7/ENIP/BACnet/OPC UA all read
+// request-side only), an IEC 104 control confirmation/termination reuses the SAME type_id as its own
+// originating command but a DIFFERENT COT (e.g. a C_SC_NA_1 "activation" command's own confirmation
+// is C_SC_NA_1 "activation confirmation", and its termination C_SC_NA_1 "activation termination") --
+// folding COT into the key means these already land under distinct operation_keys on their own, with
+// no risk of the same fact being double-counted the way an unfiltered Modbus write would be. This is
+// also why, unlike every other protocol in this file, BOTH directions are read here, deliberately,
+// the same documented divergence extract_dnp3_operations' own comment explains for DNP3 and for
+// exactly the same underlying reason: type_id+COT together already disambiguate direction and
+// semantics on their own, so there is nothing here for a request-side-only filter to protect against.
+//
+// Address/range tracking follows VSQ's own sq (sequential) flag, per-ASDU, straight off
+// Iec104AsduInfo -- never reparsed out of a rendered "ioa=..." string:
+//   - sq true (sequential IOAs): ONE Operation for the whole ASDU, has_target_range true,
+//     [object_ioas.front(), object_ioas.front() + object_count) -- the ASDU's own single contiguous
+//     span of addressed points (a general/counter interrogation response's typical shape), mirroring
+//     Modbus/S7/MELSEC/FINS's own single-range-per-operation model exactly.
+//   - sq false (discontinuous, one explicit IOA per object -- the common shape for a spontaneous
+//     single-point change report, object_count usually 1): ONE Operation PER OBJECT, each a
+//     single-point [ioa, ioa + 1) range under the SAME operation_key -- mirrors S7's own 0xB2
+//     symbolic-item precedent (Operation's own header comment: "item.count is never available ...
+//     this is 'an access was observed starting here,' not a confirmed span"). Multiple objects under
+//     the same operation_key accumulate into ONE OperationBaseline's observed_ranges list
+//     (BaselineEngine::observe's own merge_range_into call, unchanged by this function) -- adjacent
+//     or overlapping single-point ranges coalesce there automatically, so a conduit that has always
+//     reported IOAs 100-105 as five separate spontaneous single-point ASDUs still baselines as one
+//     merged [100,105) interval, and a genuinely new, disjoint IOA still surfaces as NewTargetRange --
+//     no new verdict logic needed anywhere in check_baseline for this to work correctly.
+//   - Either way, an ASDU with no object_ioas at all (object_count 0 -- e.g. an activation
+//     confirmation with nothing addressed; an unrecognized type ID; a too-short/malformed ASDU) still
+//     gets a single key-only Operation (has_target_range false) -- the type/COT pairing itself is
+//     still worth recording, mirroring extract_dnp3_operations' own key-only fallback for an object
+//     header whose own `decoded` flag is false.
+std::vector<Operation> extract_iec104_operations(const DecodedPacket& dp) {
+    std::vector<Operation> ops;
+    if (!dp.result) return ops;
+    const Iec104Result& ir = dp.result->as<Iec104Result>();
+
+    for (const Iec104AsduInfo& asdu : ir.iec104_asdus) {
+        std::string key = asdu.type_short_name + "/" + asdu.cot_name;
+
+        if (asdu.object_ioas.empty()) {
+            Operation op;
+            op.protocol = "iec104";
+            op.operation_key = key;
+            // has_target_range stays false -- see this function's own header comment.
+            ops.push_back(std::move(op));
+            continue;
+        }
+
+        if (asdu.sq && asdu.object_count > 0) {
+            Operation op;
+            op.protocol = "iec104";
+            op.operation_key = key;
+            op.has_target_range = true;
+            op.range_start = asdu.object_ioas.front();
+            op.range_end = op.range_start + static_cast<uint32_t>(asdu.object_count);
+            ops.push_back(std::move(op));
+        } else {
+            for (uint32_t ioa : asdu.object_ioas) {
+                Operation op;
+                op.protocol = "iec104";
+                op.operation_key = key;
+                op.has_target_range = true;
+                op.range_start = ioa;
+                op.range_end = ioa + 1;
+                ops.push_back(std::move(op));
+            }
+        }
+    }
+    return ops;
+}
+
 }  // namespace
 
 std::vector<Operation> extract_operations(const DecodedPacket& packet) {
@@ -754,6 +843,7 @@ std::vector<Operation> extract_operations(const DecodedPacket& packet) {
     if (packet.protocol == "opcua") return extract_opcua_operations(packet);
     if (packet.protocol == "melsec") return extract_melsec_operations(packet);
     if (packet.protocol == "fins") return extract_fins_operations(packet);
+    if (packet.protocol == "iec104") return extract_iec104_operations(packet);
     return {};
 }
 
@@ -815,14 +905,15 @@ std::string conduit_key(const std::string& protocol, const std::string& client_i
 }
 
 // This feature's own known ports -- Modbus/TCP, COTP (S7comm's own transport), and, as of Phase 2
-// (roadmap item 41), the six protocols added there -- the narrowed version of PolicyEngine::
+// (roadmap item 41), the six protocols added there, plus IEC 104 (Grok review item 3's own
+// follow-up, docs/design/baseline-engine.md) -- the narrowed version of PolicyEngine::
 // observe's/AssetInventoryEngine::observe's own is_known_service_port, restricted to the protocols
 // this engine ever extracts operations from. FINS_TCP_PORT/FINS_UDP_PORT are numerically identical
 // (9600, see fins.hpp) -- listed both for clarity, not because it matters which one C++ compares.
 bool is_known_baseline_port(uint16_t port) {
     return port == MODBUS_TCP_PORT || port == COTP_TCP_PORT || port == ENIP_TCP_PORT || port == DNP3_TCP_PORT ||
            port == OPCUA_PORT || port == MELSEC_TCP_PORT || port == MELSEC_UDP_PORT || port == FINS_TCP_PORT ||
-           port == FINS_UDP_PORT || port == BACNET_UDP_PORT;
+           port == FINS_UDP_PORT || port == BACNET_UDP_PORT || port == IEC104_TCP_PORT;
 }
 
 bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
@@ -833,11 +924,14 @@ bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
     return src_port > dst_port;
 }
 
-// True for every protocol this engine ever extracts operations from -- S7comm/Modbus (Phase 1) plus
-// the six added in Phase 2 (roadmap item 41, docs/design/baseline-engine.md).
+// True for every protocol this engine ever extracts operations from -- S7comm/Modbus (Phase 1), the
+// six added in Phase 2 (roadmap item 41, docs/design/baseline-engine.md), and IEC 104 (Grok review
+// item 3's own follow-up, docs/design/baseline-engine.md's "Follow-up: IEC 104 type/COT/IOA-range
+// tracking" section).
 bool is_baseline_protocol(const std::string& protocol) {
     return protocol == "modbus" || protocol == "s7comm" || protocol == "enip" || protocol == "dnp3" ||
-           protocol == "bacnet" || protocol == "opcua" || protocol == "melsec" || protocol == "fins";
+           protocol == "bacnet" || protocol == "opcua" || protocol == "melsec" || protocol == "fins" ||
+           protocol == "iec104";
 }
 
 }  // namespace

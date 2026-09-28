@@ -902,3 +902,110 @@ functions already extracted, never alters existing decode behavior.
 **IEC 104 remains the one open sub-item of Grok item 3.** See this document's own S7 follow-up section
 above for the specific `Iec104Result` extension it needs before `extract_iec104_operations` can be
 written correctly; that assessment is unchanged by this OPC UA follow-up.
+
+## Follow-up (v0.2.8, same release): IEC 104 type/COT/IOA-range tracking
+
+The third and last of Grok item 3's remaining sub-items, closing it out entirely. Jurgen asked to go
+ahead with it directly. As anticipated in both follow-ups above, this genuinely needed the small
+additive `Iec104Result` extension first (`Iec104AsduInfo`, mirroring `Dnp3ObjectRange`'s own role for
+DNP3 exactly) -- `Iec104Result`'s five pre-existing scalar fields (`iec104_asdu_type_short_name`,
+`iec104_cot_name`, `iec104_common_address`, ...) reflect only the FIRST ASDU coalesced into a TCP
+payload, and `iec104_object_ioas` is a single list CUMULATIVE across every coalesced ASDU with no way
+to tell which ASDU, or which type/COT, a given IOA belongs to -- writing `extract_iec104_operations`
+directly off those would have misattributed IOAs from a second coalesced ASDU to the first ASDU's own
+type/COT, exactly the failure mode flagged (and avoided) when this sub-item was first deferred.
+
+**The extension.** `Iec104AsduInfo` (`iec104.hpp`, namespace scope, mirroring `Dnp3ObjectRange`'s own
+placement): `type_short_name`, `cot_name`, `common_address`, `sq`, `object_count`, and `object_ioas`
+(that SAME ASDU's own object addresses, in order, already capped at `kMaxDecodedObjects` by
+`decode_iec104_asdu` itself before this ever sees it -- no separate cap applied here).
+`Iec104Result::iec104_asdus` is one `Iec104AsduInfo` per I-format APDU's own ASDU actually seen in a
+payload, populated unconditionally in `merge_asdu` (`Iec104Decoder::decode`, `iec104.cpp`) for both
+the first APDU and every additional coalesced one -- including an ASDU whose own `decoded` came back
+false (unrecognized type ID, or too short/malformed): `type_short_name`/`cot_name` are still
+meaningful then (e.g. `"Unknown(213)"`/`"spontaneous"`), only `object_ioas` stays empty, mirroring
+`Dnp3ObjectRange`'s own "still recorded, just with `has_range` false" treatment of an undecoded
+header.
+
+**operation_key design.** `"<type_short_name>/<cot_name>"` -- type AND cause of transmission folded
+together, per Grok's own explicit "type/COT" wording: both are small, bounded enumerations
+(`iec104_type_short_name`'s known-type table; `iec104_cot_name`'s own switch), the same "fold a
+bounded, meaningful dimension into the key" precedent S7's DB-number suffix and DNP3's
+group/variation suffix already establish. Cause of transmission earns a place in the key for a
+reason specific to IEC 104: unlike Modbus's write echo (the identical function code, address, and
+quantity repeated verbatim on both sides of an exchange -- exactly why Modbus/S7/EtherNet IP/BACnet/
+OPC UA all read request-side only, to avoid double-counting), an IEC 104 control confirmation/
+termination reuses the SAME type_id as its own originating command but a DIFFERENT COT -- a
+`C_SC_NA_1` "activation" command's own confirmation is `C_SC_NA_1` "activation confirmation", and its
+termination `C_SC_NA_1` "activation termination". Folding COT into the key means these land under
+distinct operation_keys on their own, with no double-counting risk -- which is also why, uniquely
+among every protocol in this file except DNP3, `extract_iec104_operations` reads BOTH directions
+deliberately: type_id + COT together already disambiguate direction and semantics, so there is
+nothing here for a request-side-only filter to protect against, mirroring `extract_dnp3_operations`'s
+own documented reasoning for doing the same.
+
+**Range tracking follows VSQ's own `sq` flag, per ASDU, straight off `Iec104AsduInfo` -- never
+reparsed out of a rendered string:**
+- `sq` true (sequential IOAs): ONE `Operation` for the whole ASDU, `has_target_range` true,
+  `[object_ioas.front(), object_ioas.front() + object_count)` -- the ASDU's own single contiguous
+  span (a general/counter interrogation response's typical shape), mirroring Modbus/S7/MELSEC/FINS's
+  own single-range-per-operation model.
+- `sq` false (discontinuous, one explicit IOA per object -- the common shape for a spontaneous
+  single-point change report, `object_count` usually 1): ONE `Operation` PER OBJECT, each a
+  single-point `[ioa, ioa + 1)` range under the SAME operation_key -- mirrors S7's own 0xB2 symbolic-
+  item precedent ("an access was observed starting here," not a confirmed span). Multiple objects
+  sharing an operation_key accumulate into ONE `OperationBaseline`'s `observed_ranges` list via the
+  SAME `merge_range_into` call `BaselineEngine::observe` already runs for every other protocol --
+  adjacent or overlapping single-point ranges coalesce there automatically (a conduit reporting IOAs
+  100-105 as five separate spontaneous single-point ASDUs still baselines as one merged `[100,105)`
+  interval), and a genuinely new, disjoint IOA still surfaces as `NewTargetRange` -- **no new verdict
+  logic was needed anywhere in `check_baseline` for this to work**, only correct `Operation`
+  extraction; the entire follow-up is scoped to `iec104.hpp`/`iec104.cpp`/`baseline.cpp`.
+- Either way, an ASDU with no `object_ioas` at all (`object_count` 0 -- e.g. an activation
+  confirmation with nothing addressed; an unrecognized type ID; a too-short/malformed ASDU) still
+  gets a single key-only `Operation` (`has_target_range` false) -- the type/COT pairing itself is
+  still worth recording, mirroring `extract_dnp3_operations`'s own key-only fallback for an object
+  header whose own `decoded` flag is false.
+
+**Two gates outside `extract_iec104_operations` itself needed updating too**, both caught by manual
+CLI verification before any CTest was written (the first `baseline learn` run against the real
+fixture came back with 0 conduits, not the expected 1): `is_baseline_protocol`/`is_known_baseline_port`
+(`baseline.cpp`, file-local) are a SEPARATE gate from `extract_operations`' own dispatch table --
+`BaselineEngine::observe` checks `is_baseline_protocol(dp.protocol)` before ever calling
+`extract_operations`, so adding the `"iec104"` branch to `extract_operations` alone was not
+sufficient; `is_known_baseline_port` (used for the SYN-less client/server direction heuristic) also
+needed `IEC104_TCP_PORT` added. Both were pre-existing per-protocol allowlists Phase 2's own six
+protocols already had to pass through -- an easy step to miss when a new protocol is added to
+`extract_operations` alone, so flagged here explicitly for whichever protocol follows this one.
+
+**Fixtures and tests.** No new fixture was needed for the "operations extracted correctly" cases --
+the pre-existing `tests/sample_iec104.pcap` (`build_iec104_sample`, already covering U/I/S-format
+framing, a general interrogation request/confirmation, a sequential 3-point `M_SP_NA_1` interrogation
+response, a spontaneous time-tagged `M_ME_TD_1`, and a negatively-confirmed `C_DC_NA_1` double
+command) already exercises both the `sq` true (range) and `sq` false (single-point) paths, and both
+directions, without changes. New fixture `tests/sample_baseline_iec104_new_ioa.pcap`
+(`build_baseline_iec104_new_ioa_sample`): one standalone spontaneous `M_ME_TD_1` report on the same
+conduit, addressing IOA 999 -- outside the learned baseline's own `[200,201)` range for
+`"M_ME_TD_1/spontaneous"` -- needing no preceding STARTDT handshake, IEC 104 being purely stateless
+(`iec104.hpp`'s own file header comment), the same way the OPC UA/S7 follow-ups' own standalone
+one-packet fixtures don't either. Four new `baseline_*` CTest entries (`CMakeLists.txt`): `learn`
+produces the expected `"<type>/<cot>"` keys and ranges (with a `FAIL_REGULAR_EXPRESSION` guarding
+against a bare, COT-less key reappearing); `check` against the unmodified fixture is CLEAN (1
+conduit, 6 distinct operations, 6 matched); `check` against an empty baseline reports all 6 as
+new-conduit; and the dedicated positive case -- `learn` from `sample_iec104.pcap`, then `check` the
+new fixture -- reports exactly one `new-target-range` finding for `"M_ME_TD_1/spontaneous"`,
+`observed range: [999, 1000)`, `baseline ranges: [200, 201)`, proving the conduit and operation_key
+were both already known and only the address itself was new. Full suite: 2120 -> 2124 tests (default
+config), 2107 -> 2111 (no-live-capture config), zero-warning clean rebuild in both, plus the
+ASan/UBSan config's own `iec104`/`baseline` subset (118/118, plus the full 39/39 `iec104`/`real_iec104`
+subset run separately) and a MinGW-w64 cross-compile (2111 tests registered, zero warnings), all
+confirmed directly; every pre-existing `iec104_*`/`real_iec104_*`/`inventory_iec104_*`/
+`policy_functions_iec104_*` CTest entry not touched by this change still passes with its exact
+original assertion, confirming the underlying IEC 104 decode itself (`iec104.cpp`'s APCI/ASDU/element
+decode) is otherwise unchanged -- this follow-up only ever adds a new structured field alongside what
+was already extracted.
+
+**Grok review item 3 is now fully closed.** All three sub-items -- S7comm PLC Control/PLC Stop
+(always-flag control-plane operations), OPC UA service+NodeId tracking, and IEC 104 type/COT/
+IOA-range tracking -- have shipped, each as its own self-contained follow-up in this same v0.2.8
+release.

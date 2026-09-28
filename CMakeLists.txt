@@ -14400,6 +14400,40 @@ set_tests_properties(baseline_check_fins_shrunk_range_finds_new_target_range PRO
   PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(1 finding\\(s\\)\\).*\\[1\\] new-target-range  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:9600  fins  operation=\"Memory Area Read/0x82\".*observed range: \\[5000, 5001\\).*baseline ranges: \\[1000, 1003\\)"
   FAIL_REGULAR_EXPRESSION "new-conduit|new-operation")
 
+# --- IEC 60870-5-104 -- Grok review item 3's own remaining sub-item (docs/reviews/2026-09-grok-
+# response.md, "baseline process behavior, not just ports"), deferred from the S7comm/OPC UA
+# follow-ups above until Iec104Result carried per-ASDU structured data -- see
+# extract_iec104_operations' own comment, baseline.cpp, and Iec104AsduInfo's own comment,
+# iec104.hpp, for the full "type/COT folded into the key, sq-driven range tracking" design ---------
+
+add_test(NAME baseline_learn_iec104_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_learn.json'")
+set_tests_properties(baseline_learn_iec104_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"iec104\",\n *\"server_port\": 2404,.*\"operation_key\": \"C_IC_NA_1/activation\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[0, 1\\]\\].*\"operation_key\": \"M_SP_NA_1/interrogated by station interrogation\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[100, 103\\]\\].*\"operation_key\": \"M_ME_TD_1/spontaneous\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[200, 201\\]\\].*\"operation_key\": \"C_DC_NA_1/activation\",\n *\"packet_count\": 1,\n *\"has_target_range\": true,\n *\"observed_ranges\": \\[\\[300, 301\\]\\]"
+  FAIL_REGULAR_EXPRESSION "\"operation_key\": \"M_SP_NA_1\",|\"operation_key\": \"M_ME_TD_1\",|\"operation_key\": \"C_DC_NA_1\",|\"operation_key\": \"C_IC_NA_1\",")
+
+add_test(NAME baseline_check_iec104_unmodified_zero_findings
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap'")
+set_tests_properties(baseline_check_iec104_unmodified_zero_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 6 distinct operation\\(s\\) observed, 6 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+
+add_test(NAME baseline_check_iec104_empty_baseline_finds_new_conduit
+  COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap'")
+set_tests_properties(baseline_check_iec104_empty_baseline_finds_new_conduit PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(6 finding\\(s\\)\\)"
+  FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# The NEW behavior's own dedicated positive case: `learn` from the fixture, then `check` a SECOND,
+# standalone capture on the SAME conduit reporting a spontaneous M_ME_TD_1 value at IOA 999 -- a
+# point the learned baseline's own [200,201) range for "M_ME_TD_1/spontaneous" doesn't cover. Both
+# the conduit AND the operation_key (type AND COT) are already known -- only the address itself is
+# new -- so this must be new-target-range, never new-conduit/new-operation.
+add_test(NAME baseline_check_iec104_new_ioa_on_known_conduit_is_new_target_range
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_new_ioa.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_new_ioa.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_iec104_new_ioa.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_iec104_new_ioa.pcap'")
+set_tests_properties(baseline_check_iec104_new_ioa_on_known_conduit_is_new_target_range PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(1 finding\\(s\\)\\).*\\[1\\] new-target-range  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:2404  iec104  operation=\"M_ME_TD_1/spontaneous\".*observed range: \\[999, 1000\\).*baseline ranges: \\[200, 201\\)"
+  FAIL_REGULAR_EXPRESSION "new-conduit|new-operation")
+
 # AMQP 0-9-1 and AMQP 1.0 (amqp091.hpp/amqp10.hpp, amqp_common.hpp) -- two wire-INCOMPATIBLE
 # protocols that share TCP port 5672 by convention. tests/sample_amqp091.pcap and
 # tests/sample_amqp10.pcap (build_amqp091_sample/build_amqp10_sample, tools/make_sample_pcap.py)

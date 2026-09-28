@@ -18082,6 +18082,37 @@ def build_baseline_opcua_new_nodeid_sample():
     (TESTS_DIR / "sample_baseline_opcua_new_nodeid.pcap").write_bytes(data)
 
 
+def build_baseline_iec104_new_ioa_sample():
+    """Grok review item 3's IEC 104 sub-item ("baseline process behavior, not just ports" --
+    docs/reviews/2026-09-grok-response.md) -- positive case for the new per-ASDU type/COT/IOA-range
+    tracking (see extract_iec104_operations' own comment, baseline.cpp, and Iec104AsduInfo's own
+    comment, iec104.hpp). One standalone M_ME_TD_1 spontaneous single-point report (server -> client,
+    PLC_IP -> HMI_IP, iec104/2404 -- the same conduit tests/sample_iec104.pcap's own baseline already
+    knows) addressing IOA 999, a point that fixture never touches -- its own only
+    "M_ME_TD_1/spontaneous" report (packet 6, build_iec104_sample) addresses IOA 200, giving the
+    baseline a known [200,201) single-point range for that exact operation_key. `baseline check`
+    against a baseline learned from sample_iec104.pcap alone must call this NewTargetRange (the
+    conduit is known, and so is the operation_key "M_ME_TD_1/spontaneous" -- type AND COT both match
+    -- only THIS specific IOA falls outside the baseline's already-known range), never NewConduit and
+    never NewOperation, proving extract_iec104_operations' own sq=false "one single-point range per
+    object, coalesced by operation_key" design actually catches an address outside the baseline
+    rather than silently matching on type/COT alone. IEC 104 is purely stateless (iec104.hpp's own
+    file header comment), so this doesn't need a preceding STARTDT handshake first -- a standalone
+    I-format APDU decodes on its own, the same way the OPC UA/S7 follow-ups' own standalone
+    one-packet fixtures (build_baseline_opcua_new_nodeid_sample/
+    build_baseline_s7comm_control_plane_sample, both above) do."""
+    me_value = struct.pack("<h", 8192) + bytes([0x00]) + cp56time2a(2024, 3, 15, 11, 0, 0)
+    me_report = iec104_asdu(34, 0x01, 3, 1, ioa(999) + me_value)  # M_ME_TD_1 (type 34), COT=3 spontaneous
+    payload = iec104_apdu(iec104_i_control(0, 0), me_report)
+
+    tcp = tcp_header(IEC104_PORT, 51800, 4000, 3000, TCP_PSH | TCP_ACK, len(payload)) + payload
+    ip = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp), 0x3100) + tcp
+    pkt = eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip
+
+    data = pcap_global_header() + pcap_record(pkt, 1_700_015_000, 0)
+    (TESTS_DIR / "sample_baseline_iec104_new_ioa.pcap").write_bytes(data)
+
+
 # --- AMQP 0-9-1 / AMQP 1.0 -----------------------------------------------------------------
 # Two wire-INCOMPATIBLE protocols sharing TCP port 5672 by convention -- see amqp_common.hpp's own
 # file header comment for the full detection-posture rationale this fixture exercises: sticky
@@ -20017,6 +20048,7 @@ if __name__ == "__main__":
     build_baseline_s7comm_symbolic_sample()
     build_baseline_s7comm_control_plane_sample()
     build_baseline_opcua_new_nodeid_sample()
+    build_baseline_iec104_new_ioa_sample()
     build_amqp091_sample()
     build_amqp10_sample()
     build_dicom_sample()

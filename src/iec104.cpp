@@ -866,6 +866,24 @@ std::optional<ProtocolResult> Iec104Decoder::decode(ByteSpan payload, DecodeCont
             result.iec104_object_values.push_back(entry);
             result.iec104_object_ioas.push_back(obj.ioa);
         }
+
+        // Grok review item 3's IEC 104 sub-item (docs/design/baseline-engine.md's own "Follow-up:
+        // IEC 104 type/COT/IOA-range tracking" section) -- see Iec104AsduInfo's own comment
+        // (iec104.hpp) for why this is per-ASDU rather than reusing the flattened/cumulative fields
+        // above. Pushed unconditionally, for every ASDU (first or coalesced-additional, decoded or
+        // not) -- type_short_name/cot_name are always populated even for an unrecognized type ID or
+        // a too-short/malformed ASDU (see Iec104Asdu::type_short_name/cot_name's own population,
+        // above in this function); only object_ioas stays empty in those cases, and legitimately so
+        // when object_count is 0 (e.g. an activation confirmation with no addressed points).
+        Iec104AsduInfo info;
+        info.type_short_name = asdu.type_short_name;
+        info.cot_name = asdu.cot_name;
+        info.common_address = asdu.common_address;
+        info.sq = asdu.sq;
+        info.object_count = asdu.object_count;
+        info.object_ioas.reserve(asdu.objects.size());
+        for (const auto& obj : asdu.objects) info.object_ioas.push_back(obj.ioa);
+        result.iec104_asdus.push_back(std::move(info));
     };
 
     if (apci->frame_type == Iec104FrameType::I) {

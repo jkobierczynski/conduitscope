@@ -7932,8 +7932,9 @@ deferred future migration.
     zone-level rollup done 2026-09-25, still v0.2.5 (`baseline check --policy` /
     `NewConduitKnownZone`); S7comm PLC Control/PLC Stop "always flag" done, v0.2.8 (Grok review item
     3's S7 sub-item); OPC UA service+NodeId tracking done, v0.2.8 (Grok review item 3's OPC UA
-    sub-item -- see below) -- statistical/confidence thresholds, CODESYS, and Grok item 3's IEC 104
-    sub-item are still not done, see below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
+    sub-item); IEC 104 type/COT/IOA-range tracking done, v0.2.8 (Grok review item 3's IEC 104
+    sub-item -- see below, closing out Grok item 3 entirely) -- statistical/confidence thresholds and
+    CODESYS are still not done, see below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
     (`baseline.hpp`/`baseline.cpp`), the `baseline learn`/`baseline check` subcommand pair, and
     Modbus's own prerequisite (`ModbusFrame::is_request`/`start_address`/`quantity`, populated
     from the same already-computed locals `decode_read_family`/`decode_write_multiple` had all
@@ -8242,12 +8243,60 @@ deferred future migration.
     `docs/design/baseline-engine.md`'s own "Follow-up (v0.2.8, same release): OPC UA service +
     NodeId tracking" section.
 
+    **Follow-up (v0.2.8, same release): IEC 104 type/COT/IOA-range tracking.** The third and last of
+    Grok item 3's sub-items, closing it out entirely; Jurgen asked to go ahead with it directly. As
+    anticipated in both follow-ups above, this genuinely needed the small additive `Iec104Result`
+    extension first -- `Iec104AsduInfo` (`iec104.hpp`, mirroring `Dnp3ObjectRange`'s own role for DNP3
+    exactly): `type_short_name`/`cot_name`/`common_address`/`sq`/`object_count`/`object_ioas` per ASDU,
+    since the pre-existing scalar fields reflect only the first coalesced ASDU and `iec104_object_ioas`
+    is a single list cumulative across every coalesced ASDU with no way to tell which ASDU a given IOA
+    belongs to -- writing the extraction directly off those would have misattributed IOAs across ASDU
+    boundaries. `Iec104Result::iec104_asdus` (one entry per ASDU, populated unconditionally in
+    `merge_asdu`, `iec104.cpp`, including for an undecoded ASDU -- type/COT still meaningful then, only
+    `object_ioas` empty) is the fix. operation_key is `"<type_short_name>/<cot_name>"` -- type AND
+    cause of transmission folded together, per Grok's own explicit wording, both small bounded
+    enumerations; COT earns its place in the key because, unlike Modbus's write echo, an IEC 104
+    control confirmation/termination reuses the SAME type_id as its own command but a DIFFERENT COT
+    (activation / activation confirmation / activation termination), so folding COT in naturally
+    avoids double-counting -- which is also why, uniquely among this file's protocols besides DNP3,
+    both directions are read deliberately (type+COT already disambiguate). Range tracking follows
+    VSQ's own `sq` flag: sequential (`sq` true) gets ONE Operation per ASDU with the full contiguous
+    `[first_ioa, first_ioa + object_count)` span; discontinuous (`sq` false, the common spontaneous
+    single-point-change shape) gets ONE Operation PER OBJECT, each a single-point `[ioa, ioa+1)` range
+    under the SAME operation_key -- multiple objects sharing a key accumulate into one
+    `OperationBaseline`'s `observed_ranges` list via the SAME `merge_range_into` call every other
+    protocol already uses, coalescing adjacent/overlapping points automatically, with **no new verdict
+    logic needed anywhere in `check_baseline`** -- the whole follow-up is scoped to
+    `iec104.hpp`/`iec104.cpp`/`baseline.cpp`. An ASDU with no addressed points at all still gets a
+    key-only Operation, mirroring DNP3's own undecoded-header fallback. Two gates OUTSIDE
+    `extract_iec104_operations` itself needed updating too, caught by manual CLI verification before
+    any CTest was written (`baseline learn` initially came back with 0 conduits): `is_baseline_protocol`/
+    `is_known_baseline_port` (`baseline.cpp`) are a separate allowlist `BaselineEngine::observe` checks
+    BEFORE ever calling `extract_operations` -- both needed `"iec104"`/`IEC104_TCP_PORT` added
+    alongside the dispatch-table entry, an easy step to miss when adding a new protocol here. New
+    fixture `tests/sample_baseline_iec104_new_ioa.pcap` (`build_baseline_iec104_new_ioa_sample`): one
+    standalone spontaneous `M_ME_TD_1` report at IOA 999, outside the pre-existing
+    `tests/sample_iec104.pcap` fixture's own learned `[200,201)` range for `"M_ME_TD_1/spontaneous"` --
+    IEC 104 needing no preceding handshake first, purely stateless per its own file header. Four new
+    `baseline_*` CTest entries, including the dedicated positive case proving exactly one
+    `new-target-range` finding (never `new-conduit`/`new-operation`) for a known conduit touching a
+    known type/COT at an unknown address. Full suite: 2120 -> 2124 tests (default config), 2107 -> 2111
+    (no-live-capture config), zero-warning clean rebuild in both, plus the ASan/UBSan config's own
+    `iec104`/`baseline` subset (118/118) and the full `iec104`/`real_iec104` subset (39/39) separately,
+    and a MinGW-w64 cross-compile (2111 tests registered, zero warnings), all confirmed; every
+    pre-existing `iec104_*`/`real_iec104_*`/`inventory_iec104_*`/`policy_functions_iec104_*` CTest
+    entry not touched by this change still passes with its exact original assertion. No version bump
+    beyond v0.2.8 already in this release. Full design and rationale at
+    `docs/design/baseline-engine.md`'s own "Follow-up (v0.2.8, same release): IEC 104 type/COT/
+    IOA-range tracking" section. **Grok review item 3 is now fully closed** -- all three sub-items
+    (S7comm always-flag, OPC UA service+NodeId, IEC 104 type/COT/IOA-range) shipped in this v0.2.8
+    release.
+
     Still not done: statistical/confidence thresholds (see the design doc's own "Explicitly out of
     scope" section -- the one item of the two Phase 1 originally deferred that remains genuinely
-    open), CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only
-    today), and Grok item 3's IEC 104 sub-item (type/COT/IOA-range tracking -- see the S7 follow-up
-    above for exactly what `Iec104Result` still needs before it can be written correctly). Zone-level
-    baselines, formerly listed here too, is resolved as of the zone-level-rollup follow-up above.
+    open) and CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only
+    today). Zone-level baselines and Grok item 3, both formerly listed here too, are resolved as of
+    the zone-level-rollup follow-up and the three Grok-item-3 follow-ups above, respectively.
 
 42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
     data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add

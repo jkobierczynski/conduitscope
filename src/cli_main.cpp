@@ -2401,9 +2401,9 @@ int main(int argc, char** argv) {
     // `learn`/`check` are deliberately separate commands rather than one auto-detected mode.
     auto* baseline_cmd = app.add_subcommand(
         "baseline", "ICS communication-baseline analysis at the protocol-operation level "
-                     "(S7comm, Modbus, EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS) -- learn "
-                     "what operations/address ranges are normally seen on a conduit, then check a "
-                     "capture against that baseline");
+                     "(S7comm, Modbus, EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS, IEC 104) -- "
+                     "learn what operations/address ranges are normally seen on a conduit, then "
+                     "check a capture against that baseline");
 
     auto* baseline_learn_cmd = baseline_cmd->add_subcommand(
         "learn", "Absorb every capture's own operations into a baseline file, "
