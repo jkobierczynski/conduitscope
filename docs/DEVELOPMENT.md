@@ -12476,7 +12476,7 @@ it done as its own patch.
     logic, not a new byte-parsing path of its own.
 
 85. **`decode --range`: select packets by their real file position, not
-    just "the first N."** Implements item 78 above -- Jurgen's own direct
+    just "the first N."** **Done (v0.2.8).** Implements item 78 above -- Jurgen's own direct
     request ("Can you add the --range option for selecting packets of a
     recorded capture?"), following straight from that item's own research
     (`editcap`'s selection syntax is the real prior art; neither `tshark`
@@ -12569,6 +12569,36 @@ it done as its own patch.
     net +7); documented across `docs/USER_GUIDE.md` (a new `--range` row
     in `decode`'s own option table plus two new EXAMPLES entries) and this
     ROADMAP entry.
+
+    **Follow-up (v0.2.8, same release): Windows CI failure on
+    `decode_dash_dash_range_combines_with_dash_f_filter_as_intersection`.**
+    This test's own `PASS_REGULAR_EXPRESSION "^$"` was written and verified
+    only against machines with a genuinely working Npcap/libpcap runtime
+    (every Linux config here, and Jurgen's own Windows dev machine), and
+    missed the exact "SDK linked in at build time, Npcap runtime not
+    actually installed" scenario the big `-f/--filter` CTest block
+    elsewhere in this file had already hit and solved (its own header
+    comment: "on Windows CI (SDK only, no Npcap runtime actually
+    installed)... compiling ANY BPF filter... now fails fast with that
+    clear CaptureError" -- `bpf_filter.cpp`'s own runtime-availability
+    guard). `CONDUITSCOPE_HAVE_PCAP` is a build-time signal only (the
+    Npcap SDK's import library was found and linked); it says nothing
+    about whether `wpcap.dll` (the separate, user-installed runtime) is
+    actually present when the test binary runs. Confirmed as exactly this
+    on a real Windows CI failure (`Required regular expression not found.
+    Regex=[^$]`, immediately followed by `bpf_filter.cpp`'s own "requires
+    the Npcap RUNTIME to be installed" message in that same run's output)
+    -- not a logic bug in `--range`/`-f` intersection itself, which this
+    same CI run's other six new `--range` tests (none of which compile a
+    real BPF filter) all still passed. **Fix**: widened this one test's
+    `PASS_REGULAR_EXPRESSION` to `(^$|Npcap RUNTIME)`, the identical
+    dual-acceptance pattern every other `-f/--filter` test in this file
+    already uses, so a CI leg with the SDK but no runtime still exercises
+    everything this test can prove without the runtime (the CLI plumbing,
+    the error path itself) and a machine with the runtime still gets the
+    real behavioral proof (the intersection genuinely selects nothing).
+    Re-verified: 2115/2115 (default GCC build, unchanged -- this was a
+    test-assertion fix, not a behavior change, so the count doesn't move).
 
 ### Protocols not covered at all
 

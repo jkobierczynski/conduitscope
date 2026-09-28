@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.2.7 LANGUAGES CXX)
+project(conduitscope VERSION 0.2.8 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,7 +14,7 @@ endif()
 # is meaningless for a multi-config generator (Visual Studio, Xcode: CMAKE_CONFIGURATION_TYPES is
 # set instead, and the actual configuration is picked at BUILD time via --config, not here at
 # configure time), so it's always empty in that case -- confirmed on a real Windows/MSVC build,
-# which without this fallback reports "conduitscope 0.2.7  [MSVC ..., Windows,  build, ...]" (note
+# which without this fallback reports "conduitscope 0.2.8  [MSVC ..., Windows,  build, ...]" (note
 # the double space where an empty CMAKE_BUILD_TYPE left a hole). "multi-config" is honest about why
 # no single value is available here, rather than guessing a config that may not be the one actually
 # built.
@@ -12468,12 +12468,23 @@ set_tests_properties(decode_dash_dash_range_combines_with_dash_c_capping_the_sel
 # CONDUITSCOPE_HAVE_PCAP, same as every other -f/--filter test in this file (up in the big guarded
 # block below) -- BPF *compilation* itself needs libpcap even for an offline (-r) read, not just
 # live capture, so this test would otherwise fail to even parse its own filter on a build with no
-# libpcap/Npcap support at all (e.g. this project's own build_nolive config).
+# libpcap/Npcap support at all (e.g. this project's own build_nolive config). PASS_REGULAR_EXPRESSION
+# also accepts bpf_filter.cpp's own "Npcap RUNTIME" error text -- the exact same dual-acceptance
+# pattern the big -f/--filter block below already established (see its own header comment,
+# "on Windows CI (SDK only, no Npcap runtime actually installed)..."): CONDUITSCOPE_HAVE_PCAP is a
+# BUILD-time check (the Npcap SDK's import library was found and linked), not a RUNTIME one, so a
+# Windows CI leg can compile this test in and then still fail to actually exercise it, because
+# compiling ANY BPF filter -- even one that would otherwise match nothing -- needs wpcap.dll (the
+# separate, user-installed Npcap RUNTIME) at process-load time. Missed on this test's first pass
+# (it predates -- was written after -- the big block's own established convention, but wasn't
+# cross-checked against it before delivery); confirmed as the exact failure mode by a real Windows
+# CI run (PASS_REGULAR_EXPRESSION "Required regular expression not found. Regex=[^$]", followed by
+# bpf_filter.cpp's own "requires the Npcap RUNTIME to be installed" message in that run's output).
 if(CONDUITSCOPE_HAVE_PCAP)
 add_test(NAME decode_dash_dash_range_combines_with_dash_f_filter_as_intersection
   COMMAND conduitscope decode --range "1-6" -f "udp" --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
 set_tests_properties(decode_dash_dash_range_combines_with_dash_f_filter_as_intersection PROPERTIES
-  PASS_REGULAR_EXPRESSION "^$")
+  PASS_REGULAR_EXPRESSION "(^$|Npcap RUNTIME)")
 endif()
 
 # --range presupposes a finished, numbered file to select packet #N from -- it doesn't make sense
