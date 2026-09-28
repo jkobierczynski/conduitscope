@@ -582,6 +582,131 @@ may change later. `detect_snort_patterns_all_findings`/`detect_snort_patterns_js
 assertion only after running the real CLI binary and inspecting its actual output" discipline
 "Testing and fixtures" above already establishes.
 
+## Batch 1: six more Snort-style patterns (Modbus/TCP, from Quickdraw-Snort's own `modbus.rules`)
+
+A direct follow-up to "Snort-style pattern extensions" above. Jurgen asked (verbatim) for "a batch
+of 3 times 6 further additional patterns from real Snort/Suricata OT rulesets and public ICS
+advisories to add to the detection" -- a research/proposal request first, not an implementation
+request. The research pass produced `docs/research/2026-09-detect-pattern-candidates-batch2.md`: 18
+candidate patterns across three batches of 6, each with its own source citation (Digital Bond's
+Quickdraw-Snort `modbus.rules`/`dnp3.rules`, CyberICS's `scada-scan.rules`, public CVE/advisory
+text, MITRE ATT&CK for ICS), wire-level condition, and proposed category/technique/evidence/
+severity/novelty mapping -- written and delivered as a document, not code, per that message's own
+scope. A later follow-up question ("assuming you have done the research, I assume there is no
+additional cost to make it 10x6 or 20x6 patterns? what amount of patterns is enough?") was answered
+directly: research cost for genuinely relevant, citable OT-protocol rulesets is a largely-exhausted
+pool (roughly 18-20 well-sourced candidates was close to the practical ceiling for this project's own
+sourcing standard), but implementation cost does NOT get cheaper in bulk -- each pattern still needs
+its own decode-field check (or new decode work), engine wiring, fixture, and a CTest case verified
+against real CLI output, so 60 patterns is roughly 10x the work of 6, not free. Jurgen then confirmed
+"continue with batch 1" -- the six patterns below, all Modbus/TCP, sourced from Quickdraw-Snort's own
+`modbus.rules`.
+
+| # | Pattern (as implemented) | Category / technique | Evidence | Severity | Novelty |
+|---|---|---|---|---|---|
+| 1 | Modbus Diagnostics (0x08) Force Listen Only Mode (sub-function 0x0004) | EngineeringStationActivity / T0858 | Confirmed (always-notable) | Critical | N/A |
+| 2 | Modbus Diagnostics Restart Communications Option (sub-function 0x0001) | FirmwareLogicChange / T0816 | Confirmed (always-notable) | Critical | N/A |
+| 3 | Modbus Diagnostics Clear Counters and Diagnostic Registers (sub-function 0x000A) | ProtocolMisuse / **T0872** (Indicator Removal on Host -- new citation, see below) | Confirmed (always-notable) | Moderate | N/A |
+| 4 | Modbus Read Device Identification (function 0x2B, MEI type 0x0E) from a client | EngineeringStationActivity / T0888 | Confirmed | Informational | **New-vs-known** (baseline-or-first-occurrence) |
+| 5 | Modbus Report Server ID (function 0x11) from a client | EngineeringStationActivity / T0888 | Confirmed | Informational | **New-vs-known** (baseline-or-first-occurrence) |
+| 6 | Repeated Modbus exception-code response burst: same server, same exception code, 3+ times to the same client within ~60s | ProtocolMisuse / T0855 | Confirmed (always-notable, windowed) | Moderate | N/A |
+
+Implementation notes, by pattern:
+
+- **Patterns 1-3 needed genuinely new decode work** (the only new raw-byte parsing this batch
+  added): `ModbusFrame` gained `diagnostics_sub_function` (`std::optional<uint16_t>`, function code
+  0x08's own 2-byte sub-function field) and `mei_type` (`std::optional<uint8_t>`, function code
+  0x2B's own MEI type byte) -- see their own comments, `modbus.hpp`. `diagnostics_sub_function_name`
+  (`modbus.cpp`) names five sub-functions (Return Query Data/Restart Communications Option/Return
+  Diagnostic Register/Force Listen Only Mode/Clear Counters and Diagnostic Registers); any other
+  sub-function still populates the field but renders "Unknown (0xNNNN)", the same fallback style
+  `function_name`'s own table already uses. `mei_type_name` names the two MEI types the spec
+  currently assigns (0x0D CANopen General Reference, 0x0E Read Device Identification). Deliberately
+  function-code/sub-function/MEI-type-level naming only -- Read Device Identification's own object-
+  list payload (conformity level, per-object id/value pairs) is NOT decoded further, the same "first
+  pass" scope boundary this project already documents for `opcua.hpp`/`bacnet.hpp`.
+- **All five request-side patterns (1, 2, 3, 4, 5) are gated on `dp.dst_port == MODBUS_TCP_PORT`
+  (502), not a decoded request/response field.** Diagnostics' request and response share the
+  IDENTICAL wire shape for every sub-function this decoder names (sub-function code plus echoed
+  data) -- the exact same situation `decode_write_single` already documents for Write Single Coil/
+  Register (`ModbusFrame::is_request`'s own comment, `modbus.hpp`) -- so there is no shape-based
+  signal to decide direction from. The well-known-port heuristic is the same one S7comm's own detect
+  wiring already uses (`dp.dst_port == 102`) for exactly this reason; without it, a Diagnostics
+  sub-function whose response happens to echo the request (Restart Communications Option, Clear
+  Counters -- confirmed against real traffic, see below) would otherwise be recorded TWICE, once per
+  direction, with client/server reversed on the second. Force Listen Only Mode is the one exception
+  that needs no such guard in practice -- per spec the target sends NO response to it at all
+  (confirmed directly against the real capture below).
+- **Three of the six (1, 2, 3) and the exception-burst pattern (6) are independently verified
+  against this project's own REAL capture, `tests/real_captures/modbus/modbus_test_data_part1.pcap`**
+  -- not just a synthetic fixture. A direct scapy byte-level check of that capture's raw MBAP frames
+  found it genuinely contains Force Listen Only Mode (`08 00 04 00 00`), Restart Communications
+  Option (`08 00 01 00 00`, request AND its own echoed response), and Clear Counters and Diagnostic
+  Registers (`08 00 0a 00 00`) -- confirmed BEFORE writing the corresponding CTest assertions, this
+  project's own standing discipline. The same capture also genuinely contains real, repeated
+  "Gateway Target Device Failed to Respond"/"Server Device Busy" exception bursts (`detect
+  --read tests/real_captures/modbus/modbus_test_data_part1.pcap` fires pattern 6 twice, against two
+  different real servers) -- an unplanned but welcome bonus: real evidence for the one pattern a
+  synthetic fixture alone couldn't have given the same confidence for. Read Device Identification
+  (pattern 4) is confirmed ABSENT from that same real capture (same scapy check), so it's covered
+  by the synthetic fixture instead. See `real_modbus_diagnostics_*`/`real_modbus_detect_batch1_
+  all_findings` in `CMakeLists.txt`.
+- **Pattern 3 needed the one new MITRE ATT&CK for ICS technique this batch added: T0872 (Indicator
+  Removal on Host)**, verified directly against `attack.mitre.org/techniques/T0872/` (not assumed),
+  added to `mitre_attack_ics.hpp`/`.cpp` following the exact one-liner-function pattern the existing
+  ten already use, inserted in the correct id-sorted position in `all_mitre_attack_ics_techniques()`
+  (between T0861 and T0886). Category was a genuine judgment call -- "clearing diagnostic counters"
+  doesn't cleanly fit any of this engine's four categories (not a mode change, not a firmware/logic
+  change, not a remote-access event); `ProtocolMisuse` was picked as the closest fit, the same
+  "a protocol command being used in a way that's not routine, even without a cleaner category" shape
+  `ProtocolMisuse` already covers for the CIP Identity-object-write and Modbus write-without-read
+  patterns above.
+- **Patterns 4 and 5 are deliberately new-vs-known candidates, NOT always-notable** -- a genuine
+  departure from how Quickdraw's own rules treat them (both are simple always-fire signature
+  matches in Snort). The research doc's own proposal for these two was new-vs-known novelty
+  specifically: any single Read Device Identification/Report Server ID query is ordinary
+  engineering-tool behavior on its own, and only its NOVELTY (a client not seen doing this before,
+  or genuinely absent from a supplied `--baseline-file`) is the honestly-supportable signal --
+  implemented here exactly that way, via `record_new_conduit_candidate` with a fresh source tag each
+  (`modbus-new-originator-read-device-id`/`modbus-new-originator-report-server-id`), resolved in
+  `finish()` the same baseline-or-first-occurrence way every other new-vs-known source already is.
+  Unlike the CIP `Forward_Open`/UMAS engineering-originator sources above, these are deliberately
+  NOT gated on "second-plus originator to this server" -- there is no per-server originator-set
+  tracking for either; every occurrence becomes its own candidate. Informational severity, matching
+  `umas-new-originator-discovery`'s own posture: read-only enumeration, no control-plane effect if
+  genuine.
+- **Pattern 6 (the exception-code burst) is the one Batch 1 pattern needing genuinely new
+  observe()-time state** -- `modbus_exception_burst_state_` (`detect_engine.hpp`), keyed
+  `"<client_ip>|<server_ip>|<exception_code>"`, tracking a running count plus the window's own start
+  timestamp. Deliberately WINDOWED, unlike `bacnet_who_is_count_by_source_`'s own whole-capture
+  cumulative count above: three exceptions minutes apart across an hour-long capture is not the same
+  signal as three within a minute, so the window resets to count=1 whenever a new occurrence's gap
+  since the window's own first occurrence exceeds `kModbusExceptionBurstWindowSeconds` (60s) --
+  proven by the synthetic fixture's own scenario 10 (exceptions at t=0/30/95 -- the third falls
+  outside the window and the pattern correctly does NOT fire). Threshold (3) and window (60s)
+  generalize Quickdraw-Snort's own SIDs 1111010 ("Slave Device Busy Exception Code Delay", exception
+  0x06) and 1111011 ("Acknowledge Exception Code Delay", exception 0x05), both
+  `threshold: count 3-5, seconds 60` -- the low end of that count range is used, the same "small,
+  documented judgment-call default" posture as `kS7SetupCommProbeThreshold` above; Quickdraw's own
+  rule is cited for the SHAPE of the pattern, not treated as a precise, non-negotiable count/window.
+  Moderate severity, unconditionally -- the same "real but weak, legitimate retry/backoff logic can
+  trigger this too" posture the Modbus write-without-read pattern above already established for a
+  similarly soft signal.
+
+Fixtures: `tests/sample_detect_snort_patterns_batch1.pcap`
+(`build_detect_snort_patterns_batch1_sample()`) covers all six patterns plus four negative/contrast
+conduits proving each pattern's own condition really is required -- a Diagnostics Return Query Data
+request (an ordinary, routinely-used sub-function, not one of the three named ones); an
+Encapsulated Interface Transport request with MEI type 0x0D (CANopen General Reference, not Read
+Device Identification); a server returning the same exception code only twice (under threshold); and
+a server whose third same-code exception falls outside the 60s window (proving pattern 6 is
+genuinely windowed, not a whole-capture running count). `detect_snort_patterns_batch1_all_findings`
+in `CMakeLists.txt` pins the full six-finding report end to end and asserts (via
+`FAIL_REGULAR_EXPRESSION`) that none of the four negative conduits produced a finding of their own.
+`real_modbus_diagnostics_force_listen_only_mode_decoded`/`..._restart_communications_option_decoded`/
+`..._clear_counters_decoded`/`..._detect_batch1_all_findings` (`CMakeLists.txt`) do the same against
+the real capture described above.
+
 ## Explicitly out of scope
 
 - **Evidence/novelty/severity retrofit onto pre-existing engines.** See "Four-axis model" above.

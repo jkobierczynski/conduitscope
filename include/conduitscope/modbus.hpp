@@ -115,6 +115,31 @@ struct ModbusFrame {
     // whether or not the PDU turns out to be UMAS), just with a vendor-proprietary meaning for
     // function code 0x5A's own payload. std::nullopt for every other function code.
     std::optional<UmasFrame> umas;
+
+    // Diagnostics (function code 0x08) sub-function code -- see diagnostics_sub_function_name
+    // (modbus.cpp) for the small named subset this decoder resolves (Return Query Data/Restart
+    // Communications Option/Return Diagnostic Register/Force Listen Only Mode/Clear Counters and
+    // Diagnostic Registers, the five sub-functions docs/research/2026-09-detect-pattern-candidates-
+    // batch2.md's Batch 1 items 1-3 and this project's own real modbus_test_data_part1.pcap capture
+    // actually exercise); any other sub-function code still populates this field (the 2-byte value
+    // is always read once present) but renders as "Unknown (0xNNNN)" in function_name's own style.
+    // std::nullopt when this frame's function code isn't Diagnostics, or the PDU was too short to
+    // contain the 2-byte sub-function field at all. Request and response share the identical wire
+    // shape for every sub-function this decoder names (sub-function code plus echoed data) -- same
+    // scope boundary as decode_write_single's own (modbus.cpp), so this decoder does not attempt to
+    // tell them apart; detect_engine.cpp's own Batch 1 wiring instead uses the same "destination is
+    // the well-known Modbus port" direction heuristic S7comm's own detect wiring already uses.
+    std::optional<uint16_t> diagnostics_sub_function;
+
+    // Encapsulated Interface Transport (function code 0x2B) MEI type byte -- 0x0D (CANopen General
+    // Reference) and 0x0E (Read Device Identification, Batch 1 item 4) are the two values the Modbus
+    // Application Protocol spec currently assigns; any other byte still populates this field but
+    // renders as "Unknown MEI Type (0xNN)". std::nullopt when this frame's function code isn't
+    // Encapsulated Interface Transport, or the PDU was empty. The Read Device Identification
+    // object-list payload itself (conformity level, object id/value pairs) is deliberately NOT
+    // decoded further -- function-code/MEI-type-level naming only, matching this file's own header
+    // comment's existing scope boundary for Diagnostics.
+    std::optional<uint8_t> mei_type;
 };
 
 // Attempts to interpret `tcp_payload` as a Modbus/TCP MBAP frame. Returns

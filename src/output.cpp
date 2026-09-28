@@ -2985,6 +2985,20 @@ void write_modbus_json_fields(std::ostream& out, const ModbusFrame& mb) {
         }
         out << "    \"umas_data_byte_count\": " << u.data.size() << ",\n";
     }
+    // Diagnostics (0x08) sub-function code and Encapsulated Interface Transport (0x2B) MEI type --
+    // see ModbusFrame::diagnostics_sub_function/mei_type's own comments (modbus.hpp) for what these
+    // are. Omitted entirely (this project's own "omit, never null" JSON convention) for every other
+    // function code, same as umas above.
+    if (mb.diagnostics_sub_function) {
+        std::ostringstream sub_hex;
+        sub_hex << "0x" << std::hex << *mb.diagnostics_sub_function;
+        out << "    \"modbus_diagnostics_sub_function\": \"" << sub_hex.str() << "\",\n";
+    }
+    if (mb.mei_type) {
+        std::ostringstream mei_hex;
+        mei_hex << "0x" << std::hex << static_cast<unsigned>(*mb.mei_type);
+        out << "    \"modbus_mei_type\": \"" << mei_hex.str() << "\",\n";
+    }
 }
 
 // The EIGRP analog of write_twincat_json_fields above -- same rationale (a plain free function, not

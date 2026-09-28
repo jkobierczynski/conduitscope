@@ -7,13 +7,16 @@
 // see docs/design/detection-engine.md for the full scoping discussion.
 //
 // Every technique ID/name below was independently verified against attack.mitre.org directly
-// (fetched, not assumed from training data) during this feature's research pass, on 2026-09-28.
-// This is deliberately a SMALL, curated table covering exactly the finding shapes the `detect`
-// subcommand (detect_engine.hpp) actually produces -- not an attempt to mirror the whole ATT&CK for
-// ICS matrix (which has ~80 techniques across 12 tactics; most have no counterpart in anything this
-// codebase can passively observe). Mirrors notable_it_protocols.hpp's own "just a lookup table,
-// nothing more" posture: no decode work happens here, only classification of already-decoded
-// findings.
+// (fetched, not assumed from training data) during this feature's research pass, on 2026-09-28 --
+// plus one later addition, T0872 (Indicator Removal on Host), added the same way for the Batch 1
+// "Snort-style pattern extensions" follow-up (docs/research/2026-09-detect-pattern-candidates-
+// batch2.md's Batch 1 item 3, Modbus Clear Counters and Diagnostic Registers) and verified against
+// attack.mitre.org/techniques/T0872/ directly, not assumed. This is deliberately a SMALL, curated
+// table covering exactly the finding shapes the `detect` subcommand (detect_engine.hpp) actually
+// produces -- not an attempt to mirror the whole ATT&CK for ICS matrix (which has ~80 techniques
+// across 12 tactics; most have no counterpart in anything this codebase can passively observe).
+// Mirrors notable_it_protocols.hpp's own "just a lookup table, nothing more" posture: no decode work
+// happens here, only classification of already-decoded findings.
 //
 // A technique ID/name pair is a factual citation (MITRE's own naming), not a diagnosis -- a
 // DetectionFinding citing T0858 says "this traffic has the SHAPE ATT&CK for ICS calls Change
@@ -35,10 +38,11 @@ struct MitreAttackTechnique {
     std::string name;
 };
 
-// The ten techniques this feature's findings cite, each verified individually against
-// attack.mitre.org/techniques/<id>/ during this feature's research pass (2026-09-28) -- not pulled
-// from a bulk export, and not inferred from a technique's ID number alone (ATT&CK for ICS IDs are
-// not sequentially meaningful). Declared as free functions (not a single vector) so each call site
+// The eleven techniques this feature's findings cite, each verified individually against
+// attack.mitre.org/techniques/<id>/ during this feature's research pass (2026-09-28, T0872 added
+// the same way in a later follow-up -- see this file's own header comment) -- not pulled from a
+// bulk export, and not inferred from a technique's ID number alone (ATT&CK for ICS IDs are not
+// sequentially meaningful). Declared as free functions (not a single vector) so each call site
 // in detect_engine.cpp names exactly the technique it means, self-documenting at the call site
 // rather than requiring a lookup-by-string.
 MitreAttackTechnique mitre_t0858_change_operating_mode();      // PLC/controller stop, start, mode change
@@ -51,6 +55,7 @@ MitreAttackTechnique mitre_t0822_external_remote_services();    // New remote-ac
 MitreAttackTechnique mitre_t0888_remote_system_information_discovery();  // Read-only enumeration
 MitreAttackTechnique mitre_t0861_point_and_tag_identification();         // Point/tag enumeration
 MitreAttackTechnique mitre_t0831_manipulation_of_control();     // Direct control manipulation, other
+MitreAttackTechnique mitre_t0872_indicator_removal_on_host();   // Clearing device counters/diagnostic logs
 
 // Returns every technique this file declares, id order -- used by write_detection_report_json's
 // (detect_engine.hpp) own "techniques referenced" summary section and by tests that want to assert

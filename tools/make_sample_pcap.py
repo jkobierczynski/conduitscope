@@ -18401,6 +18401,131 @@ def build_detect_bacnet_who_is_flood_sample():
     (TESTS_DIR / "sample_detect_bacnet_who_is_flood.pcap").write_bytes(data)
 
 
+def build_detect_snort_patterns_batch1_sample():
+    """Batch 1 -- six more Snort-style pattern extensions to `detect`, a direct follow-up to
+    build_detect_snort_patterns_sample's own six above (docs/research/2026-09-detect-pattern-
+    candidates-batch2.md's own Batch 1 section has the full research/scoping record, sourced from
+    Digital Bond's Quickdraw-Snort modbus.rules). Three of these six (Force Listen Only Mode/Restart
+    Communications Option/Clear Counters, and the exception-burst pattern) are ALSO verified against
+    this project's own real modbus_test_data_part1.pcap capture (CMakeLists.txt's own
+    real_modbus_diagnostics_*/real_modbus_detect_batch1_all_findings tests) -- this fixture exists
+    for the two patterns that real capture does NOT contain (Read Device Identification, confirmed
+    absent via a direct scapy byte-level check) and, more importantly, for the negative/contrast
+    cases proving each pattern does NOT fire when its own condition isn't met, the same "prove the
+    false-positive path too" discipline build_detect_snort_patterns_sample's own docstring
+    establishes.
+
+    Scenarios (ENG_IP is the client throughout, matching every prior detect fixture's own
+    "engineering workstation" role):
+      1) Diagnostics Force Listen Only Mode (sub-function 0x0004) -- EngineeringStationActivity/
+         T0858.
+      2) Diagnostics Restart Communications Option (sub-function 0x0001), request PLUS its own
+         echoed response -- FirmwareLogicChange/T0816. The response (src_port 502) must NOT produce
+         a second, role-reversed finding -- proven by the fixture's own total finding count, not a
+         separate negative scenario.
+      3) Diagnostics Clear Counters and Diagnostic Registers (sub-function 0x000A) --
+         ProtocolMisuse/T0872 (Indicator Removal on Host).
+      4) Diagnostics Return Query Data (sub-function 0x0000) -- NOT one of the three named
+         sub-functions this engine flags -- must NOT fire.
+      5) Read Device Identification (function 0x2B, MEI type 0x0E) -- EngineeringStationActivity/
+         T0888, new-vs-known (First Occurrence, no --baseline-file).
+      6) Encapsulated Interface Transport with MEI type 0x0D (CANopen General Reference, NOT Read
+         Device Identification) -- must NOT fire.
+      7) Report Server ID (function 0x11) -- EngineeringStationActivity/T0888, new-vs-known.
+      8) A server returning the same exception code (Server Device Busy, 0x06) 3 times within a few
+         seconds (well within the 60s window) -- ProtocolMisuse/T0855.
+      9) A DIFFERENT server returning the same exception code only TWICE -- under
+         kModbusExceptionBurstThreshold (3) -- must NOT fire.
+      10) A THIRD server returning the same exception code at t=0, t=30, t=95 -- the third occurrence
+          is 95s after the window's own first occurrence (t=0), past kModbusExceptionBurstWindowSeconds
+          (60), so the window resets there and the running count never reaches 3 -- must NOT fire,
+          proving this pattern is genuinely windowed, not a whole-capture cumulative count the way
+          the BACnet Who-Is-flood pattern above is.
+    """
+    ENG_IP, ENG_MAC = "192.168.1.89", mac("00:0c:29:cd:20:00")
+    FORCE_IP, FORCE_MAC = "192.168.1.90", mac("00:0c:29:cd:20:01")
+    RESTART_IP, RESTART_MAC = "192.168.1.91", mac("00:0c:29:cd:20:02")
+    CLEAR_IP, CLEAR_MAC = "192.168.1.92", mac("00:0c:29:cd:20:03")
+    DIAG_NEG_IP, DIAG_NEG_MAC = "192.168.1.93", mac("00:0c:29:cd:20:04")
+    READDEV_IP, READDEV_MAC = "192.168.1.94", mac("00:0c:29:cd:20:05")
+    MEI_NEG_IP, MEI_NEG_MAC = "192.168.1.95", mac("00:0c:29:cd:20:06")
+    REPORTID_IP, REPORTID_MAC = "192.168.1.96", mac("00:0c:29:cd:20:07")
+    EXC_BURST_IP, EXC_BURST_MAC = "192.168.1.97", mac("00:0c:29:cd:20:08")
+    EXC_NOBURST_IP, EXC_NOBURST_MAC = "192.168.1.98", mac("00:0c:29:cd:20:09")
+    EXC_RESET_IP, EXC_RESET_MAC = "192.168.1.99", mac("00:0c:29:cd:20:0a")
+
+    packets = []  # list of (payload_bytes, offset_seconds) -- same offset_seconds convention as
+                  # build_detect_snort_patterns_sample's own scenario 8, needed here so the
+                  # exception-burst scenarios (8-10) can place their packets at exact, controlled
+                  # gaps regardless of packet-list position.
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident, offset_seconds=None):
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4300 + ident) + tcp
+        pkt = eth_header(dst_mac, src_mac, 0x0800) + ip
+        packets.append((pkt, ident if offset_seconds is None else offset_seconds))
+
+    def modbus_mbap(transaction_id, unit_id, pdu):
+        return struct.pack("!HHHB", transaction_id, 0, 1 + len(pdu), unit_id) + pdu
+
+    # 1) Force Listen Only Mode (sub-function 0x0004) -- request only, per spec no response follows.
+    add_tcp(ENG_IP, ENG_MAC, FORCE_IP, FORCE_MAC, 49600, 502,
+            modbus_mbap(401, 1, bytes([0x08, 0x00, 0x04, 0x00, 0x00])), 1)
+
+    # 2) Restart Communications Option (sub-function 0x0001) -- request, then its own echoed
+    #    response (src_port 502) -- must NOT produce a second, role-reversed finding.
+    restart_pdu = bytes([0x08, 0x00, 0x01, 0x00, 0x00])
+    add_tcp(ENG_IP, ENG_MAC, RESTART_IP, RESTART_MAC, 49601, 502, modbus_mbap(402, 1, restart_pdu), 2)
+    add_tcp(RESTART_IP, RESTART_MAC, ENG_IP, ENG_MAC, 502, 49601, modbus_mbap(402, 1, restart_pdu), 3)
+
+    # 3) Clear Counters and Diagnostic Registers (sub-function 0x000A) -- T0872.
+    add_tcp(ENG_IP, ENG_MAC, CLEAR_IP, CLEAR_MAC, 49602, 502,
+            modbus_mbap(403, 1, bytes([0x08, 0x00, 0x0A, 0x00, 0x00])), 4)
+
+    # 4) Return Query Data (sub-function 0x0000) -- a genuinely ordinary, routinely-used Diagnostics
+    #    sub-function (connectivity check) -- must NOT fire any Batch 1 finding.
+    add_tcp(ENG_IP, ENG_MAC, DIAG_NEG_IP, DIAG_NEG_MAC, 49603, 502,
+            modbus_mbap(404, 1, bytes([0x08, 0x00, 0x00, 0xAB, 0xCD])), 5)
+
+    # 5) Read Device Identification (function 0x2B, MEI type 0x0E) -- minimal request: MEI type(1) +
+    #    Read Device ID code(1)=0x01 (basic) + Object Id(1)=0x00.
+    add_tcp(ENG_IP, ENG_MAC, READDEV_IP, READDEV_MAC, 49604, 502,
+            modbus_mbap(405, 1, bytes([0x2B, 0x0E, 0x01, 0x00])), 6)
+
+    # 6) Encapsulated Interface Transport, MEI type 0x0D (CANopen General Reference) -- a DIFFERENT
+    #    MEI type than Read Device Identification's own 0x0E -- must NOT fire.
+    add_tcp(ENG_IP, ENG_MAC, MEI_NEG_IP, MEI_NEG_MAC, 49605, 502, modbus_mbap(406, 1, bytes([0x2B, 0x0D, 0x00])), 7)
+
+    # 7) Report Server ID (function 0x11) -- request carries no data at all per spec.
+    add_tcp(ENG_IP, ENG_MAC, REPORTID_IP, REPORTID_MAC, 49606, 502, modbus_mbap(407, 1, bytes([0x11])), 8)
+
+    # 8) Exception-code burst: EXC_BURST_IP returns exception code 0x06 (Server Device Busy) to
+    #    ENG_IP three times, 5 seconds apart (well within the 60s window) -- fires on the third.
+    exc_pdu = bytes([0x83, 0x06])  # 0x83 = Read Holding Registers (0x03) with the exception bit set
+    for n in range(3):
+        add_tcp(EXC_BURST_IP, EXC_BURST_MAC, ENG_IP, ENG_MAC, 502, 49607, modbus_mbap(500 + n, 1, exc_pdu),
+                9 + n, offset_seconds=100 + n * 5)
+
+    # 9) A DIFFERENT server (EXC_NOBURST_IP) returns the same exception code only TWICE -- under
+    #    threshold -- must NOT fire.
+    for n in range(2):
+        add_tcp(EXC_NOBURST_IP, EXC_NOBURST_MAC, ENG_IP, ENG_MAC, 502, 49608, modbus_mbap(510 + n, 1, exc_pdu),
+                12 + n, offset_seconds=200 + n * 5)
+
+    # 10) A THIRD server (EXC_RESET_IP) returns the same exception code at t=0, t=30, t=95 (relative
+    #     to this scenario's own offset base) -- the third is 95s after the window's own first
+    #     occurrence, past the 60s window, so the running count resets there and never reaches 3 --
+    #     must NOT fire, proving this pattern is genuinely windowed.
+    for n, gap in enumerate((0, 30, 95)):
+        add_tcp(EXC_RESET_IP, EXC_RESET_MAC, ENG_IP, ENG_MAC, 502, 49609, modbus_mbap(520 + n, 1, exc_pdu),
+                14 + n, offset_seconds=300 + gap)
+
+    data = pcap_global_header()
+    for pkt, offset_seconds in packets:
+        data += pcap_record(pkt, 1_700_050_000 + offset_seconds, 0)
+    (TESTS_DIR / "sample_detect_snort_patterns_batch1.pcap").write_bytes(data)
+
+
 def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
     """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
     umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
@@ -20436,6 +20561,7 @@ if __name__ == "__main__":
     build_detect_sample()
     build_detect_snort_patterns_sample()
     build_detect_bacnet_who_is_flood_sample()
+    build_detect_snort_patterns_batch1_sample()
     build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()

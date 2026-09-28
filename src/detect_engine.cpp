@@ -170,6 +170,17 @@ constexpr size_t kS7SetupCommProbeThreshold = 3;
 // server hours apart aren't linked together as if they were one event.
 constexpr double kCompositeWindowSeconds = 300.0;
 
+// Modbus repeated exception-code response burst threshold/window (Batch 1 item 6,
+// docs/research/2026-09-detect-pattern-candidates-batch2.md) -- generalizes Quickdraw-Snort's own
+// SIDs 1111010/1111011 ("Slave Device Busy Exception Code Delay"/"Acknowledge Exception Code
+// Delay"), both `threshold: count 3-5, seconds 60`. The low end of that count range is used here
+// (3), the same "small, documented judgment-call default" posture as kS7SetupCommProbeThreshold
+// above -- Quickdraw's own rule ships as a vendor-sourced primary reference for the SHAPE of this
+// pattern (same exception code repeated to the same client within about a minute), not for the
+// exact count/window values, which Snort deployments commonly tune per site.
+constexpr size_t kModbusExceptionBurstThreshold = 3;
+constexpr double kModbusExceptionBurstWindowSeconds = 60.0;
+
 }  // namespace
 
 void DetectEngine::observe(const DecodedPacket& dp) {
@@ -648,6 +659,127 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 }
             }
         }
+
+        // --- Modbus Diagnostics (function 0x08): Force Listen Only Mode, Restart Communications
+        // --- Option, Clear Counters and Diagnostic Registers (Batch 1 items 1-3, docs/research/
+        // --- 2026-09-detect-pattern-candidates-batch2.md) -----------------------------------------
+        // All three sourced from Digital Bond's Quickdraw-Snort modbus.rules, and all three verified
+        // against this project's own real modbus_test_data_part1.pcap capture, which happens to
+        // contain genuine examples of exactly these three sub-functions (see
+        // real_modbus_diagnostics_force_listen_only_mode_decoded and its sibling CTest cases,
+        // CMakeLists.txt). Request and response share the identical wire shape for Diagnostics (see
+        // ModbusFrame::diagnostics_sub_function's own comment, modbus.hpp), so -- exactly like
+        // S7comm's own detect wiring above (dp.dst_port == 102) -- direction is decided by "the
+        // destination is the well-known Modbus port," not a decoded field: gates every branch below
+        // to the request side only, so an always-notable finding isn't recorded twice (once per
+        // direction) for a sub-function whose response happens to echo the request unchanged.
+        if (dp.dst_port == MODBUS_TCP_PORT && mb.diagnostics_sub_function) {
+            uint16_t sub = *mb.diagnostics_sub_function;
+            if (sub == 0x0004) {
+                // Force Listen Only Mode -- per spec the target sends NO response to this command at
+                // all (confirmed against the real capture above: every 0x0004 request there has no
+                // matching reply), so its own silence afterward is the expected, correct behavior,
+                // not evidence of a fault.
+                record_always_notable(
+                    "modbus-force-listen-only", DetectionCategory::EngineeringStationActivity,
+                    mitre_t0858_change_operating_mode(), dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                    "Modbus Diagnostics Force Listen Only Mode (sub-function 0x0004) -- the target "
+                    "device is being commanded to stop responding to requests entirely (per spec it "
+                    "sends no reply to this command itself, so its silence afterward is expected, "
+                    "not a fault)");
+            } else if (sub == 0x0001) {
+                record_always_notable(
+                    "modbus-restart-comm", DetectionCategory::FirmwareLogicChange,
+                    mitre_t0816_device_restart_shutdown(), dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                    "Modbus Diagnostics Restart Communications Option (sub-function 0x0001) -- the "
+                    "target device's own communication event log and interfaces are being "
+                    "reinitialized on command");
+            } else if (sub == 0x000A) {
+                // T0872 (Indicator Removal on Host) -- the one Batch 1 pattern needing a MITRE
+                // technique this codebase didn't already cite; see mitre_attack_ics.hpp's own header
+                // comment for its own separate attack.mitre.org verification. ProtocolMisuse is the
+                // closest fit of this engine's four categories -- clearing diagnostic counters is
+                // neither a mode change, a firmware/logic change, nor a remote-access event, but it
+                // is an ICS protocol command that can be used to erase evidence of prior errors or
+                // probing, the same "protocol command doing something it's not routinely used for"
+                // shape ProtocolMisuse already covers elsewhere in this file. Moderate, not Critical
+                // -- clearing counters has no direct control-plane effect on the process itself.
+                record_always_notable(
+                    "modbus-clear-counters", DetectionCategory::ProtocolMisuse,
+                    mitre_t0872_indicator_removal_on_host(), dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                    "Modbus Diagnostics Clear Counters and Diagnostic Registers (sub-function 0x000A) "
+                    "-- the target device's own diagnostic counters and event log are being reset, "
+                    "which (alongside legitimate maintenance use) can also mask evidence of prior "
+                    "communication errors or probing",
+                    DetectionSeverity::Moderate);
+            }
+        }
+
+        // --- Modbus Read Device Identification (function 0x2B, MEI type 0x0E) / Report Server ID
+        // --- (function 0x11) from a new client (Batch 1 items 4-5) ---------------------------------
+        // Both are engineering-tool-shaped reconnaissance (a device-identity/vendor-info query), and
+        // -- per this project's own research doc -- deliberately resolved as NEW-VS-KNOWN candidates
+        // (record_new_conduit_candidate, baseline-or-first-occurrence novelty) rather than as
+        // always-notable findings the way Quickdraw's own rules treat them: any single such query is
+        // ordinary engineering-tool behavior, and only its NOVELTY (a client not seen doing this
+        // before, or genuinely absent from a supplied baseline) is the honestly-supportable signal
+        // here -- see this engine's own header comment on the always-notable-vs-new-vs-known split.
+        // Informational severity, matching umas-new-originator-discovery's own posture above: this is
+        // read-only enumeration with no control-plane effect if genuine. Same request-side-only
+        // direction gate as the Diagnostics block above, for the same reason (Report Server ID's own
+        // response is a longer, differently-shaped byte-count-prefixed reply in practice, but this
+        // decoder does not parse deep enough to rely on that shape difference -- the well-known-port
+        // heuristic is simpler and matches this file's own existing precedent).
+        if (dp.dst_port == MODBUS_TCP_PORT) {
+            if (mb.mei_type && *mb.mei_type == 0x0E) {
+                record_new_conduit_candidate(
+                    DetectionCategory::EngineeringStationActivity,
+                    mitre_t0888_remote_system_information_discovery(),
+                    /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                    "modbus-new-originator-read-device-id", DetectionSeverity::Informational);
+            } else if (mb.function_name == "Report Server ID") {
+                record_new_conduit_candidate(
+                    DetectionCategory::EngineeringStationActivity,
+                    mitre_t0888_remote_system_information_discovery(),
+                    /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                    "modbus-new-originator-report-server-id", DetectionSeverity::Informational);
+            }
+        }
+
+        // --- Modbus: repeated exception-code response burst (Batch 1 item 6) -----------------------
+        // A server returning the SAME exception code 3+ times to the SAME client within roughly 60
+        // seconds -- see kModbusExceptionBurstThreshold/kModbusExceptionBurstWindowSeconds' own
+        // comment above for the Quickdraw-Snort SIDs this generalizes. Windowed (unlike
+        // bacnet_who_is_count_by_source_'s own whole-capture running count above): a burst genuinely
+        // needs to be CLOSE TOGETHER in time to mean anything, so the window resets whenever the gap
+        // since its own first occurrence exceeds kModbusExceptionBurstWindowSeconds, rather than
+        // counting every exception across an entire multi-hour capture as one running total. This is
+        // the exception RESPONSE itself (mb.is_exception, sent server -> client), so dp.src_ip is the
+        // server and dp.dst_ip is the client here -- the reverse of every other Modbus finding source
+        // in this file, the same direction-reversal dnp3-unsolicited-misuse's own comment above
+        // documents for DNP3 Unsolicited Response.
+        if (mb.is_exception) {
+            std::string key =
+                dp.dst_ip + "|" + dp.src_ip + "|" + std::to_string(static_cast<unsigned>(mb.exception_code));
+            ModbusExceptionBurstState& st = modbus_exception_burst_state_[key];
+            if (st.count == 0 || (dp.timestamp - st.window_start) > kModbusExceptionBurstWindowSeconds) {
+                st.window_start = dp.timestamp;
+                st.count = 0;
+            }
+            ++st.count;
+            if (st.count >= kModbusExceptionBurstThreshold) {
+                std::ostringstream d;
+                d << "Modbus server returned exception code " << modbus_exception_name(mb.exception_code)
+                  << " to the same client at least " << kModbusExceptionBurstThreshold << " times within "
+                  << static_cast<long>(kModbusExceptionBurstWindowSeconds)
+                  << "s -- a real, if weak, probing/instability signal (an engineering tool or a "
+                     "scanner repeatedly hitting a function the device can't currently service), but "
+                     "legitimate retry/backoff logic can trigger this too";
+                record_always_notable("modbus-exception-burst", DetectionCategory::ProtocolMisuse,
+                                       mitre_t0855_unauthorized_command_message(), dp.dst_ip, dp.src_ip,
+                                       "modbus", dp.src_port, d.str(), DetectionSeverity::Moderate);
+            }
+        }
     }
 
     // --- Notable IT protocols: a Tier-1 remote-access protocol reaching a conduit (RemoteAccessChannel)
@@ -766,6 +898,19 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
                   << c.client_ip << " to " << c.server_ip
                   << " -- a different client than the one(s) already seen issuing an engineering-station "
                      "command to this PLC in this capture";
+            } else if (c.source_tag == "modbus-new-originator-read-device-id") {
+                // Batch 1 item 4 (docs/research/2026-09-detect-pattern-candidates-batch2.md) -- unlike
+                // the CIP/UMAS sources above, this is NOT gated on "second-plus originator to this
+                // server" (no per-server originator-set tracking of its own): every occurrence becomes
+                // its own candidate, resolved purely by baseline-or-first-occurrence, matching the
+                // research doc's own explicit proposal for this pattern (see detect_engine.cpp's own
+                // call-site comment).
+                d << "Modbus Read Device Identification (function 0x2B, MEI type 0x0E) from " << c.client_ip
+                  << " to " << c.server_ip
+                  << " -- an engineering-tool-shaped device-identity/vendor-info query";
+            } else if (c.source_tag == "modbus-new-originator-report-server-id") {
+                d << "Modbus Report Server ID (function 0x11) from " << c.client_ip << " to " << c.server_ip
+                  << " -- an engineering-tool-shaped device-identity query";
             } else {
                 // "cip-new-originator" -- the only other non-remote-access source this engine has.
                 d << "CIP Forward_Open from a new originator " << c.client_ip << " to " << c.server_ip

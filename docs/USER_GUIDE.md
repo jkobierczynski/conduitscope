@@ -1291,6 +1291,74 @@ the BACnet Who-Is flood pattern's own separate fixture, is exercised by this pro
 suite (`detect_snort_patterns_all_findings`/`detect_snort_patterns_json_shape`/
 `detect_bacnet_who_is_flood`).)
 
+#### Batch 1: six more Snort-style patterns (Modbus/TCP)
+
+A direct follow-up to the six above, all sourced from Digital Bond's Quickdraw-Snort own
+`modbus.rules` (`docs/research/2026-09-detect-pattern-candidates-batch2.md` has the full research
+record and source citations, `docs/design/detection-engine.md`'s own "Batch 1" section has the full
+implementation record):
+
+- **Modbus Diagnostics Force Listen Only Mode** (function 0x08, sub-function 0x0004) -- the target
+  device is commanded to stop responding to requests entirely. Per spec it sends no response to this
+  command at all, so its own silence afterward is expected, not a fault.
+- **Modbus Diagnostics Restart Communications Option** (sub-function 0x0001) -- the target device's
+  own communication event log and interfaces are reinitialized on command.
+- **Modbus Diagnostics Clear Counters and Diagnostic Registers** (sub-function 0x000A) -- the
+  target's own diagnostic counters/event log are reset, which (alongside legitimate maintenance use)
+  can also mask evidence of prior communication errors or probing. The one pattern in this batch
+  citing a new MITRE technique, **T0872 (Indicator Removal on Host)**.
+- **Modbus Read Device Identification** (function 0x2B, MEI type 0x0E) and **Report Server ID**
+  (function 0x11) from a client -- both engineering-tool-shaped device-identity queries. Unlike
+  every pattern above, these are deliberately **new-vs-known** findings, not always-notable: a
+  single such query is ordinary engineering-tool behavior, so only a client's NOVELTY (not seen
+  doing this before, or genuinely absent from a supplied `--baseline-file`) is flagged -- the same
+  baseline-or-first-occurrence resolution every other new-vs-known finding in this report gets.
+- **Repeated Modbus exception-code response burst** -- the same server returning the same exception
+  code 3 or more times to the same client within roughly 60 seconds. A real, if weak, probing/
+  instability signal (an engineering tool or scanner repeatedly hitting a function the device can't
+  currently service) -- legitimate retry/backoff logic can trigger this too, so severity is
+  Moderate, the same posture as the Modbus write-without-read pattern above.
+
+Three of these six (Force Listen Only Mode/Restart Communications Option/Clear Counters, plus the
+exception-burst pattern) are independently verified against this project's own REAL capture,
+`tests/real_captures/modbus/modbus_test_data_part1.pcap` -- not just a synthetic fixture:
+
+```
+$ conduitscope detect -r tests/real_captures/modbus/modbus_test_data_part1.pcap
+=== conduitscope detect report ===
+capture: tests/real_captures/modbus/modbus_test_data_part1.pcap
+total packets: 118
+findings: 7 (Critical 2, Moderate 3, Informational 2)
+  evidence: Confirmed 7, Heuristic 0
+  Engineering-Station Activity: 3
+  Firmware/Logic Change: 1
+  Remote-Access Channel: 0
+  Protocol Misuse: 3
+note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT
+      section. That judgment belongs to the human analyst reading this report.
+
+--- findings (first-seen order) ---
+
+[Engineering-Station Activity] T0858 (Change Operating Mode)
+  evidence: Confirmed  novelty: N/A  severity: Critical
+  10.0.0.57 -> 10.0.0.3:502 (modbus)
+  Modbus Diagnostics Force Listen Only Mode (sub-function 0x0004) -- the target device is being commanded to stop responding to requests entirely (per spec it sends no reply to this command itself, so its silence afterward is expected, not a fault)
+  first seen: 2004-08-26 12:01:34.211940Z  last seen: 2004-08-26 12:01:34.216894Z  packets: 3
+
+[Protocol Misuse] T0855 (Unauthorized Command Message)
+  evidence: Confirmed  novelty: N/A  severity: Moderate
+  10.0.0.57 -> 10.0.0.3:502 (modbus)
+  Modbus server returned exception code Gateway Target Device Failed to Respond to the same client at least 3 times within 60s -- a real, if weak, probing/instability signal (an engineering tool or a scanner repeatedly hitting a function the device can't currently service), but legitimate retry/backoff logic can trigger this too
+  first seen: 2004-08-26 12:01:34.219055Z  last seen: 2004-08-26 12:01:44.836678Z  packets: 2
+```
+
+(Five more findings -- the Restart Communications Option, the Clear Counters/T0872 finding, a
+second exception-burst against a different real server, and both Read Device Identification/Report
+Server ID new-vs-known findings -- are omitted above for brevity; every one of the 7 findings this
+real capture produces, plus this batch's own synthetic fixture and its four negative/contrast
+conduits, is exercised by this project's own CTest suite (`real_modbus_diagnostics_*`/
+`real_modbus_detect_batch1_all_findings`/`detect_snort_patterns_batch1_all_findings`).)
+
 #### Worked example
 
 ```
@@ -1344,7 +1412,7 @@ zones upgrades that same finding's technique from T0886 to **T0822 (External Rem
 `technique_name`, `evidence`, `novelty`, `severity`, `client_ip`, `server_ip`, `protocol`,
 `server_port`, `description`, `first_seen`/`first_seen_text`, `last_seen`/`last_seen_text`,
 `packet_count`) plus a `summary` object (the same counts the text report's header shows) and a
-`techniques_referenced` array -- always the full ten-technique table from
+`techniques_referenced` array -- always the full eleven-technique table from
 `docs/design/detection-engine.md`'s own MITRE mapping, not just the ones this particular report
 cites, so a consumer always has the full citation text on hand without a second lookup.
 
@@ -6153,6 +6221,18 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   that exists elsewhere in a plant's own normal polling cycle -- treat this
   finding as a prompt to check a range's purpose, not as confirmed misuse.
   See "Snort-style pattern extensions" in the `detect` section above.
+- **`detect`'s Batch 1 Modbus Diagnostics/Read-Device-Identification/Report-Server-ID patterns
+  are gated on the destination port being the well-known Modbus port (502), not a decoded
+  request/response field.** Diagnostics' request and response share the identical wire shape for
+  every sub-function this decoder names, so there is no shape-based signal to tell them apart (the
+  same situation `ModbusFrame::is_request`'s own comment documents for Write Single Coil/Register);
+  a Modbus session running on a nonstandard port would silently miss these five findings, the same
+  honest limitation S7comm's own `dst_port == 102` detect gate already has. See "Batch 1" above.
+- **`detect`'s repeated-exception-code-burst pattern uses a fixed threshold (3) and window (60s),
+  not configurable from the command line.** Generalizes Quickdraw-Snort's own SIDs 1111010/1111011
+  (`threshold: count 3-5, seconds 60`) -- a small, documented judgment-call default, not a precise
+  vendor-mandated value; a deployment that wants a different count/window has no flag to change it
+  today. See "Batch 1" above.
 - **`detect`'s evidence/novelty/severity never assert malicious intent.**
   `evidence` says how reliably this tool observed the event; `severity`
   says how much it would matter if genuine; `novelty` says whether it

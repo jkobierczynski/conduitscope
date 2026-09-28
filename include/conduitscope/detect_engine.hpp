@@ -110,6 +110,40 @@
 //     post-pass over this engine's OWN already-produced findings (needs no new observe()-time
 //     tracking) -- FirmwareLogicChange/T0831, Critical severity, see finish()'s own implementation
 //     comment (detect_engine.cpp).
+//
+// Six more patterns ("Batch 1"), added as a direct follow-up to the six above -- all Modbus/TCP,
+// sourced from Digital Bond's Quickdraw-Snort modbus.rules (docs/research/2026-09-detect-pattern-
+// candidates-batch2.md's own Batch 1 section has the full research/scoping record for each,
+// including exact SID citations):
+//   - Diagnostics (function 0x08) Force Listen Only Mode (sub-function 0x0004) -- always-notable,
+//     EngineeringStationActivity/T0858, Critical severity. Per spec the target sends NO response to
+//     this command at all (confirmed against this project's own real modbus_test_data_part1.pcap
+//     capture, which genuinely contains this exact sub-function).
+//   - Diagnostics Restart Communications Option (sub-function 0x0001) -- always-notable,
+//     FirmwareLogicChange/T0816, Critical severity (also confirmed against that same real capture).
+//   - Diagnostics Clear Counters and Diagnostic Registers (sub-function 0x000A) -- always-notable,
+//     ProtocolMisuse/T0872 (Indicator Removal on Host -- the one new MITRE technique this batch
+//     needed, mitre_attack_ics.hpp's own header comment has its own separate verification record),
+//     Moderate severity (also confirmed against that same real capture). All three Diagnostics
+//     sub-functions above share one deliberate scope boundary: Diagnostics' request and response
+//     share the identical wire shape (see ModbusFrame::diagnostics_sub_function's own comment,
+//     modbus.hpp), so direction is decided the same way S7comm's own detect wiring already decides
+//     it (dp.dst_port == the well-known port), not a decoded field -- see detect_engine.cpp's own
+//     call-site comment.
+//   - Modbus Read Device Identification (function 0x2B, MEI type 0x0E) and Report Server ID
+//     (function 0x11) from a client -- deliberately NEW-VS-KNOWN candidates (not always-notable,
+//     unlike how Quickdraw's own rules treat them), EngineeringStationActivity/T0888, Informational
+//     severity: a single such query is ordinary engineering-tool behavior, and only its novelty is
+//     the honestly-supportable signal here -- see the research doc's own explicit proposal for this
+//     pattern and detect_engine.cpp's own call-site comment. Unlike the CIP/UMAS new-originator
+//     sources above, these are NOT gated on "second-plus originator to this server" -- every
+//     occurrence becomes its own baseline-or-first-occurrence candidate.
+//   - A repeated Modbus exception-code response burst: the SAME server returning the SAME exception
+//     code 3+ times to the SAME client within roughly 60 seconds -- always-notable, ProtocolMisuse/
+//     T0855, Moderate severity (a real but weak, retry-shaped signal -- legitimate retry/backoff
+//     logic can trigger this too, the same posture as the Modbus write-without-prior-read pattern
+//     above). Windowed (unlike bacnet_who_is_count_by_source_'s own whole-capture running count) --
+//     see modbus_exception_burst_state_'s own comment for why.
 #pragma once
 
 #include <cstdint>
@@ -407,6 +441,21 @@ private:
         double last_seen = 0.0;
     };
     std::unordered_map<std::string, S7SetupCommProbeState> s7_setup_comm_state_;
+
+    // Modbus repeated exception-code response burst state (Batch 1 item 6), per (client_ip,
+    // server_ip, exception_code) key ("<client_ip>|<server_ip>|<exception_code>") -- `count` is the
+    // number of matching exceptions seen since `window_start`, reset to 1/dp.timestamp whenever a new
+    // occurrence's gap since `window_start` exceeds kModbusExceptionBurstWindowSeconds (detect_engine.
+    // cpp), so a burst genuinely has to be close together in time to count, unlike
+    // bacnet_who_is_count_by_source_ above (a whole-capture running total with no windowing at all --
+    // appropriate there because a volumetric flood is notable regardless of pacing, but wrong for
+    // this pattern, where three exceptions minutes apart across an hour-long capture is not the same
+    // signal as three within a minute).
+    struct ModbusExceptionBurstState {
+        size_t count = 0;
+        double window_start = 0.0;
+    };
+    std::unordered_map<std::string, ModbusExceptionBurstState> modbus_exception_burst_state_;
 
     size_t total_packets_ = 0;
 };

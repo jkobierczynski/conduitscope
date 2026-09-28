@@ -13348,6 +13348,77 @@ it done as its own patch.
     and the inclusion set is exactly those 6, matching the four pre-existing `live_capture_*` tests'
     own already-correct treatment.
 
+92. **Batch 1: six more Snort-style pattern extensions to `detect`, all Modbus/TCP.** Jurgen's own
+    direct follow-up after item 89 shipped -- "create a list of a batch of 3 times 6 further
+    additional patterns from real Snort/Suricata OT rulesets and public ICS advisories to add to
+    the detection." Delivered first as a research/proposal document, not code, per that message's
+    own scope: [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md),
+    18 candidate patterns across three batches of 6, each with its own source citation, wire-level
+    condition, and proposed category/technique/evidence/severity/novelty mapping. A follow-up
+    question ("assuming you have done the research, I assume there is no additional cost to make it
+    10x6 or 20x6 patterns? what amount of patterns is enough?") was answered directly in
+    conversation: research cost for genuinely relevant, citable OT-protocol rulesets is a
+    largely-exhausted pool, but implementation cost does NOT get cheaper in bulk -- each pattern
+    still needs its own decode-field check, engine wiring, fixture, and a verified CTest case.
+    Jurgen then confirmed "continue with batch 1" -- the six below, all sourced from Digital Bond's
+    Quickdraw-Snort own `modbus.rules`. Full record in
+    [docs/design/detection-engine.md](design/detection-engine.md)'s own "Batch 1" section.
+
+    Three needed genuinely new decode work: `ModbusFrame` gained `diagnostics_sub_function`
+    (function code 0x08's 2-byte sub-function field, named for Return Query Data/Restart
+    Communications Option/Return Diagnostic Register/Force Listen Only Mode/Clear Counters and
+    Diagnostic Registers) and `mei_type` (function code 0x2B's MEI type byte, named for CANopen
+    General Reference/Read Device Identification) -- function-code/sub-function-level naming only,
+    no further decode of Read Device Identification's own object-list payload, matching this
+    project's existing "first pass" scope-boundary precedent (`opcua.hpp`/`bacnet.hpp`). The six:
+    Diagnostics Force Listen Only Mode (`EngineeringStationActivity`/T0858, always-notable,
+    Critical); Diagnostics Restart Communications Option (`FirmwareLogicChange`/T0816,
+    always-notable, Critical); Diagnostics Clear Counters and Diagnostic Registers
+    (`ProtocolMisuse`/**T0872**, the one new MITRE ATT&CK for ICS technique this batch needed --
+    Indicator Removal on Host, verified directly against `attack.mitre.org/techniques/T0872/`,
+    inserted into `mitre_attack_ics.hpp`/`.cpp`'s existing id-sorted eleven-technique table --
+    always-notable, Moderate); Read Device Identification and Report Server ID from a client
+    (`EngineeringStationActivity`/T0888, deliberately **new-vs-known** rather than always-notable
+    the way Quickdraw's own rules treat them -- the research doc's own explicit proposal, resolved
+    via `record_new_conduit_candidate` with no per-server originator-set gating, Informational); and
+    a repeated Modbus exception-code response burst -- the same server returning the same exception
+    code 3+ times to the same client within a genuinely WINDOWED 60 seconds (not a whole-capture
+    cumulative count like the BACnet Who-Is-flood pattern), generalizing Quickdraw-Snort's own SIDs
+    1111010/1111011 (`ProtocolMisuse`/T0855, always-notable, Moderate). All five request-side
+    patterns are gated on the destination being the well-known Modbus port (502), not a decoded
+    field -- Diagnostics' request and response share the identical wire shape for every named
+    sub-function (the same situation `decode_write_single` already documents for Write Single
+    Coil/Register), the same heuristic S7comm's own detect wiring already uses.
+
+    Three of the six (Force Listen Only Mode/Restart Communications Option/Clear Counters) plus the
+    exception-burst pattern are independently verified against this project's own REAL capture,
+    `tests/real_captures/modbus/modbus_test_data_part1.pcap` -- a direct scapy byte-level check
+    found it genuinely contains all three named Diagnostics sub-functions and real, repeated
+    exception-code storms (two different real servers), confirmed before writing the corresponding
+    CTest assertions. That real capture's own pre-existing `real_modbus_diagnostics_not_decoded`
+    test (asserting Diagnostics fell back to "not decoded") was retired and replaced with
+    `real_modbus_unknown_function_code_not_decoded` (pinned to function code 0x2A, the one function
+    code genuinely still undecoded in that capture) plus five new `real_modbus_diagnostics_*`/
+    `real_modbus_detect_batch1_all_findings` tests. New synthetic fixture
+    `tests/sample_detect_snort_patterns_batch1.pcap` (`build_detect_snort_patterns_batch1_sample`,
+    16 packets, 6 findings) covers Read Device Identification (confirmed absent from the real
+    capture) plus four negative/contrast conduits proving each pattern's own condition is genuinely
+    required (an ordinary Return Query Data sub-function; a non-Read-Device-ID MEI type; an
+    under-threshold exception count; and a third exception falling outside the 60s window, proving
+    the burst pattern is genuinely windowed). `output.cpp` gained the corresponding
+    `modbus_diagnostics_sub_function`/`modbus_mei_type` JSON fields, this project's own "omit,
+    never null" convention.
+
+    Full CTest across all four standing build configurations (default GCC: 2184/2184; ASan/UBSan
+    `build-fuzz`, excluding the six CAP_NET_RAW-only live-capture tests per the CI split above:
+    2255/2255, including the fuzz corpus regression; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`: 2170/2170; MinGW-w64 cross-compile, build-only there) -- 100% pass, zero
+    regressions. `docs/design/detection-engine.md` (new "Batch 1" section),
+    `docs/USER_GUIDE.md` (new "Batch 1" subsection with a real-capture worked example, two new
+    LIMITATIONS bullets, the JSON `techniques_referenced` count corrected from ten to eleven), and
+    `man/conduitscope.1` (`detect` COMMANDS entry updated to name all twelve patterns) all updated
+    in the same increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

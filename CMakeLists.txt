@@ -5068,11 +5068,67 @@ set_tests_properties(real_modbus_read_holding_registers_authoritative_pairing PR
   PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 209 \\(unit 1\\) -- matches the request seen in packet #1")
 
 # Real traffic exercising a function code outside current scope must degrade
-# to a "not decoded" note, not be misparsed.
-add_test(NAME real_modbus_diagnostics_not_decoded
+# to a "not decoded" note, not be misparsed. Function code 0x2A (distinct from 0x2B/Encapsulated
+# Interface Transport, which Batch 1 below newly decodes) is the one function code left genuinely
+# undecoded in this real capture -- see this test's own former PASS_REGULAR_EXPRESSION (Diagnostics,
+# 0x08) below, updated once Batch 1 gave Diagnostics real decode.
+add_test(NAME real_modbus_unknown_function_code_not_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
-set_tests_properties(real_modbus_diagnostics_not_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "Diagnostics: Diagnostics \\(not decoded in this groundwork release\\)")
+set_tests_properties(real_modbus_unknown_function_code_not_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Unknown \\(0x2a\\): Unknown \\(0x2a\\) \\(not decoded in this groundwork release\\)")
+
+# ---------------------------------------------------------------------------------------------
+# Modbus Diagnostics (0x08)/Encapsulated Interface Transport (0x2B)/Report Server ID (0x11) decode
+# (Batch 1 items 1-5, docs/research/2026-09-detect-pattern-candidates-batch2.md) -- verified
+# directly against this SAME real capture's own raw bytes (via scapy) before writing the assertions
+# below, this project's own standing rule. modbus_test_data_part1.pcap happens to genuinely contain
+# all three named Diagnostics sub-functions this decoder now resolves (Force Listen Only Mode/
+# Restart Communications Option/Clear Counters and Diagnostic Registers) plus Report Server ID --
+# real traffic, not a synthetic fixture, for all five of these. Read Device Identification (MEI type
+# 0x0E) is NOT present in this real capture (confirmed via the same scapy byte-level check), so it's
+# covered by sample_detect_snort_patterns_batch1.pcap below instead.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME real_modbus_diagnostics_force_listen_only_mode_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
+set_tests_properties(real_modbus_diagnostics_force_listen_only_mode_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Diagnostics: Force Listen Only Mode \\(data: 00 00\\)")
+
+add_test(NAME real_modbus_diagnostics_restart_communications_option_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
+set_tests_properties(real_modbus_diagnostics_restart_communications_option_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Diagnostics: Restart Communications Option \\(data: 00 00\\)")
+
+add_test(NAME real_modbus_diagnostics_clear_counters_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
+set_tests_properties(real_modbus_diagnostics_clear_counters_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "Diagnostics: Clear Counters and Diagnostic Registers \\(data: 00 00\\)")
+
+add_test(NAME real_modbus_diagnostics_json_sub_function_field
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format json)
+set_tests_properties(real_modbus_diagnostics_json_sub_function_field PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"modbus_diagnostics_sub_function\": \"0x4\"")
+
+# Report Server ID (function 0x11) is still not decoded beyond its own function name -- this project
+# never parses its response-side server-ID string/run-indicator payload (no citable need for it, and
+# detect_engine.cpp's own Batch 1 item 5 only needs the function code itself, not its data) -- so this
+# real capture's own Report Server ID traffic still shows the "(not decoded in this groundwork
+# release)" fallback text, just no longer misfiled next to the Diagnostics assertion above.
+add_test(NAME real_modbus_report_server_id_still_shows_function_name_only
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap" --format text)
+set_tests_properties(real_modbus_report_server_id_still_shows_function_name_only PROPERTIES
+  PASS_REGULAR_EXPRESSION "Report Server ID: Report Server ID \\(not decoded in this groundwork release\\)")
+
+# `detect` against this same real capture -- all six Batch 1 finding sources fire on genuine real
+# traffic (not a synthetic fixture), each independently confirmed via this test's own manual
+# verification pass against the real CLI output before this assertion was written. Both
+# exception-burst findings are real Modbus Gateway-Target-Device-Failed-to-Respond/Server-Device-Busy
+# exception storms actually present in this capture -- an unplanned, welcome bonus: real evidence for
+# Batch 1 item 6 that a synthetic fixture alone couldn't provide the same confidence for.
+add_test(NAME real_modbus_detect_batch1_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/modbus/modbus_test_data_part1.pcap")
+set_tests_properties(real_modbus_detect_batch1_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "findings: 7 \\(Critical 2, Moderate 3, Informational 2\\).*\\[Engineering-Station Activity\\] T0858 \\(Change Operating Mode\\).*Modbus Diagnostics Force Listen Only Mode \\(sub-function 0x0004\\).*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*Modbus server returned exception code Gateway Target Device Failed to Respond to the same client at least 3 times within 60s.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\).*Modbus Diagnostics Restart Communications Option \\(sub-function 0x0001\\).*\\[Protocol Misuse\\] T0872 \\(Indicator Removal on Host\\).*Modbus Diagnostics Clear Counters and Diagnostic Registers \\(sub-function 0x000A\\).*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*Modbus server returned exception code Server Device Busy to the same client at least 3 times within 60s.*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*Modbus Read Device Identification \\(function 0x2B, MEI type 0x0E\\) from 10\\.0\\.0\\.57 to 10\\.0\\.0\\.8.*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*Modbus Report Server ID \\(function 0x11\\) from 10\\.0\\.0\\.57 to 10\\.0\\.0\\.3")
 
 # Regression guard for a real bug found by tools/compare_with_tshark.py (an automated tshark-vs-
 # conduitscope comparison across this project's own fixture corpus): frame #9 of this real capture
@@ -15933,6 +15989,42 @@ add_test(NAME detect_bacnet_who_is_flood
 set_tests_properties(detect_bacnet_who_is_flood PROPERTIES
   PASS_REGULAR_EXPRESSION "total packets: 105.*findings: 1 \\(Critical 0, Moderate 0, Informational 1\\).*  Protocol Misuse: 1.*\\[Protocol Misuse\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: N/A  severity: Informational.*192\\.168\\.1\\.79 -> 255\\.255\\.255\\.255:47808 \\(bacnet\\).*BACnet Who-Is flood/device-enumeration sweep from this source -- at least 100 Who-Is requests observed in this capture \\(destination shown is only the most recent one -- Who-Is is routinely broadcast, so this source may have targeted several destinations\\)"
   FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.80")
+
+
+# ---------------------------------------------------------------------------------------------
+# Batch 1 -- six more Snort-style pattern extensions to `detect`, a direct follow-up to the six
+# above (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 1 section has the
+# full research/scoping record, sourced from Digital Bond's Quickdraw-Snort modbus.rules).
+# tests/sample_detect_snort_patterns_batch1.pcap (build_detect_snort_patterns_batch1_sample,
+# tools/make_sample_pcap.py) covers all six plus four negative/contrast conduits proving each
+# pattern's own condition really is required (Diagnostics Return Query Data, a non-Read-Device-ID
+# MEI type, an under-threshold exception count, and an exception burst whose third occurrence falls
+# outside the 60s window) -- see that fixture's own docstring for the full scenario list. Three of
+# these six patterns (Force Listen Only Mode/Restart Communications Option/Clear Counters, plus the
+# exception-burst pattern) are ALSO independently verified against this project's own REAL
+# modbus_test_data_part1.pcap capture -- see real_modbus_diagnostics_*/real_modbus_detect_batch1_
+# all_findings above.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME detect_snort_patterns_batch1_diagnostics_decode_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch1.pcap" --format text)
+set_tests_properties(detect_snort_patterns_batch1_diagnostics_decode_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Diagnostics: Force Listen Only Mode \\(data: 00 00\\).*Diagnostics: Restart Communications Option \\(data: 00 00\\).*Diagnostics: Restart Communications Option \\(data: 00 00\\).*Diagnostics: Clear Counters and Diagnostic Registers \\(data: 00 00\\).*Diagnostics: Return Query Data \\(data: ab cd\\).*Encapsulated Interface Transport: Read Device Identification \\(data: 01 00\\).*Encapsulated Interface Transport: CANopen General Reference \\(data: 00\\).*Report Server ID: Report Server ID \\(not decoded in this groundwork release\\)")
+
+add_test(NAME detect_snort_patterns_batch1_diagnostics_and_mei_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch1.pcap" --format json)
+set_tests_properties(detect_snort_patterns_batch1_diagnostics_and_mei_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"modbus_diagnostics_sub_function\": \"0x4\".*\"modbus_diagnostics_sub_function\": \"0x1\".*\"modbus_diagnostics_sub_function\": \"0x1\".*\"modbus_diagnostics_sub_function\": \"0xa\".*\"modbus_diagnostics_sub_function\": \"0x0\".*\"modbus_mei_type\": \"0xe\".*\"modbus_mei_type\": \"0xd\"")
+
+# All six findings, first-seen order, plus a FAIL_REGULAR_EXPRESSION proving none of the four
+# negative/contrast conduits (.93 Return Query Data, .95 CANopen MEI type, .98 under-threshold
+# exceptions, .99 windowed-out exceptions) produced a finding of their own -- the "findings: 6"
+# total in the PASS expression is itself part of that same proof.
+add_test(NAME detect_snort_patterns_batch1_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch1.pcap")
+set_tests_properties(detect_snort_patterns_batch1_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 16.*findings: 6 \\(Critical 2, Moderate 2, Informational 2\\).*evidence: Confirmed 6, Heuristic 0.*  Engineering-Station Activity: 3.*  Firmware/Logic Change: 1.*  Remote-Access Channel: 0.*  Protocol Misuse: 2.*\\[Engineering-Station Activity\\] T0858 \\(Change Operating Mode\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.89 -> 192\\.168\\.1\\.90:502 \\(modbus\\).*Modbus Diagnostics Force Listen Only Mode \\(sub-function 0x0004\\) -- the target device is being commanded to stop responding to requests entirely \\(per spec it sends no reply to this command itself, so its silence afterward is expected, not a fault\\).*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.89 -> 192\\.168\\.1\\.91:502 \\(modbus\\).*Modbus Diagnostics Restart Communications Option \\(sub-function 0x0001\\) -- the target device's own communication event log and interfaces are being reinitialized on command.*\\[Protocol Misuse\\] T0872 \\(Indicator Removal on Host\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.89 -> 192\\.168\\.1\\.92:502 \\(modbus\\).*Modbus Diagnostics Clear Counters and Diagnostic Registers \\(sub-function 0x000A\\).*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.89 -> 192\\.168\\.1\\.97:502 \\(modbus\\).*Modbus server returned exception code Server Device Busy to the same client at least 3 times within 60s.*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.89 -> 192\\.168\\.1\\.94:502 \\(modbus\\).*Modbus Read Device Identification \\(function 0x2B, MEI type 0x0E\\) from 192\\.168\\.1\\.89 to 192\\.168\\.1\\.94 -- an engineering-tool-shaped device-identity/vendor-info query \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.89 -> 192\\.168\\.1\\.96:502 \\(modbus\\).*Modbus Report Server ID \\(function 0x11\\) from 192\\.168\\.1\\.89 to 192\\.168\\.1\\.96 -- an engineering-tool-shaped device-identity query \\(first occurrence within this capture; no --baseline-file was supplied\\)"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.93|192\\.168\\.1\\.95|192\\.168\\.1\\.98|192\\.168\\.1\\.99")
 
 
 # ---------------------------------------------------------------------------------------------

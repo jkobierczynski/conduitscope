@@ -209,6 +209,87 @@ void decode_write_multiple(ModbusFrame& frame, ByteSpan data, const char* unit_n
     frame.notes.push_back("showing raw PDU bytes instead: " + to_hex(data));
 }
 
+// Named subset of Diagnostics (function code 0x08) sub-functions -- the five this project's own
+// real modbus_test_data_part1.pcap capture exercises (Force Listen Only Mode/Restart Communications
+// Option/Clear Counters and Diagnostic Registers -- verified directly against that capture's raw
+// bytes -- plus Return Query Data/Return Diagnostic Register, the two most commonly seen in other
+// public Modbus captures/documentation). Every other sub-function code still gets read (see
+// decode_diagnostics below) but falls back to "Unknown (0xNNNN)", the same style as this file's own
+// function_name's fallback for an unrecognized top-level function code.
+std::string diagnostics_sub_function_name(uint16_t sub_function) {
+    switch (sub_function) {
+        case 0x0000: return "Return Query Data";
+        case 0x0001: return "Restart Communications Option";
+        case 0x0002: return "Return Diagnostic Register";
+        case 0x0004: return "Force Listen Only Mode";
+        case 0x000A: return "Clear Counters and Diagnostic Registers";
+        default: {
+            std::ostringstream out;
+            out << "Unknown (0x" << std::hex << sub_function << ")";
+            return out.str();
+        }
+    }
+}
+
+// Diagnostics (0x08) PDU shape is sub-function-code(2) + data(usually 2 bytes, echoed unchanged
+// between request and response for every sub-function this decoder names) -- request and response
+// are therefore indistinguishable from payload shape alone, the same situation decode_write_single
+// above documents for Write Single Coil/Register; see ModbusFrame::diagnostics_sub_function's own
+// comment (modbus.hpp) for why this is a deliberate scope boundary, not an oversight.
+void decode_diagnostics(ModbusFrame& frame, ByteSpan data) {
+    if (data.size() < 2) {
+        frame.summary = "malformed " + frame.function_name + " (missing 2-byte sub-function code)";
+        if (!data.empty()) frame.notes.push_back("raw PDU data: " + to_hex(data));
+        return;
+    }
+    Cursor c(data);
+    uint16_t sub_function = c.u16be();
+    frame.diagnostics_sub_function = sub_function;
+    std::ostringstream out;
+    // Deliberately does NOT repeat the literal word "Diagnostics" here -- output.cpp's own report
+    // writers already render "<function_name>: <summary>" (see e.g. Read Holding Registers' own
+    // "request: read ..." summary, decode_read_family above), so a summary starting with the
+    // function's own name a second time would print doubled ("Diagnostics: Diagnostics: ...").
+    out << diagnostics_sub_function_name(sub_function);
+    ByteSpan rest = c.rest();
+    if (!rest.empty()) out << " (data: " << to_hex(rest) << ")";
+    frame.summary = out.str();
+    frame.notes.push_back("request and response share this exact shape per spec (sub-function code "
+                           "plus echoed data) -- this decoder does not attempt to distinguish them here, "
+                           "same scope boundary as Write Single Coil/Register above");
+}
+
+// The two MEI (Modbus Encapsulation Interface) types the Modbus Application Protocol spec currently
+// assigns -- see ModbusFrame::mei_type's own comment (modbus.hpp) for the scope boundary (function-
+// code/MEI-type-level naming only, no further decode of the Read Device Identification object list).
+std::string mei_type_name(uint8_t mei) {
+    switch (mei) {
+        case 0x0D: return "CANopen General Reference";
+        case 0x0E: return "Read Device Identification";
+        default: {
+            std::ostringstream out;
+            out << "Unknown MEI Type (0x" << std::hex << static_cast<unsigned>(mei) << ")";
+            return out.str();
+        }
+    }
+}
+
+void decode_encapsulated_interface_transport(ModbusFrame& frame, ByteSpan data) {
+    if (data.empty()) {
+        frame.summary = "malformed " + frame.function_name + " (missing MEI type byte)";
+        return;
+    }
+    Cursor c(data);
+    uint8_t mei = c.u8();
+    frame.mei_type = mei;
+    std::ostringstream out;
+    // Same "don't repeat function_name inside summary" reasoning as decode_diagnostics above.
+    out << mei_type_name(mei);
+    ByteSpan rest = c.rest();
+    if (!rest.empty()) out << " (data: " << to_hex(rest) << ")";
+    frame.summary = out.str();
+}
+
 }  // namespace
 
 std::vector<std::string> modbus_known_function_names() {
@@ -386,6 +467,8 @@ std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
         case FC_WRITE_SINGLE_REGISTER: decode_write_single(frame, data); break;
         case FC_WRITE_MULTIPLE_COILS: decode_write_multiple(frame, data, "coil(s)"); break;
         case FC_WRITE_MULTIPLE_REGISTERS: decode_write_multiple(frame, data, "register(s)"); break;
+        case FC_DIAGNOSTICS: decode_diagnostics(frame, data); break;
+        case FC_ENCAPSULATED_INTERFACE_TRANSPORT: decode_encapsulated_interface_transport(frame, data); break;
         case UMAS_MODBUS_FUNCTION_CODE: {
             UmasFrame umas_frame;
             decode_umas(data, umas_frame);

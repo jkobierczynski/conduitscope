@@ -40,6 +40,9 @@ MitreAttackTechnique mitre_t0861_point_and_tag_identification() {
 MitreAttackTechnique mitre_t0831_manipulation_of_control() {
     return {"T0831", "Manipulation of Control"};
 }
+MitreAttackTechnique mitre_t0872_indicator_removal_on_host() {
+    return {"T0872", "Indicator Removal on Host"};
+}
 
 std::vector<MitreAttackTechnique> all_mitre_attack_ics_techniques() {
     // Deliberately id-sorted (not declaration order) so this list -- and anything rendered from it
@@ -53,6 +56,7 @@ std::vector<MitreAttackTechnique> all_mitre_attack_ics_techniques() {
         mitre_t0855_unauthorized_command_message(),
         mitre_t0858_change_operating_mode(),
         mitre_t0861_point_and_tag_identification(),
+        mitre_t0872_indicator_removal_on_host(),
         mitre_t0886_remote_services(),
         mitre_t0888_remote_system_information_discovery(),
     };
