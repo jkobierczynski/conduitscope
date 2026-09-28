@@ -189,7 +189,54 @@ std::vector<Operation> extract_s7comm_operations(const DecodedPacket& dp) {
     std::vector<Operation> ops;
     if (!dp.result) return ops;
     const S7CommResult& sr = dp.result->as<S7CommResult>();
-    if (!sr.has_function || sr.items.empty()) return ops;
+    if (!sr.has_function) return ops;
+
+    // PLC Control ("PI-Service", function_code 0x28) / PLC Stop (function_code 0x29) -- Grok review
+    // item 3's own S7comm sub-item (docs/reviews/2026-09-grok-response.md): a block download/program
+    // change or a CPU stop command is a control-plane operation, not an address access, and Jurgen's
+    // own confirmed answer to this feature's one open design question was to always flag every
+    // occurrence of one, regardless of whether it's already been learned (see Operation::always_flag's
+    // own comment and BaselineVerdict::ControlPlaneOperation's own comment for the full mechanism this
+    // feeds). Gated on sr.function_name alone (the same string s7comm.cpp's own function-name table
+    // produces for these two function codes -- S7CommResult carries no raw function_code field of its
+    // own, see its struct comment for why), Job (request) side only: has_pi_service and
+    // plc_stop_message are themselves only ever populated on the Job side (see S7CommFrame's own
+    // comments) -- neither function's Ack_Data side carries a repeatable "what happened" signal worth
+    // extracting an Operation from (PLC Stop's Ack_Data is entirely undecoded; PLC Control's Ack_Data
+    // is just a status byte, has_pi_control_status, which says nothing about WHICH PI service ran).
+    //
+    // Emitted before, and regardless of, the items.empty() early return below -- function codes 0x28/
+    // 0x29 never populate S7CommFrame::items in the first place (see that struct's own comment
+    // restricting items/data_items to function_code 0x04/0x05 only), so before this addition these
+    // packets were completely invisible to the baseline engine, silently dropped by that same early
+    // return alongside every other untracked function code (e.g. Setup Communication). That's the
+    // right behavior for an untracked function code, but wrong specifically for these two.
+    //
+    // operation_key: "PLC Stop" alone (no further dimension -- Wireshark's own dissector, and this
+    // codebase's own decoder, don't distinguish any sub-variety of it); "PLC Control/<pi_service_name>"
+    // for PLC Control -- folding the raw PI service name (e.g. "_INSE", "P_PROGRAM") into the key the
+    // same "fold a bounded, meaningful dimension into the key" way S7's own DB-number suffix already
+    // does, since a real conduit issues a small, stable set of PI services, not a new one per packet.
+    // Neither key has an address concept (has_target_range stays false, its default) -- a PI service's
+    // own parameter block (block descriptors, an ASCII argument) isn't a byte/bit-addressable range in
+    // the sense observed_ranges models, and PLC Stop has no parameters at all.
+    if (sr.function_name == "PLC Stop") {
+        Operation op;
+        op.protocol = "s7comm";
+        op.operation_key = "PLC Stop";
+        op.always_flag = true;
+        ops.push_back(std::move(op));
+    } else if (sr.function_name == "PLC Control" && sr.has_pi_service) {
+        Operation op;
+        op.protocol = "s7comm";
+        std::ostringstream key;
+        key << "PLC Control/" << sr.pi_service_name;
+        op.operation_key = key.str();
+        op.always_flag = true;
+        ops.push_back(std::move(op));
+    }
+
+    if (sr.items.empty()) return ops;
 
     for (const S7Item& item : sr.items) {
         Operation op;
@@ -947,6 +994,14 @@ void BaselineEngine::observe(const DecodedPacket& dp) {
             os.s7_db_number = op.s7_db_number;
             os.s7_range_unit = op.s7_range_unit;
         }
+        // Mirrors the s7_range_unit branch above -- stable across every packet contributing this
+        // operation_key (see Operation::always_flag's own comment: the flag is a property of the
+        // operation_key itself, e.g. every "PLC Stop" Operation sets it identically), so an OR-in
+        // would be equivalent, but a plain assignment reads the same "copied straight from the
+        // Operation that produced this entry" way the fields above already do.
+        if (op.always_flag) {
+            os.always_flag = true;
+        }
     }
 }
 
@@ -971,6 +1026,7 @@ std::vector<ConduitBaseline> BaselineEngine::finish() const {
             ob.s7_area_letter = os.s7_area_letter;
             ob.s7_db_number = os.s7_db_number;
             ob.s7_range_unit = os.s7_range_unit;
+            ob.always_flag = os.always_flag;
             cb.operations.push_back(std::move(ob));
         }
         result.push_back(std::move(cb));
@@ -1075,6 +1131,7 @@ const char* baseline_verdict_name(BaselineVerdict verdict) {
         case BaselineVerdict::NewConduit: return "new-conduit";
         case BaselineVerdict::NewOperation: return "new-operation";
         case BaselineVerdict::NewTargetRange: return "new-target-range";
+        case BaselineVerdict::ControlPlaneOperation: return "control-plane-operation";
     }
     return "known-operation";
 }
@@ -1170,7 +1227,19 @@ BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vec
             // more.
             bool any_uncovered = false;
             uint32_t uncovered_start = 0, uncovered_end = 0;
-            if (!base_conduit) {
+            // Grok review item 3's own "always flag every occurrence" override (Operation::
+            // always_flag's own comment, and BaselineVerdict::ControlPlaneOperation's own comment,
+            // baseline.hpp) -- checked FIRST, before any of the conduit/operation/range comparisons
+            // below, and unconditional: a control-plane operation (today: S7comm PLC Control/PLC
+            // Stop) gets this verdict regardless of whether base_conduit/base_op even exist, and
+            // regardless of what the comparisons below would otherwise have concluded. Deliberately
+            // does NOT also run the NewConduit/NewConduitKnownZone/NewOperation/NewTargetRange logic
+            // below for this operation_key -- those verdicts exist to describe how UNFAMILIAR a
+            // (conduit, operation_key) pair is, which is beside the point for an operation whose every
+            // occurrence is reportable regardless of familiarity.
+            if (obs_op.always_flag) {
+                verdict = BaselineVerdict::ControlPlaneOperation;
+            } else if (!base_conduit) {
                 verdict = BaselineVerdict::NewConduit;
                 // Zone precedent, per operation_key -- see BaselineVerdict::NewConduitKnownZone's
                 // own comment (baseline.hpp) and find_zone_vouching_client_ips' own comment (above)
@@ -1728,6 +1797,15 @@ void write_baseline_check_report_text(std::ostream& out, const BaselineCheckRepo
         out << "  [" << (i + 1) << "] " << baseline_verdict_name(f.verdict) << "  " << f.client_ip << " -> "
             << f.server_ip << ":" << f.server_port << "  " << f.protocol << "  operation=\"" << f.operation_key
             << "\"  (" << f.packet_count << " packet(s))\n";
+        if (f.verdict == BaselineVerdict::ControlPlaneOperation) {
+            // Distinguishes this from every other finding's own "here's something unfamiliar" framing
+            // -- a control-plane operation is flagged for what it IS, not for being new, so a reader
+            // seeing this on an otherwise long-established conduit isn't left wondering why it showed
+            // up in the findings list at all (see BaselineVerdict::ControlPlaneOperation's own
+            // comment, baseline.hpp).
+            out << "      always reported: control-plane operation (not gated on prior baseline "
+                   "knowledge)\n";
+        }
         if (f.verdict == BaselineVerdict::NewConduitKnownZone) {
             out << "      zone: " << f.zone_name << "\n";
             out << "      already known in this zone: " << client_ips_text(f.zone_vouching_client_ips) << "\n";

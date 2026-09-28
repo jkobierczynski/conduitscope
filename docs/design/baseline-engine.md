@@ -708,3 +708,110 @@ the kind of soft information-hiding this project's own review discipline avoids 
 truncation/cap was added, matching this feature's own realistic scale (a real zone's own client
 count is not expected to be large enough for this to become an unreadable wall of IPs the way, say,
 an unbounded packet-level dump could be).
+
+## Follow-up (v0.2.8, same release): S7comm PLC Control/PLC Stop -- "always flag" control-plane operations
+
+Grok's external review (`docs/reviews/2026-09-grok-ics-ot-improvement-areas.md`) item 3, "Baseline
+process behavior, not just ports," flagged (per its own fact-check, `docs/reviews/2026-09-grok-
+response.md`) as "partially stale": most of item 3's original ask was already satisfied by this
+engine's existing operation-level tracking, but the fact-check identified three genuinely remaining
+gaps. This follow-up resolves the S7comm one; IEC 104 type/COT/IOA-range tracking and OPC UA
+service+NodeId tracking are the other two, deliberately NOT addressed here -- see this section's own
+closing note for why.
+
+**The gap, confirmed by reading the code rather than assumed from the fact-check's own framing:**
+S7comm PLC Control (function_code 0x28, "PI-Service" -- block download/activation, program change,
+and several Sinumerik/CNC-specific operations) and PLC Stop (function_code 0x29, a CPU stop command)
+were not merely "under-classified" the way the fact-check's own wording might suggest -- they were
+COMPLETELY INVISIBLE to this engine. `extract_s7comm_operations`'s own early-return guard
+(`sr.items.empty()`) silently dropped both: `S7CommFrame::items`/`S7CommResult::items` are only ever
+populated for function_code 0x04/0x05 (Read Var/Write Var), never for 0x28/0x29 (see `s7comm.hpp`'s
+own comment on `items`). This is a more significant finding than "needs a severity label" -- these
+packets contributed nothing at all to `baseline learn`/`check`, not merely an under-classified
+finding.
+
+**Design question and answer.** Unlike every other verdict this engine produces, where a repeat of
+already-baselined behavior is by design the uninteresting case (`KnownOperation`, silently tallied,
+never a `BaselineFinding`), a control-plane command that can change what a PLC actually runs is
+arguably exactly as reportable on its hundredth occurrence as its first. Jurgen was asked directly
+whether `baseline check` should always flag every occurrence of one of these two operations,
+regardless of whether it's already been learned, or only flag it the first time (i.e. let it become
+`KnownOperation` like everything else once learned). **His answer: always flag every occurrence.**
+
+**Implementation.** A new, protocol-agnostic mechanism, not an S7-specific one:
+- `Operation::always_flag` (`baseline.hpp`) -- false for every operation this file extracts except
+  the two `extract_s7comm_operations` (`baseline.cpp`) now emits for `sr.function_name == "PLC Stop"`
+  (`operation_key` = `"PLC Stop"`) and `sr.function_name == "PLC Control" && sr.has_pi_service`
+  (`operation_key` = `"PLC Control/<pi_service_name>"`, e.g. `"PLC Control/_INSE"` -- folding the raw
+  PI service name into the key the same "fold a bounded, meaningful dimension in" way S7's own
+  DB-number suffix already does). Neither carries a range (`has_target_range` stays false) -- a PI
+  service's own block-descriptor parameter block isn't a byte/bit-addressable range the way
+  `observed_ranges` models, and PLC Stop has no parameters at all. Both are emitted BEFORE, and
+  regardless of, the `items.empty()` early return, Job (request) side only (the same side
+  `has_pi_service`/`plc_stop_message` are themselves only ever populated on).
+- `OperationBaseline::always_flag` / `BaselineEngine::OperationState::always_flag` mirror
+  `Operation`'s field the exact "per-capture-role-only, never persisted" way `s7_area_letter`/
+  `s7_db_number`/`s7_range_unit` already do -- `check_baseline` only ever reads this off the
+  freshly-extracted "observed" side, never a loaded baseline file, so leaving it at its default
+  `false` in every persisted `BaselineStore` is deliberate, not an oversight (a control-plane
+  operation_key is recognized by its own string, not by a flag that needs to round-trip through the
+  JSON schema).
+- **`BaselineVerdict::ControlPlaneOperation`** (rendered `"control-plane-operation"`), a new verdict
+  that is NOT a position on the familiar/unfamiliar scale the other five values sit on -- it's an
+  orthogonal, unconditional override, applied FIRST in `check_baseline`'s per-(conduit, operation_key)
+  loop, before the conduit/operation/range comparisons are even consulted: whenever
+  `obs_op.always_flag` is true, the verdict is `ControlPlaneOperation`, full stop, never
+  `KnownOperation` even when the exact same (conduit, operation_key) has already been learned. Every
+  other finding field (client_ip/server_ip/protocol/server_port/operation_key/packet_count) is
+  populated exactly the way any other finding's would be -- only the verdict, and whether a finding
+  is constructed at all instead of silently tallied into `known_operation_count`, differ. This is
+  exit-code-significant automatically, with zero changes to `run_baseline_check`/`compliant()`:
+  `compliant()` is `findings.empty()`, unchanged, and a `ControlPlaneOperation` finding is a real
+  `BaselineFinding` like any other non-`KnownOperation` verdict.
+- Report rendering: text gets one extra line under a `ControlPlaneOperation` finding ("always
+  reported: control-plane operation (not gated on prior baseline knowledge)"), so a reader seeing
+  this on an otherwise long-established conduit isn't left wondering why it showed up in the findings
+  list at all. JSON adds no extra field -- the `"verdict": "control-plane-operation"` string alone is
+  the machine-readable signal, matching how `NewConduit`/`NewOperation` also add nothing beyond the
+  common fields.
+
+**Fixtures and tests.** `tests/sample_baseline_s7comm_control_plane.pcap`
+(`build_baseline_s7comm_control_plane_sample`, `tools/make_sample_pcap.py`): one conduit (HMI_IP ->
+PLC_IP, s7comm/102), two Job-request packets -- a PLC Stop and a PLC Control `_INSE` (one block
+descriptor, DB100/Passive). Four new `baseline_*` CTest entries (`CMakeLists.txt`): `learn` produces
+both operation_keys correctly (key-only, no range); `check` against a baseline that has never seen
+this conduit at all still reports `control-plane-operation` for both, not `new-conduit` (the override
+takes priority over the "conduit not in baseline" branch too); the critical case -- `learn` directly
+from this fixture, then `check` the SAME fixture against that just-learned baseline -- still reports
+both as `control-plane-operation`, proving the override genuinely bypasses `KnownOperation` rather
+than merely coinciding with `NewOperation`/`NewConduit` the first time a baseline sees them (asserted
+directly via `FAIL_REGULAR_EXPRESSION "known-operation"`); and the JSON verdict rendering. Full suite:
+2115 -> 2119 tests (default config), 2102 -> 2106 (no-live-capture config), zero-warning clean rebuild
+in both, plus the ASan/UBSan config's own `baseline_*`/`control_plane` subset and a MinGW-w64
+cross-compile, all confirmed directly; every pre-existing `baseline_*`/`s7comm_*` CTest entry (182 in
+the default config alone) still passes with its exact original `PASS_REGULAR_EXPRESSION` pin,
+confirming zero regression -- including every pre-existing `sample_s7comm_pi_control.pcap` decode
+test, since this follow-up touches only `baseline.hpp`/`baseline.cpp`, never `s7comm.hpp`/`s7comm.cpp`
+(the underlying PLC Control/PLC Stop decode itself is untouched and was already correct).
+
+**Deliberately NOT addressed in this pass: IEC 104 and OPC UA.** Both were originally assessed (before
+this pass actually read the relevant structs closely) as "pure wiring, no new decode" -- reusing
+already-fully-decoded fields (`Iec104Result::iec104_object_ioas`, `OpcUaNodeIdInfo`/
+`node_id_display()`) the same way `extract_s7comm_operations`/`extract_dnp3_operations` already reuse
+per-item structured data. Re-reading `Iec104Result` closely for this pass surfaced a real complication
+that assessment missed: unlike `OpcUaResult` (whose `first` field carries the FULL, un-flattened
+`OpcUaMessage` of the first coalesced chunk, so OPC UA's own gap really is "just" promoting a NodeId
+onto a new structured field), `Iec104Result` is already a flattened, first-ASDU-only summary --
+`iec104_has_asdu`/`iec104_asdu_type_short_name`/`iec104_cot_name`/`iec104_common_address` reflect only
+the FIRST I-format APDU coalesced into one TCP payload, while `iec104_object_ioas` is a CUMULATIVE
+list across every coalesced APDU, and neither `sq` (sequential-vs-discontinuous IOA addressing) nor
+`object_count` -- both needed to know whether a contiguous range can even be claimed -- reach
+`Iec104Result` at all. Wiring `extract_iec104_operations` directly off `Iec104Result` as it stands
+today would either misattribute IOAs from a second coalesced ASDU to the first ASDU's own type/COT,
+or require guessing at range-vs-discontinuous shape with no `sq` to check it against -- neither is
+acceptable given this feature's own "never silently guess, never misattribute" review discipline. This
+needs the same kind of small, additive `Iec104Result` extension (a `std::vector` of per-ASDU decoded
+detail rather than five first-ASDU-only scalars, mirroring `Dnp3Result::dnp3_objects`'s own earlier
+promotion) before `extract_iec104_operations` can be written correctly -- genuinely more design/decode
+work than either the S7 sub-item above or the original "pure wiring" assessment suggested, and not
+yet confirmed with Jurgen. Flagged here rather than silently attempted or silently dropped.

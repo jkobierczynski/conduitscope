@@ -108,6 +108,22 @@ struct Operation {
     uint16_t s7_db_number = 0;    // meaningful only when s7_area_letter is "DB" or "DI"
     std::string s7_range_unit;    // "byte" | "bit" | "counter_or_timer" -- see s7_range_notation's
                                    // own comment (s7comm.hpp) for why all three need telling apart
+
+    // Grok review item 3 ("baseline process behavior, not just ports"), the S7comm sub-item:
+    // true for an operation that check_baseline() must ALWAYS surface as a finding, on EVERY
+    // occurrence, regardless of whether this exact (conduit, operation_key) pair is already known
+    // to the baseline -- see BaselineVerdict::ControlPlaneOperation's own comment (below) for the
+    // full rule this drives, and extract_s7comm_operations' own comment for exactly which two S7comm
+    // operations set it (PLC Control/"PI-Service" and PLC Stop) and why. False for every operation
+    // extracted anywhere else in this file -- a control-plane command that changes what a PLC
+    // actually runs (a block download, a program change, a CPU stop) is a fundamentally different
+    // kind of event than "this HMI read this register again": its hundredth occurrence is exactly as
+    // worth a human's attention as its first, unlike every other operation this engine tracks, where
+    // a repeat of already-baselined behavior is BY DESIGN the uninteresting case (see
+    // BaselineFinding's own "Never constructed for a KnownOperation match" comment). Named generically
+    // (not "s7_always_flag") since the mechanism itself is protocol-agnostic -- a future protocol's
+    // own disruptive command could set this identically, without check_baseline() changing at all.
+    bool always_flag = false;
 };
 
 // Extracts every Operation this single decoded packet contributes, or an empty vector when
@@ -152,6 +168,15 @@ struct OperationBaseline {
     std::string s7_area_letter;
     uint16_t s7_db_number = 0;
     std::string s7_range_unit;
+
+    // Mirrors Operation::always_flag's own comment/role exactly the same "per-capture-role-only,
+    // never persisted" way s7_area_letter/s7_db_number/s7_range_unit above already do: check_baseline
+    // only ever reads this off the freshly-extracted "observed" side (the capture being checked, via
+    // BaselineEngine::finish()), never off a loaded baseline file -- a control-plane operation_key
+    // (e.g. "PLC Stop") is recognized by ITS OWN operation_key string, not by a flag that would need
+    // to survive a round trip through the persisted JSON schema, so leaving this at its default false
+    // in every loaded BaselineStore is harmless and deliberate, not an oversight.
+    bool always_flag = false;
 };
 
 // One conduit's baseline: every distinct operation_key ever observed on this (client_ip, server_ip,
@@ -256,7 +281,28 @@ void merge_baseline_observations(BaselineStore& store, const std::vector<Conduit
 // flavor of NewConduit, backed by another host in the same declared zone already doing the exact
 // same thing. Added by the `--policy` follow-up, docs/design/baseline-engine.md's own "Follow-up"
 // section (zone-level baselines, previously the design doc's own "Explicitly out of scope" item).
-enum class BaselineVerdict { KnownOperation, NewConduitKnownZone, NewConduit, NewOperation, NewTargetRange };
+//
+// ControlPlaneOperation is a different kind of thing from the other five, and sits last on purpose:
+// it is not a position on the "how well-established is this (conduit, operation_key) pair" scale the
+// other five values are (KnownOperation through NewTargetRange, in increasing order of how
+// unfamiliar the pair is) -- it is an ORTHOGONAL, unconditional override that fires whenever
+// check_baseline() sees an operation with Operation::always_flag set (today: S7comm PLC Control/
+// "PI-Service" and PLC Stop -- see extract_s7comm_operations' own comment), regardless of whether
+// that exact (conduit, operation_key) pair would otherwise have been KnownOperation, NewOperation,
+// or anything else on the scale. Grok review item 3's own explicit ask (docs/reviews/2026-09-grok-
+// response.md, and Jurgen's own confirmed answer to this feature's one open design question): a
+// control-plane command that can change what a PLC actually runs is exactly as reportable on its
+// hundredth occurrence as its first, so this verdict is never silently folded into
+// known_operation_count the way an ordinary repeat of already-baselined behavior is -- see
+// check_baseline's own comment for exactly where this override is applied.
+enum class BaselineVerdict {
+    KnownOperation,
+    NewConduitKnownZone,
+    NewConduit,
+    NewOperation,
+    NewTargetRange,
+    ControlPlaneOperation
+};
 
 // Renders a BaselineVerdict as the exact lowercase-with-hyphens string this codebase's own
 // DirectionSource/FlowVerdict rendering convention uses elsewhere (direction_source_name,
@@ -305,11 +351,13 @@ struct BaselineFinding {
 // the baseline, M did not" header the way write_baseline_check_report_text does.
 struct BaselineCheckReport {
     std::string capture_path;
-    // Only ever NewConduit/NewOperation/NewTargetRange entries -- see the design doc's own CLI
-    // shape comment ("reports every operation in this capture that the baseline doesn't already
-    // cover"): a KnownOperation match is exactly the case that ISN'T worth listing one-by-one, so
-    // it's folded into known_operation_count below instead, not omitted silently -- the report's
-    // own summary line still says how many operations matched cleanly.
+    // Never a KnownOperation entry -- see the design doc's own CLI shape comment ("reports every
+    // operation in this capture that the baseline doesn't already cover"): a KnownOperation match is
+    // exactly the case that ISN'T worth listing one-by-one, so it's folded into known_operation_count
+    // below instead, not omitted silently -- the report's own summary line still says how many
+    // operations matched cleanly. Every other BaselineVerdict value, including ControlPlaneOperation
+    // (which can fire even when the underlying (conduit, operation_key) pair WOULD otherwise have
+    // been KnownOperation -- see that enum value's own comment), does produce a finding here.
     std::vector<BaselineFinding> findings;
     size_t known_operation_count = 0;      // distinct (conduit, operation_key) pairs that matched
     size_t conduits_observed = 0;          // distinct conduits this capture exercised at all
@@ -385,6 +433,17 @@ struct BaselineCheckReport {
 //   - otherwise (has_target_range false, or the range IS fully covered) -> KnownOperation --
 //     tallied into known_operation_count, no BaselineFinding constructed (see
 //     BaselineCheckReport::findings' own comment for why).
+//
+// One override sits in front of all of the above, applied first, per (conduit, operation_key), BEFORE
+// any of the conduit/operation/range comparisons above are even consulted: when this capture's own
+// freshly-extracted OperationBaseline::always_flag is true (today: S7comm PLC Control/PLC Stop -- see
+// Operation::always_flag's own comment), the verdict is unconditionally BaselineVerdict::
+// ControlPlaneOperation -- never KnownOperation, even when the exact same (conduit, operation_key,
+// range) has already been learned. Every other field on the resulting BaselineFinding (client_ip,
+// server_ip, protocol, server_port, operation_key, packet_count, and, for an S7comm finding, s7_area_
+// letter/s7_db_number/s7_range_unit) is still populated exactly the way it would be for any other
+// finding -- only the verdict itself, and whether a finding is constructed at all instead of being
+// silently tallied into known_operation_count, differ.
 BaselineCheckReport check_baseline(const BaselineStore& baseline, const std::vector<ConduitBaseline>& observed,
                                     const std::string& capture_path, const Policy* policy = nullptr);
 
@@ -442,9 +501,13 @@ public:
     // Folds one already-decoded packet into this engine's per-conduit, per-operation state for
     // THIS capture. Call once per packet, in capture order (same discipline as
     // PolicyEngine::observe/AssetInventoryEngine::observe). A non-TCP packet, or one whose protocol
-    // isn't "modbus"/"s7comm", or one extract_operations() returns nothing for (a response packet,
-    // a Setup Communication/PLC Stop/PLC Control S7 job with no Read/Write Var item, a Modbus
-    // exception response, ...) contributes nothing.
+    // isn't "modbus"/"s7comm", or one extract_operations() returns nothing for (a response packet, a
+    // Setup Communication S7 job, a Modbus exception response, ...) contributes nothing. PLC Stop/
+    // PLC Control S7 jobs are the one exception to "no Read/Write Var item means nothing to extract"
+    // -- see extract_s7comm_operations' own comment: these carry no item list at all (function codes
+    // 0x29/0x28 never populate S7CommFrame::items), but still contribute their own always_flag
+    // Operation(s), specifically so check_baseline() can surface them (see
+    // BaselineVerdict::ControlPlaneOperation's own comment).
     //
     // Client (initiator) vs. server is decided per TCP session exactly the same SYN/SYN-ACK-first,
     // known-port-fallback way PolicyEngine::observe/AssetInventoryEngine::observe already do (see
@@ -491,6 +554,11 @@ private:
         std::string s7_area_letter;
         uint16_t s7_db_number = 0;
         std::string s7_range_unit;
+        // Mirrors Operation::always_flag -- stable across every packet contributing this
+        // operation_key (see OperationBaseline::always_flag's own comment), so "copied straight from
+        // the first Operation that contributes this operation_key" is exactly as safe here as it is
+        // for s7_area_letter above.
+        bool always_flag = false;
     };
     struct ConduitState {
         std::string client_ip, server_ip, protocol;

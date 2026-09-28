@@ -14100,6 +14100,50 @@ set_tests_properties(baseline_check_symbolic_addresses_no_effect_on_modbus PROPE
   FAIL_REGULAR_EXPRESSION "\\(symbolic\\)")
 
 # ---------------------------------------------------------------------------------------------
+# Grok review item 3 ("baseline process behavior, not just ports" -- docs/reviews/2026-09-grok-
+# response.md), the S7comm sub-item: PLC Control ("PI-Service")/PLC Stop baselining. See
+# Operation::always_flag's own comment (baseline.hpp) and extract_s7comm_operations' own comment
+# (baseline.cpp) for the full "always flag every occurrence, regardless of prior baseline
+# knowledge" mechanism -- Jurgen's own confirmed answer to this feature's one open design question.
+# tests/sample_baseline_s7comm_control_plane.pcap carries one conduit exercising both operations
+# ("PLC Stop" and "PLC Control/_INSE").
+# ---------------------------------------------------------------------------------------------
+
+# `learn` spot-check: both operation_keys present, key-only (no range concept for either -- neither
+# a bare CPU-stop command nor a PI-service's own block-descriptor parameter block is a byte/bit-
+# addressable range in the sense observed_ranges models).
+add_test(NAME baseline_learn_s7comm_control_plane_produces_expected_operations
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_control_plane.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_learn.json'")
+set_tests_properties(baseline_learn_s7comm_control_plane_produces_expected_operations PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"operation_key\": \"PLC Stop\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"PLC Control/_INSE\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+
+# `check` against a baseline that has NEVER seen this conduit or either operation_key at all -- both
+# must still report as control-plane-operation, not new-conduit (proving the override takes priority
+# over the ordinary "conduit isn't in the baseline" branch too, not only the KnownOperation one).
+add_test(NAME baseline_check_s7comm_control_plane_empty_baseline_flags_both
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_empty.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_control_plane.pcap'")
+set_tests_properties(baseline_check_s7comm_control_plane_empty_baseline_flags_both PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*1 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 0 matched the baseline, 2 did not.*FINDINGS \\(2\\):\n *\\[1\\] control-plane-operation .*operation=\"PLC Stop\".*always reported: control-plane operation.*\\[2\\] control-plane-operation .*operation=\"PLC Control/_INSE\".*always reported: control-plane operation"
+  FAIL_REGULAR_EXPRESSION "new-conduit|new-operation")
+
+# The critical case: `learn` directly from this same fixture (so the baseline now has BOTH
+# operation_keys on file, on the exact same conduit), then `check` the SAME fixture against that
+# just-learned baseline. An ordinary operation would be KnownOperation here (0 findings) -- proving
+# these two are still reported, with the SAME verdict, confirms the override genuinely bypasses the
+# ordinary KnownOperation silencing rather than merely coinciding with NewConduit/NewOperation the
+# first time a baseline sees them.
+add_test(NAME baseline_check_s7comm_control_plane_always_flags_even_when_known
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_known.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_known.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_control_plane.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_known.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_control_plane.pcap'")
+set_tests_properties(baseline_check_s7comm_control_plane_always_flags_even_when_known PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*0 matched the baseline, 2 did not.*\\[1\\] control-plane-operation .*operation=\"PLC Stop\".*\\[2\\] control-plane-operation .*operation=\"PLC Control/_INSE\""
+  FAIL_REGULAR_EXPRESSION "known-operation")
+
+add_test(NAME baseline_check_s7comm_control_plane_json_verdict
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_control_plane.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_control_plane_json.json' --format json '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_s7comm_control_plane.pcap'")
+set_tests_properties(baseline_check_s7comm_control_plane_json_verdict PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"verdict\": \"control-plane-operation\",\n *\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"s7comm\",\n *\"server_port\": 102,\n *\"operation_key\": \"PLC Stop\".*\"verdict\": \"control-plane-operation\".*\"operation_key\": \"PLC Control/_INSE\"")
+
+# ---------------------------------------------------------------------------------------------
 # Smaller follow-up (same release, docs/design/baseline-engine.md's "Follow-up" section, 0xB2/
 # TIA1200SYM sub-case): Jurgen's own real 4SICS capture (4SICS-GeekLounge-151021.pcap) showed 36
 # Merker-write packets landing with NO range at all, not even a "/bit" one -- the is_experimental

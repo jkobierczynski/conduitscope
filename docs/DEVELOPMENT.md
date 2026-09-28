@@ -7930,8 +7930,9 @@ deferred future migration.
 41. **ICS communication-baseline analysis at the protocol-operation level.** **Phase 1 done, v0.2.5
     (S7comm/Modbus); Phase 2 done, v0.2.5 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS);
     zone-level rollup done 2026-09-25, still v0.2.5 (`baseline check --policy` /
-    `NewConduitKnownZone`) -- statistical/confidence thresholds and CODESYS are still not done, see
-    below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
+    `NewConduitKnownZone`); S7comm PLC Control/PLC Stop "always flag" done, v0.2.8 (Grok review item
+    3's S7 sub-item -- see below) -- statistical/confidence thresholds, CODESYS, and Grok item 3's
+    IEC 104/OPC UA sub-items are still not done, see below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
     (`baseline.hpp`/`baseline.cpp`), the `baseline learn`/`baseline check` subcommand pair, and
     Modbus's own prerequisite (`ModbusFrame::is_request`/`start_address`/`quantity`, populated
     from the same already-computed locals `decode_read_family`/`decode_write_multiple` had all
@@ -8144,10 +8145,59 @@ deferred future migration.
     design and rationale at `docs/design/baseline-engine.md`'s own "Follow-up (2026-09-25)"
     section.
 
+    **Follow-up (v0.2.8, same release): S7comm PLC Control/PLC Stop -- "always flag" control-plane
+    operations.** Grok's external review, item 3 ("Baseline process behavior, not just ports" --
+    `docs/reviews/2026-09-grok-ics-ot-improvement-areas.md`), was fact-checked
+    (`docs/reviews/2026-09-grok-response.md`) as "partially stale" with three genuinely remaining
+    sub-items: S7comm PLC Control/PLC Stop, IEC 104 type/COT/IOA-range tracking, and OPC UA
+    service+NodeId tracking. Jurgen asked to start with this item; this follow-up resolves the S7comm
+    sub-item only (see below for why IEC 104/OPC UA are deferred). The gap, confirmed by reading the
+    code rather than assumed from the fact-check's own wording: PLC Control (function_code 0x28,
+    "PI-Service") and PLC Stop (function_code 0x29) were not under-classified, they were completely
+    invisible to this engine -- `extract_s7comm_operations`'s own `sr.items.empty()` early return
+    silently dropped both, since `S7CommFrame`/`S7CommResult::items` are only ever populated for
+    function_code 0x04/0x05, never 0x28/0x29. Jurgen's own answer to this feature's one open design
+    question (asked directly): `baseline check` should always flag every occurrence of either
+    operation, regardless of whether it's already been learned -- unlike every other verdict this
+    engine produces, where a repeat of already-baselined behavior is by design the uninteresting case.
+    Implemented as a new, protocol-agnostic mechanism (not S7-specific): `Operation::always_flag`
+    (`baseline.hpp`), set only by the two new S7comm operations `extract_s7comm_operations` now
+    emits (`"PLC Stop"`, `"PLC Control/<pi_service_name>"`, key-only, no range concept, emitted
+    before and regardless of the `items.empty()` early return, Job-request-side only); a new verdict,
+    `BaselineVerdict::ControlPlaneOperation` (`"control-plane-operation"`), that is NOT a position on
+    the familiar/unfamiliar severity scale the other five verdicts sit on but an orthogonal,
+    unconditional override applied FIRST in `check_baseline`'s per-operation loop, before the
+    conduit/operation/range comparisons are even consulted -- whenever `always_flag` is true, the
+    verdict is `ControlPlaneOperation`, never `KnownOperation`, even when the exact same (conduit,
+    operation_key) has already been learned. Zero changes needed to `compliant()`/exit-code plumbing
+    -- a `ControlPlaneOperation` finding is a real `BaselineFinding` like any other non-`KnownOperation`
+    verdict. New fixture `tests/sample_baseline_s7comm_control_plane.pcap`
+    (`build_baseline_s7comm_control_plane_sample`); four new `baseline_*` CTest entries, including the
+    critical case -- `learn` directly from the fixture, then `check` that SAME fixture against the
+    just-learned baseline -- still reports both operations as `control-plane-operation`, not
+    `known-operation`, proving the override genuinely bypasses the ordinary silencing rather than
+    merely coinciding with `NewOperation`/`NewConduit` the first time. Full suite: 2115 -> 2119 tests
+    (default config), 2102 -> 2106 (no-live-capture config), zero-warning clean rebuild in both, plus
+    the ASan/UBSan config's own baseline subset and a MinGW-w64 cross-compile, all confirmed; every
+    pre-existing `baseline_*`/`s7comm_*` CTest entry still passes with its exact original
+    `PASS_REGULAR_EXPRESSION` pin. No version bump beyond the `--range` feature's own v0.2.8 already
+    in this release. Full design and rationale at `docs/design/baseline-engine.md`'s own "Follow-up
+    (v0.2.8, same release)" section, including an honest note on why IEC 104/OPC UA were deferred:
+    re-reading `Iec104Result` closely for this pass (not merely re-reading the earlier, looser
+    assessment) surfaced that it's already a flattened, first-ASDU-only summary with a cumulative
+    (not per-ASDU) IOA list and no `sq`/`object_count` -- a real complication the original "pure
+    wiring" assessment missed, needing a small additive `Iec104Result` extension (mirroring
+    `Dnp3Result::dnp3_objects`'s own earlier promotion) before `extract_iec104_operations` can be
+    written correctly. OPC UA's own gap is more straightforward (`OpcUaResult::first` already carries
+    the full, un-flattened `OpcUaMessage`), but both are left for a dedicated follow-up rather than
+    rushed alongside this one.
+
     Still not done: statistical/confidence thresholds (see the design doc's own "Explicitly out of
     scope" section -- the one item of the two Phase 1 originally deferred that remains genuinely
-    open) and CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only
-    today). Zone-level baselines, formerly listed here too, is resolved as of the follow-up above.
+    open), CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only
+    today), and Grok item 3's IEC 104/OPC UA sub-items (see the follow-up above for exactly what's
+    still needed for each). Zone-level baselines, formerly listed here too, is resolved as of the
+    zone-level-rollup follow-up above.
 
 42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
     data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add

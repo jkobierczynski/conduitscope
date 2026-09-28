@@ -18005,6 +18005,53 @@ def build_baseline_s7comm_symbolic_sample():
     (TESTS_DIR / "sample_baseline_s7comm_symbolic.pcap").write_bytes(data)
 
 
+def build_baseline_s7comm_control_plane_sample():
+    """Grok review item 3's S7comm sub-item ("baseline process behavior, not just ports" --
+    docs/reviews/2026-09-grok-response.md) -- PLC Control ("PI-Service", function_code 0x28) / PLC
+    Stop (function_code 0x29) baselining. See Operation::always_flag's own comment (baseline.hpp)
+    and extract_s7comm_operations' own comment (baseline.cpp) for the full "always flag every
+    occurrence, regardless of prior baseline knowledge" mechanism this exercises -- Jurgen's own
+    confirmed answer to this feature's one open design question. One conduit (HMI_IP -> PLC_IP,
+    s7comm/102), two Job-request-side operations, same pattern build_s7comm_pi_control_sample already
+    uses for its own _INSE/PLC_STOP scenarios:
+      1) PLC Stop -- a bare CPU-stop command (operation_key "PLC Stop").
+      2) PLC Control _INSE -- a block-download/activation command inserting one block, DB100
+         (Passive destination) (operation_key "PLC Control/_INSE").
+    Both operation_keys must show up as `baseline check` findings with verdict
+    control-plane-operation every time this capture is checked against ANY baseline -- including one
+    that has ALREADY learned this exact capture (see
+    baseline_check_s7comm_control_plane_always_flags_even_when_known, CMakeLists.txt) -- proving the
+    override actually bypasses the ordinary KnownOperation silencing, not merely happens to produce
+    NewOperation/NewConduit findings the first time a baseline sees it."""
+    ENG_IP, ENG_PORT = HMI_IP, 49500
+
+    def add_request(param: bytes, pdu_ref: int, ident: int):
+        req = s7_header(0x01, pdu_ref, len(param), 0) + param
+        cotp = tpkt_frame(COTP_DT_HEADER, req)
+        tcp = tcp_header(ENG_PORT, 102, 1000 + pdu_ref, 2000, TCP_PSH | TCP_ACK, len(cotp)) + cotp
+        ip = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp), ident) + tcp
+        return eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip
+
+    packets = []
+
+    # 1) PLC Stop -- Job request. Real traffic carries literally "PLC_STOP" (see
+    #    build_s7comm_pi_control_sample's own comment on this -- this decoder doesn't validate
+    #    against it).
+    packets.append(add_request(bytes([0x29]) + bytes(5) + bytes([8]) + b"PLC_STOP", 201, 0x3300))
+
+    # 2) PLC Control _INSE -- one block descriptor, DB100, Passive destination.
+    block = b"DB" + f"{100:05d}".encode("ascii") + b"P"
+    blocks_param = bytes([1, 0x00]) + block
+    pi_param = (bytes([0x28]) + bytes(7) + struct.pack("!H", len(blocks_param)) + blocks_param +
+                bytes([len(b"_INSE")]) + b"_INSE")
+    packets.append(add_request(pi_param, 202, 0x3301))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_013_000 + i, i * 1000)
+    (TESTS_DIR / "sample_baseline_s7comm_control_plane.pcap").write_bytes(data)
+
+
 # --- AMQP 0-9-1 / AMQP 1.0 -----------------------------------------------------------------
 # Two wire-INCOMPATIBLE protocols sharing TCP port 5672 by convention -- see amqp_common.hpp's own
 # file header comment for the full detection-posture rationale this fixture exercises: sticky
@@ -19938,6 +19985,7 @@ if __name__ == "__main__":
     build_baseline_zone_unknown_host_sample()
     build_baseline_zone_new_operation_sample()
     build_baseline_s7comm_symbolic_sample()
+    build_baseline_s7comm_control_plane_sample()
     build_amqp091_sample()
     build_amqp10_sample()
     build_dicom_sample()
