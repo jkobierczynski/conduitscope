@@ -13331,6 +13331,23 @@ it done as its own patch.
     `docs/reviews/2026-09-grok-response.md` (item 5's own paragraph updated
     to reflect what shipped) updated in the same increment.
 
+    **Follow-up fix (same day, caught by a real CI run):** `.github/workflows/ci.yml`'s
+    `sanitizers` job splits its CTest run around a privilege boundary -- everything that doesn't
+    need `CAP_NET_RAW` runs unprivileged first (so ASan's LeakSanitizer stays genuinely intact; see
+    that job's own long comment on why `setcap` alone breaks `ASAN_OPTIONS` propagation via
+    `/proc/self/environ`), and exactly four named tests that actually open `lo` re-run afterward
+    under `sudo`. `capture`'s own two live-interface CTest cases
+    (`capture_duration_stops_cleanly_with_no_traffic`,
+    `capture_rotation_and_retention_with_real_traffic`) were never added to either that job's `-E`
+    exclusion list or its `-R` sudo-inclusion list when they were first written above, so they ran
+    in the unprivileged batch and failed there with "Operation not permitted" -- not a code or
+    decode-logic regression (`run_capture` uses the exact same `LiveCapture` class `decode`/`policy
+    validate`/`inventory`/`detect` already do, confirmed by re-reading `src/cli_main.cpp`), purely a
+    CI wiring gap. Fixed by adding both test names to both regexes; verified locally with `ctest -N
+    -E ...`/`ctest -N -R ...` in `build-fuzz` that the exclusion set is now exactly total-minus-6
+    and the inclusion set is exactly those 6, matching the four pre-existing `live_capture_*` tests'
+    own already-correct treatment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

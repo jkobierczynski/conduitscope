@@ -209,11 +209,20 @@ jobs:
       # non-ASan run already covers "does this work for an ordinary capability-holding,
       # non-root process", which is unaffected by any of this since it has no LeakSanitizer to
       # conflict with).
+      # NOTE: every CTest case that actually opens a live interface (as opposed to just validating
+      # arguments or enumerating interfaces) must be named in BOTH this step's -E exclusion AND the
+      # next step's -R inclusion below -- there is no third place that lists them, so adding a new
+      # one (e.g. a future subcommand with its own live-capture CTest case) means updating both
+      # regexes in the same change, not just CMakeLists.txt. `capture`'s own two (added alongside
+      # RotatingPcapWriter/the `capture` subcommand, Grok review item 5) were the first tests to
+      # need this after the split above was written, and were originally missed here -- confirmed by
+      # a real CI run failing them with "Operation not permitted" while running unprivileged in this
+      # step, exactly the failure mode this comment exists to prevent happening again.
       - name: Test everything that doesn't need CAP_NET_RAW (full leak detection)
         working-directory: build
         run: >
           ctest -j"$(nproc)" --output-on-failure
-          -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic)$"
+          -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic)$"
 
       - name: Test the CAP_NET_RAW-needing live-capture tests (under sudo -- see above)
         working-directory: build
@@ -222,7 +231,7 @@ jobs:
         run: >
           sudo --preserve-env=ASAN_OPTIONS
           ctest -j"$(nproc)" --output-on-failure
-          -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic)$"
+          -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic)$"
 
   release-windows:
     # Windows counterpart to build-and-test/build-without-libpcap above, but scoped to tag pushes
