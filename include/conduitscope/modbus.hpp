@@ -30,6 +30,7 @@
 
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/protocol_decoder.hpp"
+#include "conduitscope/umas.hpp"
 
 namespace conduitscope {
 
@@ -105,6 +106,15 @@ struct ModbusFrame {
     // copying these two fields out -- see output.cpp's write_modbus_json_fields.
     bool paired_response = false;
     size_t paired_request_index = 0;
+
+    // Set only when function_code (base, exception bit stripped) == UMAS_MODBUS_FUNCTION_CODE
+    // (0x5A/90) -- see umas.hpp's own header comment for what UMAS is and why it's decoded as a
+    // sub-frame here rather than getting its own top-level ProtocolResult variant: it is Modbus/
+    // TCP at the wire level (same MBAP header, same transaction-ID pairing via paired_response/
+    // paired_request_index above -- ModbusDecoder::decode's pairing logic runs identically
+    // whether or not the PDU turns out to be UMAS), just with a vendor-proprietary meaning for
+    // function code 0x5A's own payload. std::nullopt for every other function code.
+    std::optional<UmasFrame> umas;
 };
 
 // Attempts to interpret `tcp_payload` as a Modbus/TCP MBAP frame. Returns

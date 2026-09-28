@@ -147,6 +147,7 @@ build tree does):
 | `fuzz_srvsvc`                  | `try_parse_srvsvc_request`/`_response` on the DCE/RPC stub, looped over every named SRVSVC opnum (NetrShareEnum/NetrShareGetInfo full decode, enumeration opnums header-only) and both `sealed` values | `fuzz/corpus/srvsvc/`         |
 | `fuzz_wkssvc`                  | `try_parse_wkssvc_request`/`_response` on the DCE/RPC stub, looped over every named WKSSVC opnum (NetrWkstaGetInfo/NetrWkstaUserEnum full decode, join/unjoin left structural-only) and both `sealed` values | `fuzz/corpus/wkssvc/`         |
 | `fuzz_drsuapi`                 | `try_parse_drsuapi_request`/`_response` on the DCE/RPC stub, looped over DRSBind/DRSUnbind/DRSGetNCChanges/DRSCrackNames (DRSGetNCChanges/DCSync deliberately structural-only) and both `sealed` values | `fuzz/corpus/drsuapi/`        |
+| `fuzz_umas`                    | `decode_umas` (Schneider Electric UMAS, Modbus/TCP function code 0x5A/90 -- session key + function/status byte classification; also reachable transitively through `fuzz_modbus`, this harness calls it directly for full per-iteration coverage, see fuzz_umas.cpp's own file header) | `fuzz/corpus/umas/`           |
 
 ## Running
 

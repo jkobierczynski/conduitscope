@@ -598,7 +598,22 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
 
     std::string function_name;
     if (protocol == "modbus" && dp.result && !dp.result->as<ModbusFrame>().function_name.empty()) {
-        function_name = dp.result->as<ModbusFrame>().function_name;
+        const ModbusFrame& mb = dp.result->as<ModbusFrame>();
+        // UMAS (function code 0x5A, umas.hpp) is Modbus/TCP at the wire level -- dp.protocol
+        // never becomes "umas", it stays "modbus" -- so no separate branch is needed to REACH
+        // this traffic at all (it already falls into this same "modbus" case above). What's worth
+        // doing here is surfacing the SPECIFIC UMAS command (TAKE_PLC_RESERVATION, START_PLC, ...)
+        // instead of the generic "UMAS" mb.function_name alone would give -- the same specificity
+        // the enip branch below already gets from CIP's own service_name rather than settling for
+        // the outer ENIP command name. A response carries no function code on the wire at all
+        // (only a success/failure status, see umas.hpp) so it falls back to the generic "UMAS"
+        // label, same as ordinary Modbus's own read-response side reports the same function name
+        // as its request (there's no separate "response" name to report there either).
+        if (mb.umas && !mb.umas->is_response && !mb.umas->function_name.empty()) {
+            function_name = "UMAS/" + mb.umas->function_name;
+        } else {
+            function_name = mb.function_name;
+        }
     } else if (protocol == "dnp3" && dp.result && dp.result->as<Dnp3Result>().dnp3_has_function &&
                !dp.result->as<Dnp3Result>().dnp3_function_name.empty()) {
         function_name = dp.result->as<Dnp3Result>().dnp3_function_name;

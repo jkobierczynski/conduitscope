@@ -408,6 +408,25 @@ and infers conduits from the matrix. Can render a Mermaid or Graphviz
 \fBOPTIONS (inventory)\fR below and \fBdocs/USER_GUIDE.md\fR's \fBinventory\fR
 section for a worked example.
 .TP
+.B detect (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
+Detection findings OT incident\-response teams recognize (Grok review item
+4): engineering\-station mode changes, firmware/logic downloads and device
+restarts, protocol misuse (unsolicited/unexpected commands, a new
+engineering\-station originator), and new remote\-access channels into the
+plant \-\- distinct from the flood/scan\-shaped signatures this tool
+already detects elsewhere. Every finding cites exactly one MITRE ATT&CK
+for ICS technique and carries a labeled confidence (\fBHigh\fR for an
+always\-notable finding needing no "new vs. known" judgment; \fBMedium\fR/
+\fBLow\fR for a new\-vs\-known finding, resolved against \fB\-\-baseline\-file\fR
+when given, or first\-occurrence\-within\-this\-capture otherwise). With
+\fB\-\-policy\fR, a new remote\-access finding's own technique is further
+resolved between T0886 (Remote Services) and T0822 (External Remote
+Services) depending on whether it crosses a declared zone boundary.
+\fBdetect\fR always exits 0 on a successful run, regardless of findings \-\-
+see \fBEXIT STATUS\fR. See \fBOPTIONS (detect)\fR below,
+\fBdocs/design/detection-engine.md\fR for the full design record, and
+\fBdocs/USER_GUIDE.md\fR's \fBdetect\fR section for a worked example.
+.TP
 .B baseline learn \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIFILE\fR ...] [\fIOPTIONS\fR]
 Protocol\-operation\-level communication baseline, covering S7comm, Modbus,
 EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, and FINS: decodes each given
@@ -1546,6 +1565,95 @@ default.
 .B \-\-services \fIFILE\fR
 Unix /etc/services-style file to supplement/override the built-in
 port\->service-name table. Must exist.
+.SH OPTIONS (detect)
+.TP
+.BR \-r ", " \-\-read " " \fIFILE\fR
+Input capture file (classic pcap or pcapng, auto-detected). Required unless \fB\-i\fR is given; mutually exclusive with it.
+.TP
+.BR \-i ", " \-\-interface " " \fINAME\fR
+Run detection against live traffic on this network interface instead of
+reading a file. Required unless \fB\-r\fR is given; mutually exclusive with it.
+.TP
+.BR \-f ", " \-\-filter " " \fIBPF\fR
+BPF filter (tcpdump syntax). Works with both \fB\-i\fR and \fB\-r\fR.
+.TP
+.B \-\-duration \fISECONDS\fR
+Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
+(unlimited -- rely on Ctrl+C instead).
+.TP
+.B \-\-snaplen \fIBYTES\fR
+Maximum bytes captured per packet with \fB\-i\fR. Default: 65535.
+.TP
+.B \-\-no\-promiscuous
+Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the report here instead of stdout. Caution: a single-dash typo of a
+double-dash long option name glues onto this flag's own short form instead
+of erroring -- always use the double dash for a long option name.
+.TP
+.BR \-T ", " \-\-format " " {text,json}
+Report format. Default: text.
+.TP
+.B \-\-strict
+Abort on the first malformed packet instead of warning and continuing.
+.TP
+.B \-\-policy \fIFILE\fR
+Zone/conduit policy YAML file, same format and same option name as
+\fBpolicy validate\fR's own \fB\-\-policy\fR (reuses that same parser, not a
+second one) \-\- used only to resolve a new remote\-access finding's own
+MITRE technique between \fBT0886\fR (Remote Services, stays within one
+declared zone) and \fBT0822\fR (External Remote Services, crosses a
+declared zone boundary): when both endpoints resolve to a declared zone
+and the zones differ, T0822; otherwise (no policy given, an endpoint
+outside every declared zone, or both endpoints in the same zone) the
+narrower T0886 claim. Every other finding is unaffected by this flag, and
+this flag never changes a finding's confidence. Optional; omitted by
+default. Must exist.
+.TP
+.B \-\-baseline\-file \fIFILE\fR
+Baseline JSON file (see \fBbaseline learn\fR), read\-only, never written \-\-
+used to resolve every new\-vs\-known finding (a new remote\-access channel,
+a new CIP/UMAS engineering\-station originator) against real history
+instead of this capture's own first\-occurrence order. A candidate whose
+conduit is already present in the loaded baseline is not flagged at all;
+one genuinely absent gets \fBMedium\fR confidence. Without this flag, every
+new\-vs\-known finding is \fBLow\fR confidence (first occurrence within this
+capture only \-\- honestly weaker evidence, since the capture might simply
+start after the channel was already long\-established). Optional; omitted
+by default. Must exist.
+.TP
+.B \-\-max\-baseline\-file\-bytes \fIN\fR
+Cap how large \fB\-\-baseline\-file\fR may be before it's read into memory.
+Default: 256 MiB.
+.TP
+.B \-\-mac\-vendor
+Same meaning as \fBdecode\fR's \fB\-\-mac\-vendor\fR, applied to the report's
+endpoint MAC addresses. Off by default.
+.TP
+.B \-\-resolve
+Same meaning as \fBdecode\fR's \fB\-\-resolve\fR: enable hostname resolution
+from an explicitly-supplied \fB\-\-hosts\fR file. Off by default.
+File-only \-\- \fBnever\fR performs live DNS.
+.TP
+.B \-\-hosts \fIFILE\fR
+Unix /etc/hosts-style file to resolve IP addresses from, for
+\fB\-\-resolve\fR. Must exist.
+.TP
+.B \-\-nn
+Same meaning as \fBdecode\fR's \fB\-\-nn\fR: disable service name
+(port\->name) resolution, applied to each finding's server port. On by
+default.
+.TP
+.B \-\-services \fIFILE\fR
+Unix /etc/services-style file to supplement/override the built-in
+port\->service-name table. Must exist.
+.TP
+.B \-\-max\-reassembly\-bytes \fIN\fR ", " \-\-max\-reassembly\-segments \fIN\fR ", " \-\-max\-recursion\-depth \fIN\fR ", " \-\-max\-decoded\-objects \fIN\fR ", " \-\-max\-coalesced\-messages \fIN\fR
+Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
+the same name above; apply identically here since this command decodes the
+same traffic. Each defaults to 0 (leave every site at its own compile-time
+default).
 .SH OPTIONS (baseline learn)
 .TP
 .B \-\-baseline\-file \fIFILE\fR
@@ -1765,7 +1873,14 @@ this is returned on any successful run, even one that observed zero assets.
 For \fBbaseline learn\fR: the baseline file was successfully updated \-\-
 \fBlearn\fR never has a compliance concept either, and never returns
 anything else on success. For \fBbaseline check\fR: the capture is CLEAN
-(zero findings against the baseline).
+(zero findings against the baseline). For \fBdetect\fR: a report was
+produced \-\- \fBdetect always returns 0 on a successful run, regardless of
+how many findings it reports\fR. Unlike \fBpolicy validate\fR/\fBbaseline
+check\fR, \fBdetect\fR has no compliant/non\-compliant concept to report
+against; it's a reporting tool surfacing findings for a human or a SIEM to
+triage, not a pass/fail gate. A caller wanting a non\-zero result
+specifically when \fBdetect\fR finds something should check the JSON
+report's own \fBsummary.total\fR rather than the process exit code.
 .TP
 .B 1
 Fatal error (bad arguments, unreadable/unrecognized input file, a
@@ -1774,7 +1889,9 @@ that couldn't be opened or failed validation; for \fBbaseline learn\fR/
 \fBbaseline check\fR, a baseline file that exists but fails to parse as
 valid baseline JSON; for \fBbaseline check \-\-policy\fR, a policy file
 that couldn't be opened or failed validation, same as \fBpolicy
-validate\fR's own \fB\-\-policy\fR).
+validate\fR's own \fB\-\-policy\fR; for \fBdetect \-\-policy\fR/
+\fB\-\-baseline\-file\fR, the same for either file failing to open or
+parse).
 .TP
 .B 2
 Currently unused. Reserved rather than reused: an earlier release used this
@@ -2181,7 +2298,16 @@ not yet been run on a real Windows machine, validated on Linux so far only
 against loopback traffic;
 \fBpolicy validate\fR's zones are IPv4 CIDR-only and its client/server
 (initiator) determination falls back to a port-number heuristic when no
-SYN/SYN-ACK was captured for a flow. See the
+SYN/SYN-ACK was captured for a flow;
+UMAS (Schneider Electric's Unity Pro engineering-station protocol, carried
+inside Modbus/TCP function code 0x5A) has no official public
+specification at all and is decoded at the function-code level only, never
+its data field's internal structure \-\- see \fBdocs/design/detection-engine.md\fR
+and \fBdocs/PROTOCOL_COVERAGE.md\fR's own UMAS entry;
+\fBdetect\fR's T0886-vs-T0822 zone-crossing distinction for a new
+remote-access finding depends entirely on \fB\-\-policy\fR being given, and
+every new-vs-known finding is Low confidence, honestly weaker evidence,
+whenever no \fB\-\-baseline\-file\fR is supplied. See the
 "LIMITATIONS" section of \fBdocs/USER_GUIDE.md\fR and the "ROADMAP"
 section of \fBdocs/DEVELOPMENT.md\fR in the source tree for the full,
 current detail and what's planned next.

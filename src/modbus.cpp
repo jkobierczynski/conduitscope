@@ -93,6 +93,12 @@ const ModbusFunctionEntry* find_modbus_function(uint8_t fc) {
 
 std::string function_name(uint8_t fc) {
     if (const auto* entry = find_modbus_function(fc)) return entry->name;
+    // UMAS (see umas.hpp) isn't a kModbusFunctions entry -- it's a distinct vendor-proprietary
+    // protocol layered on this one function code, decoded into its own ModbusFrame::umas sub-
+    // frame below, not folded into this table's own name style. Named here too (not just at the
+    // switch case that populates frame.umas) so an exception response citing this function code
+    // (frame.is_exception, above the switch) also reads as "UMAS" rather than "Unknown (0x5A)".
+    if (fc == UMAS_MODBUS_FUNCTION_CODE) return "UMAS";
     std::ostringstream out;
     out << "Unknown (0x" << std::hex << static_cast<unsigned>(fc) << ")";
     return out.str();
@@ -380,6 +386,14 @@ std::optional<ModbusFrame> try_parse_modbus_tcp(ByteSpan tcp_payload) {
         case FC_WRITE_SINGLE_REGISTER: decode_write_single(frame, data); break;
         case FC_WRITE_MULTIPLE_COILS: decode_write_multiple(frame, data, "coil(s)"); break;
         case FC_WRITE_MULTIPLE_REGISTERS: decode_write_multiple(frame, data, "register(s)"); break;
+        case UMAS_MODBUS_FUNCTION_CODE: {
+            UmasFrame umas_frame;
+            decode_umas(data, umas_frame);
+            frame.summary = umas_frame.summary;
+            frame.notes.insert(frame.notes.end(), umas_frame.notes.begin(), umas_frame.notes.end());
+            frame.umas = std::move(umas_frame);
+            break;
+        }
         default:
             frame.summary = frame.function_name + " (not decoded in this groundwork release)";
             frame.notes.push_back("raw PDU data: " + to_hex(data));
@@ -427,7 +441,8 @@ std::optional<ProtocolResult> ModbusDecoder::decode(ByteSpan payload, DecodeCont
                                             mb.unit_id};
         }
     } else {
-        bool looks_like_response = mb.is_exception || mb.summary.rfind("response:", 0) == 0;
+        bool looks_like_response = mb.is_exception || mb.summary.rfind("response:", 0) == 0 ||
+                                    (mb.umas && mb.umas->is_response);
         if (looks_like_response) {
             mb.notes.push_back(
                 "no outstanding request found on this TCP session for transaction id " +

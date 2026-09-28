@@ -42,6 +42,33 @@ std::vector<Operation> extract_modbus_operations(const DecodedPacket& dp) {
     std::vector<Operation> ops;
     if (!dp.result) return ops;
     const ModbusFrame& mb = dp.result->as<ModbusFrame>();
+
+    // UMAS (function code 0x5A, umas.hpp) START_PLC/STOP_PLC -- same always-flag control-plane
+    // treatment S7comm's own PLC Control/PLC Stop already gets above (Grok gap #4 Phase 6, see
+    // that S7 branch's own comment for the full always_flag mechanism this reuses). Request side
+    // only (mb.umas->is_response is never true here since a response carries no function code at
+    // all to match against, see umas.hpp) -- checked BEFORE the is_request/function_name early
+    // return below, since decode_umas never sets ModbusFrame::is_request/start_address/quantity at
+    // all (UMAS's data field is deliberately left opaque, see umas.hpp's own header comment), so
+    // that early return would otherwise make START_PLC/STOP_PLC invisible to this engine entirely,
+    // the same "silently dropped by the general early return" problem the S7 branch's own comment
+    // documents for PLC Control/PLC Stop.
+    if (mb.umas && !mb.umas->is_response) {
+        if (mb.umas->function_code == UMAS_START_PLC) {
+            Operation op;
+            op.protocol = "modbus";
+            op.operation_key = "UMAS/START_PLC";
+            op.always_flag = true;
+            ops.push_back(std::move(op));
+        } else if (mb.umas->function_code == UMAS_STOP_PLC) {
+            Operation op;
+            op.protocol = "modbus";
+            op.operation_key = "UMAS/STOP_PLC";
+            op.always_flag = true;
+            ops.push_back(std::move(op));
+        }
+    }
+
     if (!mb.is_request || mb.function_name.empty()) return ops;
 
     Operation op;

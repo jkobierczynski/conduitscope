@@ -56,6 +56,7 @@ add_library(conduitscope_core STATIC
   src/udp.cpp
   src/attack_detect.cpp
   src/modbus.cpp
+  src/umas.cpp
   src/dnp3.cpp
   src/iec104.cpp
   src/enip.cpp
@@ -151,6 +152,8 @@ add_library(conduitscope_core STATIC
   src/policy_engine.cpp
   src/asset_inventory.cpp
   src/baseline.cpp
+  src/mitre_attack_ics.cpp
+  src/detect_engine.cpp
   src/flow_direction.cpp
   src/live_capture.cpp
   src/bpf_filter.cpp
@@ -511,6 +514,14 @@ if(CONDUITSCOPE_ENABLE_FUZZING)
   add_conduitscope_fuzzer(srvsvc)
   add_conduitscope_fuzzer(wkssvc)
   add_conduitscope_fuzzer(drsuapi)
+  # UMAS (umas.hpp/cpp, Grok gap #4 Phase 5) -- reachable transitively through fuzz_modbus's own
+  # try_parse_modbus_tcp (base_fc == 0x5A dispatches to decode_umas, modbus.cpp), but this
+  # dedicated harness calls decode_umas directly so every iteration lands on UMAS-specific code
+  # instead of ~1/128th of them -- see fuzz_umas.cpp's own file header comment. Particularly worth
+  # a dedicated pass since UMAS is this codebase's first protocol decoded entirely from
+  # unofficial, reverse-engineered sources (umas.hpp's own header comment), with no official
+  # spec's own edge cases already anticipated.
+  add_conduitscope_fuzzer(umas)
 endif()
 
 add_test(NAME decode_modbus_sample
@@ -15650,3 +15661,191 @@ add_test(NAME inventory_stix_relationship_count_matches_edges
   COMMAND conduitscope inventory --format stix --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap")
 set_tests_properties(inventory_stix_relationship_count_matches_edges PROPERTIES
   PASS_REGULAR_EXPRESSION "\"type\": \"relationship\".*\"type\": \"relationship\".*\"type\": \"relationship\".*\"type\": \"relationship\".*\"type\": \"relationship\"")
+
+# ---------------------------------------------------------------------------------------------
+# `detect` (detect_engine.hpp/cpp, mitre_attack_ics.hpp/cpp) -- "Detection that OT IR teams
+# recognize" (Grok gap #4, docs/reviews/2026-09-grok-ics-ot-improvement-areas.md item 4,
+# docs/design/detection-engine.md's own design record). Phases 1-4 of that plan: subcommand
+# scaffolding, always-notable control-plane/firmware findings from already-decoded fields, and
+# new-vs-known remote-access/CIP-originator findings. Phases 5-6 (the new UMAS decoder and its
+# wiring into this engine) land in a later phase of work -- see detect_engine.hpp's own header
+# comment for the full always-notable-vs-new-vs-known design this engine implements.
+#
+# tests/sample_detect.pcap (build_detect_sample in tools/make_sample_pcap.py) is the primary
+# fixture -- purpose-built (no pre-existing fixture pcap happened to contain this specific mix of
+# traffic shapes) to exercise every Phase 2-4 finding source in one capture: an S7comm Request
+# Download, a DNP3 Cold Restart, a DNP3 Enable-Unsolicited-then-matching-Unsolicited-Response pair
+# (must NOT flag) plus a second outstation's Unsolicited Response with no prior Enable seen at all
+# (must flag), an IEC 104 ASDU with an out-of-range/"unknown" cause-of-transmission, an IEC 104
+# Reset Process command, a BACnet ReinitializeDevice request, a BACnet DeviceCommunicationControl
+# request, two CIP Forward_Open requests from two different originators against the same target
+# (only the second is new-relative-to-this-capture), and one RDP (remote-access) session -- 12
+# packets total, 9 findings. See that builder's own docstring for the full scenario list.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME detect_no_findings_on_irrelevant_capture_text
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap")
+set_tests_properties(detect_no_findings_on_irrelevant_capture_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "findings: 0 \\(High 0, Medium 0, Low 0\\).*Engineering-Station Activity: 0.*Firmware/Logic Change: 0.*Remote-Access Channel: 0.*Protocol Misuse: 0.*\nno findings")
+
+add_test(NAME detect_no_findings_on_irrelevant_capture_json
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format json)
+set_tests_properties(detect_no_findings_on_irrelevant_capture_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total\": 0,\n *\"high\": 0,\n *\"medium\": 0,\n *\"low\": 0,.*\"findings\": \\[  \\]")
+
+# Every Phase 2-4 finding source, pinned in first-seen order (see this section's own header
+# comment for what each scenario in sample_detect.pcap is). Deliberately one large regex, same
+# style as inventory_text_report_assets_communications_zones_conduits above, rather than one
+# add_test per finding -- these 9 findings are one coherent, order-dependent report.
+add_test(NAME detect_sample_detect_text_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap")
+set_tests_properties(detect_sample_detect_text_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 12.*findings: 9 \\(High 7, Medium 0, Low 2\\).*  Engineering-Station Activity: 0.*  Firmware/Logic Change: 4.*  Remote-Access Channel: 1.*  Protocol Misuse: 4.*\\[Firmware/Logic Change\\] T0843 \\(Program Download\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.10:102 \\(s7comm\\).*S7comm block download \\(Request Download\\) -- a program/logic block is being written TO the CPU from an engineering station.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.61:20000 \\(dnp3\\).*DNP3 Cold Restart request -- an outstation is being commanded to restart.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.62:20000 \\(dnp3\\).*DNP3 Unsolicited Response from an outstation this capture never saw a master enable unsolicited responses on \\(Enable Unsolicited Responses, function 0x14\\) -- either enabled before this capture began, or genuinely unexpected.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.63:2404 \\(iec104\\).*IEC 104 ASDU with cause-of-transmission \"unknown type identification\" \\(type C_IC_NA_1\\) -- the receiving end's own reported COT is one of IEC 60870-5-101/104's four error codes.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.63:2404 \\(iec104\\).*IEC 104 Reset Process command \\(C_RP_NA_1\\) -- a controlling station commanded a process reset.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.64:47808 \\(bacnet\\).*BACnet ReinitializeDevice request -- a device is being commanded to restart or change its reinitialization state.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: High.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.64:47808 \\(bacnet\\).*BACnet DeviceCommunicationControl request -- a device's own communication can be silenced or re-enabled by this service.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: Low.*192\\.168\\.1\\.67 -> 192\\.168\\.1\\.65:44818 \\(enip\\).*CIP Forward_Open from a new originator 192\\.168\\.1\\.67 to 192\\.168\\.1\\.65 -- a different engineering/control client than the one\\(s\\) already seen opening a connection to this target in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Remote-Access Channel\\] T0886 \\(Remote Services\\) -- confidence: Low.*192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 \\(rdp\\).*New rdp \\(remote-access\\) session 192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 -- first occurrence within this capture; no --baseline-file was supplied, so this may already be a normal, previously-established channel -- rerun with --baseline-file for a stronger signal")
+
+# JSON shape: summary counts, a sample of the techniques_referenced array (all 10 curated
+# mitre_attack_ics.hpp entries are always emitted, regardless of which this report actually
+# cites -- see write_detection_report_json's own doc comment), and the first/last finding's own
+# full field set (category/technique_id/technique_name/confidence/client_ip/server_ip/protocol/
+# server_port) -- everything in between is already covered by the text report's own exact-order
+# assertion above.
+add_test(NAME detect_sample_detect_json_shape
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap" --format json)
+set_tests_properties(detect_sample_detect_json_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 12,.*\"summary\": \\{.*\"total\": 9,.*\"high\": 7,.*\"medium\": 0,.*\"low\": 2,.*\"engineering_station_activity\": 0,.*\"firmware_logic_change\": 4,.*\"remote_access_channel\": 1,.*\"protocol_misuse\": 4.*\"techniques_referenced\": \\[.*\\{\"id\": \"T0816\", \"name\": \"Device Restart/Shutdown\"\\},.*\\{\"id\": \"T0888\", \"name\": \"Remote System Information Discovery\"\\}.*\"findings\": \\[.*\"category\": \"Firmware/Logic Change\",.*\"technique_id\": \"T0843\",.*\"technique_name\": \"Program Download\",.*\"confidence\": \"High\",.*\"client_ip\": \"192\\.168\\.1\\.60\",.*\"server_ip\": \"192\\.168\\.1\\.10\",.*\"protocol\": \"s7comm\",.*\"server_port\": 102,")
+
+add_test(NAME detect_sample_detect_json_last_finding_shape
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap" --format json)
+set_tests_properties(detect_sample_detect_json_last_finding_shape PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"category\": \"Remote-Access Channel\",.*\"technique_id\": \"T0886\",.*\"technique_name\": \"Remote Services\",.*\"confidence\": \"Low\",.*\"client_ip\": \"192\\.168\\.1\\.68\",.*\"server_ip\": \"192\\.168\\.1\\.69\",.*\"protocol\": \"rdp\",.*\"server_port\": 3389,")
+
+# --- --baseline-file: resolves new-vs-known findings against real history (baseline.hpp's own
+# --- load_baseline_store/BaselineStore, reused read-only -- see detect_engine.hpp's own header
+# --- comment). Learns from sample_detect.pcap itself so the baseline genuinely contains the CIP
+# --- conduit both originators used (192.168.1.66->.65 and 192.168.1.67->.65 -- `baseline learn`
+# --- tracks enip Forward_Open as a conduit operation, confirmed via manual verification during
+# --- development) but never learns an rdp conduit at all (rdp carries no baseline-trackable
+# --- operations -- is_baseline_protocol() (baseline.cpp) doesn't include it), so this one baseline
+# --- file exercises BOTH new-vs-known outcomes in a single run: the CIP finding that was Low
+# --- confidence with no baseline is genuinely present in it and drops out of the report entirely;
+# --- the rdp finding that was Low confidence is genuinely absent and upgrades to Medium.
+add_test(NAME detect_baseline_file_suppresses_known_and_upgrades_absent_to_medium
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke.json'")
+set_tests_properties(detect_baseline_file_suppresses_known_and_upgrades_absent_to_medium PROPERTIES
+  PASS_REGULAR_EXPRESSION "findings: 8 \\(High 7, Medium 1, Low 0\\).*Protocol Misuse: 3.*\\[Remote-Access Channel\\] T0886 \\(Remote Services\\) -- confidence: Medium\n  192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 \\(rdp\\)\n  New rdp \\(remote-access\\) session 192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 -- confirmed absent from the supplied baseline"
+  FAIL_REGULAR_EXPRESSION "CIP Forward_Open from a new originator")
+
+# --- --policy: resolves a RemoteAccessChannel finding's technique between T0886 (Remote Services,
+# --- the default) and T0822 (External Remote Services, crosses a declared zone boundary) --
+# --- tests/policies/detect_zone.yaml declares the RDP scenario's client/server in two separate
+# --- zones so the upgrade actually fires; every other finding is unaffected by --policy.
+add_test(NAME detect_policy_zone_crossing_upgrades_remote_access_to_t0822
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/detect_zone.yaml")
+set_tests_properties(detect_policy_zone_crossing_upgrades_remote_access_to_t0822 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[Remote-Access Channel\\] T0822 \\(External Remote Services\\) -- confidence: Low\n  192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 \\(rdp\\)\n  New rdp \\(remote-access\\) session 192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 -- crosses a declared zone boundary"
+  FAIL_REGULAR_EXPRESSION "T0886")
+
+add_test(NAME detect_bad_format_rejected
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format xml)
+set_tests_properties(detect_bad_format_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME detect_baseline_file_bad_path_rejected
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --baseline-file "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_baseline.json")
+set_tests_properties(detect_baseline_file_bad_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(NAME detect_policy_bad_path_rejected
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_policy.yaml")
+set_tests_properties(detect_policy_bad_path_rejected PROPERTIES
+  WILL_FAIL TRUE)
+
+
+# ---------------------------------------------------------------------------------------------
+# UMAS-over-Modbus/TCP (umas.hpp/cpp, Grok gap #4 Phase 5 -- "Unity Pro/UMAS is in scope as new
+# decode work", docs/design/detection-engine.md's own UMAS research section). Dispatched from
+# modbus.cpp's own function-code switch on 0x5A/90 (ModbusFrame::umas) -- see umas.hpp's header
+# comment for the two primary sources this first-pass, function-code-level-only decoder is built
+# from (UMAS has no official public specification). tests/sample_umas.pcap (build_umas_sample,
+# tools/make_sample_pcap.py) exercises TAKE_PLC_RESERVATION, START_PLC/STOP_PLC (one success, one
+# failure response, to exercise both response_success values), the INITIALIZE_DOWNLOAD/
+# DOWNLOAD_BLOCK/END_STRATEGY_DOWNLOAD sequence, READ_ID/READ_PROJECT_INFO/READ_PLC_INFO, and one
+# undocumented function code (0x99) to exercise umas_function_name's own "Unknown (0x..)"
+# fallback -- 13 packets, all ENG_IP (192.168.1.50) <-> PLC_IP (192.168.1.10) over port 502.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME umas_decode_all_function_codes_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap")
+set_tests_properties(umas_decode_all_function_codes_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "UMAS: request \\(session key 0x1\\): TAKE_PLC_RESERVATION, 0 data byte\\(s\\).*UMAS: response \\(session key 0x1\\): success, 2 data byte\\(s\\).*UMAS: request \\(session key 0x2\\): START_PLC, 0 data byte\\(s\\).*UMAS: response \\(session key 0x2\\): success, 0 data byte\\(s\\).*UMAS: request \\(session key 0x3\\): STOP_PLC, 0 data byte\\(s\\).*UMAS: response \\(session key 0x3\\): failure, 0 data byte\\(s\\).*UMAS: request \\(session key 0x4\\): INITIALIZE_DOWNLOAD, 4 data byte\\(s\\).*UMAS: request \\(session key 0x4\\): DOWNLOAD_BLOCK, 16 data byte\\(s\\).*UMAS: request \\(session key 0x4\\): END_STRATEGY_DOWNLOAD, 0 data byte\\(s\\).*UMAS: request \\(session key 0x5\\): READ_ID, 0 data byte\\(s\\).*UMAS: request \\(session key 0x5\\): READ_PROJECT_INFO, 0 data byte\\(s\\).*UMAS: request \\(session key 0x5\\): READ_PLC_INFO, 0 data byte\\(s\\).*UMAS: request \\(session key 0x6\\): Unknown \\(0x99\\), 1 data byte\\(s\\)")
+
+# -v/--verbose notes: the request/response heuristic explanation (every UMAS packet gets one --
+# see decode_umas's own comment) and the authoritative MBAP transaction-ID pairing note (same
+# pairing mechanism as ordinary Modbus, see modbus.cpp's own ModbusDecoder::decode -- UMAS is
+# still Modbus/TCP at the wire level).
+add_test(NAME umas_decode_verbose_notes_heuristic_and_pairing
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" -v)
+set_tests_properties(umas_decode_verbose_notes_heuristic_and_pairing PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: classified as a request because the byte after the session key is not 0xFE/0xFD.*note: classified as a response because the byte after the session key is 0xFE/0xFD.*note: authoritative pairing: response to transaction id 101 \\(unit 0\\) -- matches the request seen in packet #1")
+
+# JSON field shape -- a request (umas_function_code/umas_function_name present, umas_is_response
+# false, no umas_response_success key at all -- this project's own "omit, never null" convention),
+# a success response, and a failure response (umas_response_success: false).
+add_test(NAME umas_decode_json_request_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" --format json)
+set_tests_properties(umas_decode_json_request_fields PROPERTIES
+  # The exact adjacent field sequence pinned below (umas_is_response immediately followed by
+  # umas_function_code, with no umas_response_success line between them) is itself the proof that
+  # a request's own JSON object never carries umas_response_success -- a whole-capture
+  # FAIL_REGULAR_EXPRESSION for that key isn't usable here since OTHER packets in this same JSON
+  # array (the response packets) legitimately carry it.
+  PASS_REGULAR_EXPRESSION "\"summary\": \"UMAS: request \\(session key 0x1\\): TAKE_PLC_RESERVATION, 0 data byte\\(s\\)\",\n *\"modbus_is_request\": false,\n *\"umas_session_key\": \"0x1\",\n *\"umas_is_response\": false,\n *\"umas_function_code\": \"0x10\",\n *\"umas_function_name\": \"TAKE_PLC_RESERVATION\",\n *\"umas_data_byte_count\": 0,")
+
+add_test(NAME umas_decode_json_success_response_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" --format json)
+set_tests_properties(umas_decode_json_success_response_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"UMAS: response \\(session key 0x1\\): success, 2 data byte\\(s\\)\",.*\"umas_session_key\": \"0x1\",\n *\"umas_is_response\": true,\n *\"umas_response_success\": true,\n *\"umas_data_byte_count\": 2,")
+
+add_test(NAME umas_decode_json_failure_response_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" --format json)
+set_tests_properties(umas_decode_json_failure_response_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"UMAS: response \\(session key 0x3\\): failure, 0 data byte\\(s\\)\",.*\"umas_session_key\": \"0x3\",\n *\"umas_is_response\": true,\n *\"umas_response_success\": false,\n *\"umas_data_byte_count\": 0,")
+
+add_test(NAME umas_decode_json_unknown_function_code_fallback
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" --format json)
+set_tests_properties(umas_decode_json_unknown_function_code_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"umas_function_code\": \"0x99\",\n *\"umas_function_name\": \"Unknown \\(0x99\\)\",\n *\"umas_data_byte_count\": 1,")
+
+# Regular (non-UMAS) Modbus function codes are completely unaffected -- no umas_* field appears
+# on an ordinary Modbus frame at all (this project's own "omit, never null" convention).
+add_test(NAME umas_fields_absent_from_ordinary_modbus_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(umas_fields_absent_from_ordinary_modbus_json PROPERTIES
+  FAIL_REGULAR_EXPRESSION "umas_")
+
+
+# ---------------------------------------------------------------------------------------------
+# UMAS Phase 6 wiring (Grok gap #4 -- "wire UMAS everywhere every other protocol is wired"):
+# baseline.cpp's always-flag control-plane treatment for START_PLC/STOP_PLC, and detect_engine.cpp
+# (mode change/firmware-download always-notable findings, plus a new-engineering-station-
+# originator mechanism shared across TAKE_PLC_RESERVATION/READ_ID/READ_PROJECT_INFO/
+# READ_PLC_INFO). Scenarios 7-8 of sample_umas.pcap add two more originators (ENG2_IP=
+# 192.168.1.51 via TAKE_PLC_RESERVATION, ENG3_IP=192.168.1.52 via READ_ID) specifically to
+# exercise that new-originator mechanism -- see build_umas_sample's own docstring.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME baseline_check_umas_start_stop_plc_always_flagged
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_umas_check.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_umas_check.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_umas_check.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap'; echo EXITCODE=$?")
+set_tests_properties(baseline_check_umas_start_stop_plc_always_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*1 conduit\\(s\\) observed, 2 distinct operation\\(s\\) observed, 0 matched the baseline, 2 did not.*\\[1\\] control-plane-operation  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502  modbus  operation=\"UMAS/START_PLC\"  \\(1 packet\\(s\\)\\).*always reported: control-plane operation \\(not gated on prior baseline knowledge\\).*\\[2\\] control-plane-operation  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502  modbus  operation=\"UMAS/STOP_PLC\"  \\(1 packet\\(s\\)\\).*EXITCODE=4")
+
+add_test(NAME detect_umas_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap")
+set_tests_properties(detect_umas_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 15.*findings: 5 \\(High 3, Medium 0, Low 2\\).*  Engineering-Station Activity: 3.*  Firmware/Logic Change: 1.*  Remote-Access Channel: 0.*  Protocol Misuse: 1.*\\[Engineering-Station Activity\\] T0858 \\(Change Operating Mode\\) -- confidence: High.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502 \\(modbus\\).*UMAS START_PLC command -- an engineering station changed the PLC's own run/stop mode.*\\[Engineering-Station Activity\\] T0858 \\(Change Operating Mode\\) -- confidence: High.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502 \\(modbus\\).*UMAS STOP_PLC command -- an engineering station changed the PLC's own run/stop mode.*\\[Firmware/Logic Change\\] T0843 \\(Program Download\\) -- confidence: High.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:502 \\(modbus\\).*UMAS INITIALIZE_DOWNLOAD -- a program/logic block is being transferred to/from the PLC from an engineering station.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\) -- confidence: Low.*192\\.168\\.1\\.51 -> 192\\.168\\.1\\.10:502 \\(modbus\\).*UMAS TAKE_PLC_RESERVATION from a new engineering-station originator 192\\.168\\.1\\.51 to 192\\.168\\.1\\.10 -- a different client than the one\\(s\\) already seen issuing an engineering-station command to this PLC in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\) -- confidence: Low.*192\\.168\\.1\\.52 -> 192\\.168\\.1\\.10:502 \\(modbus\\).*UMAS read-only discovery command \\(READ_ID/READ_PROJECT_INFO/READ_PLC_INFO\\) from a new engineering-station originator 192\\.168\\.1\\.52 to 192\\.168\\.1\\.10 -- a different client than the one\\(s\\) already seen issuing an engineering-station command to this PLC in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\)")
+
+# Ordinary (non-UMAS) Modbus traffic produces no UMAS-sourced detect findings at all -- confirms
+# the dp.protocol == "modbus" && mb.umas gate really does stay scoped to UMAS PDUs only.
+add_test(NAME detect_umas_fields_absent_for_ordinary_modbus
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(detect_umas_fields_absent_for_ordinary_modbus PROPERTIES
+  FAIL_REGULAR_EXPRESSION "UMAS")

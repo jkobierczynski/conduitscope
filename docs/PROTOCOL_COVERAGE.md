@@ -55,6 +55,116 @@ baseline Modbus operations at the function-code-plus-address-range level --
 see `docs/design/baseline-engine.md` and this document's own S7comm section
 below for the S7comm side of the same feature.
 
+### UMAS (Schneider Electric's Unity Pro / Control Expert engineering-station protocol, carried inside Modbus/TCP function code 0x5A)
+
+**No official public specification exists for UMAS at all** -- unlike almost
+every other protocol in this document, there is no vendor datasheet, RFC, or
+standards-body document to cite. This decoder is built entirely from
+convergent open-source reverse-engineering: Kaspersky ICS-CERT/Securelist's
+["The secrets of Schneider Electric's UMAS
+protocol"](https://ics-cert.kaspersky.com/publications/reports/2022/09/29/the-secrets-of-schneider-electrics-umas-protocol/)
+([Securelist mirror](https://securelist.com/the-secrets-of-schneider-electrics-umas-protocol/107435/)),
+and the open-source
+[yanissec/umas-wireshark-dissector](https://github.com/yanissec/umas-wireshark-dissector)
+Wireshark dissector (`umas.lua`), the same kind of primary source this
+project already cites for other protocols' field tables. Both sources agree
+on the wire shape described below. See `docs/design/detection-engine.md`'s
+own "UMAS-over-Modbus/TCP" section for the full sourcing record and scope
+discussion.
+
+**UMAS is not a separate protocol value in this tool's output.** It is
+carried entirely inside Modbus/TCP's own function code 0x5A (90) -- the
+same MBAP header, the same transaction-ID request/response pairing
+mechanism -- so every UMAS packet is still tagged `protocol: modbus`
+throughout `decode`/`inventory`/`baseline`/`detect`, exactly like any other
+Modbus/TCP packet. `ModbusFrame` carries an additional
+`std::optional<UmasFrame> umas` field, populated only when the base function
+code (with the exception bit stripped) is 0x5A.
+
+**Decoded**: the 1-byte session key; request-vs-response classification
+(the byte immediately following the session key is checked against `0xFE`
+success / `0xFD` failure -- if it matches either, it's a response, otherwise
+it's a request and that byte is the UMAS function code; documented in
+`decode_umas`'s own comment as a heuristic, the same "always runs, honestly
+labeled" posture Modbus's own base request/response shape heuristic
+already takes, since no function code in the table below comes anywhere
+near `0xFE`/`0xFD`); and, for a request, the function code decoded against a
+27-entry name table:
+
+| Hex | Name | Hex | Name |
+|---|---|---|---|
+| 0x01 | INIT_COMM | 0x30 | INITIALIZE_UPLOAD |
+| 0x02 | READ_ID | 0x31 | UPLOAD_BLOCK |
+| 0x03 | READ_PROJECT_INFO | 0x32 | END_STRATEGY_UPLOAD |
+| 0x04 | READ_PLC_INFO | 0x33 | INITIALIZE_DOWNLOAD |
+| 0x06 | READ_CARD_INFO | 0x34 | DOWNLOAD_BLOCK |
+| 0x0A | REPEAT | 0x35 | END_STRATEGY_DOWNLOAD |
+| 0x10 | TAKE_PLC_RESERVATION | 0x39 | READ_ETH_MASTER_DATA |
+| 0x11 | RELEASE_PLC_RESERVATION | 0x40 | START_PLC |
+| 0x12 | KEEP_ALIVE | 0x41 | STOP_PLC |
+| 0x20 | READ_MEMORY_BLOCK | 0x50 | MONITOR_PLC |
+| 0x22 | READ_VARIABLES | 0x58 | CHECK_PLC |
+| 0x23 | WRITE_VARIABLES | 0x70 | READ_IO_OBJECT |
+| 0x24 | READ_COILS_REGISTERS | 0x71 | WRITE_IO_OBJECT |
+| 0x25 | WRITE_COILS_REGISTERS | 0x73 | GET_STATUS_MODULE |
+
+An unrecognized function code is shown as `Unknown (0xNN)` rather than
+rejected -- the same "name what's known, never guess at the rest" posture
+this project takes for every other protocol's own reserved/vendor-specific
+codes.
+
+**Deliberately not decoded: the data field's internal structure.** Memory
+addresses, project name strings, and reservation payload contents inside a
+UMAS message's data field are kept as opaque bytes (only a byte count is
+reported), never parsed. Kaspersky's own writeup documents the
+session-key/version drift across firmware releases (the session key was a
+static `0x01` before firmware 2.7, then a randomized 1-byte value --
+CVE-2020-28212) and the Application Password mechanism (a nonce plus
+SHA-256 digest -- CVE-2021-22779); both are pure security history this
+decoder does not re-implement, validate, or bypass. Without real Unity Pro
+capture samples to validate field offsets against, deeper decode of the
+data field would be guesswork this project's own "cite a primary source,
+verify against real captured output" discipline can't support -- the same
+explicit "first pass" scope boundary `opcua.hpp`/`bacnet.hpp` already took
+before their own next decode phase. `tests/sample_umas.pcap` is
+synthetically constructed (`tools/make_sample_pcap.py`) from the function
+code table above, the same as every other protocol's fixtures here --
+absent a real Unity Pro capture, it validates wire-shape parsing
+correctness, not real-world traffic fidelity.
+
+**JSON output** (`decode -T json`) adds, when `protocol: modbus` and a UMAS
+frame was decoded: `umas_session_key` (hex string, e.g. `"0x1"`),
+`umas_is_response` (bool), `umas_response_success` (bool, request omitted
+-- only present for a response), `umas_function_code`/`umas_function_name`
+(hex string / name, response omitted -- only present for a request), and
+`umas_data_byte_count` (always present). Example, a TAKE_PLC_RESERVATION
+request and its response:
+
+```json
+{"protocol": "modbus", "summary": "UMAS: request (session key 0x1): TAKE_PLC_RESERVATION, 0 data byte(s)",
+ "umas_session_key": "0x1", "umas_is_response": false,
+ "umas_function_code": "0x10", "umas_function_name": "TAKE_PLC_RESERVATION",
+ "umas_data_byte_count": 0}
+{"protocol": "modbus", "summary": "UMAS: response (session key 0x1): success, 2 data byte(s)",
+ "umas_session_key": "0x1", "umas_is_response": true,
+ "umas_response_success": true, "umas_data_byte_count": 2}
+```
+
+**Wired everywhere every other decoder is**, per Jurgen's own scoping of
+UMAS as new decode work generally, not `detect`-only: `inventory`'s
+`observed_functions` records a UMAS request as `"UMAS/<function-name>"`
+(e.g. `"UMAS/START_PLC"`), distinguishing which specific UMAS operations
+were seen on a conduit rather than only that UMAS traffic occurred at all;
+`baseline learn`/`baseline check` treat UMAS START_PLC/STOP_PLC as
+always-flagged control-plane operations, the same treatment S7comm's own
+PLC Control/PLC Stop already gets; `detect` flags START_PLC/STOP_PLC (MITRE
+T0858, Change Operating Mode), INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/
+END_STRATEGY_DOWNLOAD (T0843, Program Download) as always-notable, High-
+confidence findings, and TAKE_PLC_RESERVATION/READ_ID/READ_PROJECT_INFO/
+READ_PLC_INFO from a new engineering-station originator as new-vs-known
+findings (T0855/T0888) -- see `docs/design/detection-engine.md` for the
+full detection design.
+
 ### DNP3
 
 Detected reliably (via the 0x05 0x64 start bytes) and its data-link-layer

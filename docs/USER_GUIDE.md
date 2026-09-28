@@ -1118,6 +1118,171 @@ scope above. `inventory` has no compliance concept at all, so there is no
 reported and never affects this command's own (always-zero-on-success)
 exit code.
 
+### `detect` -- detection findings OT incident-response teams recognize
+
+```
+conduitscope detect (-r FILE | -i INTERFACE) [options]
+```
+
+Grok review item 4 (`docs/reviews/2026-09-grok-ics-ot-improvement-areas.md`): a purpose-built
+report surfacing the finding shapes an OT incident-response team actually looks for --
+engineering-station mode changes, firmware/logic downloads and device restarts, protocol misuse
+(unsolicited/unexpected commands, a new engineering-station originator), and new remote-access
+channels into the plant -- distinct from `attack_detect.hpp`'s own flood/scan-shaped signatures
+(SYN/ACK/UDP/ICMP floods and similar), which `detect` does not duplicate or replace. Every finding
+cites exactly one MITRE ATT&CK for ICS technique (never a generic "something happened" note with no
+citation) and carries a labeled confidence level, never a bare "this looks unusual." See
+`docs/design/detection-engine.md` for the full design record, including the MITRE mapping table and
+exactly how confidence is decided.
+
+| Option | Default | Description |
+|---|---|---|
+| `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
+| `-i, --interface NAME` | *(required unless `-r` given)* | Run detection against live traffic on this network interface instead of reading a file -- see LIVE CAPTURE below. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
+| `-f, --filter BPF` | *(none)* | BPF filter (tcpdump syntax). Works with both `-i` and `-r`. |
+| `--duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds; `0` means rely on Ctrl+C instead. |
+| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
+| `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
+| `-o, --output FILE` | stdout | Write the report here instead of stdout. |
+| `-T, --format {text,json}` | `text` | Report format. |
+| `--strict` | off | Same meaning as `decode --strict`: abort on the first malformed packet instead of reporting a warning and continuing. |
+| `--policy FILE` | *(none)* | Zone/conduit policy YAML file (see `policy validate`) -- used only to tell a new remote-access session that stays within one declared zone (T0886, Remote Services) from one that crosses a zone boundary (T0822, External Remote Services). Every other finding is unaffected by this flag. Must exist. |
+| `--baseline-file FILE` | *(none)* | Baseline JSON file (see `baseline learn`) -- used to resolve every new-vs-known finding (a new remote-access channel, a new CIP/UMAS engineering-station originator) against real history instead of this capture's own first-occurrence order. A conduit already present in the baseline is not flagged at all; one genuinely absent gets Medium confidence. Without this flag, a new-vs-known finding is Low confidence (first occurrence within this capture only). Must exist. |
+| `--max-baseline-file-bytes N` | 256 MiB | Cap how large `--baseline-file` may be before it's read into memory. |
+| `--mac-vendor` | off | Same meaning as `decode --mac-vendor`, applied to the report's endpoint MAC addresses. |
+| `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS** -- file-only. |
+| `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
+| `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each finding's server port. |
+| `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+| `--max-reassembly-bytes N`, `--max-reassembly-segments N`, `--max-recursion-depth N`, `--max-decoded-objects N`, `--max-coalesced-messages N` | *(compile-time defaults)* | Same five resource-exhaustion-limit overrides as `decode`'s own flags of the same name. |
+
+#### Two kinds of finding
+
+**Always-notable** findings need no "new vs. known" judgment at all -- the traffic shape itself is
+notable every time it's seen: a PLC/controller mode change, a firmware/logic download, a device
+restart, an unsolicited or unexpected protocol message. These always get **High** confidence.
+Currently sourced from S7comm (PLC Control/Stop, block download), DNP3 (Cold/Warm Restart,
+Enable-then-later-Unsolicited-Response-with-none-enabled), IEC 104 (an ASDU whose own
+cause-of-transmission is one of the four error codes, a Reset Process command), BACnet
+(ReinitializeDevice, DeviceCommunicationControl), and UMAS (START_PLC/STOP_PLC,
+INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/END_STRATEGY_DOWNLOAD -- see "UMAS decode" below).
+
+**New-vs-known** findings -- a remote-access protocol (RDP/VNC/TeamViewer/AnyDesk/Zoom) reaching a
+conduit, a CIP Forward_Open or UMAS engineering-station command from a client not seen doing that
+before -- are only notable when they're genuinely new, and "new" is decided honestly:
+
+- With `--baseline-file` supplied: a conduit genuinely absent from the loaded baseline's known
+  conduits is real evidence of "new" -- **Medium** confidence. A conduit already present in the
+  baseline is not flagged at all.
+- Without `--baseline-file` (the common single-pcap assessment case): evaluated as
+  first-occurrence-within-this-capture -- **Low** confidence, and the finding's own description says
+  so and suggests re-running with `--baseline-file` for a stronger signal (the capture might simply
+  start after the channel was already long-established, which first-occurrence order can't tell
+  apart from genuinely new).
+
+With `--policy` also given, a new remote-access finding's own MITRE technique is further resolved
+between T0886 (Remote Services, stays within one declared zone) and T0822 (External Remote Services,
+crosses a declared zone boundary) -- independent of confidence, which is decided by
+`--baseline-file` alone.
+
+Confidence is new-findings-only for now: it is not retrofitted onto `attack_detect.hpp`'s
+flood/scan findings or onto `baseline check`'s own new-conduit/new-operation findings -- see
+`docs/design/detection-engine.md`'s own "explicitly out of scope" note.
+
+#### Worked example
+
+```
+$ conduitscope detect -r tests/sample_detect.pcap
+=== conduitscope detect report ===
+capture: tests/sample_detect.pcap
+total packets: 12
+findings: 9 (High 7, Medium 0, Low 2)
+  Engineering-Station Activity: 0
+  Firmware/Logic Change: 4
+  Remote-Access Channel: 1
+  Protocol Misuse: 4
+
+--- findings (first-seen order) ---
+
+[Firmware/Logic Change] T0843 (Program Download) -- confidence: High
+  192.168.1.60 -> 192.168.1.10:102 (s7comm)
+  S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station
+  first seen: 2023-11-15 03:46:40.000000Z  last seen: 2023-11-15 03:46:40.000000Z  packets: 1
+
+[Protocol Misuse] T0855 (Unauthorized Command Message) -- confidence: Low
+  192.168.1.67 -> 192.168.1.65:44818 (enip)
+  CIP Forward_Open from a new originator 192.168.1.67 to 192.168.1.65 -- a different engineering/control client than the one(s) already seen opening a connection to this target in this capture (first occurrence within this capture; no --baseline-file was supplied)
+  first seen: 2023-11-15 03:46:50.010000Z  last seen: 2023-11-15 03:46:50.010000Z  packets: 1
+
+[Remote-Access Channel] T0886 (Remote Services) -- confidence: Low
+  192.168.1.68 -> 192.168.1.69:3389 (rdp)
+  New rdp (remote-access) session 192.168.1.68 -> 192.168.1.69:3389 -- first occurrence within this capture; no --baseline-file was supplied, so this may already be a normal, previously-established channel -- rerun with --baseline-file for a stronger signal
+  first seen: 2023-11-15 03:46:51.011000Z  last seen: 2023-11-15 03:46:51.011000Z  packets: 1
+```
+
+(Six more findings -- DNP3 Cold Restart, an unsolicited DNP3 response, an error-COT IEC 104 ASDU,
+an IEC 104 Reset Process, and BACnet ReinitializeDevice/DeviceCommunicationControl -- are omitted
+above for brevity; every one of the 9 findings this capture produces is exercised by this project's
+own CTest suite.) Re-running the same capture against a baseline that has already learned the RDP
+conduit and the CIP originator (`baseline learn --baseline-file b.json tests/sample_detect.pcap`,
+then `detect -r tests/sample_detect.pcap --baseline-file b.json`) drops the CIP finding entirely
+(now a known originator) and upgrades the RDP finding from Low to **Medium**, its description
+changing to `"confirmed absent from the supplied baseline"`. Adding `--policy` with a policy file
+that places the RDP conduit's two endpoints in different declared zones upgrades that same finding's
+technique from T0886 to **T0822 (External Remote Services)**.
+
+`-T json` mirrors the same data as a `findings` array (each entry: `category`, `technique_id`,
+`technique_name`, `confidence`, `client_ip`, `server_ip`, `protocol`, `server_port`, `description`,
+`first_seen`/`first_seen_text`, `last_seen`/`last_seen_text`, `packet_count`) plus a `summary` object
+(the same counts the text report's header shows) and a `techniques_referenced` array -- always the
+full ten-technique table from `docs/design/detection-engine.md`'s own MITRE mapping, not just the
+ones this particular report cites, so a consumer always has the full citation text on hand without a
+second lookup.
+
+#### UMAS decode
+
+UMAS (Schneider Electric's proprietary Unity Pro/Control Expert engineering-station protocol,
+Modbus/TCP function code 0x5A/90) is decoded as part of Modbus/TCP, not as a separate protocol --
+`conduitscope decode`/`inventory`/`baseline`/`detect` all see UMAS traffic tagged `protocol: modbus`
+exactly like any other Modbus/TCP packet, since UMAS genuinely rides Modbus/TCP's own MBAP framing.
+27 UMAS function codes are named (`INIT_COMM`, `READ_ID`, `TAKE_PLC_RESERVATION`, `START_PLC`,
+`STOP_PLC`, `INITIALIZE_DOWNLOAD`/`DOWNLOAD_BLOCK`/`END_STRATEGY_DOWNLOAD`, and 21 more -- see
+`docs/PROTOCOL_COVERAGE.md`'s own UMAS entry for the full table), plus request-vs-response
+classification via the session-key-adjacent status byte (`0xFE` success / `0xFD` failure).
+
+**UMAS has no official public specification** -- reverse-engineered from Kaspersky ICS-CERT's own
+published research and an open-source Wireshark dissector (both cited by URL in
+`include/conduitscope/umas.hpp`). Only function-code-level naming and request/response
+classification are decoded; the data field's internal structure (memory addresses, project name
+strings, reservation payload contents) is intentionally left opaque -- see
+`docs/design/detection-engine.md`'s "UMAS-over-Modbus/TCP" section for the full sourcing record and
+scope boundary. `decode -T json` output for a UMAS packet adds `umas_session_key`,
+`umas_is_response`, `umas_response_success` (responses only), `umas_function_code`/
+`umas_function_name` (requests only), and `umas_data_byte_count`.
+
+```
+$ conduitscope detect -r tests/sample_umas.pcap
+=== conduitscope detect report ===
+capture: tests/sample_umas.pcap
+total packets: 15
+findings: 5 (High 3, Medium 0, Low 2)
+  Engineering-Station Activity: 3
+  Firmware/Logic Change: 1
+  Remote-Access Channel: 0
+  Protocol Misuse: 1
+
+--- findings (first-seen order) ---
+
+[Engineering-Station Activity] T0858 (Change Operating Mode) -- confidence: High
+  192.168.1.50 -> 192.168.1.10:502 (modbus)
+  UMAS START_PLC command -- an engineering station changed the PLC's own run/stop mode
+  first seen: 2023-11-15 06:33:22.002000Z  last seen: 2023-11-15 06:33:22.002000Z  packets: 1
+```
+
+`baseline learn`/`baseline check` also treat UMAS START_PLC/STOP_PLC as always-flagged control-plane
+operations, the same treatment S7comm's own PLC Control/PLC Stop already gets -- `baseline check`
+reports them regardless of whether the baseline file has ever seen them before.
+
 ### `version` -- print version and build information
 
 Equivalent to the global `--version` flag; provided as a subcommand as well
@@ -5699,13 +5864,40 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   possible HART-IP/Modbus TCP collision left undocumented-but-accepted.
   An explicit `--protocol hartip` is unaffected by this exclusion and
   still attempts every port. See docs/PROTOCOL_COVERAGE.md's Tier 5 section.
+- **UMAS is decoded at the function-code level only, never the data
+  field's internal structure** -- and it has no official public
+  specification at all, unlike almost everything else this tool decodes.
+  Memory addresses, project name strings, and reservation payload contents
+  inside a UMAS message are never parsed; only the session key, function
+  code/name, and request-vs-response classification are. See
+  `docs/design/detection-engine.md`'s "UMAS-over-Modbus/TCP" section and
+  docs/PROTOCOL_COVERAGE.md's own UMAS entry for the full sourcing record
+  and scope boundary.
+- **`detect`'s T0886-vs-T0822 (Remote Services vs. External Remote
+  Services) distinction for a new remote-access finding depends entirely
+  on `--policy` being given.** Without it, every new remote-access finding
+  cites the narrower T0886 -- "crossed a zone boundary" isn't inferable
+  without a policy file that says where the boundaries are, so `detect`
+  never guesses. See the `detect` section above.
+- **`detect`'s new-vs-known findings are Low confidence, honestly weaker
+  evidence, whenever no `--baseline-file` is supplied** -- evaluated as
+  first-occurrence-within-this-capture, which can't distinguish "genuinely
+  new" from "the capture simply starts after this channel was already
+  long-established." The finding's own description says so and suggests
+  `--baseline-file`. See the `detect` section above.
+- **`detect`'s confidence field is new-findings-only.** It is not
+  retrofitted onto the pre-existing flood/scan-shaped findings
+  (`attack_detect.hpp`/`ipv6_attack_detect.hpp`) or onto `baseline
+  check`'s own new-conduit/new-operation findings -- a deliberate scope
+  boundary, not an oversight. See `docs/design/detection-engine.md`'s
+  "explicitly out of scope" note.
 
 ## EXIT STATUS
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful run, even one that observed zero assets. |
-| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"). |
+| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful run, even one that observed zero assets. For `detect`: a report was produced -- **`detect` always returns 0 on a successful run, regardless of how many findings it reports.** Unlike `policy validate`/`baseline check`, `detect` has no compliant/non-compliant concept to report against; it's a reporting tool surfacing findings for a human or a SIEM to triage, not a pass/fail gate. A caller wanting a non-zero result specifically when `detect` finds something should check the JSON report's own `summary.total` rather than the process exit code. |
+| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"); for `detect`, the same for a `--policy` or `--baseline-file` that couldn't be opened or failed to parse. |
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
 | 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory` (see code 0 above). |
 

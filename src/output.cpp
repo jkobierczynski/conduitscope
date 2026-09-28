@@ -2967,6 +2967,24 @@ void write_modbus_json_fields(std::ostream& out, const ModbusFrame& mb) {
     if (mb.quantity) {
         out << "    \"modbus_quantity\": " << *mb.quantity << ",\n";
     }
+    // UMAS (function code 0x5A -- see umas.hpp) sub-frame, when present. Omitted entirely (this
+    // project's own "omit, never null" JSON convention) for every other function code.
+    if (mb.umas) {
+        const UmasFrame& u = *mb.umas;
+        std::ostringstream session_key_hex;
+        session_key_hex << "0x" << std::hex << static_cast<unsigned>(u.session_key);
+        out << "    \"umas_session_key\": \"" << session_key_hex.str() << "\",\n";
+        out << "    \"umas_is_response\": " << (u.is_response ? "true" : "false") << ",\n";
+        if (u.is_response) {
+            out << "    \"umas_response_success\": " << (u.response_success ? "true" : "false") << ",\n";
+        } else {
+            std::ostringstream fc_hex;
+            fc_hex << "0x" << std::hex << static_cast<unsigned>(u.function_code);
+            out << "    \"umas_function_code\": \"" << fc_hex.str() << "\",\n";
+            out << "    \"umas_function_name\": \"" << json_escape(u.function_name) << "\",\n";
+        }
+        out << "    \"umas_data_byte_count\": " << u.data.size() << ",\n";
+    }
 }
 
 // The EIGRP analog of write_twincat_json_fields above -- same rationale (a plain free function, not

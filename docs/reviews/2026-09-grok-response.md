@@ -59,35 +59,63 @@ Modbus/DNP3/S7comm/EtherNet-IP) as of this repository -- S7comm-Plus is
 the one protocol from Grok's own example list still genuinely absent
 from `inventory`. This is Jurgen's own item 2, next after item 1.
 
-**3. Baseline process behavior, not just ports -- partially stale.** The
-"Modbus + S7 only" framing describes an earlier state of the baseline
-engine, not the current one: `docs/design/baseline-engine.md`'s own
-status line shows Phase 2 already extended `baseline learn`/`baseline
-check` to EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, and FINS, each with
-its own operation-level tracking (CIP service/class/instance/attribute,
-DNP3 function+group/variation, etc.) and a `--policy`-aware
-`new-conduit-known-zone` rollup. Two of Grok's five bullet points --
-DNP3 function+group/variation+point index, and EtherNet/IP
-service+class/instance/attribute -- are already implemented. IEC 104
-type/COT/IOA-range tracking, OPC UA service+NodeId (today it's
-service-name only, no NodeId), and treating S7 block-download/
-program-change as its own high-severity class are the genuinely
-remaining pieces. This is Jurgen's own item 3, after item 2.
+**3. Baseline process behavior, not just ports -- now fully done (this
+paragraph originally read "partially stale" at review time; updated
+after the remaining pieces shipped).** The "Modbus + S7 only" framing
+describes an early state of the baseline engine, not the current one:
+`docs/design/baseline-engine.md`'s own status line shows Phase 2 already
+extended `baseline learn`/`baseline check` to EtherNet/IP, DNP3, BACnet,
+OPC UA, MELSEC, and FINS, each with its own operation-level tracking
+(CIP service/class/instance/attribute, DNP3 function+group/variation,
+etc.) and a `--policy`-aware `new-conduit-known-zone` rollup. All five of
+Grok's bullet points are now implemented: DNP3 function+group/variation
++point index and EtherNet/IP service+class/instance/attribute were
+already done by review time; IEC 104 type/COT/IOA-range tracking, OPC UA
+service+NodeId (structured `NodeId`, not just the service name), and S7
+PLC Control/PLC Stop (block-download/program-change/cold-restart) as an
+always-flag control-plane class shipped as three v0.2.8 follow-ups --
+see the design doc's own "Follow-up (v0.2.8, ...)" sections. Grok review
+item 3 is now fully closed.
 
-**4. Detection that OT IR teams recognize -- mostly a real gap.**
-`attack_detect.hpp`/`ipv6_attack_detect.hpp` cover flood/scan-shaped
-findings (SYN/ACK/UDP/ICMP floods, rogue DHCPv6 servers, and similar),
-with exactly one incidental MITRE ATT&CK technique-ID citation found in
-the whole codebase (T1557.003, in a comment, not a structured field on
-the finding itself) -- there is no systematic ATT&CK-for-ICS or
-Dragos-style activity-group mapping across findings. Engineering-station
-behavioral detection (TIA Portal/Studio 5000/Unity fingerprinting),
-firmware/logic-download and cold-restart flagging as their own category,
-and "new remote-access channel into L2" as a named finding (as opposed
-to the existing generic "IT protocols an OT auditor flags" tiers, which
-already flag RDP/VNC/SSH/etc. reaching a zone but don't yet distinguish
-"new" from "previously baselined") are all genuinely not built yet. Fair
-point, not yet scheduled in Jurgen's own ordering.
+**4. Detection that OT IR teams recognize -- now fully done (this
+paragraph originally read "mostly a real gap" at review time; updated
+after the feature shipped).** Every genuine gap this bullet originally
+named has been closed. A new `detect` subcommand
+(`include/conduitscope/detect_engine.hpp`/`src/detect_engine.cpp`, full
+design record at `docs/design/detection-engine.md`) now produces a
+unified report of engineering-station mode changes, firmware/logic
+downloads and device restarts, protocol misuse, and new remote-access
+channels, each finding citing exactly one of ten independently-verified
+MITRE ATT&CK for ICS techniques (`include/conduitscope/
+mitre_attack_ics.hpp`) -- no Dragos-style activity-group attribution,
+per Jurgen's own scoping decision (proprietary threat intel this project
+has no legitimate data to correlate against). "New remote-access channel
+into L2" is now a named, distinguished finding: a Tier-1 remote-access
+protocol (RDP/VNC/TeamViewer/AnyDesk/Zoom) reaching a conduit is flagged
+only when it's genuinely new -- confirmed absent from an optional
+`--baseline-file` (Medium confidence) or first-occurrence-within-this-
+capture when none is given (Low confidence, honestly labeled as weaker
+evidence) -- exactly the "new" vs. "previously baselined" distinction
+this paragraph originally said was missing. Engineering-station
+behavioral detection now goes beyond fingerprinting existing protocols'
+control-plane traffic (S7 PLC Control/Stop, CIP Forward_Open) to include
+a genuine new decoder for Schneider Electric's UMAS protocol (Unity
+Pro/Control Expert's own engineering-station protocol, riding Modbus/TCP
+function code 0x5A) -- which has no official public specification at
+all, reverse-engineered from Kaspersky ICS-CERT's published research and
+an open-source Wireshark dissector, both cited by URL. Firmware/
+logic-download and restart/mode-change flagging is now its own labeled
+category (`FirmwareLogicChange`/`EngineeringStationActivity`), always
+High confidence, sourced from S7comm block download, DNP3 Cold/Warm
+Restart, IEC 104 Reset Process, BACnet ReinitializeDevice, and UMAS
+START_PLC/STOP_PLC/INITIALIZE_DOWNLOAD-DOWNLOAD_BLOCK-
+END_STRATEGY_DOWNLOAD. Confidence labeling ("keep the honesty") is a
+real structured field (`DetectionConfidence`) on every new finding, not
+prose-level hedging -- deliberately scoped to this feature's own new
+findings only, not retrofitted onto the pre-existing flood/scan
+detectors or `baseline check`'s own findings (a separate, larger effort,
+noted as a reasonable future follow-up in the design doc). Grok review
+item 4 is now fully closed.
 
 **5. Continuous, safe sensor mode -- confirmed as not built, and worth
 flagging as a bigger scope question.** `live_capture.hpp`/`cli_main.cpp`

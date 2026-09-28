@@ -1,0 +1,27 @@
+# Zone policy for `detect --policy`'s own T0886-vs-T0822 zone-crossing distinction (Grok gap #4,
+# Phase 3 -- see detect_engine.hpp's own DetectEngine::finish comment for exactly how `policy` is
+# used: a RemoteAccessChannel finding's technique is only ever upgraded from T0886 (Remote Services,
+# the default -- no zone crossing inferable) to T0822 (External Remote Services) when BOTH endpoints
+# resolve to a declared zone AND those zones differ).
+#
+# Declares the two IPs tools/make_sample_pcap.py's build_detect_sample() uses for its RDP scenario
+# (RDP_CLIENT_IP=192.168.1.68, RDP_SERVER_IP=192.168.1.69) in two SEPARATE zones, so
+# detect_remote_access_zone_crossing_upgrades_to_t0822 (CMakeLists.txt) can confirm the upgrade
+# actually fires. A single-zone variant isn't a separate fixture -- reusing sample_detect.pcap's own
+# S7/CIP hosts (all in 192.168.1.0/24) with no policy at all already covers the "no crossing / no
+# policy" T0886 default case, exercised by every other `detect` CTest entry that doesn't pass
+# --policy.
+zones:
+  it_remote_access_zone:
+    description: "IT-side host initiating the RDP session (RDP_CLIENT_IP)"
+    networks: [192.168.1.68/32]
+  ot_process_zone:
+    description: "OT-side host receiving the RDP session (RDP_SERVER_IP) -- a different zone than the client, so the conduit crosses a declared boundary"
+    networks: [192.168.1.69/32]
+
+conduits:
+  - name: "RDP reaches the OT zone (declared, so detect --policy can classify direction/crossing -- not itself an endorsement; detect flags it regardless of whether a conduit permits it -- 'any' since 'rdp' is not one of this schema's own recognized OT protocol names, see policy.cpp's own protocol allow-list)"
+    from: it_remote_access_zone
+    to: ot_process_zone
+    protocols: [any]
+    ports: [3389]

@@ -2177,13 +2177,26 @@ through its ten points in order, starting with items 1-3, one at a time:
   outside what Grok's own bullets under item 3 asked for: statistical/confidence thresholds (a
   Phase-1-era scope decision, see the design doc's own "Explicitly out of scope" section) and
   CODESYS's `CmpIecVarAccess` (a separate, unrelated decode gap, not a baseline-engine one).
-- **Items 4-10** (OT-IR-recognizable detection and ATT&CK-for-ICS mapping, continuous SPAN/TAP
-  sensor mode, decode depth on process-critical protocols, a 62443/NIS2 evidence pack, Zeek/CEF/
-  syslog integration, parser trustworthiness, and product packaging) are not yet scheduled. The
-  response document notes that item 9 (parser trustworthiness: ASan/UBSan in CI, fuzzing on the
-  high-value parsers) is already substantially standing practice, not an open item, and that item 5
-  (continuous sensor mode) is worth a deliberate scope conversation before committing to it, since
-  it pulls toward an always-on sensor product rather than an assessment/audit CLI.
+- **Item 4 (detection that OT IR teams recognize) is fully done.** See
+  [docs/design/detection-engine.md](design/detection-engine.md) for the full design record. All 8
+  phases are implemented and shipped (item 88 below): a MITRE ATT&CK-for-ICS lookup table (ten
+  curated, individually-verified technique citations), the new `detect` subcommand and its
+  `DetectEngine`/`DetectionReport` (four finding categories, `High`/`Medium`/`Low` labeled
+  confidence), always-notable findings wired from S7comm/DNP3/IEC 104/BACnet's already-decoded
+  fields, a new-vs-known mechanism for remote-access channels and CIP/UMAS engineering-station
+  originators (backed by an optional `--baseline-file`, with an honest Low-confidence
+  first-occurrence fallback when none is given), `--policy`-aware T0886-vs-T0822 zone-crossing
+  resolution, and a genuinely new UMAS-over-Modbus/TCP decoder (Schneider Electric's Unity Pro
+  engineering-station protocol, no official public specification, sourced from Kaspersky ICS-CERT
+  and an open-source Wireshark dissector) wired into `detect`, `AssetInventoryEngine`, and
+  `BaselineEngine` alike. Grok review item 4 is now fully closed.
+- **Items 5-10** (continuous SPAN/TAP sensor mode, decode depth on process-critical protocols, a
+  62443/NIS2 evidence pack, Zeek/CEF/syslog integration, parser trustworthiness, and product
+  packaging) are not yet scheduled. The response document notes that item 9 (parser trustworthiness:
+  ASan/UBSan in CI, fuzzing on the high-value parsers) is already substantially standing practice,
+  not an open item, and that item 5 (continuous sensor mode) is worth a deliberate scope conversation
+  before committing to it, since it pulls toward an always-on sensor product rather than an
+  assessment/audit CLI.
 
 
 ## PROTOCOL DETECTION
@@ -12960,6 +12973,105 @@ it done as its own patch.
     to still compile and link cleanly; plus a clean-room extract-rebuild-
     test before delivery. `docs/USER_GUIDE.md` and `man/conduitscope.1`
     updated in the same increment.
+
+88. **Detection that OT IR teams recognize -- Grok gap #4, all 8 phases.**
+    See [docs/design/detection-engine.md](design/detection-engine.md) for
+    the full design record and Jurgen's own three scoping decisions (a
+    single unified `detect` subcommand; MITRE ATT&CK for ICS only, no
+    Dragos-style activity-group attribution; UMAS in scope as genuine new
+    decode work). Reused, not rebuilt: firmware/logic-download,
+    control-plane mode changes, and protocol-misuse findings are wired from
+    fields S7comm/DNP3/IEC 104/BACnet/EtherNet/IP already decoded (S7 PLC
+    Control/PLC Stop/block download, DNP3 Cold/Warm Restart and
+    Enable/Unsolicited-Response tracking, IEC 104 error-shaped COT and
+    Reset Process, BACnet ReinitializeDevice/DeviceCommunicationControl,
+    CIP Forward_Open originator tracking) -- none of this needed new
+    decode work, only a new reporting layer over already-decoded data.
+    Newly decoded: UMAS-over-Modbus/TCP
+    (`include/conduitscope/umas.hpp`/`src/umas.cpp`), Schneider Electric's
+    Unity Pro/Control Expert engineering-station protocol (Modbus/TCP
+    function code 0x5A), which has **no official public specification** --
+    sourced from Kaspersky ICS-CERT/Securelist's own published research and
+    the open-source `yanissec/umas-wireshark-dissector` project, both cited
+    by URL in the header comment. Decoded at the function-code level only
+    (27 named commands, session key, request-vs-response classification
+    via the `0xFE`/`0xFD` status byte) -- the data field's internal
+    structure is deliberately left opaque, the same "first pass, honestly
+    scoped" posture `opcua.hpp`/`bacnet.hpp` already established.
+    Architectural choice: UMAS lives *inside* `ModbusFrame`
+    (`std::optional<UmasFrame> umas`), not as its own top-level protocol,
+    since it genuinely rides Modbus/TCP's own MBAP framing -- `protocol`
+    stays `"modbus"` for UMAS traffic throughout the codebase, so it needed
+    no new protocol-name branch anywhere a protocol-name dispatch already
+    exists.
+
+    New `include/conduitscope/mitre_attack_ics.hpp`: ten MITRE ATT&CK for
+    ICS technique citations, each independently verified against
+    `attack.mitre.org` during this feature's own research pass (fetched,
+    not assumed from training data) -- T0858 (Change Operating Mode), T0816
+    (Device Restart/Shutdown), T0843 (Program Download), T0821 (Modify
+    Controller Tasking), T0855 (Unauthorized Command Message), T0886
+    (Remote Services), T0822 (External Remote Services), T0888 (Remote
+    System Information Discovery), T0861 (Point & Tag Identification),
+    T0831 (Manipulation of Control). New `include/conduitscope/
+    detect_engine.hpp`/`src/detect_engine.cpp`: `DetectEngine`, four
+    `DetectionCategory` values (Engineering-Station Activity,
+    Firmware/Logic Change, Remote-Access Channel, Protocol Misuse), three
+    `DetectionConfidence` levels (`High` for every always-notable finding;
+    `Medium`/`Low` for a new-vs-known finding, resolved against an optional
+    `--baseline-file` -- reusing `baseline.hpp`'s own `BaselineStore`
+    read-only -- or first-occurrence-within-this-capture otherwise, with
+    the report text saying so honestly). An optional `--policy` further
+    resolves a new remote-access finding's own technique between T0886 and
+    T0822 depending on whether it crosses a declared zone boundary
+    (reusing `policy validate`'s own `Policy`/`zone_for` machinery, no
+    second parser). A shared engineering-station-originator-tracking
+    mechanism (first introduced for CIP Forward_Open, generalized to
+    UMAS TAKE_PLC_RESERVATION/READ_ID/READ_PROJECT_INFO/READ_PLC_INFO
+    across one shared per-server map) flags a second-or-later distinct
+    client as new, never the first (nothing to compare against within a
+    capture). New `detect` subcommand (`src/cli_main.cpp`): `-r`/`-i`
+    (both offline and live capture, unlike file-only `baseline
+    learn`/`check`), `--policy`, `--baseline-file`/
+    `--max-baseline-file-bytes`, `-T text|json`, plus the same resource-
+    limit/resolver flags every other report-producing subcommand carries.
+    **Deliberately always exits 0 on a successful run, regardless of
+    findings** -- unlike `policy validate`/`baseline check`, `detect` has
+    no compliant/non-compliant concept; it's a reporting tool for a human
+    or a SIEM to triage, not a CI pass/fail gate (a caller wanting that
+    should check the JSON report's own `summary.total`).
+
+    Wired into `AssetInventoryEngine` (a UMAS request's `observed_functions`
+    entry is `"UMAS/<function-name>"`, distinguishing which specific UMAS
+    operations were seen) and `BaselineEngine` (UMAS START_PLC/STOP_PLC get
+    the same `always_flag` `ControlPlaneOperation` treatment S7comm's own
+    PLC Control/PLC Stop already has) -- following this project's "a new
+    decoder gets wired everywhere every other decoder is," not `detect`-only,
+    since Jurgen scoped UMAS as new decode work generally.
+
+    **Verification bar met**: full CTest across all four standing build
+    configurations (default GCC, ASan/UBSan `build-fuzz`,
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`, MinGW-w64
+    cross-compile, build-only there) after every one of the 8 phases;
+    a new dedicated `fuzz_umas` libFuzzer harness (seeded from
+    `fuzz/corpus/umas/`, 15 seed files) run for 13.4 million iterations
+    with zero ASan/UBSan findings, following this project's "every decoder
+    gets fuzzed, a transitively-reachable sub-decoder still gets its own
+    dedicated harness" convention (see `fuzz/README.md`'s own entry); new
+    `tests/sample_detect.pcap` (9 findings across 7 always-notable sources
+    plus a CIP new-originator and an RDP new-remote-access-channel case)
+    and `tests/sample_umas.pcap` (every UMAS function code this decoder
+    names, plus a second and third distinct engineering-station originator
+    exercising the shared new-originator map for real); every CTest
+    assertion written only after manually running the real CLI binary and
+    inspecting its actual output, this project's standing rule; plus a
+    clean-room extract-rebuild-test cycle before delivery.
+    `docs/design/detection-engine.md` (new), `docs/USER_GUIDE.md` (new
+    `detect` section, UMAS decode subsection, LIMITATIONS additions),
+    `man/conduitscope.1` (new `detect` COMMANDS entry, `OPTIONS (detect)`
+    section, EXIT STATUS/LIMITATIONS additions), and
+    `docs/PROTOCOL_COVERAGE.md` (new UMAS entry) all updated in the same
+    increment.
 
 ### Protocols not covered at all
 

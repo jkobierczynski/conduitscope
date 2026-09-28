@@ -39,6 +39,7 @@
 
 #include "conduitscope/asset_inventory.hpp"
 #include "conduitscope/baseline.hpp"
+#include "conduitscope/detect_engine.hpp"
 #include "conduitscope/bpf_filter.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
@@ -1493,6 +1494,110 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
     }
 }
 
+// `detect` -- Grok gap #4 ("Detection that OT IR teams recognize"). See detect_engine.hpp's own
+// file header for the design and docs/design/detection-engine.md for the full record. Mirrors
+// run_inventory's own shape (a single-pass observe/finish engine, text/json report) with two
+// optional whole-of-run inputs read the same way run_baseline_check already reads them:
+// `policy_path` (--policy, reusing parse_policy_file -- only for the RemoteAccessChannel
+// T0886-vs-T0822 zone-crossing distinction, see DetectEngine::finish's own comment) and
+// `baseline_path` (--baseline-file, reusing load_baseline_store -- for new-vs-known resolution).
+// Both stay unconstructed (nullptr) when their flag is empty, the exact same "an absent optional
+// flag never touches this code path at all" posture run_baseline_check's own policy_path already
+// established.
+int run_detect(const std::string& input, const std::string& interface_name, const std::string& filter,
+                int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
+                const std::string& format, bool strict, bool quiet, const std::string& policy_path,
+                const std::string& baseline_path, size_t max_baseline_file_bytes,
+                const ResourceLimitCliVars& limit_vars, bool oui_enabled, bool resolve_hostnames,
+                const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
+                std::ostream& diag) {
+    std::ofstream file_out;
+    std::ostream* out = &std::cout;
+    if (!output.empty()) {
+        file_out.open(output, std::ios::binary);
+        if (!file_out) {
+            std::cerr << "error: cannot open output file '" << output << "'\n";
+            return 1;
+        }
+        out = &file_out;
+    }
+
+    try {
+        std::optional<Policy> policy;
+        if (!policy_path.empty()) {
+            policy = parse_policy_file(policy_path);
+        }
+        std::optional<BaselineStore> baseline;
+        if (!baseline_path.empty()) {
+            baseline = load_baseline_store(baseline_path, max_baseline_file_bytes);
+        }
+
+        std::vector<std::string> resolver_notes;
+        Resolver resolver(oui_enabled, resolve_hostnames, hosts_path, service_names_enabled, services_path,
+                           resolver_notes);
+        if (!quiet) {
+            for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
+        }
+
+        DecodeOptions options;
+        options.strict = strict;
+        options.limits = build_resource_limits(limit_vars);
+        PacketSource source =
+            open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
+        SigintGuard sigint_guard(source.live_ptr());
+        Decoder decoder(options);
+        DetectEngine engine;
+
+        PcapPacket pkt;
+        size_t index = 0, warnings = 0;
+        while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
+            index = source.index();
+            DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
+            if (dp.protocol == "parse-error") {
+                ++warnings;
+                if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+            }
+            engine.observe(dp);
+        }
+
+        std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
+        DetectionReport report = engine.finish(policy ? &*policy : nullptr, baseline ? &*baseline : nullptr);
+        if (format == "json") {
+            write_detection_report_json(*out, report, capture_label, resolver);
+        } else {
+            write_detection_report_text(*out, report, capture_label, resolver);
+        }
+
+        if (!interface_name.empty() && !quiet) {
+            diag << "capture on '" << interface_name << "' stopped (" << index << " packet(s) captured)\n";
+        }
+        if (warnings > 0 && !quiet) {
+            diag << warnings
+                 << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
+                    "the first one, or -q to silence this message\n";
+        }
+        return 0;
+    } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const PolicyError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const BaselineStoreError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 // Exit code specific to `baseline check` (see man/conduitscope.1's EXIT STATUS and
 // docs/USER_GUIDE.md): 0 = clean (every operation this capture exercised was already covered by
 // the baseline), 1 = fatal error (bad arguments, an unreadable/malformed baseline or capture file),
@@ -2471,6 +2576,103 @@ int main(int argc, char** argv) {
                       "port->service-name table")
         ->check(CLI::ExistingFile);
 
+    // --- detect ------------------------------------------------------------------
+    // Grok gap #4 ("Detection that OT IR teams recognize") -- see detect_engine.hpp's own file
+    // header and docs/design/detection-engine.md for the design record.
+    auto* detect_cmd = app.add_subcommand(
+        "detect", "Detection findings OT incident-response teams recognize: engineering-station "
+                   "mode changes, firmware/logic downloads and restarts, protocol misuse, and new "
+                   "remote-access channels -- each finding cites a MITRE ATT&CK for ICS technique "
+                   "and a labeled confidence level. See docs/design/detection-engine.md.");
+    std::string detect_input, detect_interface, detect_filter, detect_output;
+    int detect_duration = 0;
+    int detect_snaplen = 65535;
+    bool detect_promiscuous = true;
+    std::string detect_format = "text";
+    bool detect_strict = false;
+    std::string detect_policy_path;
+    std::string detect_baseline_file;
+    size_t detect_max_baseline_file_bytes = kDefaultMaxBaselineFileBytes;
+    bool detect_mac_vendor = false, detect_resolve = false, detect_service_names = true;
+    std::string detect_hosts_file, detect_services_file;
+    ResourceLimitCliVars detect_limit_vars;
+
+    auto* detect_input_opt =
+        detect_cmd->add_option("-r,--read", detect_input,
+                                "Input capture file (classic pcap or pcapng, auto-detected)")
+            ->check(CLI::ExistingFile);
+    auto* detect_interface_opt = detect_cmd->add_option(
+        "-i,--interface", detect_interface,
+        "Run detection against live traffic on this network interface instead of reading a file "
+        "(see 'conduitscope interfaces'); requires this build to have been compiled with "
+        "libpcap/Npcap support -- exactly one of -r/-i is required");
+    detect_input_opt->excludes(detect_interface_opt);
+    detect_interface_opt->excludes(detect_input_opt);
+    detect_cmd->add_option("-f,--filter", detect_filter,
+                            "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
+                            "with -r, applied per-packet after reading the file; requires this build to "
+                            "have been compiled with libpcap/Npcap support in both cases");
+    detect_cmd
+        ->add_option("--duration", detect_duration,
+                      "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
+                      "Ctrl+C instead)")
+        ->capture_default_str();
+    detect_cmd->add_option("--snaplen", detect_snaplen, "Maximum bytes captured per packet with -i")
+        ->capture_default_str();
+    detect_cmd->add_flag(
+        "!--no-promiscuous", detect_promiscuous,
+        "With -i, don't put the interface into promiscuous mode (by default it is)");
+    detect_cmd->add_option(
+        "-o,--output", detect_output,
+        "Write the report here instead of stdout. Caution: a single-dash long-option typo "
+        "glues onto this flag -- always use the double dash for a long option name");
+    detect_cmd
+        ->add_option("-T,--format", detect_format, "Report format: text or json")
+        ->transform(CLI::IsMember({"text", "json"}))
+        ->capture_default_str();
+    detect_cmd->add_flag("--strict", detect_strict,
+                          "Abort on the first malformed packet instead of reporting it and continuing");
+    add_resource_limit_options(detect_cmd, detect_limit_vars);
+    detect_cmd
+        ->add_option("--policy", detect_policy_path,
+                      "Policy YAML file (see 'policy validate') -- used only to tell a new "
+                      "remote-access session that stays within one declared zone (MITRE ATT&CK for "
+                      "ICS T0886, Remote Services) from one that crosses a zone boundary (T0822, "
+                      "External Remote Services); every other finding is unaffected by this flag")
+        ->check(CLI::ExistingFile);
+    detect_cmd
+        ->add_option("--baseline-file", detect_baseline_file,
+                      "Baseline JSON file (see 'baseline learn') -- used to resolve every "
+                      "new-vs-known finding (a new remote-access channel, a new CIP originator) "
+                      "against real history instead of this capture's own first-occurrence order. "
+                      "A conduit already present in the baseline is not flagged at all; one "
+                      "genuinely absent gets Medium confidence. Without this flag, a new-vs-known "
+                      "finding is Low confidence (first occurrence within this capture only)")
+        ->check(CLI::ExistingFile);
+    detect_cmd
+        ->add_option("--max-baseline-file-bytes", detect_max_baseline_file_bytes,
+                      "Cap how large --baseline-file may be before it's read into memory (default "
+                      "256 MiB)")
+        ->capture_default_str();
+    detect_cmd->add_flag("--mac-vendor", detect_mac_vendor,
+                          "Enable OUI (MAC vendor) resolution in the report; off by default");
+    detect_cmd->add_flag(
+        "--resolve", detect_resolve,
+        "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the "
+        "report; off by default; NEVER performs live DNS");
+    detect_cmd
+        ->add_option("--hosts", detect_hosts_file,
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+        ->check(CLI::ExistingFile);
+    detect_cmd->add_flag("!--nn", detect_service_names,
+                          "Disable service name resolution (built-in table plus --services) in "
+                          "the report, on by default");
+    detect_cmd
+        ->add_option("--services", detect_services_file,
+                      "Unix /etc/services-style file to supplement/override the built-in "
+                      "port->service-name table")
+        ->check(CLI::ExistingFile);
+
     // --- baseline learn / baseline check ---------------------------------------
     // ICS communication-baseline analysis at the protocol-operation level (roadmap item 41,
     // docs/DEVELOPMENT.md; full design and rationale at docs/design/baseline-engine.md). Mirrors
@@ -2715,6 +2917,13 @@ int main(int argc, char** argv) {
                               inventory_limit_vars,
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
                               inventory_services_file, *diag);
+    }
+    if (detect_cmd->parsed()) {
+        return run_detect(detect_input, detect_interface, detect_filter, detect_duration, detect_snaplen,
+                           detect_promiscuous, detect_output, detect_format, detect_strict, quiet,
+                           detect_policy_path, detect_baseline_file, detect_max_baseline_file_bytes,
+                           detect_limit_vars, detect_mac_vendor, detect_resolve, detect_hosts_file,
+                           detect_service_names, detect_services_file, *diag);
     }
     if (baseline_learn_cmd->parsed()) {
         return run_baseline_learn(baseline_learn_inputs, baseline_learn_file, baseline_learn_strict, quiet,

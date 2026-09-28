@@ -18113,6 +18113,227 @@ def build_baseline_iec104_new_ioa_sample():
     (TESTS_DIR / "sample_baseline_iec104_new_ioa.pcap").write_bytes(data)
 
 
+def build_detect_sample():
+    """Grok gap #4 ("Detection that OT IR teams recognize" --
+    docs/reviews/2026-09-grok-ics-ot-improvement-areas.md item 4, docs/design/detection-engine.md) --
+    one standalone packet per `detect` finding source, each on its own conduit/IP pair so every
+    finding's own client/server/technique/confidence is independently checkable. Every OT protocol
+    packet here is a standalone request the same "no handshake needed first" way
+    build_baseline_s7comm_control_plane_sample/build_baseline_iec104_new_ioa_sample above already
+    establish for their own protocols (S7comm/IEC 104 are both effectively stateless at the level
+    this decoder reads them).
+
+    Scenarios (see detect_engine.cpp for exactly which decoded fields produce each):
+      1) S7comm Request Download (function 0x1A) ENG_IP -> PLC_IP:102 -- FirmwareLogicChange/T0843.
+      2) DNP3 Cold Restart request ENG_IP -> DNP3_OUT_IP -- FirmwareLogicChange/T0816.
+      3) DNP3 Enable Unsolicited Responses, then an Unsolicited Response FROM THE SAME outstation --
+         must NOT be flagged (this master was seen enabling it on this exact conduit).
+      4) DNP3 Unsolicited Response from a SECOND, different outstation (DNP3_OUT2_IP) that never saw
+         an Enable -- must be flagged: ProtocolMisuse/T0855.
+      5) IEC 104 ASDU with COT=44 ("unknown type identification") -- ProtocolMisuse/T0855.
+      6) IEC 104 Reset Process (C_RP_NA_1), COT=6 "activation" -- FirmwareLogicChange/T0816.
+      7) BACnet reinitializeDevice Confirmed-Request -- FirmwareLogicChange/T0816.
+      8) BACnet deviceCommunicationControl Confirmed-Request -- ProtocolMisuse/T0855.
+      9) & 10) EtherNet/IP CIP Forward_Open from two DIFFERENT originators (ENIP_C1_IP, then
+         ENIP_C2_IP) to the SAME target ENIP_S_IP -- only the SECOND originator produces a finding
+         (ProtocolMisuse/T0855, Low confidence with no --baseline-file); the first is the "nothing to
+         be new relative to" baseline case and produces none, see DetectEngine::observe's own comment.
+      11) A single RDP (TCP/3389) packet RDP_CLIENT_IP -> RDP_SERVER_IP -- RemoteAccessChannel/T0886,
+          Low confidence with no --baseline-file/--policy (see CMakeLists.txt's own
+          detect_remote_access_with_policy_upgrades_to_t0822 for the T0822 zone-crossing case, which
+          reuses this same packet against a policy file rather than needing a second fixture)."""
+    ENG_IP, ENG_MAC = "192.168.1.60", mac("00:0c:29:cd:00:01")
+    DNP3_OUT_IP, DNP3_OUT_MAC = "192.168.1.61", mac("00:0c:29:cd:00:02")
+    DNP3_OUT2_IP, DNP3_OUT2_MAC = "192.168.1.62", mac("00:0c:29:cd:00:03")
+    IEC_IP, IEC_MAC = "192.168.1.63", mac("00:0c:29:cd:00:04")
+    BAC_IP, BAC_MAC = "192.168.1.64", mac("00:0c:29:cd:00:05")
+    ENIP_S_IP, ENIP_S_MAC = "192.168.1.65", mac("00:0c:29:cd:00:06")
+    ENIP_C1_IP, ENIP_C1_MAC = "192.168.1.66", mac("00:0c:29:cd:00:07")
+    ENIP_C2_IP, ENIP_C2_MAC = "192.168.1.67", mac("00:0c:29:cd:00:08")
+    RDP_CLIENT_IP, RDP_CLIENT_MAC = "192.168.1.68", mac("00:0c:29:cd:00:09")
+    RDP_SERVER_IP, RDP_SERVER_MAC = "192.168.1.69", mac("00:0c:29:cd:00:0a")
+
+    packets = []
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident):
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4000 + ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def add_udp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident):
+        udp = udp_header(src_port, dst_port, payload)
+        ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x4000 + ident) + udp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # 1) S7comm Request Download (function 0x1A) -- minimal 1-byte param is enough: has_function/
+    #    function_name are set unconditionally once the function-code byte itself is read (see
+    #    detect_engine.cpp's own comment on has_function being populated regardless of how much of a
+    #    function's own further parameter structure this decoder goes on to decode).
+    s7_param = bytes([0x1A])
+    s7_req = s7_header(0x01, 301, len(s7_param), 0) + s7_param
+    s7_cotp = tpkt_frame(COTP_DT_HEADER, s7_req)
+    add_tcp(ENG_IP, ENG_MAC, PLC_IP, PLC_MAC, 49300, 102, s7_cotp, 1)
+
+    # 2) DNP3 Cold Restart request (function 0x0D), no object headers.
+    cold_restart = dnp3_link_frame(source=1, destination=1024, user_data=bytes([0xC0, 0xC0, 0x0D]))
+    add_tcp(ENG_IP, ENG_MAC, DNP3_OUT_IP, DNP3_OUT_MAC, 49301, 20000, cold_restart, 2)
+
+    # 3) DNP3 Enable Unsolicited Responses (function 0x14) on the ENG_IP<->DNP3_OUT_IP conduit,
+    #    then an Unsolicited Response (function 0x82) FROM DNP3_OUT_IP -- must NOT be flagged.
+    enable_unsol = dnp3_link_frame(source=1, destination=1024, user_data=bytes([0xC0, 0xC0, 0x14]))
+    add_tcp(ENG_IP, ENG_MAC, DNP3_OUT_IP, DNP3_OUT_MAC, 49301, 20000, enable_unsol, 3)
+    unsol_ok = dnp3_link_frame(source=1024, destination=1, user_data=bytes([0xC0, 0xC0, 0x82, 0x00, 0x00]))
+    add_tcp(DNP3_OUT_IP, DNP3_OUT_MAC, ENG_IP, ENG_MAC, 20000, 49301, unsol_ok, 4)
+
+    # 4) Unsolicited Response from a SECOND outstation (DNP3_OUT2_IP) this capture never saw ENG_IP
+    #    enable unsolicited responses on -- must be flagged.
+    unsol_bad = dnp3_link_frame(source=1024, destination=1, user_data=bytes([0xC0, 0xC0, 0x82, 0x00, 0x00]))
+    add_tcp(DNP3_OUT2_IP, DNP3_OUT2_MAC, ENG_IP, ENG_MAC, 20000, 49302, unsol_bad, 5)
+
+    # 5) IEC 104 ASDU with COT=44 ("unknown type identification") on a General Interrogation (type
+    #    100) -- the type itself is never flagged on its own (see detect_engine.cpp's own scoping
+    #    note), only this abnormal COT.
+    bad_cot = iec104_asdu(100, 0x01, 44, 1, ioa(0) + bytes([20]))
+    add_tcp(ENG_IP, ENG_MAC, IEC_IP, IEC_MAC, 49303, IEC104_PORT, iec104_apdu(iec104_i_control(0, 0), bad_cot), 6)
+
+    # 6) IEC 104 Reset Process command (C_RP_NA_1, type 105), COT=6 "activation", QRP=1 "general
+    #    reset".
+    reset_process = iec104_asdu(105, 0x01, 6, 1, ioa(0) + bytes([1]))
+    add_tcp(ENG_IP, ENG_MAC, IEC_IP, IEC_MAC, 49303, IEC104_PORT,
+            iec104_apdu(iec104_i_control(1, 1), reset_process), 7)
+
+    # 7) BACnet reinitializeDevice (service choice 20) Confirmed-Request -- data body left empty;
+    #    this service isn't in bacnet.hpp's own "first pass" value-decode set (only named, not
+    #    value-decoded -- see that file's header comment), so an empty body still yields a real
+    #    service_choice_name match.
+    reinit = bvlc_message(0x0A, npdu_header() + apdu_confirmed_request(20, b"", invoke_id=40))
+    add_udp(ENG_IP, ENG_MAC, BAC_IP, BAC_MAC, 49304, BACNET_PORT, reinit, 8)
+
+    # 8) BACnet deviceCommunicationControl (service choice 17) Confirmed-Request.
+    devcomm = bvlc_message(0x0A, npdu_header() + apdu_confirmed_request(17, b"", invoke_id=41))
+    add_udp(ENG_IP, ENG_MAC, BAC_IP, BAC_MAC, 49304, BACNET_PORT, devcomm, 9)
+
+    # 9) & 10) CIP Forward_Open from two different originators to the same target. Minimal request:
+    #    service 0x54, path_size_words=2 (4 bytes): Class(0x20,0x06 Connection Manager) +
+    #    Instance(0x24,0x01) -- decode_cip_message only needs the service byte + a well-formed path
+    #    to set is_response=false/service_name="Forward_Open"/decoded=true; the connection-parameter
+    #    data that would normally follow is not required for that.
+    forward_open_cip = bytes([0x54, 0x02, 0x20, 0x06, 0x24, 0x01])
+    fwd_open_msg = enip_message(0x006F, data=enip_cpf_unconnected(forward_open_cip), session_handle=0x1001,
+                                 sender_context=b"DETECT01")
+    add_tcp(ENIP_C1_IP, ENIP_C1_MAC, ENIP_S_IP, ENIP_S_MAC, 49305, ENIP_PORT, fwd_open_msg, 10)
+    fwd_open_msg2 = enip_message(0x006F, data=enip_cpf_unconnected(forward_open_cip), session_handle=0x1002,
+                                  sender_context=b"DETECT02")
+    add_tcp(ENIP_C2_IP, ENIP_C2_MAC, ENIP_S_IP, ENIP_S_MAC, 49306, ENIP_PORT, fwd_open_msg2, 11)
+
+    # 11) A single RDP (TCP/3389) packet -- port-only match (it_protocols.cpp's own weakest
+    #     identification tier, see that file's header comment), which is all this feature needs to
+    #     exercise the RemoteAccessChannel finding source.
+    add_tcp(RDP_CLIENT_IP, RDP_CLIENT_MAC, RDP_SERVER_IP, RDP_SERVER_MAC, 49307, 3389,
+            b"\x03\x00\x00\x0b\x06\xe0\x00\x00\x00\x00\x00", 12)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_020_000 + i, i * 1000)
+    (TESTS_DIR / "sample_detect.pcap").write_bytes(data)
+
+
+def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
+    """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
+    umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
+    (session key + function/status byte + data), exactly what src/umas.cpp's decode_umas reads."""
+    pdu = bytes([0x5A]) + umas_payload
+    length = 1 + len(pdu)  # unit_id + PDU
+    return struct.pack("!HHH", transaction_id, 0, length) + bytes([unit_id]) + pdu
+
+
+def build_umas_sample():
+    """UMAS-over-Modbus/TCP (Grok gap #4 Phase 5 -- docs/design/detection-engine.md's own UMAS
+    research section, umas.hpp's header comment for the two primary sources this decoder is built
+    from). Exercises every function code detect_engine.cpp's Phase 6 wiring cares about
+    (TAKE_PLC_RESERVATION, START_PLC/STOP_PLC, INITIALIZE_DOWNLOAD/DOWNLOAD_BLOCK/
+    END_STRATEGY_DOWNLOAD, READ_ID/READ_PROJECT_INFO/READ_PLC_INFO), a failure (0xFD) response,
+    and one function code absent from umas.hpp's own kUmasFunctions table, to exercise the
+    "Unknown (0x..)" naming fallback (umas_function_name, umas.cpp) the same way every other
+    protocol's own function/command-code table in this codebase is fixture-tested against an
+    intentionally-unrecognized value.
+
+    All requests use ENG_IP (the same "engineering workstation" role sample_detect.pcap's own
+    ENG_IP plays) against PLC_IP, over port 502 -- UMAS shares Modbus/TCP's own well-known port,
+    it is not a separate registered port. Each request/response pair reuses the SAME session key
+    byte (arbitrary per pair, distinct across pairs purely so a human reading a hex dump can tell
+    which response answers which request -- this decoder itself does not correlate by session key,
+    see umas.hpp's own header comment on why: real session-key reuse/rotation behavior is
+    documented as unreliable pre-firmware-2.7 by Kaspersky's own writeup).
+
+    Scenarios 7-8 add two more engineering-station IPs (ENG2_IP, ENG3_IP) to exercise
+    detect_engine.cpp's own "new UMAS engineering-station originator" mechanism
+    (umas_engineering_originators_by_server_): ENG_IP's own TAKE_PLC_RESERVATION in scenario 1 is
+    the FIRST-ever originator for PLC_IP across TAKE_PLC_RESERVATION/READ_ID/READ_PROJECT_INFO/
+    READ_PLC_INFO -- nothing to be new relative to, so it produces no finding (confirmed during
+    this fixture's own manual verification pass). ENG2_IP's TAKE_PLC_RESERVATION (7) is a
+    genuinely new originator -> ProtocolMisuse/T0855. ENG3_IP's READ_ID (8) is ALSO a new
+    originator, via a DIFFERENT one of the four tracked commands -> EngineeringStationActivity/
+    T0888 -- proving the shared originator set really is command-agnostic, not per-command."""
+    ENG_IP, ENG_MAC = "192.168.1.50", HMI_MAC
+    PLC_IP_LOCAL, PLC_MAC_LOCAL = "192.168.1.10", PLC_MAC
+    ENG2_IP, ENG2_MAC = "192.168.1.51", mac("00:0c:29:cd:01:01")
+    ENG3_IP, ENG3_MAC = "192.168.1.52", mac("00:0c:29:cd:01:02")
+
+    packets = []
+
+    def add_tcp(from_eng: bool, payload: bytes, ident: int, sport=49400, dport=502,
+                eng_ip=ENG_IP, eng_mac=ENG_MAC):
+        src_ip, dst_ip = (eng_ip, PLC_IP_LOCAL) if from_eng else (PLC_IP_LOCAL, eng_ip)
+        src_mac, dst_mac = (eng_mac, PLC_MAC_LOCAL) if from_eng else (PLC_MAC_LOCAL, eng_mac)
+        src_port, dst_port = (sport, dport) if from_eng else (dport, sport)
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x6000 + ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # 1) TAKE_PLC_RESERVATION (0x10) request + success (0xFE) response.
+    add_tcp(True, umas_mbap(101, 0, bytes([0x01, 0x10])), 1)
+    add_tcp(False, umas_mbap(101, 0, bytes([0x01, 0xFE, 0x00, 0x00])), 2)
+
+    # 2) START_PLC (0x40) request + success response -- T0858 (Change Operating Mode) territory.
+    add_tcp(True, umas_mbap(102, 0, bytes([0x02, 0x40])), 3)
+    add_tcp(False, umas_mbap(102, 0, bytes([0x02, 0xFE])), 4)
+
+    # 3) STOP_PLC (0x41) request + FAILURE (0xFD) response -- exercises the failure branch.
+    add_tcp(True, umas_mbap(103, 0, bytes([0x03, 0x41])), 5)
+    add_tcp(False, umas_mbap(103, 0, bytes([0x03, 0xFD])), 6)
+
+    # 4) INITIALIZE_DOWNLOAD (0x33) / DOWNLOAD_BLOCK (0x34) / END_STRATEGY_DOWNLOAD (0x35) --
+    #    T0843 (Program Download) territory, requests only (a real download's block-transfer
+    #    payload is exactly the opaque data this decoder deliberately doesn't parse further).
+    add_tcp(True, umas_mbap(104, 0, bytes([0x04, 0x33, 0x00, 0x00, 0x10, 0x00])), 7)
+    add_tcp(True, umas_mbap(105, 0, bytes([0x04, 0x34]) + bytes(range(16))), 8)
+    add_tcp(True, umas_mbap(106, 0, bytes([0x04, 0x35])), 9)
+
+    # 5) READ_ID (0x02) / READ_PROJECT_INFO (0x03) / READ_PLC_INFO (0x04) -- T0888/T0861
+    #    (discovery/enumeration) territory.
+    add_tcp(True, umas_mbap(107, 0, bytes([0x05, 0x02])), 10)
+    add_tcp(True, umas_mbap(108, 0, bytes([0x05, 0x03])), 11)
+    add_tcp(True, umas_mbap(109, 0, bytes([0x05, 0x04])), 12)
+
+    # 6) An undocumented function code (0x99 -- absent from kUmasFunctions, umas.cpp) to exercise
+    #    umas_function_name's own "Unknown (0x..)" fallback.
+    add_tcp(True, umas_mbap(110, 0, bytes([0x06, 0x99, 0xAB])), 13)
+
+    # 7) TAKE_PLC_RESERVATION from a SECOND originator (ENG2_IP) -- a genuinely new engineering-
+    #    station client relative to ENG_IP's own scenario-1 TAKE_PLC_RESERVATION -> flagged.
+    add_tcp(True, umas_mbap(111, 0, bytes([0x07, 0x10])), 14, sport=49401, eng_ip=ENG2_IP, eng_mac=ENG2_MAC)
+
+    # 8) READ_ID from a THIRD originator (ENG3_IP) -- new relative to BOTH ENG_IP and ENG2_IP,
+    #    via a different tracked command than either of theirs -> also flagged.
+    add_tcp(True, umas_mbap(112, 0, bytes([0x08, 0x02])), 15, sport=49402, eng_ip=ENG3_IP, eng_mac=ENG3_MAC)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_umas.pcap").write_bytes(data)
+
+
 # --- AMQP 0-9-1 / AMQP 1.0 -----------------------------------------------------------------
 # Two wire-INCOMPATIBLE protocols sharing TCP port 5672 by convention -- see amqp_common.hpp's own
 # file header comment for the full detection-posture rationale this fixture exercises: sticky
@@ -20049,6 +20270,8 @@ if __name__ == "__main__":
     build_baseline_s7comm_control_plane_sample()
     build_baseline_opcua_new_nodeid_sample()
     build_baseline_iec104_new_ioa_sample()
+    build_detect_sample()
+    build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()
     build_dicom_sample()
