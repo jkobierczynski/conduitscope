@@ -1662,6 +1662,37 @@ write back at the end. Required. Unlike \fBbaseline check\fR's own
 \fB\-\-baseline\-file\fR, this path is \fBnot\fR required to already exist --
 a missing file is treated as an empty baseline and created.
 .TP
+.B \-\-max\-baseline\-file\-bytes \fIN\fR
+Cap how large \fB\-\-baseline\-file\fR may be before it's read into memory.
+Default: 256 MiB. \fB0\fR leaves it at its own default; a baseline file this
+large genuinely being legitimate is essentially always a sign something
+else is wrong (see \fBdocs/DEVELOPMENT.md\fR's security review write\-up).
+.TP
+.B \-\-max\-baseline\-tcp\-sessions \fIN\fR
+Cap the number of distinct TCP sessions \fBBaselineEngine\fR tracks per
+capture for client/server direction inference. Default: 50,000. \fB0\fR
+leaves it at its own default; past this, further new sessions fall back to
+the known\-port heuristic instead of SYN/SYN\-ACK tracking and this
+capture's own observation is marked incomplete (see \fB\-\-max\-baseline\-*\fR's
+shared behavior below).
+.TP
+.B \-\-max\-baseline\-conduits \fIN\fR
+Cap the number of distinct conduits (client, server, protocol, port)
+\fBBaselineEngine\fR records per capture. Default: 20,000. \fB0\fR leaves it
+at its own default; past this, further new conduits observed in the
+capture are not recorded.
+.TP
+.B \-\-max\-baseline\-operations\-per\-conduit \fIN\fR
+Cap the number of distinct operation keys \fBBaselineEngine\fR records per
+conduit. Default: 5,000. \fB0\fR leaves it at its own default; past this,
+further new operations on that conduit are not recorded.
+.TP
+.B \-\-max\-baseline\-ranges\-per\-operation \fIN\fR
+Cap the number of distinct (coalesced) target-address ranges
+\fBBaselineEngine\fR records per operation. Default: 1,000. \fB0\fR leaves it
+at its own default; past this, further new, disjoint ranges for that
+operation are not recorded.
+.TP
 .I captures
 One or more pcap/pcapng capture files to learn from, in order (classic pcap
 or pcapng, auto-detected). Required, positional (no \fB\-r\fR/\fB\-i\fR --
@@ -1678,12 +1709,56 @@ Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
 the same name above; apply identically here since this command decodes the
 same traffic. Each defaults to 0 (leave every site at its own compile-time
 default).
+.PP
+If any of the four \fB\-\-max\-baseline\-*\fR limits above is hit while
+learning from a given capture, \fBlearn\fR still absorbs whatever it DID
+manage to observe from that capture (a partial observation merged in is
+still strictly better than none) but prints a warning naming which
+limit(s) were hit, even under \fB\-q\fR/\fB\-\-quiet\fR \-\- unlike an
+ordinary parse warning, this affects the correctness of the baseline file
+being written, not just diagnostic noise. \fBlearn\fR still exits \fB0\fR
+in this case; \fBbaseline check\fR, by contrast, cannot silently produce a
+clean/compliant result from a truncated observation and instead uses a
+dedicated exit code \-\- see \fBEXIT STATUS\fR.
 .SH OPTIONS (baseline check)
 .TP
 .B \-\-baseline\-file \fIFILE\fR
 Baseline JSON file to check against (read-only, never written). Required
 and must already exist -- unlike \fBbaseline learn\fR's own
 \fB\-\-baseline\-file\fR.
+.TP
+.B \-\-max\-baseline\-file\-bytes \fIN\fR
+Cap how large \fB\-\-baseline\-file\fR may be before it's read into memory.
+Default: 256 MiB. \fB0\fR leaves it at its own default; a baseline file this
+large genuinely being legitimate is essentially always a sign something
+else is wrong (see \fBdocs/DEVELOPMENT.md\fR's security review write\-up).
+.TP
+.B \-\-max\-baseline\-tcp\-sessions \fIN\fR
+Cap the number of distinct TCP sessions \fBBaselineEngine\fR tracks in THIS
+capture for client/server direction inference. Default: 50,000. \fB0\fR
+leaves it at its own default; past this, further new sessions fall back to
+the known\-port heuristic instead of SYN/SYN\-ACK tracking and this
+capture's own observation is marked incomplete (see below).
+.TP
+.B \-\-max\-baseline\-conduits \fIN\fR
+Cap the number of distinct conduits (client, server, protocol, port)
+\fBBaselineEngine\fR records for THIS capture. Default: 20,000. \fB0\fR
+leaves it at its own default; past this, further new conduits observed in
+the capture are not recorded and this capture's own observation is marked
+incomplete.
+.TP
+.B \-\-max\-baseline\-operations\-per\-conduit \fIN\fR
+Cap the number of distinct operation keys \fBBaselineEngine\fR records per
+conduit for THIS capture. Default: 5,000. \fB0\fR leaves it at its own
+default; past this, further new operations on that conduit are not
+recorded and this capture's own observation is marked incomplete.
+.TP
+.B \-\-max\-baseline\-ranges\-per\-operation \fIN\fR
+Cap the number of distinct (coalesced) target-address ranges
+\fBBaselineEngine\fR records per operation for THIS capture. Default:
+1,000. \fB0\fR leaves it at its own default; past this, further new,
+disjoint ranges for that operation are not recorded and this capture's own
+observation is marked incomplete.
 .TP
 .I capture
 The single pcap/pcapng capture file to check (classic pcap or pcapng,
@@ -1740,6 +1815,16 @@ Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
 the same name above; apply identically here since this command decodes the
 same traffic. Each defaults to 0 (leave every site at its own compile-time
 default).
+.PP
+If any of the four \fB\-\-max\-baseline\-*\fR limits above is hit while
+observing THIS capture, the report's \fBobservation_truncated\fR field
+(JSON) is set and the text report prints an \fBOBSERVATION INCOMPLETE\fR
+banner naming which limit(s) were hit, even when the capture would
+otherwise be reported \fBCLEAN\fR -- a \fBCLEAN\fR/compliant result from a
+truncated observation is not trustworthy (raise the relevant
+\fB\-\-max\-baseline\-*\fR limit and re\-run). This takes priority over the
+ordinary compliant/anomaly exit codes: see \fBEXIT STATUS\fR's code
+\fB5\fR.
 .SH LIVE CAPTURE
 \fB\-i/\-\-interface\fR and \fBinterfaces\fR require this build to have been
 compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --
@@ -1910,6 +1995,20 @@ only by another host's precedent in the same \fB\-\-policy\fR zone
 (\fBnew\-conduit\-known\-zone\fR), a new operation on a known conduit, or
 an address range outside the baseline for a known operation). Never
 returned by \fBbaseline learn\fR, which never emits a verdict at all.
+.TP
+.B 5
+\fBbaseline check\fR only: the capture and baseline file were both valid,
+but this run's own \fBBaselineEngine\fR hit at least one of its four
+internal \fB\-\-max\-baseline\-*\fR growth ceilings (see \fBOPTIONS
+(baseline check)\fR above) and therefore only PARTLY observed the
+capture -- \fBobservation_truncated\fR is true. Takes priority over both
+\fB0\fR and \fB4\fR: a truncated observation can only ever produce false
+negatives, so a caller scripting against this exit code should treat
+\fB5\fR as "re\-run with a higher \fB\-\-max\-baseline\-*\fR limit and try
+again," not as clean and not as an ordinary anomaly. Never returned by
+\fBbaseline learn\fR, which always absorbs whatever it could observe and
+exits \fB0\fR regardless (printing a warning instead -- see \fBOPTIONS
+(baseline learn)\fR above).
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets
