@@ -2190,13 +2190,27 @@ through its ten points in order, starting with items 1-3, one at a time:
   engineering-station protocol, no official public specification, sourced from Kaspersky ICS-CERT
   and an open-source Wireshark dissector) wired into `detect`, `AssetInventoryEngine`, and
   `BaselineEngine` alike. Grok review item 4 is now fully closed.
-- **Items 5-10** (continuous SPAN/TAP sensor mode, decode depth on process-critical protocols, a
-  62443/NIS2 evidence pack, Zeek/CEF/syslog integration, parser trustworthiness, and product
-  packaging) are not yet scheduled. The response document notes that item 9 (parser trustworthiness:
-  ASan/UBSan in CI, fuzzing on the high-value parsers) is already substantially standing practice,
-  not an open item, and that item 5 (continuous sensor mode) is worth a deliberate scope conversation
-  before committing to it, since it pulls toward an always-on sensor product rather than an
-  assessment/audit CLI.
+- **Item 5 (continuous, safe sensor mode) is fully done.** See
+  [docs/design/sensor-mode.md](design/sensor-mode.md) for the full design record. Scoped in two
+  `AskUserQuestion` decisions with Jurgen before any code was written, since the response document
+  had flagged this item as worth a deliberate scope conversation rather than a default "yes" (it
+  pulls toward an always-on sensor product, not an assessment/audit CLI): (1) a **capture-only
+  rotator** -- a new `RotatingPcapWriter` and `capture` subcommand that rotate pcap output by size
+  and/or time and enforce a total-bytes or file-count retention cap against a live `-i` interface,
+  with no decode/analysis engine running inside the capture process itself (analysis stays a
+  separate, later, offline pass over the rotated files, exactly as today); and (2) **independent
+  per-tap processes plus a merge subcommand** -- each tap point runs its own single-interface
+  `conduitscope capture`/analysis pair with no new cross-process concurrency, and a new `merge
+  inventory` subcommand unions N tap points' own `inventory --format json` reports (by IP, summing
+  edge packet counts, re-deriving zones/conduits fresh rather than copying them) into one
+  site-wide asset matrix. Confirmed by direct source reading that the "survives zero-traffic
+  interfaces" half of Grok's ask was already solved by the existing `LiveCapture` poll loop, and
+  that `PcapWriter` already existed as a reusable non-rotating building block. Grok review item 5 is
+  now fully closed.
+- **Items 6-10** (decode depth on process-critical protocols, a 62443/NIS2 evidence pack, Zeek/CEF/
+  syslog integration, parser trustworthiness, and product packaging) are not yet scheduled. The
+  response document notes that item 9 (parser trustworthiness: ASan/UBSan in CI, fuzzing on the
+  high-value parsers) is already substantially standing practice, not an open item.
 
 
 ## PROTOCOL DETECTION
@@ -13214,6 +13228,108 @@ it done as its own patch.
     `man/conduitscope.1` (`detect` COMMANDS entry, `--policy`/
     `--baseline-file` OPTIONS entries, and the LIMITATIONS paragraph all
     rewritten) updated in the same increment.
+
+91. **Continuous, safe sensor mode -- Grok gap #5.** See
+    [docs/design/sensor-mode.md](design/sensor-mode.md) for the full design
+    record. Scoped in two `AskUserQuestion` decisions with Jurgen before any
+    code was written, since the response document had flagged this item as
+    worth a deliberate scope conversation rather than a default "yes" (it
+    pulls toward an always-on sensor product, not an assessment/audit CLI),
+    and confirmed against the actual source first that Grok's own "survives
+    zero-traffic interfaces" complaint was already solved by the existing
+    `LiveCapture` poll loop, and that a non-rotating `PcapWriter` already
+    existed as a reusable building block:
+
+    **Capture-only rotator** (Jurgen's first answer, "Capture-only
+    rotator"): a new `RotatingPcapWriter`
+    (`include/conduitscope/rotating_pcap_writer.hpp` /
+    `src/rotating_pcap_writer.cpp`) wraps classic-pcap file output with a
+    `RotationPolicy` (`rotate_bytes`, `rotate_seconds`, `max_total_bytes`,
+    `max_files`) -- rotates on size and/or elapsed packet-timestamp time
+    (never wall-clock, so behavior stays deterministic and testable),
+    evicts the oldest closed file whenever a total-bytes or file-count cap
+    is exceeded (never the currently-open file, and eviction failures are
+    reported through a callback rather than thrown, since a multi-week
+    unattended sensor should keep running rather than crash on one bad
+    `unlink`), and always writes at least one packet per file regardless of
+    how small `rotate_bytes` is set, to avoid an infinite-rotation loop.
+    Covered by a 39-assertion selftest
+    (`tools/rotating_pcap_writer_selftest.cpp`, wired into CTest as
+    `rotating_pcap_writer_rotation_and_retention_self_test`) against
+    synthetic packets, plus `tests/capture_rotation_smoke.sh` (CTest's
+    `capture_rotation_and_retention_with_real_traffic`) against real
+    loopback traffic.
+
+    A new `capture` subcommand (`src/cli_main.cpp`) wires
+    `RotatingPcapWriter` into live `-i` capture: `-i,--interface`
+    (required), `-f,--filter`, `-a,--duration`, `--snaplen`,
+    `!--no-promiscuous`, `-c,--max-packets`, `-d,--directory`, `--prefix`,
+    `--rotate-bytes`, `--rotate-seconds`, `--max-total-bytes`,
+    `--max-files`. Deliberately its own subcommand rather than an extension
+    of `decode -i -w`: `decode` always fully decodes and prints every
+    packet (wasted overhead for an unattended multi-week run) and `decode
+    -w` has no rotation at all. Live-interface-only (no `-r`), since an
+    already-captured offline file has no "fills the disk over weeks"
+    problem to solve. Output filenames are sanitized
+    (`sanitize_filename_component`) before use, since interface names are
+    not inherently filesystem-safe on every platform (Windows/Npcap's own
+    `\Device\NPF_{GUID}` naming contains backslashes and braces). Verified
+    by direct `grep -rn "pcap_sendpacket\|pcap_inject\|send_packet\|SendPacket"`
+    across `src/`/`include/` (zero matches) that `capture` never transmits
+    toward the process network, matching Grok's own explicit ask. 6 new
+    CTest cases cover argument validation, retention-without-a-rotation-
+    trigger error clarity, a bad output directory, an unavailable
+    interface, a clean zero-traffic stop, and the real-traffic rotation
+    smoke test above. Validated on loopback traffic only -- Grok's own
+    "validate on real mirrored OT switches, not loopback" ask is flagged in
+    the design doc and `docs/USER_GUIDE.md`'s LIMITATIONS as still
+    outstanding, since this project has no access to a real mirrored OT
+    switch to test against.
+
+    **Independent per-tap processes + merge subcommand** (Jurgen's second
+    answer, over introducing any new concurrency): each tap point runs its
+    own ordinary, independent, single-interface `conduitscope capture` /
+    analysis pair -- no multi-tap process, no new concurrency anywhere. A
+    new `merge inventory` subcommand
+    (`include/conduitscope/inventory_merge.hpp` / `src/inventory_merge.cpp`)
+    stitches N tap points' own `inventory --format json` reports into one
+    site-wide asset matrix: assets and edges are unioned by IP/key
+    (overlapping IPs across tap points are not double-counted; overlapping
+    edges have their `packet_count`s summed), `ever_client`/`ever_server`
+    recomputed from the union, and zones/conduits always freshly re-derived
+    from the merged assets/edges (never copied from either input) using the
+    same `cidr_mask`/`zone_name_for` logic `AssetInventoryEngine::finish`
+    itself uses, reimplemented locally since it operates on already-parsed
+    JSON rather than a live engine. A dedicated JSON parser
+    (`inventory_merge.cpp`'s own `JsonCursor`) is deliberately *tolerant* of
+    unrecognized fields, unlike `baseline.cpp`'s strict parser for its own
+    fixed self-authored schema, since an inventory report's JSON shape
+    varies with which of `--resolve`/`--mac-vendor`/`--services` were used
+    to generate it. Scope is inventory-only, and deliberately not a full
+    round-trip merge of every field: `top_touched_addresses` is never
+    merged (an already-truncated top-N can't be re-ranked into a true
+    global top-N), `inferred_role` is first-non-Unknown-wins rather than
+    globally recomputed (the underlying heuristic isn't exported), and
+    `notable_protocols` is never merged -- all stated explicitly in the
+    header's own scope comment and in the design doc, rather than left as a
+    silent gap. `merge` is a group subcommand with a single `inventory`
+    sub-subcommand today, deliberately leaving room for a future `merge
+    policy`/`merge detect`/`merge baseline` without a breaking CLI change.
+    5 new CTest cases cover argument validation, a missing report file,
+    malformed JSON, the bare `merge` fallback error, and
+    `tests/inventory_merge_smoke.sh`'s real two-report merge (generating
+    its own inputs via the CLI itself, per this project's standing "verify
+    against real output" rule, rather than a hand-authored JSON fixture).
+
+    Full CTest across all four standing build configurations (default GCC,
+    ASan/UBSan `build-fuzz`, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`, MinGW-w64 cross-compile, build-only there) -- run twice,
+    once after `capture`/`RotatingPcapWriter` and again after `merge
+    inventory`, both times 100% pass with zero regressions.
+    `docs/USER_GUIDE.md` (new CAPTURE and MERGE sections),
+    `man/conduitscope.1` (`capture` and `merge inventory` entries), and
+    `docs/reviews/2026-09-grok-response.md` (item 5's own paragraph updated
+    to reflect what shipped) updated in the same increment.
 
 ### Protocols not covered at all
 

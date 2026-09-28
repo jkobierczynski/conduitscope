@@ -16,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +45,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/flow_direction.hpp"
+#include "conduitscope/inventory_merge.hpp"
 #include "conduitscope/live_capture.hpp"
 #include "conduitscope/output.hpp"
 #include "conduitscope/packet_range.hpp"
@@ -52,6 +54,7 @@
 #include "conduitscope/policy.hpp"
 #include "conduitscope/policy_engine.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/rotating_pcap_writer.hpp"
 #include "conduitscope/time_format.hpp"
 #include "conduitscope/version.hpp"
 
@@ -1821,6 +1824,156 @@ int run_interfaces(std::ostream& out) {
     }
 }
 
+// Filesystem-safe filename component -- replaces every character other than ASCII letters/digits/
+// '-'/'_'/'.' with '_'. Used to turn -i/--interface (or a user-supplied --prefix) into something
+// safe to use as a filename prefix: on Linux this is usually already safe ("eth0"), but Npcap
+// interface names on Windows are GUID-style device paths (e.g. "\Device\NPF_{4E2E1911-...}")
+// containing '\', '{', '}', all of which are either a path separator or simply unwise to put in a
+// filename unescaped. See rotating_pcap_writer.hpp's own constructor comment on `prefix`.
+std::string sanitize_filename_component(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (char c : raw) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+            c == '_' || c == '.') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    return out.empty() ? std::string("capture") : out;
+}
+
+// `capture`: continuous, safe sensor mode -- writes rotated, retention-bounded classic-pcap files
+// to disk from a live interface only, with NO decode/analysis running inside it (Grok review item
+// 5, docs/reviews/2026-09-grok-ics-ot-improvement-areas.md; full design record at
+// docs/design/sensor-mode.md's "capture-only rotator" scoping decision). Structurally similar to
+// run_decode's own live-capture-plus-write path, minus everything decode-specific (Decoder,
+// Resolver, every OutputWriter, direction tracking, --range, --filter applied twice for -r/-i --
+// none of that applies to a source that is always live and is never decoded here at all).
+int run_capture(const std::string& interface_name, const std::string& filter, int duration_seconds,
+                 int snaplen, bool promiscuous, size_t max_packets, const std::string& directory,
+                 const std::string& prefix, size_t rotate_bytes, size_t rotate_seconds,
+                 size_t max_total_bytes, size_t max_files, bool quiet, std::ostream& diag) {
+    try {
+        LiveCapture capture(interface_name, snaplen, promiscuous, filter, duration_seconds, max_packets);
+        // Same Ctrl+C posture as run_decode/run_policy_validate/run_inventory above -- `false` for
+        // `color` since `capture` has no colorized text output of its own to restore (it prints at
+        // most a plain end-of-run summary line, never per-packet text).
+        SigintGuard sigint_guard(&capture);
+
+        RotationPolicy policy;
+        policy.rotate_bytes = rotate_bytes;
+        policy.rotate_seconds = rotate_seconds;
+        policy.max_total_bytes = max_total_bytes;
+        policy.max_files = max_files;
+
+        std::string effective_prefix =
+            sanitize_filename_component(prefix.empty() ? interface_name : prefix);
+        RotatingPcapWriter writer(
+            directory, effective_prefix, capture.info().linktype, static_cast<uint32_t>(snaplen),
+            policy, [&](const std::string& warning) {
+                if (!quiet) diag << "warning: " << warning << "\n";
+            });
+
+        if (!quiet) {
+            diag << "capturing on '" << interface_name << "' into '" << directory << "/"
+                 << effective_prefix << "_*.pcap' -- Ctrl+C to stop\n";
+        }
+
+        PcapPacket pkt;
+        size_t captured_count = 0;
+        while (!g_stop_requested.load(std::memory_order_acquire) && capture.next(pkt)) {
+            writer.write_packet(pkt);
+            ++captured_count;
+            if (max_packets != 0 && captured_count >= max_packets) break;
+        }
+
+        if (!quiet) {
+            diag << captured_count << " packet(s) captured across " << (writer.rotation_count() + 1)
+                 << " file(s); most recent: '" << writer.current_path() << "' (" << writer.current_bytes()
+                 << " bytes)\n";
+        }
+        return 0;
+    } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
+// `merge inventory`: the "multiple-simultaneous-tap-point stitching into one site-wide matrix"
+// half of Grok review item 5 -- combines N `inventory --format json` reports (one per tap point,
+// each produced by its own independent `capture`-then-`inventory` pass, per Jurgen's own
+// "independent per-tap processes + merge subcommand" scoping decision) into one merged
+// AssetInventoryReport, then renders it through the exact same writers `inventory` itself uses
+// (write_inventory_report_text/_json/_csv) -- see inventory_merge.hpp's own file header for the
+// merge semantics and its deliberately-scoped-out fields.
+int run_merge_inventory(const std::vector<std::string>& inputs, const std::string& output,
+                         const std::string& format, uint8_t zone_prefix_len, bool quiet, bool oui_enabled,
+                         bool resolve_hostnames, const std::string& hosts_path, bool service_names_enabled,
+                         const std::string& services_path, std::ostream& diag) {
+    std::ofstream file_out;
+    std::ostream* out = &std::cout;
+    if (!output.empty()) {
+        file_out.open(output, std::ios::binary);
+        if (!file_out) {
+            std::cerr << "error: cannot open output file '" << output << "'\n";
+            return 1;
+        }
+        out = &file_out;
+    }
+
+    try {
+        std::vector<std::string> resolver_notes;
+        Resolver resolver(oui_enabled, resolve_hostnames, hosts_path, service_names_enabled, services_path,
+                           resolver_notes);
+        if (!quiet) {
+            for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
+        }
+
+        std::vector<AssetInventoryReport> reports;
+        reports.reserve(inputs.size());
+        for (const auto& path : inputs) {
+            std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                std::cerr << "error: cannot open '" << path << "' for reading\n";
+                return 1;
+            }
+            std::ostringstream buf;
+            buf << in.rdbuf();
+            reports.push_back(parse_inventory_report_json_for_merge(buf.str()));
+        }
+
+        AssetInventoryReport merged = merge_inventory_reports(reports, zone_prefix_len);
+
+        std::ostringstream label;
+        label << "merged: " << inputs.size() << " report(s) (";
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (i) label << ", ";
+            label << inputs[i];
+        }
+        label << ")";
+
+        if (format == "json") {
+            write_inventory_report_json(*out, merged, label.str(), resolver);
+        } else if (format == "csv") {
+            write_inventory_report_csv(*out, merged, resolver);
+        } else {
+            write_inventory_report_text(*out, merged, label.str(), resolver);
+        }
+        return 0;
+    } catch (const InventoryMergeError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2791,6 +2944,181 @@ int main(int argc, char** argv) {
         ->check(CLI::ExistingFile);
     add_resource_limit_options(baseline_check_cmd, baseline_check_limit_vars);
 
+    // --- capture --------------------------------------------------------------
+    // Continuous, safe sensor mode (Grok review item 5, docs/reviews/2026-09-grok-ics-ot-
+    // improvement-areas.md; full design record at docs/design/sensor-mode.md). Deliberately its
+    // own subcommand, separate from `decode -i -w` (which already writes a live capture to a
+    // single ever-growing file, but never rotates it and always fully decodes+prints every packet
+    // too, wasted overhead for an unattended run nobody is watching): `capture` skips decode
+    // entirely and writes ONLY rotated, retention-bounded classic-pcap files -- see
+    // rotating_pcap_writer.hpp's own file header. Live-interface-only (-i/--interface is
+    // ->required() below, no -r/--read at all) -- rotating an already-finite offline file has no
+    // "does not fill the disk over weeks" problem to solve in the first place; validate rotation
+    // policy logic offline instead via tools/rotating_pcap_writer_selftest.cpp. NEVER transmits
+    // any packet onto the wire or the process network -- this subcommand, like `decode`'s own -w,
+    // only ever writes to a local file; see docs/design/sensor-mode.md for how that assurance was
+    // confirmed (no send/inject capability exists anywhere in this codebase).
+    auto* capture_cmd = app.add_subcommand(
+        "capture", "Continuous, disk-bounded live packet capture to rotated classic-pcap files -- "
+                    "no decoding, no analysis, never transmits. Meant to run unattended for weeks "
+                    "on a SPAN/TAP collector; analyze the rotated files afterward with 'decode'/"
+                    "'inventory'/'detect'/'baseline' as a separate pass, same as any offline "
+                    "capture. One tap point (interface) per process -- for a multi-tap site, run "
+                    "one independent 'capture' process per tap point, each with its own --directory, "
+                    "then combine their own separate analysis passes' reports afterward");
+    std::string capture_interface;
+    std::string capture_filter;
+    int capture_duration = 0;
+    int capture_snaplen = 65535;
+    bool capture_promiscuous = true;
+    size_t capture_max_packets = 0;
+    std::string capture_directory = ".";
+    std::string capture_prefix;
+    size_t capture_rotate_bytes = 0;
+    size_t capture_rotate_seconds = 0;
+    size_t capture_max_total_bytes = 0;
+    size_t capture_max_files = 0;
+
+    capture_cmd
+        ->add_option("-i,--interface", capture_interface,
+                      "Capture live from this network interface (see 'conduitscope interfaces'); "
+                      "requires this build to have been compiled with libpcap/Npcap support. "
+                      "Required -- unlike 'decode'/'policy validate'/'inventory', 'capture' has no "
+                      "-r/--read offline-file mode at all (see this subcommand's own --help header)")
+        ->required();
+    capture_cmd->add_option("-f,--filter", capture_filter,
+                             "BPF filter (tcpdump syntax), applied by libpcap at capture time -- "
+                             "same syntax and meaning as 'decode'/'policy validate'/'inventory''s "
+                             "own -f");
+    capture_cmd->add_option("-a,--duration", capture_duration,
+                             "Stop after this many seconds (0 = unlimited; stop with Ctrl+C or "
+                             "--max-packets instead)")
+        ->capture_default_str();
+    capture_cmd->add_option("--snaplen", capture_snaplen, "Maximum bytes captured per packet")
+        ->capture_default_str();
+    capture_cmd->add_flag("!--no-promiscuous", capture_promiscuous,
+                           "Don't put the interface into promiscuous mode (by default it is, since "
+                           "the main use case -- watching a mirrored/SPAN switch port -- needs "
+                           "traffic not addressed to this host)");
+    capture_cmd->add_option("-c,--max-packets", capture_max_packets,
+                             "Stop after capturing this many packets total, across every rotated "
+                             "file (0 = unlimited, the default -- the normal setting for a "
+                             "long-running sensor; a nonzero value is mainly useful for a bounded "
+                             "test/smoke run)")
+        ->capture_default_str();
+    capture_cmd
+        ->add_option("-d,--directory", capture_directory,
+                      "Directory to write rotated capture files into. Must already exist -- this "
+                      "subcommand never creates it")
+        ->capture_default_str()
+        ->check(CLI::ExistingDirectory);
+    capture_cmd->add_option(
+        "--prefix", capture_prefix,
+        "Filename prefix for every rotated file (default: -i/--interface's own name, sanitized -- "
+        "see this subcommand's own --help header). Useful to give a shorter/friendlier name than "
+        "a raw platform interface identifier, especially on Windows/Npcap where interface names "
+        "can be long GUID-style strings");
+    capture_cmd
+        ->add_option("--rotate-bytes", capture_rotate_bytes,
+                      "Rotate to a new file once the current one reaches roughly this many bytes "
+                      "(0 = no size-based rotation, the default). See rotating_pcap_writer.hpp's "
+                      "own RotationPolicy::rotate_bytes for the exact boundary behavior")
+        ->capture_default_str();
+    capture_cmd
+        ->add_option("--rotate-seconds", capture_rotate_seconds,
+                      "Rotate to a new file once a captured packet's own timestamp is at least this "
+                      "many seconds past the current file's first packet (0 = no time-based "
+                      "rotation, the default). Checked against each packet's own capture timestamp, "
+                      "not wall-clock -- see rotating_pcap_writer.hpp's own RotationPolicy::"
+                      "rotate_seconds for why")
+        ->capture_default_str();
+    capture_cmd
+        ->add_option("--max-total-bytes", capture_max_total_bytes,
+                      "Delete the oldest already-rotated file(s) so the combined size of every "
+                      "rotated file this run still has on disk (never counting the file currently "
+                      "being written, which is never deleted) stays at or under this many bytes "
+                      "(0 = no size-based retention cap, the default). Requires --rotate-bytes "
+                      "and/or --rotate-seconds to be set too -- with no rotation there is only ever "
+                      "one file, which is always the active file, and the active file is never "
+                      "deleted, so this could never actually bound disk use on its own")
+        ->capture_default_str();
+    capture_cmd
+        ->add_option("--max-files", capture_max_files,
+                      "Delete the oldest already-rotated file(s) so this run has at most this many "
+                      "files on disk IN TOTAL, counting the file currently being written (0 = no "
+                      "count-based retention cap, the default). Same --rotate-bytes/--rotate-seconds "
+                      "requirement as --max-total-bytes above")
+        ->capture_default_str();
+
+    // --- merge ------------------------------------------------------------
+    // The "stitch multiple tap points into one site-wide matrix" half of Grok review item 5 --
+    // see inventory_merge.hpp's own file header for the full design and scope. A group subcommand
+    // with one sub-subcommand so far ('inventory'), mirroring `baseline`'s own group-plus-sub-
+    // subcommand shape -- merging a site's `policy validate`/`detect`/`baseline` reports is each a
+    // reasonable, structurally different follow-up, not attempted in this pass (see
+    // inventory_merge.hpp's own file header for exactly why each is a different problem).
+    auto* merge_cmd = app.add_subcommand(
+        "merge", "Combine reports from multiple independent tap points into one site-wide view. "
+                  "Currently only 'inventory' exists -- merging policy/detect/baseline reports "
+                  "across tap points is a reasonable follow-up, not built yet");
+    auto* merge_inventory_cmd = merge_cmd->add_subcommand(
+        "inventory", "Combine N 'inventory --format json' reports (one per tap point) into one "
+                      "site-wide asset/communications/zone/conduit matrix -- see this codebase's "
+                      "own inventory_merge.hpp for exactly how assets/edges are unioned and why "
+                      "zones/conduits are always freshly re-derived from the merged result rather "
+                      "than merged themselves");
+    std::vector<std::string> merge_inventory_inputs;
+    std::string merge_inventory_output, merge_inventory_format = "text";
+    int merge_inventory_zone_prefix = kDefaultInventoryZonePrefixLen;
+    bool merge_inventory_mac_vendor = false, merge_inventory_resolve = false, merge_inventory_service_names = true;
+    std::string merge_inventory_hosts_file, merge_inventory_services_file;
+    merge_inventory_cmd
+        ->add_option("reports", merge_inventory_inputs,
+                      "One or more 'inventory --format json' report files, one per tap point "
+                      "(merging just one is also legal -- e.g. to re-derive zones at a different "
+                      "--zone-prefix)")
+        ->required()
+        ->check(CLI::ExistingFile);
+    merge_inventory_cmd->add_option(
+        "-o,--output", merge_inventory_output,
+        "Write the merged report here instead of stdout. Caution: a single-dash long-option typo "
+        "glues onto this flag -- always use the double dash for a long option name");
+    merge_inventory_cmd
+        ->add_option("-T,--format", merge_inventory_format,
+                      "Merged report format: text, json, or csv (csv is deliberately asset-only, "
+                      "same as 'inventory --format csv' -- see write_inventory_report_csv's own "
+                      "doc comment)")
+        ->transform(CLI::IsMember({"text", "json", "csv"}))
+        ->capture_default_str();
+    merge_inventory_cmd
+        ->add_option("--zone-prefix", merge_inventory_zone_prefix,
+                      "CIDR prefix length ([0, 32]) used to group the MERGED asset list into "
+                      "zones -- independent of whatever --zone-prefix, if any, each individual "
+                      "input report was itself generated with; zones/conduits are always freshly "
+                      "re-derived from the merged assets/edges, never merged from the inputs' own "
+                      "zones/conduits arrays (which are ignored entirely -- see inventory_merge.hpp)")
+        ->capture_default_str()
+        ->check(CLI::Range(0, 32));
+    merge_inventory_cmd->add_flag("--mac-vendor", merge_inventory_mac_vendor,
+                                   "Enable OUI (MAC vendor) resolution in the merged report; off by "
+                                   "default, same as 'inventory' itself");
+    merge_inventory_cmd->add_flag(
+        "--resolve", merge_inventory_resolve,
+        "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the merged "
+        "report; off by default; NEVER performs live DNS");
+    merge_inventory_cmd
+        ->add_option("--hosts", merge_inventory_hosts_file,
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+        ->check(CLI::ExistingFile);
+    merge_inventory_cmd->add_flag("!--nn", merge_inventory_service_names,
+                                   "Disable service name resolution (built-in table plus --services) "
+                                   "in the merged report, on by default");
+    merge_inventory_cmd
+        ->add_option("--services", merge_inventory_services_file,
+                      "Unix /etc/services-style file to supplement/override the built-in "
+                      "port->service-name table")
+        ->check(CLI::ExistingFile);
+
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
 
@@ -2813,6 +3141,16 @@ int main(int argc, char** argv) {
     if (inventory_cmd->parsed() && inventory_input.empty() == inventory_interface.empty()) {
         std::cerr << "error: 'inventory' needs exactly one of -r/--read (an offline capture file) "
                      "or -i/--interface (a live capture interface)\n";
+        return 1;
+    }
+    // Same rule RotatingPcapWriter's own constructor (rotating_pcap_writer.hpp) enforces -- checked
+    // again here, before this process ever opens the capture interface, so a bad flag combination
+    // is reported immediately rather than after already needing (and possibly failing to get)
+    // capture privilege.
+    if (capture_cmd->parsed() && (capture_max_total_bytes != 0 || capture_max_files != 0) &&
+        capture_rotate_bytes == 0 && capture_rotate_seconds == 0) {
+        std::cerr << "error: 'capture' --max-total-bytes/--max-files requires --rotate-bytes "
+                     "and/or --rotate-seconds to be set too (see 'capture --help')\n";
         return 1;
     }
 
@@ -2954,6 +3292,22 @@ int main(int argc, char** argv) {
     }
     if (baseline_cmd->parsed()) {
         std::cerr << "error: 'baseline' needs a subcommand ('learn' or 'check')\n";
+        return 1;
+    }
+    if (capture_cmd->parsed()) {
+        return run_capture(capture_interface, capture_filter, capture_duration, capture_snaplen,
+                            capture_promiscuous, capture_max_packets, capture_directory, capture_prefix,
+                            capture_rotate_bytes, capture_rotate_seconds, capture_max_total_bytes,
+                            capture_max_files, quiet, *diag);
+    }
+    if (merge_inventory_cmd->parsed()) {
+        return run_merge_inventory(merge_inventory_inputs, merge_inventory_output, merge_inventory_format,
+                                    static_cast<uint8_t>(merge_inventory_zone_prefix), quiet,
+                                    merge_inventory_mac_vendor, merge_inventory_resolve, merge_inventory_hosts_file,
+                                    merge_inventory_service_names, merge_inventory_services_file, *diag);
+    }
+    if (merge_cmd->parsed()) {
+        std::cerr << "error: 'merge' needs a subcommand (currently only 'inventory' exists)\n";
         return 1;
     }
     std::cout << "conduitscope " << version_string() << "\n";

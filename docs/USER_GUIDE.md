@@ -1402,6 +1402,142 @@ INITIALIZE_DOWNLOAD (T0843) trigger it here too, exactly as an S7 PLC Stop + dow
 operations, the same treatment S7comm's own PLC Control/PLC Stop already gets -- `baseline check`
 reports them regardless of whether the baseline file has ever seen them before.
 
+### `capture` -- continuous, disk-bounded live capture to rotated pcap files
+
+```
+conduitscope capture -i INTERFACE [options]
+```
+
+Grok review item 5 (`docs/reviews/2026-09-grok-ics-ot-improvement-areas.md`): a **capture-only**
+subcommand meant to run unattended for weeks on a rugged/air-gapped SPAN/TAP collector box --
+it writes rotated, retention-bounded classic-pcap files and nothing else. It does **not** decode
+or analyze traffic (no `RotatingPcapWriter`-fed engine runs inside it), and it **never transmits**
+anything toward the process network (verified directly against the source: no packet-injection
+call -- `pcap_sendpacket`/`pcap_inject`/equivalent -- exists anywhere in this codebase). Analyze
+the rotated files afterward with `decode`/`inventory`/`detect`/`baseline`, exactly like any other
+offline capture. See `docs/design/sensor-mode.md` for the full design record, including why this
+is deliberately its own subcommand rather than an extension of `decode -i -w` (which always fully
+decodes and prints every packet, and has no rotation).
+
+One tap point (interface) per `capture` process -- there is no multi-interface mode. For a
+multi-tap site, run one independent `capture` process per tap point (each with its own
+`--directory`), analyze each tap point's own rotated files separately, and combine the resulting
+`inventory` reports afterward with `merge inventory` below.
+
+| Option | Default | Description |
+|---|---|---|
+| `-i, --interface NAME` | *(required)* | Capture live from this network interface (see `conduitscope interfaces`). Unlike `decode`/`policy validate`/`inventory`, `capture` has no `-r/--read` offline-file mode at all -- there's nothing to rotate/retain about a file that already exists. |
+| `-f, --filter BPF` | *(none)* | BPF filter (tcpdump syntax), applied by libpcap at capture time -- same meaning as `decode`'s own `-f`. |
+| `-a, --duration SECONDS` | `0` (unlimited) | Stop after this many seconds; `0` means rely on Ctrl+C or `--max-packets` instead. |
+| `--snaplen BYTES` | `65535` | Maximum bytes captured per packet. |
+| `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
+| `-c, --max-packets N` | `0` (unlimited) | Stop after capturing this many packets total, across every rotated file. `0` is the normal setting for a long-running sensor; a nonzero value is mainly useful for a bounded test/smoke run. |
+| `-d, --directory DIR` | `.` | Directory to write rotated capture files into. Must already exist -- `capture` never creates it. |
+| `--prefix NAME` | interface name, sanitized | Filename prefix for every rotated file. Non-alphanumeric characters (other than `-`, `_`, `.`) are replaced with `_` before use, since a raw interface name is not inherently filesystem-safe on every platform -- Windows/Npcap's own `\Device\NPF_{GUID}`-style names contain backslashes and braces. |
+| `--rotate-bytes N` | `0` (off) | Rotate to a new file once the current one reaches roughly this many bytes (plain byte count, no unit suffix). `0` disables size-based rotation. |
+| `--rotate-seconds N` | `0` (off) | Rotate to a new file once a captured packet's own timestamp is at least this many seconds past the current file's first packet. Checked against each packet's *capture* timestamp, not wall-clock time, so behavior stays deterministic and testable regardless of how long the process actually runs. `0` disables time-based rotation. |
+| `--max-total-bytes N` | `0` (off) | Delete the oldest already-rotated file(s) so the combined size of every rotated file still on disk (never counting the file currently being written, which is never deleted) stays at or under this many bytes. Requires `--rotate-bytes` and/or `--rotate-seconds` -- with no rotation there is only ever one file, which is always the active file, so this could never bound disk use on its own. |
+| `--max-files N` | `0` (off) | Delete the oldest already-rotated file(s) so at most this many files exist on disk in total, counting the file currently being written. Same rotation-flag requirement as `--max-total-bytes`. |
+
+At least one of `--rotate-bytes`/`--rotate-seconds` must be given if either `--max-total-bytes` or
+`--max-files` is given -- `capture` reports this clearly at startup rather than silently accepting
+a retention cap that could never actually take effect.
+
+```
+$ conduitscope capture --interface lo --directory /tmp/capdemo --prefix lo \
+      --max-packets 4 --rotate-bytes 1 --max-files 2 --duration 30
+capturing on 'lo' into '/tmp/capdemo/lo_*.pcap' -- Ctrl+C to stop
+4 packet(s) captured across 4 file(s); most recent: '/tmp/capdemo/lo_20260928T192154Z_000003.pcap' (94 bytes)
+```
+
+(`--rotate-bytes 1` here is deliberately smaller than even one packet record, forcing every file to
+hold exactly one packet -- `RotatingPcapWriter` always writes at least one packet per file
+regardless of how small the configured cap is, to avoid an infinite-rotation loop. With
+`--max-files 2`, only the 2 most recently closed/active files of the 4 opened are still on disk once
+this exits; the rest were evicted as retention allows.)
+
+**Validated on loopback traffic only.** Grok's own review text specifically asks to "validate on
+real mirrored OT switches, not loopback" -- this project has no access to a real mirrored OT switch
+to test against, so that validation is still outstanding. See LIMITATIONS below.
+
+### `merge inventory` -- combine multiple tap points' inventory reports into one site-wide matrix
+
+```
+conduitscope merge inventory REPORT.json [REPORT.json...] [options]
+```
+
+The other half of Grok review item 5: since each tap point runs its own independent `capture` +
+`inventory` pair (no multi-tap process, no new concurrency anywhere -- see `capture` above),
+`merge inventory` is what stitches their separate `inventory --format json` reports into one
+site-wide asset/communications/zone/conduit matrix. `merge` is a group subcommand with `inventory`
+as its only sub-subcommand today, deliberately leaving room for a future `merge policy`/`merge
+detect`/`merge baseline` without a breaking CLI change.
+
+| Option | Default | Description |
+|---|---|---|
+| `reports` (positional) | *(required, 1 or more)* | One or more `inventory --format json` report files, one per tap point. Merging just a single report is also legal -- e.g. to re-derive zones at a different `--zone-prefix` than the report was originally generated with. |
+| `-o, --output FILE` | stdout | Write the merged report here instead of stdout. |
+| `-T, --format {text,json,csv}` | `text` | Merged report format. `csv` is deliberately asset-only, the same scope `inventory --format csv` itself has. |
+| `--zone-prefix N` | `24` | CIDR prefix length (0-32) used to group the *merged* asset list into zones -- independent of whatever `--zone-prefix` each individual input report was itself generated with. Zones/conduits are always freshly re-derived from the merged assets/edges; each input's own `zones`/`conduits` JSON arrays are ignored entirely, never merged. |
+| `--mac-vendor` | off | Enable OUI (MAC vendor) resolution in the merged report; same meaning as `inventory`'s own flag. |
+| `--resolve` | off | Enable hostname resolution from `--hosts` in the merged report. Never performs live DNS. |
+| `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file, for `--resolve`. |
+| `--nn` | off (service-name resolution on by default) | Disable service-name resolution in the merged report. |
+| `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. |
+
+Assets and edges are **unioned by key** (IP for an asset; client/server/protocol/port for an edge)
+across every input report -- an IP or edge appearing in more than one tap point's report is not
+double-counted, and an edge's own `packet_count` is the *sum* across every report it appears in.
+`ever_client`/`ever_server` are recomputed from the union. Zones and conduits are always freshly
+re-derived from the merged assets/edges using the same logic `inventory` itself uses, never copied
+from any input's own zones/conduits.
+
+**Deliberately not merged**, and why: `top_touched_addresses` (an already-truncated top-N can't be
+re-ranked into a true global top-N without the full underlying counts); `inferred_role` (kept as
+first-non-`Unknown`-wins across inputs rather than globally recomputed, since the role-inference
+heuristic isn't exposed outside the engine that originally computed it); `notable_it_protocols`
+(never merged). See `include/conduitscope/inventory_merge.hpp`'s own header comment and
+`docs/design/sensor-mode.md` for the full scope record.
+
+```
+$ conduitscope inventory --read site1.pcap --format json -o site1.json
+$ conduitscope inventory --read site2.pcap --format json -o site2.json
+$ conduitscope merge inventory site1.json site2.json
+OT asset inventory
+  capture: merged: 2 report(s) (site1.json, site2.json)
+  scope:   Modbus, DNP3, S7comm, EtherNet/IP, BACnet/IP, IEC 104, HART-IP (TCP only),
+           OPC UA, MMS, MQTT, and S7comm-Plus -- plus FF-HSE (TCP only; rarely
+           applicable, since FF-HSE is fundamentally a UDP protocol) -- see
+           docs/MANUAL.md's ROADMAP item 17
+
+9 asset(s) observed, 17 total packet(s) in capture, 0 skipped (not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen over UDP)
+
+ASSETS (9):
+  10.0.5.21  00:0c:29:de:ad:01  [client]  dnp3, s7comm  (6 packet(s))
+      first seen: 2023-11-15 03:46:42.002000Z  last seen: 2023-11-15 03:46:47.007000Z
+      role: HMI/Engineering Station  (heuristic, low confidence)
+  ...
+  192.168.1.10  00:0c:29:aa:bb:cc  [server]  modbus  (5 packet(s))
+      first seen: 2023-11-14 22:13:20.000000Z  last seen: 2023-11-15 03:46:41.001000Z
+      role: PLC/RTU  (heuristic, low confidence)
+  ...
+
+COMMUNICATIONS (5):
+  192.168.1.50 -> 192.168.1.10:502 (modbus)  modbus  [Read Holding Registers]  (5 packet(s), direction: port-heuristic)
+      first seen: 2023-11-14 22:13:20.000000Z  last seen: 2023-11-15 03:46:41.001000Z
+  ...
+
+INFERRED ZONES (2, grouped by observed /24 subnet):
+  zone_10_0_5_0_24 (10.0.5.0/24): 10.0.5.21, 10.0.5.22
+  zone_192_168_1_0_24 (192.168.1.0/24): 192.168.1.10, 192.168.1.11, 192.168.1.12, 192.168.1.14, 192.168.1.15, 192.168.1.16, 192.168.1.50
+```
+
+(`192.168.1.10` is shared by both `site1.json` and `site2.json` in this example -- the real
+`merge` output above is against `tests/sample_inventory.pcap`/`tests/sample_modbus.pcap`, and the
+Modbus edge's `packet_count` of 5 there is the sum of that shared conduit's own count in each input
+report, `2 + 3`, proving the union/sum behavior rather than a naive concatenation. See
+`tests/inventory_merge_smoke.sh`.)
+
 ### `version` -- print version and build information
 
 Equivalent to the global `--version` flag; provided as a subcommand as well
@@ -6043,6 +6179,29 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   `DEFAULT_FLOOD_THRESHOLD` for consistency across this codebase's two
   independent flood detectors, not because 100 is researched for Who-Is
   specifically.
+- **`capture` has only been validated against loopback traffic, not a real
+  mirrored/SPAN OT switch port.** Grok's own review text asks specifically
+  to "validate on real mirrored OT switches, not loopback" -- this project
+  has no access to one to test against. The rotation/retention mechanics
+  themselves are exercised deterministically (`rotating_pcap_writer_selftest`)
+  and against real loopback traffic (`tests/capture_rotation_smoke.sh`), but
+  neither substitutes for real switch-mirrored production OT traffic
+  volume/timing.
+- **`capture` writes classic pcap only, never pcapng**, matching `decode
+  -w`'s own existing output format -- see `include/conduitscope/pcap_writer.hpp`.
+- **`capture` never runs any decode/analysis engine itself** -- by design
+  (see `docs/design/sensor-mode.md`), not a missing feature. Analyze rotated
+  files afterward with `decode`/`policy validate`/`inventory`/`detect`/
+  `baseline` as a separate pass.
+- **`merge inventory` does not merge `top_touched_addresses`,
+  `inferred_role` beyond first-non-`Unknown`-wins, or `notable_it_protocols`
+  across inputs** -- each is a deliberate scope boundary, not an oversight;
+  see `merge inventory`'s own COMMANDS section above and
+  `include/conduitscope/inventory_merge.hpp`'s header comment for why each
+  one specifically can't be soundly merged from already-generated reports.
+- **`merge` today only merges `inventory` reports.** Merging `policy
+  validate`/`detect`/`baseline` reports across tap points is a reasonable
+  follow-up, not built yet.
 
 ## EXIT STATUS
 

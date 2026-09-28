@@ -481,6 +481,40 @@ operation is instead reported as the lower\-severity
 compliant/anomaly report, text or JSON (\fB\-T/\-\-format\fR); see
 \fBOPTIONS (baseline check)\fR and \fBEXIT STATUS\fR below.
 .TP
+.B capture \fB\-i\fR \fIINTERFACE\fR [\fIOPTIONS\fR]
+Continuous, disk\-bounded live capture to rotated classic\-pcap files (Grok
+review item 5) \-\- no decoding, no analysis, and it never transmits
+anything toward the process network (verified directly against the
+source: no packet\-injection call exists anywhere in this codebase).
+Meant to run unattended for weeks on a rugged/air\-gapped SPAN/TAP
+collector box; analyze the rotated files afterward with
+\fBdecode\fR/\fBinventory\fR/\fBdetect\fR/\fBbaseline\fR as a separate pass,
+same as any offline capture. Rotates on \fB\-\-rotate\-bytes\fR and/or
+\fB\-\-rotate\-seconds\fR (checked against each packet's own capture
+timestamp, not wall\-clock), and evicts the oldest already\-rotated
+file(s) \-\- never the active file \-\- once \fB\-\-max\-total\-bytes\fR
+and/or \fB\-\-max\-files\fR is exceeded. One tap point (interface) per
+process \-\- for a multi\-tap site, run one independent \fBcapture\fR
+process per tap point, each with its own \fB\-\-directory\fR, then combine
+their own separate \fBinventory\fR reports afterward with \fBmerge
+inventory\fR. See \fBOPTIONS (capture)\fR below and
+\fBdocs/design/sensor-mode.md\fR for the full design record.
+.TP
+.B merge inventory \fIREPORT.json\fR [\fIREPORT.json\fR ...] [\fIOPTIONS\fR]
+Combines N \fBinventory \-\-format json\fR reports, one per tap point, into
+one site\-wide asset/communications/zone/conduit matrix (the other half
+of Grok review item 5). Assets and edges are unioned by key (IP for an
+asset; client/server/protocol/port for an edge) \-\- an overlapping IP or
+edge across reports is not double\-counted, and an overlapping edge's
+\fBpacket_count\fR is summed across every report it appears in. Zones and
+conduits are always freshly re\-derived from the merged assets/edges,
+never copied from any input report's own zones/conduits.
+\fBtop_touched_addresses\fR, \fBinferred_role\fR beyond first\-non\-Unknown\-wins,
+and \fBnotable_it_protocols\fR are deliberately not merged \-\- see
+\fBdocs/USER_GUIDE.md\fR's \fBmerge inventory\fR section for why. \fBmerge\fR
+is a group subcommand; \fBinventory\fR is its only sub\-subcommand today.
+See \fBOPTIONS (merge inventory)\fR below.
+.TP
 .B version
 Print version and build information, including whether this build has live
 capture support.
@@ -1846,6 +1880,108 @@ truncated observation is not trustworthy (raise the relevant
 \fB\-\-max\-baseline\-*\fR limit and re\-run). This takes priority over the
 ordinary compliant/anomaly exit codes: see \fBEXIT STATUS\fR's code
 \fB5\fR.
+.SH OPTIONS (capture)
+.TP
+.BR \-i ", " \-\-interface " " \fINAME\fR
+Capture live from this network interface (see \fBconduitscope
+interfaces\fR). Required \-\- unlike \fBdecode\fR/\fBpolicy
+validate\fR/\fBinventory\fR, \fBcapture\fR has no \fB\-r/\-\-read\fR
+offline\-file mode at all.
+.TP
+.BR \-f ", " \-\-filter " " \fIBPF\fR
+BPF filter (tcpdump syntax), applied by libpcap at capture time \-\- same
+meaning as \fBdecode\fR's own \fB\-f\fR.
+.TP
+.BR \-a ", " \-\-duration " " \fISECONDS\fR
+Stop after this many seconds. Default: 0 (unlimited \-\- rely on Ctrl+C or
+\fB\-\-max\-packets\fR instead).
+.TP
+.B \-\-snaplen \fIBYTES\fR
+Maximum bytes captured per packet. Default: 65535.
+.TP
+.B \-\-no\-promiscuous
+Same meaning as \fBdecode\fR's \fB\-\-no\-promiscuous\fR.
+.TP
+.BR \-c ", " \-\-max\-packets " " \fIN\fR
+Stop after capturing this many packets total, across every rotated file.
+Default: 0 (unlimited \-\- the normal setting for a long\-running sensor; a
+nonzero value is mainly useful for a bounded test/smoke run).
+.TP
+.BR \-d ", " \-\-directory " " \fIDIR\fR
+Directory to write rotated capture files into. Must already exist \-\-
+\fBcapture\fR never creates it. Default: \fB.\fR
+.TP
+.B \-\-prefix \fINAME\fR
+Filename prefix for every rotated file. Default: \fB\-i/\-\-interface\fR's
+own name, sanitized (non\-alphanumeric characters other than \fB\-\fR,
+\fB_\fR, \fB.\fR replaced with \fB_\fR, since a raw interface name is not
+inherently filesystem\-safe on every platform \-\- Windows/Npcap's own
+\fB\\Device\\NPF_{GUID}\fR\-style names contain backslashes and braces).
+.TP
+.B \-\-rotate\-bytes \fIN\fR
+Rotate to a new file once the current one reaches roughly this many bytes
+(plain byte count, no unit suffix). Default: 0 (no size\-based rotation).
+.TP
+.B \-\-rotate\-seconds \fIN\fR
+Rotate to a new file once a captured packet's own timestamp is at least
+this many seconds past the current file's first packet \-\- checked
+against each packet's own capture timestamp, not wall\-clock time.
+Default: 0 (no time\-based rotation).
+.TP
+.B \-\-max\-total\-bytes \fIN\fR
+Delete the oldest already\-rotated file(s) so the combined size of every
+rotated file still on disk (never counting the file currently being
+written, which is never deleted) stays at or under this many bytes.
+Requires \fB\-\-rotate\-bytes\fR and/or \fB\-\-rotate\-seconds\fR to be set
+too. Default: 0 (no size\-based retention cap).
+.TP
+.B \-\-max\-files \fIN\fR
+Delete the oldest already\-rotated file(s) so this run has at most this
+many files on disk in total, counting the file currently being written.
+Same \fB\-\-rotate\-bytes\fR/\fB\-\-rotate\-seconds\fR requirement as
+\fB\-\-max\-total\-bytes\fR above. Default: 0 (no count\-based retention
+cap).
+.SH OPTIONS (merge inventory)
+.TP
+.B \fIreports\fR (positional, one or more)
+One or more \fBinventory \-\-format json\fR report files, one per tap
+point. Required. Merging just one is also legal \-\- e.g. to re\-derive
+zones at a different \fB\-\-zone\-prefix\fR than the report was originally
+generated with.
+.TP
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the merged report here instead of stdout.
+.TP
+.BR \-T ", " \-\-format " " {text,json,csv}
+Merged report format. \fBcsv\fR is deliberately asset\-only, the same
+scope \fBinventory \-\-format csv\fR itself has. Default: text.
+.TP
+.B \-\-zone\-prefix \fIN\fR
+CIDR prefix length (0\-32) used to group the \fImerged\fR asset list into
+zones \-\- independent of whatever \fB\-\-zone\-prefix\fR each individual
+input report was itself generated with. Zones/conduits are always
+freshly re\-derived from the merged assets/edges; each input's own
+zones/conduits are ignored entirely, never merged. Default: 24.
+.TP
+.B \-\-mac\-vendor
+Enable OUI (MAC vendor) resolution in the merged report. Off by default,
+same as \fBinventory\fR itself.
+.TP
+.B \-\-resolve
+Enable hostname resolution from \fB\-\-hosts\fR in the merged report. Off
+by default. \fBNever\fR performs live DNS.
+.TP
+.B \-\-hosts \fIFILE\fR
+Unix /etc/hosts-style file to resolve IP addresses from, for
+\fB\-\-resolve\fR. Must exist.
+.TP
+.B \-\-nn
+Disable service name resolution (built\-in table plus \fB\-\-services\fR)
+in the merged report. On by default.
+.TP
+.B \-\-services \fIFILE\fR
+Unix /etc/services-style file to supplement/override the built-in
+port\->service-name table. Must exist.
 .SH LIVE CAPTURE
 \fB\-i/\-\-interface\fR and \fBinterfaces\fR require this build to have been
 compiled with libpcap (Linux) or the Npcap SDK (Windows) found by CMake --

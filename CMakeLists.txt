@@ -49,6 +49,7 @@ add_library(conduitscope_core STATIC
   src/byteio.cpp
   src/pcap_reader.cpp
   src/pcap_writer.cpp
+  src/rotating_pcap_writer.cpp
   src/link_layer.cpp
   src/ipv4.cpp
   src/ipv6.cpp
@@ -151,6 +152,7 @@ add_library(conduitscope_core STATIC
   src/quic.cpp
   src/policy_engine.cpp
   src/asset_inventory.cpp
+  src/inventory_merge.cpp
   src/baseline.cpp
   src/mitre_attack_ics.cpp
   src/detect_engine.cpp
@@ -318,6 +320,26 @@ add_test(NAME resource_limits_scoping_self_test
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_active_flows.pcap"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap")
+
+# --------------------------------------------------------------------------------------------
+# RotatingPcapWriter rotation/retention self-test -- see tools/rotating_pcap_writer_selftest.cpp's
+# own file header for the full rationale (Grok review item 5, docs/reviews/2026-09-grok-ics-ot-
+# improvement-areas.md: "runs for weeks... rotates captures, does not fill the disk" -- see
+# docs/design/sensor-mode.md for the full design record). Same "always built, no opt-in flag"
+# posture as the selftests above -- exact byte-boundary/retention-eviction correctness across many
+# synthetic packets is far more reliably and quickly proven directly against the library API than
+# through a CLI-driven CTest case timing real captured traffic.
+# --------------------------------------------------------------------------------------------
+add_executable(rotating_pcap_writer_selftest tools/rotating_pcap_writer_selftest.cpp)
+target_link_libraries(rotating_pcap_writer_selftest PRIVATE conduitscope_core)
+
+set(_conduitscope_rotating_pcap_writer_selftest_scratch_dir
+    "${CMAKE_CURRENT_BINARY_DIR}/rotating_pcap_writer_selftest_scratch")
+file(MAKE_DIRECTORY "${_conduitscope_rotating_pcap_writer_selftest_scratch_dir}")
+
+add_test(NAME rotating_pcap_writer_rotation_and_retention_self_test
+  COMMAND rotating_pcap_writer_selftest
+          "${_conduitscope_rotating_pcap_writer_selftest_scratch_dir}")
 
 # --------------------------------------------------------------------------------------------
 # Optional libFuzzer harnesses (fuzz/) -- see fuzz/README.md and docs/DEVELOPMENT.md's "External
@@ -11333,6 +11355,107 @@ else()
       TIMEOUT 20)
   endif()
 endif()
+
+# ---------------------------------------------------------------------------------------------
+# `capture` subcommand -- continuous, disk-bounded live capture to rotated classic-pcap files
+# (rotating_pcap_writer.hpp/cpp, src/cli_main.cpp's run_capture; Grok review item 5, docs/reviews/
+# 2026-09-grok-ics-ot-improvement-areas.md; full design record at docs/design/sensor-mode.md).
+# Same gating conventions as the live_capture block just above: argument-validation tests run
+# unconditionally (they never actually open an interface), behavior tests are gated on
+# CONDUITSCOPE_HAVE_PCAP and, for anything that opens a real interface, further gated on UNIX and
+# scoped to "lo". RotatingPcapWriter's own byte-exact rotation/retention boundary logic is already
+# covered deterministically by tools/rotating_pcap_writer_selftest.cpp against synthetic packets
+# (see its own CTest case above and its own file header for why); what's left to prove here is the
+# CLI wiring itself, end to end, against real captured traffic.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME capture_requires_interface
+  COMMAND conduitscope capture)
+set_tests_properties(capture_requires_interface PROPERTIES
+  PASS_REGULAR_EXPRESSION "--interface is required")
+
+# This validation (main()'s own post-CLI11-parse check, mirroring RotatingPcapWriter's own
+# constructor check) happens before this process ever opens the capture interface -- runs
+# regardless of CONDUITSCOPE_HAVE_PCAP/platform, same as decode's own -r/-i "exactly one" checks
+# above.
+add_test(NAME capture_retention_without_rotation_trigger_reports_clearly
+  COMMAND conduitscope capture --interface lo --max-files 3)
+set_tests_properties(capture_retention_without_rotation_trigger_reports_clearly PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-total-bytes/--max-files requires --rotate-bytes and/or --rotate-seconds")
+
+add_test(NAME capture_retention_by_total_bytes_without_rotation_trigger_reports_clearly
+  COMMAND conduitscope capture --interface lo --max-total-bytes 1000)
+set_tests_properties(capture_retention_by_total_bytes_without_rotation_trigger_reports_clearly PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-total-bytes/--max-files requires --rotate-bytes and/or --rotate-seconds")
+
+# CLI11's own ->check(CLI::ExistingDirectory) on --directory -- also runs before this process ever
+# opens the capture interface, so this too is unconditional.
+add_test(NAME capture_bad_directory_reports_clearly
+  COMMAND conduitscope capture --interface lo --directory "${CMAKE_CURRENT_SOURCE_DIR}/this-directory-does-not-exist")
+set_tests_properties(capture_bad_directory_reports_clearly PROPERTIES
+  PASS_REGULAR_EXPRESSION "Directory does not exist")
+
+if(NOT CONDUITSCOPE_HAVE_PCAP)
+  add_test(NAME capture_unavailable_interface
+    COMMAND conduitscope capture --interface lo --directory "${CMAKE_CURRENT_BINARY_DIR}" --duration 1)
+  set_tests_properties(capture_unavailable_interface PROPERTIES
+    PASS_REGULAR_EXPRESSION "live capture is not available.*libpcap.*Npcap")
+else()
+  if(UNIX)
+    add_test(NAME capture_duration_stops_cleanly_with_no_traffic
+      COMMAND conduitscope capture --interface lo --directory "${CMAKE_CURRENT_BINARY_DIR}" --prefix
+              capture_duration_idle --duration 1)
+    set_tests_properties(capture_duration_stops_cleanly_with_no_traffic PROPERTIES
+      TIMEOUT 10
+      FAIL_REGULAR_EXPRESSION "error:")
+
+    # See tests/capture_rotation_smoke.sh's own file header for exactly what this proves (real
+    # rotation AND real retention eviction against real loopback traffic) and why a bug here would
+    # hang (TIMEOUT) or leave the wrong number of files behind rather than silently pass.
+    add_test(NAME capture_rotation_and_retention_with_real_traffic
+      COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/capture_rotation_smoke.sh" "$<TARGET_FILE:conduitscope>")
+    set_tests_properties(capture_rotation_and_retention_with_real_traffic PROPERTIES
+      TIMEOUT 20)
+  endif()
+endif()
+
+# ---------------------------------------------------------------------------------------------
+# `merge inventory` -- the "stitch multiple tap points into one site-wide matrix" half of Grok
+# review item 5 (inventory_merge.hpp/cpp, src/cli_main.cpp's run_merge_inventory; full design
+# record at docs/design/sensor-mode.md). Needs no live capture/libpcap at all (it reads already-
+# produced JSON reports), so every test here is unconditional, unlike the live_capture/capture
+# blocks above.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME merge_inventory_requires_at_least_one_report
+  COMMAND conduitscope merge inventory)
+set_tests_properties(merge_inventory_requires_at_least_one_report PROPERTIES
+  PASS_REGULAR_EXPRESSION "reports is required")
+
+add_test(NAME merge_inventory_missing_report_file_reports_clearly
+  COMMAND conduitscope merge inventory "${CMAKE_CURRENT_SOURCE_DIR}/this-report-does-not-exist.json")
+set_tests_properties(merge_inventory_missing_report_file_reports_clearly PROPERTIES
+  PASS_REGULAR_EXPRESSION "File does not exist")
+
+add_test(NAME merge_inventory_malformed_json_reports_clearly
+  COMMAND conduitscope merge inventory "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(merge_inventory_malformed_json_reports_clearly PROPERTIES
+  PASS_REGULAR_EXPRESSION "malformed JSON")
+
+add_test(NAME merge_needs_a_subcommand
+  COMMAND conduitscope merge)
+set_tests_properties(merge_needs_a_subcommand PROPERTIES
+  PASS_REGULAR_EXPRESSION "'merge' needs a subcommand")
+
+# See tests/inventory_merge_smoke.sh's own file header for exactly what this proves (assets/edges
+# genuinely unioned by key across two REAL, freshly-generated inventory JSON reports that overlap
+# on one asset IP, not just concatenated) and why it generates its own input reports with the CLI
+# itself rather than a checked-in/hand-authored JSON fixture.
+add_test(NAME inventory_merge_combines_two_reports_into_one_site_wide_matrix
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/inventory_merge_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(inventory_merge_combines_two_reports_into_one_site_wide_matrix PROPERTIES
+  TIMEOUT 20)
 
 # ---------------------------------------------------------------------------------------------
 # ROADMAP item 18, second half: `policy validate`/`inventory` surfacing the mere PRESENCE of any

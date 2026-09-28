@@ -117,16 +117,37 @@ detectors or `baseline check`'s own findings (a separate, larger effort,
 noted as a reasonable future follow-up in the design doc). Grok review
 item 4 is now fully closed.
 
-**5. Continuous, safe sensor mode -- confirmed as not built, and worth
-flagging as a bigger scope question.** `live_capture.hpp`/`cli_main.cpp`
-support `--duration`/`--max-packets`-bounded live capture against one
-interface at a time; there is no capture-rotation-to-disk, no
-multiple-simultaneous-tap-point stitching into one site-wide matrix, and
-no documented handling of the "zero-traffic interface" poll-loop
-limitation Grok names specifically. This is real, but it's also the item
-most likely to pull conduitscope toward being a always-on sensor product
-rather than an assessment/audit CLI -- worth a deliberate scope
-conversation with Jurgen before committing to it, not a default "yes."
+**5. Continuous, safe sensor mode -- now fully done, after a deliberate
+scope conversation with Jurgen first.** This paragraph originally flagged
+the item as the one most likely to pull conduitscope toward being an
+always-on sensor product rather than an assessment/audit CLI, and
+recommended a scope conversation before committing to it rather than a
+default "yes." That conversation happened (two `AskUserQuestion` rounds,
+both answered with the recommended option), and it kept the scope
+narrow and consistent with an audit CLI rather than a sensor product: a
+**capture-only rotator** -- a new `RotatingPcapWriter` and `capture`
+subcommand that rotate live `-i` capture output by size and/or elapsed
+packet time and enforce a total-bytes or file-count retention cap, with
+no decode/analysis engine running inside the capture process itself
+(analysis stays a separate, later, offline pass over the rotated files,
+exactly as today) -- and **independent per-tap processes plus a merge
+subcommand**, not a multi-tap process: each tap point still runs its own
+ordinary single-interface `conduitscope` process, and a new `merge
+inventory` subcommand unions N tap points' own inventory reports (by IP,
+summing overlapping edges' packet counts, re-deriving zones/conduits
+fresh) into one site-wide asset matrix, with no new concurrency anywhere.
+Direct source reading before writing any code found that the "zero-traffic
+interface" poll-loop limitation this paragraph named specifically was
+already solved by the existing `LiveCapture` poll loop, and that a
+non-rotating `PcapWriter` already existed as a reusable building block --
+so the actual new work was the rotation/retention layer, the `capture`
+subcommand, and the merge subcommand, not a rewrite of live capture
+itself. `capture` is verified, by grepping for every packet-injection
+call across the codebase, to never transmit toward the process network.
+Validated on loopback traffic only, not yet against a real mirrored OT
+switch, an outstanding caveat carried forward honestly in
+`docs/design/sensor-mode.md` and `docs/USER_GUIDE.md` rather than
+implied as covered. Grok review item 5 is now fully closed.
 
 **6. Decode depth where the process lives -- mixed; the IPv6 framing is
 stale as of item 1's own Phase 1/2 work, the rest holds.** `decode`
