@@ -7931,8 +7931,9 @@ deferred future migration.
     (S7comm/Modbus); Phase 2 done, v0.2.5 (EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS);
     zone-level rollup done 2026-09-25, still v0.2.5 (`baseline check --policy` /
     `NewConduitKnownZone`); S7comm PLC Control/PLC Stop "always flag" done, v0.2.8 (Grok review item
-    3's S7 sub-item -- see below) -- statistical/confidence thresholds, CODESYS, and Grok item 3's
-    IEC 104/OPC UA sub-items are still not done, see below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
+    3's S7 sub-item); OPC UA service+NodeId tracking done, v0.2.8 (Grok review item 3's OPC UA
+    sub-item -- see below) -- statistical/confidence thresholds, CODESYS, and Grok item 3's IEC 104
+    sub-item are still not done, see below.** Phase 1 first, scoped to S7comm and Modbus exactly as the design called for: `BaselineEngine`
     (`baseline.hpp`/`baseline.cpp`), the `baseline learn`/`baseline check` subcommand pair, and
     Modbus's own prerequisite (`ModbusFrame::is_request`/`start_address`/`quantity`, populated
     from the same already-computed locals `decode_read_family`/`decode_write_multiple` had all
@@ -8192,12 +8193,61 @@ deferred future migration.
     the full, un-flattened `OpcUaMessage`), but both are left for a dedicated follow-up rather than
     rushed alongside this one.
 
+    **Follow-up (v0.2.8, same release): OPC UA service + NodeId tracking.** The second of Grok item
+    3's two remaining sub-items; Jurgen's instruction: "Start with the OPC UA service + NodeId
+    tracking." As anticipated in the S7 follow-up's own closing note above, this one really was pure
+    wiring, no new decode -- `OpcUaResult::first` already carries the full, un-flattened
+    `OpcUaMessage` of the first coalesced chunk, and every NodeId needed was already parsed and
+    rendered by `node_id_display()` for the existing `values` free-text summary. The gap, confirmed
+    directly against `tests/sample_opcua.pcap`'s own fixture data: `extract_opcua_operations`
+    previously emitted one key-only `Operation` per service name (`"ReadRequest"`, `"WriteRequest"`,
+    `"CallRequest"`), so the fixture's own two WriteRequest packets -- which address two DIFFERENT
+    NodeIds, `ns=2;i=1002` and `ns=2;i=1003` -- silently collapsed into one shared `"WriteRequest"`
+    key (`packet_count: 2`); a conduit that had only ever written `ns=2;i=1002` suddenly writing
+    `ns=2;i=1003` produced no anomaly at all. Implemented: `OpcUaMessage::node_ids` (`opcua.hpp`), a
+    new `std::vector<std::string>` populated only for ReadRequest/WriteRequest/CallRequest, one entry
+    per NodesToRead/NodesToWrite/MethodsToCall array element, reusing `node_id_display()`'s existing
+    rendering verbatim (CallRequest folds both the object_id and method_id of each
+    `CallMethodRequest` into one entry, `"object=<...> method=<...>"`, since neither alone identifies
+    "the operation" for an RPC-style call); `decode_read_request_params`/
+    `decode_write_request_params`/`decode_call_request_params` (`opcua.cpp`) each gained an
+    `OpcUaMessage&` parameter to populate it, reusing `call_tier1_decoder`'s existing
+    `OpcUaMessage&`-threading (precedent: `GetEndpointsResponse`'s own identity-field population), so
+    no new parameter-passing infrastructure was needed; `extract_opcua_operations` (`baseline.cpp`)
+    now emits one `Operation` per NodeId (`operation_key = msg.service_name + "/" + node_id`) whenever
+    `msg.node_ids` is non-empty, leaving every other OPC UA service (Browse, CreateSession,
+    GetEndpoints, FindServers, ...) unchanged as key-only. `has_target_range` stays false throughout
+    -- a NodeId is not a `[start, end)` range, and per spec is not even reliably numeric. New fixture
+    `tests/sample_baseline_opcua_new_nodeid.pcap` (`build_baseline_opcua_new_nodeid_sample`): one
+    standalone WriteRequest on the same conduit `sample_opcua.pcap`'s baseline already knows,
+    addressing a NodeId (`ns=2;i=9999`) that fixture never touches (OPC UA's own stateless design
+    means no handshake was needed first). Three pre-existing `baseline_*` CTest entries updated to the
+    new per-NodeId keys/counts (10 -> 11 distinct operations), plus a new
+    `baseline_check_opcua_new_nodeid_on_known_conduit_is_new_operation` proving the dedicated positive
+    case: the conduit and the other two WriteRequest NodeIds are all already known, only this NodeId
+    is new, so the result is exactly one `new-operation` finding, never `new-conduit` and never
+    silently absorbed into an already-known WriteRequest operation. (One CMake gotcha hit while writing
+    that test's own `FAIL_REGULAR_EXPRESSION`: an unescaped literal `;` inside a
+    `set_tests_properties` string is parsed by CMake as a list separator, so
+    `"new-conduit|WriteRequest/ns=2;i=1002|..."` silently split at each `;`, and the fragment
+    `"new-conduit|WriteRequest/ns=2"` then false-matched any OPC UA operation at all, since almost
+    every OPC UA operation_key contains a NodeId with its own `;`; fixed by escaping the intentional
+    semicolons as `\;`.) Full suite: 2119 -> 2120 tests (default config), 2106 -> 2107
+    (no-live-capture config), zero-warning clean rebuild in both, plus the ASan/UBSan config's own
+    `baseline_*`/`opcua` subset (121/121) and a MinGW-w64 cross-compile (2107 tests registered,
+    zero warnings), all confirmed; every pre-existing `opcua_*`/`real_opcua_*`/`inventory_opcua_*`/
+    `policy_widened_opcua_*` CTest entry not touched by this change still passes with its exact
+    original assertion, confirming the underlying Tier-1 Read/Write/Call decode itself is otherwise
+    unchanged. No version bump beyond v0.2.8 already in this release. Full design and rationale at
+    `docs/design/baseline-engine.md`'s own "Follow-up (v0.2.8, same release): OPC UA service +
+    NodeId tracking" section.
+
     Still not done: statistical/confidence thresholds (see the design doc's own "Explicitly out of
     scope" section -- the one item of the two Phase 1 originally deferred that remains genuinely
     open), CODESYS's `CmpIecVarAccess` (still the one confirmed real decode gap, structural-only
-    today), and Grok item 3's IEC 104/OPC UA sub-items (see the follow-up above for exactly what's
-    still needed for each). Zone-level baselines, formerly listed here too, is resolved as of the
-    zone-level-rollup follow-up above.
+    today), and Grok item 3's IEC 104 sub-item (type/COT/IOA-range tracking -- see the S7 follow-up
+    above for exactly what `Iec104Result` still needs before it can be written correctly). Zone-level
+    baselines, formerly listed here too, is resolved as of the zone-level-rollup follow-up above.
 
 42. **CC-Link IE Field Network Basic (CCIEFB), Mitsubishi Electric -- UDP ports 61450 (cyclic
     data) and 61451 (SLMP node search / set IP address).** **Done.** Jurgen asked "Can you add

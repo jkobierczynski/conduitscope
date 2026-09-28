@@ -815,3 +815,90 @@ detail rather than five first-ASDU-only scalars, mirroring `Dnp3Result::dnp3_obj
 promotion) before `extract_iec104_operations` can be written correctly -- genuinely more design/decode
 work than either the S7 sub-item above or the original "pure wiring" assessment suggested, and not
 yet confirmed with Jurgen. Flagged here rather than silently attempted or silently dropped.
+
+## Follow-up (v0.2.8, same release): OPC UA service + NodeId tracking
+
+The second of Grok item 3's two remaining sub-items after the S7comm follow-up above. Jurgen's
+instruction: "Start with the OPC UA service + NodeId tracking." As anticipated when IEC 104 and OPC
+UA were both deferred from the S7 follow-up, this one really was "pure wiring, no new decode" --
+`OpcUaResult::first` already carries the full, un-flattened `OpcUaMessage` of the first coalesced
+chunk (unlike `Iec104Result`'s flattened, first-ASDU-only shape, which is why IEC 104 remains
+deferred, unchanged, separately from this follow-up), and every NodeId this change needed was already
+being parsed and rendered by `node_id_display()` for the existing `values` free-text summary -- this
+follow-up only had to keep a copy of that same rendering as a named field, never re-parse it.
+
+**The gap.** `extract_opcua_operations` (`baseline.cpp`) previously emitted exactly one key-only
+`Operation` per recognized service (`operation_key = msg.service_name`, e.g. `"ReadRequest"`,
+`"WriteRequest"`, `"CallRequest"`) -- the OPC UA equivalent of tracking that a conduit calls Modbus
+Read Holding Registers at all, but never which register. Confirmed directly (not assumed) against
+`tests/sample_opcua.pcap`'s own fixture data: its two WriteRequest packets address two DIFFERENT
+NodeIds (`ns=2;i=1002` and `ns=2;i=1003`) that were silently collapsed into one shared `"WriteRequest"`
+operation_key (`packet_count: 2`) before this change -- a conduit that has only ever written
+`ns=2;i=1002` suddenly writing `ns=2;i=1003` produced no anomaly at all, exactly the kind of gap this
+sub-item was raised to close.
+
+**Implementation.**
+- `OpcUaMessage::node_ids` (`opcua.hpp`) -- a new `std::vector<std::string>`, populated only for
+  ReadRequest/WriteRequest/CallRequest (the request side), one entry per NodesToRead/NodesToWrite/
+  MethodsToCall array element, in the same order `decode_read_request_params`/
+  `decode_write_request_params`/`decode_call_request_params` (`opcua.cpp`) already walk that array.
+  Every entry reuses `node_id_display()`'s existing canonical rendering (`"ns=N;i=X"`/`"ns=N;s=X"`/
+  `"ns=N;g=X"`/`"ns=N;b=<N byte(s)>"`) verbatim -- the same string `OpcUaMessage::values` already
+  carries as free text, kept as a named field instead of re-parsed from it. For CallRequest, a single
+  `CallMethodRequest` carries two NodeIds (object_id and method_id), neither of which alone identifies
+  "the operation" for an RPC-style call, so both are folded into one entry per array element:
+  `"object=<...> method=<...>"`.
+- `decode_read_request_params`/`decode_write_request_params`/`decode_call_request_params` each gained
+  an `OpcUaMessage& msg` parameter (in addition to their existing `Cursor&`/`values` parameters) and
+  now push onto `msg.node_ids` inside their existing per-NodeId decode loops -- `call_tier1_decoder`
+  already threaded `OpcUaMessage& msg` through its call sites for exactly this kind of promotion
+  (precedent: `GetEndpointsResponse`'s own identity-field population), so this needed no new
+  parameter-passing infrastructure, only extending three existing signatures and their three call
+  sites.
+- `extract_opcua_operations` (`baseline.cpp`): when `msg.node_ids` is non-empty (i.e. the message is a
+  Read/Write/Call request), emits one `Operation` PER NodeId entry, `operation_key = msg.service_name +
+  "/" + node_id` (e.g. `"ReadRequest/ns=2;i=1001"`, `"WriteRequest/ns=2;i=1002"`,
+  `"CallRequest/object=ns=2;i=2000 method=ns=2;i=2001"`). Every other recognized OPC UA service
+  (Browse, CreateSession, GetEndpoints, FindServers, ActivateSession, CloseSession,
+  CloseSecureChannel, ...) is UNCHANGED -- still gets exactly one key-only `Operation`
+  (`operation_key = msg.service_name` alone), since `msg.node_ids` is only ever non-empty for
+  Read/Write/Call in the first place. `has_target_range` remains always false for OPC UA, unchanged
+  from before this follow-up -- a NodeId is not a `[start, end)` range the way a Modbus register or S7
+  DB offset is, and per the OPC UA spec itself NodeIds are not reliably numeric at all (string/GUID/
+  opaque identifiers are equally valid), so there is no range concept to add here even though S7 and
+  DNP3 both have one.
+
+**Fixtures and tests.** New fixture `tests/sample_baseline_opcua_new_nodeid.pcap`
+(`build_baseline_opcua_new_nodeid_sample`, `tools/make_sample_pcap.py`): one standalone WriteRequest
+packet on the same conduit `tests/sample_opcua.pcap`'s own baseline already knows (HMI_IP -> PLC_IP,
+opcua/4840), addressing a NodeId (`ns=2;i=9999`) that fixture never touches -- OPC UA's own
+"purely stateless, no fragment reassembly" property (`opcua.hpp`'s file header) means this needed no
+Hello/OpenSecureChannel/CreateSession handshake first, a standalone symmetric MSG chunk decodes on its
+own, the same way the S7 follow-up's own standalone one-packet-per-scenario fixture does. Four
+`baseline_*` CTest entries updated/added (`CMakeLists.txt`): `baseline_learn_opcua_produces_expected_
+operations` and the two `baseline_check_opcua_*` tests against `sample_opcua.pcap` itself updated from
+their old bare-service-name regexes/counts (10 distinct operations) to the new per-NodeId keys and
+counts (11 distinct operations -- the two WriteRequest packets now key separately, one more distinct
+(conduit, operation_key) pair than before); a new `baseline_check_opcua_new_nodeid_on_known_conduit_
+is_new_operation` proves the dedicated positive case -- `learn` from `sample_opcua.pcap`, then `check`
+the new fixture: the conduit is already known and so are the OTHER two WriteRequest NodeIds, but this
+specific NodeId is not, so the result must be exactly one `new-operation` finding for
+`"WriteRequest/ns=2;i=9999"`, never `new-conduit` and never silently absorbed into an already-known
+WriteRequest operation. (One CMake gotcha hit and fixed while writing this last test's own
+`FAIL_REGULAR_EXPRESSION`: an unescaped literal `;` inside a `set_tests_properties` string argument is
+parsed by CMake as a list separator, silently splitting `"new-conduit|WriteRequest/ns=2;i=1002|..."`
+into multiple independent alternatives at each `;` -- `"new-conduit|WriteRequest/ns=2"` on its own then
+false-matched any OPC UA operation, since almost every OPC UA operation_key itself contains a NodeId
+with a `;` in it. Fixed by escaping every intentional literal semicolon as `\;`, matching the one other
+pre-existing `\;`-escaped regex already in `CMakeLists.txt`.) Full suite: 2119 -> 2120 tests (default
+config), 2106 -> 2107 (no-live-capture config), zero-warning clean rebuild in both, plus the ASan/UBSan
+config's own `baseline_*`/`opcua` subset (121/121) and a MinGW-w64 cross-compile (2107 tests
+registered, zero warnings), all confirmed directly; every pre-existing `opcua_*`/`real_opcua_*`/
+`inventory_opcua_*`/`policy_widened_opcua_*` CTest entry not touched by this change still passes with
+its exact original assertion, confirming the underlying OPC UA decode itself (`opcua.cpp`'s Tier-1
+Read/Write/Call parameter decode) is otherwise unchanged -- this follow-up only ever adds to what those
+functions already extracted, never alters existing decode behavior.
+
+**IEC 104 remains the one open sub-item of Grok item 3.** See this document's own S7 follow-up section
+above for the specific `Iec104Result` extension it needs before `extract_iec104_operations` can be
+written correctly; that assessment is unchanged by this OPC UA follow-up.

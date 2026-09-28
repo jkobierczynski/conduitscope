@@ -895,7 +895,7 @@ void decode_close_session_request_params(Cursor& c, std::vector<std::string>& va
 // docs/MANUAL.md.
 
 // ReadValueId -- shared by ReadRequest's own NodesToRead array.
-void decode_read_request_params(Cursor& c, std::vector<std::string>& values) {
+void decode_read_request_params(Cursor& c, std::vector<std::string>& values, OpcUaMessage& msg) {
     double max_age_ms = bits_to_double(c.u64le());
     uint32_t timestamps_to_return = c.u32le();
     int32_t n = read_array_count(c);
@@ -913,6 +913,7 @@ void decode_read_request_params(Cursor& c, std::vector<std::string>& values) {
                              " attribute=" + attribute_id_name(attribute);
         if (index_range.has_value() && !index_range->empty()) entry += " range=" + *index_range;
         values.push_back(entry);
+        msg.node_ids.push_back(node_id_display(node));  // see OpcUaMessage::node_ids' own comment
     }
 }
 
@@ -930,7 +931,7 @@ void decode_read_response_params(Cursor& c, std::vector<std::string>& values) {
 }
 
 // WriteValue -- shared by WriteRequest's own NodesToWrite array.
-void decode_write_request_params(Cursor& c, std::vector<std::string>& values) {
+void decode_write_request_params(Cursor& c, std::vector<std::string>& values, OpcUaMessage& msg) {
     int32_t n = read_array_count(c);
     values.push_back("nodes-to-write-count=" + std::to_string(n));
     for (int32_t i = 0; i < n; ++i) {
@@ -943,6 +944,7 @@ void decode_write_request_params(Cursor& c, std::vector<std::string>& values) {
         if (index_range.has_value() && !index_range->empty()) entry += " range=" + *index_range;
         entry += " value=" + dv;
         values.push_back(entry);
+        msg.node_ids.push_back(node_id_display(node));  // see OpcUaMessage::node_ids' own comment
     }
 }
 
@@ -959,7 +961,7 @@ void decode_write_response_params(Cursor& c, std::vector<std::string>& values) {
 }
 
 // CallMethodRequest -- shared by CallRequest's own MethodsToCall array.
-void decode_call_request_params(Cursor& c, std::vector<std::string>& values) {
+void decode_call_request_params(Cursor& c, std::vector<std::string>& values, OpcUaMessage& msg) {
     int32_t n = read_array_count(c);
     values.push_back("methods-to-call-count=" + std::to_string(n));
     for (int32_t i = 0; i < n; ++i) {
@@ -973,6 +975,9 @@ void decode_call_request_params(Cursor& c, std::vector<std::string>& values) {
         }
         values.push_back("call[" + std::to_string(i) + "]=object=" + node_id_display(object_id) +
                           " method=" + node_id_display(method_id) + " input-arguments=[" + args.str() + "]");
+        // Both NodeIds folded into one entry -- see OpcUaMessage::node_ids' own comment for why
+        // neither alone fully identifies "the operation" for a method call.
+        msg.node_ids.push_back("object=" + node_id_display(object_id) + " method=" + node_id_display(method_id));
     }
 }
 
@@ -1105,11 +1110,11 @@ void call_tier1_decoder(const std::string& name, Cursor& c, std::vector<std::str
     else if (name == "ActivateSessionRequest") decode_activate_session_request_params(c, values, notes, redact);
     else if (name == "ActivateSessionResponse") decode_activate_session_response_params(c, values);
     else if (name == "CloseSessionRequest") decode_close_session_request_params(c, values);
-    else if (name == "ReadRequest") decode_read_request_params(c, values);
+    else if (name == "ReadRequest") decode_read_request_params(c, values, msg);
     else if (name == "ReadResponse") decode_read_response_params(c, values);
-    else if (name == "WriteRequest") decode_write_request_params(c, values);
+    else if (name == "WriteRequest") decode_write_request_params(c, values, msg);
     else if (name == "WriteResponse") decode_write_response_params(c, values);
-    else if (name == "CallRequest") decode_call_request_params(c, values);
+    else if (name == "CallRequest") decode_call_request_params(c, values, msg);
     else if (name == "CallResponse") decode_call_response_params(c, values);
 }
 

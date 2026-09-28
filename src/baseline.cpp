@@ -533,26 +533,39 @@ std::vector<Operation> extract_bacnet_operations(const DecodedPacket& dp) {
     return ops;
 }
 
-// OPC UA: operation_key is the recognized service name alone (e.g. "ReadRequest", "WriteRequest",
-// "CallRequest", "CreateSessionRequest", "BrowseRequest", ...) -- every Tier 1 AND Tier 2 recognized
-// service (opcua.hpp) is recorded, not just Read/Write/Call, the same "the operation itself is still
-// worth recording even without a range" posture S7 already takes for a BIT-transport-size item.
-// Request side only (OpcUaServiceHeader::is_response false): a response carries only a StatusCode,
-// never a NodeId to key or range on.
+// OPC UA: operation_key is the recognized service name alone (e.g. "CreateSessionRequest",
+// "BrowseRequest", ...) for every Tier 1/Tier 2 service EXCEPT Read/Write/Call -- Grok review item
+// 3's own OPC UA sub-item (docs/reviews/2026-09-grok-response.md, "baseline process behavior, not
+// just ports"): Read/Write/Call now instead get one Operation PER ADDRESSED NODEID, operation_key
+// "<ServiceName>/<NodeId string>", the same "one Operation per addressed sub-item" precedent
+// extract_s7comm_operations' own per-S7Item loop and extract_dnp3_operations' own
+// per-Dnp3ObjectRange loop already establish -- a conduit that has only ever touched NodeId A
+// suddenly touching NodeId B is exactly the kind of thing this engine exists to flag, and folding
+// every NodeId a request addresses into ONE service-level key would hide that entirely. Every other
+// recognized service still gets its single, key-only Operation (service_name alone) -- the same
+// "the operation itself is still worth recording even without a per-target key" posture S7 already
+// takes for a BIT-transport-size item -- since Browse/CreateSession/etc. don't address a NodeId
+// list this engine has anywhere to read one from (Browse addresses exactly one NodeId too, but
+// promoting it is a separate, unrelated decode effort -- see OpcUaMessage::node_ids' own comment,
+// opcua.hpp, for the current Tier 1/Tier 2 scope boundary).
+//
+// Sourced from OpcUaMessage::node_ids (opcua.hpp) -- promoted by decode_read_request_params/
+// decode_write_request_params/decode_call_request_params (opcua.cpp) directly from the SAME
+// node_id_display() rendering OpcUaMessage::values already carries as free text, never re-parsed
+// out of a rendered string (the anti-pattern this file rejects elsewhere). Request side only
+// (OpcUaServiceHeader::is_response false, checked below): a response carries only a StatusCode,
+// never a NodeId to key on -- node_ids is therefore always empty on the response side anyway, but
+// the explicit is_response check is kept for the same "every other protocol this engine reads is
+// request-side only" consistency, not because node_ids alone wouldn't already guard it.
 //
 // has_target_range is ALWAYS false -- an honest call, not a forced fit (per the design doc's own
-// framing): Read/Write/Call's own NodeId list is decoded by opcua.cpp's decode_read_request_params/
-// decode_write_request_params/decode_call_request_params straight into OpcUaMessage::values as
-// display strings ("nodes-to-read[0]=ns=2;i=1001 attribute=Value") -- there is no structured NodeId
-// field on OpcUaMessage this file could read a numeric identifier back out of without parsing a
-// rendered string (the same anti-pattern rejected elsewhere in this file). Even a successfully
-// parsed NUMERIC NodeId identifier still wouldn't be a genuine [start,end) range the way a register
-// block is: a single Read/Write targets one specific NodeId, not a COUNT of consecutive addresses,
-// and a request can address several UNRELATED NodeIds in one call (an array, not a contiguous span)
-// -- there's no natural "range" to build even with the number in hand, only, at best, a single-point
-// interval per NodeId, which this pass does not attempt given the NodeId itself isn't reliably
-// numeric in the first place (OPC UA NodeIds are legally String/Guid/ByteString identifiers too, per
-// opcua.hpp's own "Primitive encoding" section).
+// framing), unchanged by this follow-up: even with a structured NodeId identifier now in hand, a
+// single Read/Write/Call targets one specific NodeId, not a COUNT of consecutive addresses, and a
+// request can address several UNRELATED NodeIds in one call (an array, not a contiguous span) --
+// there's no natural [start,end) range to build even with the identifier available, only, at best,
+// a single-point interval per NodeId, which this pass does not attempt given the NodeId itself
+// isn't reliably numeric in the first place (OPC UA NodeIds are legally String/Guid/ByteString
+// identifiers too, per opcua.hpp's own "Primitive encoding" section).
 std::vector<Operation> extract_opcua_operations(const DecodedPacket& dp) {
     std::vector<Operation> ops;
     if (!dp.result) return ops;
@@ -560,6 +573,17 @@ std::vector<Operation> extract_opcua_operations(const DecodedPacket& dp) {
     const OpcUaMessage& msg = our.first;
     if (!msg.service_recognized || msg.service_name.empty()) return ops;
     if (msg.has_header && msg.header.is_response) return ops;
+
+    if (!msg.node_ids.empty()) {
+        for (const std::string& node_id : msg.node_ids) {
+            Operation op;
+            op.protocol = "opcua";
+            op.operation_key = msg.service_name + "/" + node_id;
+            // has_target_range stays false -- see this function's own header comment.
+            ops.push_back(std::move(op));
+        }
+        return ops;
+    }
 
     Operation op;
     op.protocol = "opcua";

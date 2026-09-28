@@ -443,6 +443,35 @@ struct OpcUaMessage {
 
     std::vector<std::string> values;  // Tier 1 service-specific decoded fields, "key=value" each
 
+    // The NodeId(s) this message's own service body addresses -- Grok review item 3's OPC UA
+    // sub-item ("baseline process behavior, not just ports" -- docs/reviews/2026-09-grok-
+    // response.md). The same targets `values` above already renders as free text (e.g.
+    // "nodes-to-read[0]=ns=2;s=Temperature attribute=Value"), promoted to their own structured
+    // field instead of requiring a caller to re-parse rendered text -- the same "expose what's
+    // already extracted as a named field" posture EnipFrame's own identity_* fields (relative to
+    // CipMessage's generic `values`) and Iec104Result::iec104_object_ioas already established.
+    //
+    // Populated only for the three request-side services whose own body addresses NodeIds
+    // directly -- ReadRequest's NodesToRead, WriteRequest's NodesToWrite, CallRequest's
+    // MethodsToCall (decode_read_request_params/decode_write_request_params/
+    // decode_call_request_params, opcua.cpp) -- one entry per array element, in the SAME order
+    // those functions walk that array (so index i here is index i in the corresponding `values`
+    // entries too). Each entry is that array element's own node_id_display() rendering, the exact
+    // same canonical "ns=N;i=X"/"ns=N;s=X"/"ns=N;g=X"/"ns=N;b=<N byte(s)>" string `values` already
+    // carries -- reused directly, never re-derived. For ReadRequest/WriteRequest this is simply the
+    // node being read/written; for CallRequest, a CallMethodRequest carries TWO NodeIds (the object
+    // the method is invoked against, and the method itself), and BOTH are baseline-relevant --
+    // neither alone fully identifies "the operation" -- so they're folded into one string per
+    // entry, "object=<...> method=<...>", the same "fold a bounded, meaningful dimension into the
+    // key" precedent S7's own DB-number suffix already established, rather than adding a second,
+    // parallel array a caller would have to zip against this one by index.
+    //
+    // Empty for every other service, including every response (a response carries no NodeId of its
+    // own to report -- see extract_opcua_operations' own comment, baseline.cpp, for why NodeId
+    // extraction is deliberately request-side only here, mirroring every other protocol this
+    // baseline engine reads).
+    std::vector<std::string> node_ids;
+
     bool body_shown_as_hex = false;
     std::string body_hex;
     size_t body_length = 0;

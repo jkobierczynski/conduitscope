@@ -14304,23 +14304,46 @@ set_tests_properties(baseline_check_bacnet_empty_baseline_finds_new_conduit PROP
   PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(2 finding\\(s\\)\\).*\\[1\\] new-conduit  192\\.168\\.1\\.10 -> 192\\.168\\.1\\.255:47808  bacnet  operation=\"readProperty/analog-input/present-value\".*\\[2\\] new-conduit  192\\.168\\.1\\.10 -> 192\\.168\\.1\\.255:47808  bacnet  operation=\"writeProperty/binary-output/present-value\""
   FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
 
-# --- OPC UA -- key-only: see extract_opcua_operations' own comment (baseline.cpp) ----------------
+# --- OPC UA -- key-only for every service except Read/Write/Call, which get one Operation PER
+# addressed NodeId instead (Grok review item 3's OPC UA sub-item -- see extract_opcua_operations'
+# own comment, baseline.cpp, and OpcUaMessage::node_ids' own comment, opcua.hpp) --------------------
 
+# tests/sample_opcua.pcap's own ReadRequest/CallRequest each address exactly one NodeId, and its two
+# WriteRequest packets address TWO DIFFERENT NodeIds (ns=2;i=1002 and ns=2;i=1003) -- proving the
+# split actually happens: before this follow-up both WriteRequest packets collapsed into one shared
+# "WriteRequest" operation_key (packet_count 2); now they're two distinct rows, each packet_count 1,
+# which is the entire point of this sub-item (a conduit that only ever writes ns=2;i=1002 suddenly
+# writing ns=2;i=1003 is exactly the kind of thing this engine exists to flag, and the old key would
+# have hidden it entirely).
 add_test(NAME baseline_learn_opcua_produces_expected_operations
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json'")
 set_tests_properties(baseline_learn_opcua_produces_expected_operations PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"protocol\": \"opcua\",\n *\"server_port\": 4840,.*\"operation_key\": \"ReadRequest\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest\",\n *\"packet_count\": 2,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"CallRequest\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]")
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"opcua\",\n *\"server_port\": 4840,.*\"operation_key\": \"ReadRequest/ns=2;i=1001\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest/ns=2;i=1002\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"CallRequest/object=ns=2;i=2000 method=ns=2;i=2001\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest/ns=2;i=1003\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]"
+  FAIL_REGULAR_EXPRESSION "\"operation_key\": \"WriteRequest\"|\"operation_key\": \"ReadRequest\"|\"operation_key\": \"CallRequest\"")
 
 add_test(NAME baseline_check_opcua_unmodified_zero_findings
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap'")
 set_tests_properties(baseline_check_opcua_unmodified_zero_findings PROPERTIES
-  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 10 distinct operation\\(s\\) observed, 10 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+  # 11 distinct operations, not 10 -- the two WriteRequest packets now key separately (see this
+  # section's own comment above), one more distinct (conduit, operation_key) pair than before.
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 11 distinct operation\\(s\\) observed, 11 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
 
 add_test(NAME baseline_check_opcua_empty_baseline_finds_new_conduit
   COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap'")
 set_tests_properties(baseline_check_opcua_empty_baseline_finds_new_conduit PROPERTIES
-  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(10 finding\\(s\\)\\).*\\[6\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"ReadRequest\".*\\[7\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest\""
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(11 finding\\(s\\)\\).*\\[6\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"ReadRequest/ns=2;i=1001\".*\\[7\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2;i=1002\".*\\[8\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"CallRequest/object=ns=2;i=2000 method=ns=2;i=2001\".*\\[9\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2;i=1003\""
   FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
+
+# The NEW behavior's own dedicated positive case: `learn` from the fixture, then `check` a SECOND
+# capture on the SAME conduit that writes a NodeId (ns=2;i=9999) the baseline has never seen --
+# must be NewOperation (the conduit and the OTHER NodeId are both already known; only this specific
+# NodeId is new), never silently folded into the already-known "WriteRequest" behavior the old
+# service-name-only key would have produced.
+add_test(NAME baseline_check_opcua_new_nodeid_on_known_conduit_is_new_operation
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_new_nodeid.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_new_nodeid.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_new_nodeid.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_opcua_new_nodeid.pcap'")
+set_tests_properties(baseline_check_opcua_new_nodeid_on_known_conduit_is_new_operation PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(1 finding\\(s\\)\\).*\\[1\\] new-operation  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2;i=9999\""
+  FAIL_REGULAR_EXPRESSION "new-conduit|WriteRequest/ns=2\\;i=1002|WriteRequest/ns=2\\;i=1003")
 
 # --- MELSEC (MC Protocol/SLMP) -- full range-tracking for Batch Read/Write, key-only otherwise:
 # see extract_melsec_operations' own comment (baseline.cpp) -------------------------------------

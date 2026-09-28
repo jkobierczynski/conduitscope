@@ -18052,6 +18052,36 @@ def build_baseline_s7comm_control_plane_sample():
     (TESTS_DIR / "sample_baseline_s7comm_control_plane.pcap").write_bytes(data)
 
 
+def build_baseline_opcua_new_nodeid_sample():
+    """Grok review item 3's OPC UA sub-item ("baseline process behavior, not just ports" --
+    docs/reviews/2026-09-grok-response.md) -- positive case for the new per-NodeId Operation
+    tracking (see extract_opcua_operations' own comment, baseline.cpp, and OpcUaMessage::node_ids'
+    own comment, opcua.hpp). One standalone WriteRequest packet on the SAME conduit
+    tests/sample_opcua.pcap's own baseline already knows (HMI_IP -> PLC_IP, opcua/4840), writing a
+    NodeId (ns=2;i=9999) that fixture never touches -- `baseline check` against a baseline learned
+    from sample_opcua.pcap alone must call this NewOperation (the conduit is known,
+    "WriteRequest/ns=2;i=1002" and "WriteRequest/ns=2;i=1003" are both already known too -- only
+    THIS specific NodeId is new), never NewConduit and never silently folded into the
+    already-known WriteRequest operations the way a plain service-name-only key would have. OPC UA
+    is purely stateless (opcua.hpp's own file header comment), so this doesn't need a full
+    Hello/OpenSecureChannel/CreateSession handshake first -- a standalone symmetric MSG decodes on
+    its own terms, the same way build_baseline_s7comm_control_plane_sample's own standalone
+    one-packet-per-scenario S7comm fixtures do."""
+    channel_id, token_id = 500001, 1
+
+    write_params = (opcua_array_count(1) + node_id_numeric(2, 9999) + struct.pack("<I", 13) +
+                     opcua_string(None) + opcua_data_value(opcua_variant_float(7.0)))
+    write_body = opcua_service_message(673, opcua_request_header(1), write_params)  # WriteRequest
+    payload = opcua_symmetric_message("MSG", channel_id, token_id, 1, 1, write_body)
+
+    tcp = tcp_header(53100, OPCUA_PORT, 1000, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+    ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), 0x7400) + tcp
+    pkt = eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip
+
+    data = pcap_global_header() + pcap_record(pkt, 1_700_014_000, 0)
+    (TESTS_DIR / "sample_baseline_opcua_new_nodeid.pcap").write_bytes(data)
+
+
 # --- AMQP 0-9-1 / AMQP 1.0 -----------------------------------------------------------------
 # Two wire-INCOMPATIBLE protocols sharing TCP port 5672 by convention -- see amqp_common.hpp's own
 # file header comment for the full detection-posture rationale this fixture exercises: sticky
@@ -19986,6 +20016,7 @@ if __name__ == "__main__":
     build_baseline_zone_new_operation_sample()
     build_baseline_s7comm_symbolic_sample()
     build_baseline_s7comm_control_plane_sample()
+    build_baseline_opcua_new_nodeid_sample()
     build_amqp091_sample()
     build_amqp10_sample()
     build_dicom_sample()
