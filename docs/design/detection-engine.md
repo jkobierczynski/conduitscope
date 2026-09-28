@@ -707,6 +707,129 @@ in `CMakeLists.txt` pins the full six-finding report end to end and asserts (via
 `..._clear_counters_decoded`/`..._detect_batch1_all_findings` (`CMakeLists.txt`) do the same against
 the real capture described above.
 
+## Batch 2: six more Snort-style patterns (DNP3 control-plane operations plus known scanner-tool fingerprints)
+
+A direct follow-up to Batch 1, from the same `docs/research/2026-09-detect-pattern-candidates-
+batch2.md` document's own Batch 2 section (items 7-12). Jurgen confirmed "continue with batch 2"
+immediately after Batch 1 shipped. Sourced from Quickdraw-Snort's `dnp3.rules`, CyberICS's
+`scada-scan.rules`, and nmap's own published NSE source (`modbus-discover.nse`, cross-checked during
+the original research pass; the BACnet-related NSE content needed a fresh fetch during this batch's
+own implementation, see pattern 12 below).
+
+| # | Pattern (as implemented) | Category / technique | Evidence | Severity | Novelty |
+|---|---|---|---|---|---|
+| 7 | DNP3 Stop Application (function 0x12) | EngineeringStationActivity / T0858 | Confirmed (always-notable) | Critical | N/A |
+| 8 | A DNP3 Write-classified function addressed to a reserved broadcast destination (0xFFFF/0xFFFE/0xFFFD) | ProtocolMisuse / T0855 | Confirmed (always-notable) | Critical | N/A |
+| 9 | DNP3 object-group/variation enumeration sweep: a master's Read requests span 5+ distinct object group/variation pairs against one outstation within 60s | EngineeringStationActivity / **T0861** (Point & Tag Identification) | Confirmed (always-notable, windowed) | Moderate | N/A |
+| 10 | Modbus request byte-exact matches Metasploit's `scada/modbus_findunitid`/`modbus_detect` probe | ProtocolMisuse / T0888 | Confirmed (byte-exact) | Moderate | N/A |
+| 11 | Modbus request byte-exact matches nmap's `modbus-discover.nse` Report Server ID or Read Device Identification probe | ProtocolMisuse / T0888 | Confirmed (byte-exact) | Informational | N/A |
+| 12 | BACnet ReadProperty request for the Device object's wildcard/"any" instance (device,4194303) asking for one of nine standard identity properties | ProtocolMisuse / T0888 | Confirmed (field-exact) | Informational | N/A |
+
+Implementation notes, by pattern:
+
+- **Pattern 7 needed zero new decode work** -- function code 0x12 ("Stop Application") was already
+  named in `dnp3.cpp`'s own function-code table before this batch (confirmed by grep before writing
+  any code, per this project's own "confirm readiness before implementing" discipline). Pure
+  `detect_engine.cpp` wiring: a new `else if` branch alongside the existing Cold/Warm Restart branch,
+  its own distinct `finding_kind` (`"dnp3-stop-application"`) and technique (T0858, not T0816 --
+  halting the application layer is a mode change, not a restart).
+- **Pattern 8 is deliberately a SEPARATE check, not folded into the function-name chain.** A broadcast
+  Cold Restart or Stop Application must produce BOTH its own function-specific finding AND
+  `dnp3-broadcast-command` -- confirmed this is exactly what happens against the real capture below
+  (a broadcast Stop Application there produces both findings). Gated on
+  `dnp3_write_function_names()` (`dnp3.hpp` -- the same read/write classification
+  `Policy::parse_policy_text`'s own `functions: [write]` keyword expansion already uses) rather than
+  enumerating function names again in `detect_engine.cpp`; every Write-classified function is
+  inherently master-issued (Confirm/Select/Response/Unsolicited Response are all `Other`), so no
+  extra direction gating was needed.
+- **Pattern 9 is the one pattern in this batch whose implementation deliberately DEPARTS from the
+  research doc's own readiness note.** That note suggested "same mechanism as the already-built
+  BACnet Who-Is-flood counter" (an unwindowed, whole-capture running count). The pattern's own wire
+  condition text -- "an unusually wide spread of distinct object groups/variations... within a short
+  window" -- explicitly calls for real time-windowing instead, so this reuses
+  `modbus_exception_burst_state_`'s own windowed-reset shape (Batch 1 pattern 6) rather than the
+  unwindowed one: a whole-capture running count would treat four unrelated single-object polls spread
+  across an hour-long capture the same as four different object types requested within one burst --
+  not the same signal. `Dnp3EnumerationSweepState` (`detect_engine.hpp`) tracks a SET of `(group,
+  variation)` pairs, not a count -- the pattern is about DIVERSITY of what's being read, so a master
+  re-reading the same handful of object types many times within the window must never trip this on
+  repetition alone. Threshold (5 distinct pairs) and window (60s, matching
+  `kModbusExceptionBurstWindowSeconds` for consistency) are another small, documented judgment call,
+  not vendor-sourced -- Quickdraw's own SIDs 1111213/1111214 generalize a differently-shaped condition
+  (repeated exception RESPONSES, `threshold: count 3-5, seconds 30-60`) that doesn't transplant
+  directly. T0861 (Point & Tag Identification) was picked over the more generic T0888 already used
+  elsewhere in this file because it's the more semantically precise MITRE fit for a points-list-shaped
+  sweep specifically -- both were already in `mitre_attack_ics.hpp`'s existing table, so no new
+  technique citation was needed.
+- **Patterns 10 and 11 resolved an open design question the research doc itself flagged**: whether
+  byte-exact scanner-tool fingerprinting would need new raw-frame-byte exposure, since every existing
+  `detect_engine.cpp` pattern before this batch read a DECODED/named field, never raw payload bytes.
+  It did not. Every byte Metasploit's and nmap's own fixed probe framings touch is already available
+  as an individually-decoded `ModbusFrame` field (`transaction_id`/`protocol_id`/`mbap_length`/
+  `unit_id`/`function_code`) or via `raw_pdu_data` (already exposed "for hex fallback/JSON",
+  `modbus.hpp`, covering the PDU bytes after the function code) -- confirmed by decomposing each
+  cited byte string field-by-field against `ModbusFrame`'s own layout before writing any code. A new
+  `raw_pdu_matches()` helper (`detect_engine.cpp`, an exact-length-and-content byte comparison against
+  `raw_pdu_data`) is the only new machinery this needed. Metasploit's probe (pattern 10) is Moderate,
+  not Informational like the two nmap probes (pattern 11) -- Metasploit is exploit-adjacent tooling,
+  not pure reconnaissance, matching the research doc's own "Informational-to-Moderate" call for that
+  one. The two nmap sub-patterns (Report Server ID and Read Device Identification) use two distinct
+  `finding_kind` tags (`modbus-scanner-nmap-report-server-id`/`modbus-scanner-nmap-read-device-id`),
+  not one shared tag -- a conduit hit by both probes gets two findings, not one silently overwriting
+  the other's own description. Both nmap sub-patterns also legitimately co-occur with Batch 1's own
+  generic new-vs-known Read-Device-ID/Report-Server-ID findings on the same conduit (a tool-specific,
+  higher-confidence fingerprint AND a generic first-occurrence reconnaissance finding are both true at
+  once) -- confirmed directly in the synthetic fixture's own report, not assumed.
+- **Pattern 12 is the one item the research doc itself flagged as not implementation-ready**: "needs
+  the specific nmap BACnet NSE script's own request bytes read directly... before implementing." That
+  research pass ran as part of this batch's own implementation (a fresh fetch of CyberICS's
+  `scada-scan.rules` BACnet section). It surfaced two corrections to the original research pass: the
+  ruleset actually ships **nine** BACnet-nmap SIDs (101563265-101563273), not the eight the original
+  pass estimated from the repo's rule count alone (Vendor-Name, SID 101563273, was missed); and every
+  one of the nine rules is byte-identical except its final property-identifier byte --
+  `|81 0a 00 11 01 04 00 05 01 0c 0c 02 3f ff ff 19 <property>|` -- decoded field by field:
+  BVLC-Original-Unicast-NPDU, NPDU version 1, a Confirmed-Request ReadProperty (service 12) whose
+  ObjectIdentifier is object type 8 (device) instance `0x3FFFFF` (4194303, BACnet's own
+  22-bit-all-ones "any device" wildcard instance -- a real, spec-legal convention for addressing a
+  device without already knowing its real instance number, but one a legitimate operator who already
+  knows their own devices' instance numbers has no routine reason to use), asking for one of nine
+  standard identity properties (Application-Software-Version/Description/Firmware-Revision/Location/
+  Model-Name/Object-Identifier/Object-Name/Vendor-Identifier/Vendor-Name). Unlike patterns 10/11, this
+  needed NO raw-byte matching at all: every byte this fingerprint needs is already available as
+  rendered `BacnetApdu::values` entries (`"object=device,4194303"`/`"property=<name>"`) --
+  `decode_object_property_reference` (`bacnet.cpp`) already renders an object identifier as
+  `<object_type_name>,<instance>` and a property as its own name, so this pattern is a plain string
+  comparison against already-decoded fields, deliberately NOT byte-exact against invoke-ID/max-APDU
+  bytes the way patterns 10/11 are (those bytes vary by nmap version/config in ways the object/
+  property pair does not).
+- **Three of the six (7, 8, 9) are independently verified against this project's own REAL capture,
+  `tests/real_captures/dnp3/dnp3_test_data_part1.pcap`** -- an unplanned, welcome bonus matching Batch
+  1's own precedent with `modbus_test_data_part1.pcap`. `detect --read` against that capture fires a
+  genuine Stop Application finding (twice, against two different outstations), a genuine broadcast
+  Disable Unsolicited Responses (destination 0xFFFF), a genuine broadcast Stop Application (both the
+  function-specific AND the broadcast finding fire together, confirming pattern 7 and pattern 8 are
+  correctly independent), and a genuine 5-distinct-object-group/variation enumeration sweep --
+  confirmed via this project's own manual verification pass against the real CLI output before
+  writing `real_dnp3_detect_batch2_findings`'s own assertion. Patterns 10/11/12 (the scanner-tool
+  fingerprints) have no real-capture evidence -- no real capture in this project happens to have been
+  generated by Metasploit or nmap -- so those three rely entirely on the synthetic fixture.
+
+Fixtures: `tests/sample_detect_snort_patterns_batch2.pcap`
+(`build_detect_snort_patterns_batch2_sample()`) covers all six patterns plus eight negative/contrast
+conduits proving each pattern's own condition really is required: a Stop Application to a
+non-broadcast destination (proving 7 and 8 are independent); a broadcast Read (Read-classified, not
+Write -- proving 8's function-access gate matters, not just the destination address); an
+under-threshold enumeration sweep (4 distinct pairs); a windowed-out enumeration sweep (5 distinct
+pairs, but the 5th arrives 95s after the window's own first occurrence); a Metasploit near-miss
+(quantity=1, not the probe's own quantity=0); two nmap near-misses (a different unit ID, a different
+transaction ID); a BACnet wildcard-instance request for a property outside the nine-property set; and
+a BACnet request for one of the nine properties but against a REAL (non-wildcard) device instance.
+`detect_snort_patterns_batch2_all_findings` (`CMakeLists.txt`) pins the full eleven-finding report
+(seven Batch 2 sources plus four co-occurring Batch 1 generic new-vs-known findings on the nmap
+sub-pattern conduits) end to end and asserts, via `FAIL_REGULAR_EXPRESSION`, that none of the six
+negative-only conduits produced a finding of their own. `real_dnp3_detect_batch2_findings`
+(`CMakeLists.txt`) does the same against the real capture described above.
+
 ## Explicitly out of scope
 
 - **Evidence/novelty/severity retrofit onto pre-existing engines.** See "Four-axis model" above.

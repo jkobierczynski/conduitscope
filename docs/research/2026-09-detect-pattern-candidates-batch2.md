@@ -68,10 +68,25 @@ All six of these come from Digital Bond's `modbus.rules` (SIDs 1111001-1111011);
   verified CTest coverage (including against this project's own real `modbus_test_data_part1.pcap`
   capture, which turned out to genuinely exercise items 1-3 and 6) -- see
   `docs/design/detection-engine.md`'s own "Batch 1" section for the full implementation record and
-  `docs/DEVELOPMENT.md`'s item 92 for the ROADMAP entry. Batches 2 and 3 (items 7-18) remain
-  candidate-only, not implemented -- nothing there has been wired into `detect_engine.cpp`,
-  `mitre_attack_ics.hpp`, or any CTest case. A follow-up implementation pass would pick some or all
-  of these, following this project's own standing rules: verify every CTest assertion against real
-  CLI output, verify every new MITRE ID directly against `attack.mitre.org` before adding it, and
-  build/fixture new decode-field exposure (batch 3's OPC UA SecurityPolicy/UserIdentityToken fields)
-  the same way batch 1's Modbus diagnostic sub-functions/MEI type were added.
+  `docs/DEVELOPMENT.md`'s item 92 for the ROADMAP entry.
+- **Batch 2 (items 7-12) is now implemented too.** Jurgen confirmed "continue with batch 2" as a
+  direct follow-up; all six now ship in `detect_engine.cpp`/`detect_engine.hpp` with verified CTest
+  coverage, including against this project's own real `dnp3_test_data_part1.pcap` capture (which
+  turned out to genuinely exercise items 7-9) -- see `docs/design/detection-engine.md`'s own "Batch
+  2" section for the full implementation record and `docs/DEVELOPMENT.md`'s item 93 for the ROADMAP
+  entry. Item 12's own "needs one more research pass" flag above was resolved during that
+  implementation pass: a fresh fetch of the CyberICS ruleset's actual BACnet-section content found
+  NINE SIDs (101563265-101563273), not the eight estimated above from the repo's rule count alone
+  (Vendor-Name, SID 101563273, was missed the first time), and every rule's exact byte content
+  (a ReadProperty request for the Device object's wildcard instance 4194303, one of nine standard
+  identity properties) -- corrected in the implementation record. Items 10/11's own open question
+  about whether byte-exact fingerprinting would need new raw-frame-byte exposure was also resolved:
+  it did not -- every byte both fingerprints touch was already an individually-decoded `ModbusFrame`
+  field or available via the pre-existing `raw_pdu_data`.
+  Batch 3 (items 13-18) remains candidate-only, not implemented -- nothing there has been wired into
+  `detect_engine.cpp`, `mitre_attack_ics.hpp`, or any CTest case. A follow-up implementation pass
+  would pick some or all of these, following this project's own standing rules: verify every CTest
+  assertion against real CLI output, verify every new MITRE ID directly against `attack.mitre.org`
+  before adding it, and build/fixture new decode-field exposure (batch 3's OPC UA
+  SecurityPolicy/UserIdentityToken fields) the same way batch 1's Modbus diagnostic sub-functions/MEI
+  type were added.

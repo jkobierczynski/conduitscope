@@ -410,8 +410,8 @@ section for a worked example.
 .TP
 .B detect (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Detection findings OT incident\-response teams recognize (Grok review item
-4, plus twelve Snort\-style pattern extensions added as direct follow\-ups
-in two batches of six):
+4, plus eighteen Snort\-style pattern extensions added as direct follow\-ups
+in three batches of six):
 engineering\-station mode changes, firmware/logic downloads and device
 restarts, protocol misuse (unsolicited/unexpected commands, a new
 engineering\-station originator, a CIP Identity Object write, a DNP3
@@ -420,12 +420,18 @@ read on the same conduit, a BACnet Who\-Is flood/enumeration sweep, S7comm
 Setup Communication probing), new remote\-access channels into the plant,
 a download\-then\-restart composite (a firmware/logic download and a
 restart/mode\-change finding both against the same server within a short
-window), and (Batch 1, sourced from Digital Bond's Quickdraw\-Snort
+window), (Batch 1, sourced from Digital Bond's Quickdraw\-Snort
 \fBmodbus.rules\fR) Modbus Diagnostics Force Listen Only Mode/Restart
 Communications Option/Clear Counters and Diagnostic Registers, Read
 Device Identification and Report Server ID from a new client, and a
-repeated exception\-code response burst \-\- distinct from the flood/scan\-
-shaped signatures this tool already detects elsewhere. Every finding
+repeated exception\-code response burst, and (Batch 2, sourced from
+Quickdraw\-Snort's \fBdnp3.rules\fR plus CyberICS's \fBscada\-scan.rules\fR
+plus nmap's own published NSE source) DNP3 Stop Application, a
+write/operate command addressed to a reserved DNP3 broadcast destination,
+a DNP3 object\-group/variation enumeration sweep, and known Modbus
+(Metasploit/nmap) and BACnet (nmap) scanner\-tool byte\-exact
+fingerprints \-\- distinct from the flood/scan\-shaped signatures this
+tool already detects elsewhere. Every finding
 cites exactly one MITRE ATT&CK for ICS technique and carries three
 independent, labeled dimensions \-\-
 never a single conflated "confidence" field, and never a claim about

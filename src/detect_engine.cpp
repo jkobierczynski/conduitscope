@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <ostream>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -181,6 +183,35 @@ constexpr double kCompositeWindowSeconds = 300.0;
 constexpr size_t kModbusExceptionBurstThreshold = 3;
 constexpr double kModbusExceptionBurstWindowSeconds = 60.0;
 
+// DNP3 object-group/variation enumeration sweep threshold/window (Batch 2 item 9, docs/research/
+// 2026-09-detect-pattern-candidates-batch2.md) -- another small, documented judgment-call default,
+// not vendor-sourced: Quickdraw's own SIDs 1111213/1111214 (which this generalizes) use `threshold:
+// count 3-5, seconds 30-60` on a differently-shaped condition (repeated EXCEPTION RESPONSES), so
+// their exact numbers don't transplant directly. 5 distinct object group/variation combinations
+// within 60 seconds is picked as "wide spread" -- high enough that one ordinary integrity poll
+// (typically a handful of Class 0/1/2/3 object headers, or often just one or two) doesn't trip it,
+// low enough that an engineering tool genuinely walking the outstation's supported object types
+// still does -- same window as kModbusExceptionBurstWindowSeconds, for consistency across this
+// file's two windowed detectors.
+constexpr size_t kDnp3EnumerationSweepThreshold = 5;
+constexpr double kDnp3EnumerationSweepWindowSeconds = 60.0;
+
+// Byte-exact match against a fixed expected sequence -- used by the Batch 2 Modbus scanner-tool
+// fingerprints (items 10/11, detect_engine.cpp's own DNP3-block-sibling Modbus block below). Every
+// byte these fingerprints check is already available as an individually-decoded ModbusFrame field
+// (transaction_id/protocol_id/mbap_length/unit_id/function_code) or via raw_pdu_data (already
+// exposed "for hex fallback/JSON", modbus.hpp, covering the PDU bytes after the function code) -- no
+// new decode work or raw-frame-byte exposure was needed for this batch.
+bool raw_pdu_matches(const ByteSpan& span, std::initializer_list<uint8_t> expected) {
+    if (span.size() != expected.size()) return false;
+    size_t i = 0;
+    for (uint8_t b : expected) {
+        if (span.at(i) != b) return false;
+        ++i;
+    }
+    return true;
+}
+
 }  // namespace
 
 void DetectEngine::observe(const DecodedPacket& dp) {
@@ -340,6 +371,50 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        dp.dst_port,
                                        "DNP3 " + dr.dnp3_function_name +
                                            " request -- an outstation is being commanded to restart");
+            } else if (dr.dnp3_function_name == "Stop Application") {
+                // Batch 2 item 7 (docs/research/2026-09-detect-pattern-candidates-batch2.md) --
+                // distinct from Cold/Warm Restart above: this halts the outstation's application
+                // layer without a full device restart (function 0x12, already named in dnp3.cpp's own
+                // function-code table before this batch -- pure wiring, no decode-layer change).
+                record_always_notable("dnp3-stop-application", DetectionCategory::EngineeringStationActivity,
+                                       mitre_t0858_change_operating_mode(), dp.src_ip, dp.dst_ip, "dnp3",
+                                       dp.dst_port,
+                                       "DNP3 Stop Application request -- an outstation's application "
+                                       "layer is being halted without a full device restart");
+            } else if (dr.dnp3_function_name == "Read") {
+                // Batch 2 item 9: object-group/variation enumeration sweep -- a single master's Read
+                // requests against one outstation span an unusually wide spread of distinct object
+                // group/variation combinations within a short window. WINDOWED (unlike
+                // bacnet_who_is_count_by_source_'s own whole-capture running count) -- see
+                // dnp3_enumeration_sweep_state_'s own comment (detect_engine.hpp) for why this
+                // deliberately departs from the research doc's own readiness note, which suggested
+                // reusing that unwindowed mechanism. A SET of (group, variation) pairs, not a count --
+                // the signal is DIVERSITY of what's being read, so re-reading the same handful of
+                // object types repeatedly within the window must never trip this on repetition alone.
+                std::string ekey = dp.src_ip + "|" + dp.dst_ip;
+                Dnp3EnumerationSweepState& est = dnp3_enumeration_sweep_state_[ekey];
+                if (est.distinct_group_variations.empty() ||
+                    (dp.timestamp - est.window_start) > kDnp3EnumerationSweepWindowSeconds) {
+                    est.window_start = dp.timestamp;
+                    est.distinct_group_variations.clear();
+                }
+                for (const auto& obj : dr.dnp3_objects) {
+                    est.distinct_group_variations.emplace(obj.group, obj.variation);
+                }
+                if (est.distinct_group_variations.size() >= kDnp3EnumerationSweepThreshold) {
+                    record_always_notable(
+                        "dnp3-enumeration-sweep", DetectionCategory::EngineeringStationActivity,
+                        mitre_t0861_point_and_tag_identification(), dp.src_ip, dp.dst_ip, "dnp3",
+                        dp.dst_port,
+                        "DNP3 Read requests from this master spanned " +
+                            std::to_string(est.distinct_group_variations.size()) +
+                            " distinct object group/variation combinations against this outstation "
+                            "within " +
+                            std::to_string(static_cast<long>(kDnp3EnumerationSweepWindowSeconds)) +
+                            "s -- an engineering-tool-shaped enumeration sweep rather than routine "
+                            "periodic polling",
+                        DetectionSeverity::Moderate);
+                }
             } else if (dr.dnp3_function_name == "Enable Unsolicited Responses") {
                 dnp3_unsolicited_enabled_[dp.src_ip + "|" + dp.dst_ip] = true;
             } else if (dr.dnp3_function_name == "Disable Unsolicited Responses") {
@@ -387,6 +462,33 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                         "which this engine never flags -- Direct Operate is a legitimate, "
                         "intentional bypass of Select-before-Operate, not a violation of it)");
                 }
+            }
+
+            // Batch 2 item 8: a write/operate command addressed to one of DNP3's three reserved
+            // broadcast destination addresses (0xFFFF general reserved broadcast, 0xFFFE unconfirmed
+            // broadcast, 0xFFFD confirmed broadcast -- all three per the DNP3 spec) reaches every
+            // outstation on the segment at once. Deliberately a SEPARATE check, not folded into the
+            // function-name chain above -- a broadcast Cold Restart or Stop Application should still
+            // produce BOTH its own function-specific finding above AND this one, not just one or the
+            // other. Gated to Write-classified function codes only (dnp3_write_function_names(),
+            // dnp3.hpp -- the exact same read/write classification Policy::parse_policy_text's own
+            // 'functions: [write]' keyword expansion already uses), matching the pattern's own "a
+            // write/operate command" framing -- every Write-classified function is inherently
+            // master-issued (Confirm/Select/Response/Unsolicited Response are all Other, never
+            // Write), so no extra direction gating is needed here.
+            static const std::vector<std::string> kDnp3WriteFunctionNames = dnp3_write_function_names();
+            bool is_dnp3_write = std::find(kDnp3WriteFunctionNames.begin(), kDnp3WriteFunctionNames.end(),
+                                            dr.dnp3_function_name) != kDnp3WriteFunctionNames.end();
+            if (is_dnp3_write && (dr.destination_address == 0xFFFF || dr.destination_address == 0xFFFE ||
+                                   dr.destination_address == 0xFFFD)) {
+                std::ostringstream d;
+                d << "DNP3 " << dr.dnp3_function_name << " addressed to reserved broadcast destination "
+                     "address 0x" << std::hex << dr.destination_address << std::dec
+                  << " -- reaches every outstation on the segment at once, a single message with "
+                     "plant-wide blast radius";
+                record_always_notable("dnp3-broadcast-command", DetectionCategory::ProtocolMisuse,
+                                       mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip,
+                                       "dnp3", dp.dst_port, d.str());
             }
         }
     }
@@ -454,6 +556,50 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        "bacnet", dp.dst_port,
                                        "BACnet DeviceCommunicationControl request -- a device's own "
                                        "communication can be silenced or re-enabled by this service");
+            } else if (svc == "readProperty") {
+                // Batch 2 item 12: known BACnet scanner-tool fingerprint (nmap-shaped) -- CyberICS
+                // SIDs 101563265-101563273 (docs/research/2026-09-detect-pattern-candidates-batch2.md
+                // flagged this item as needing one more research pass before implementation; that
+                // pass ran as part of this batch and found NINE SIDs, not the eight the original
+                // pass estimated from the repo's rule count alone -- Vendor-Name/SID 101563273 was
+                // missed the first time). Every one of the nine rules is byte-identical except its
+                // final property-identifier byte -- |81 0a 00 11 01 04 00 05 01 0c 0c 02 3f ff ff 19
+                // <property>| -- decoded field by field: BVLC-Original-Unicast-NPDU, NPDU version 1, a
+                // Confirmed-Request ReadProperty (service 12) whose ObjectIdentifier is object type 8
+                // (device) instance 0x3FFFFF (4194303, BACnet's own 22-bit-all-ones "any device"
+                // wildcard instance -- a real, spec-legal convention for addressing a device without
+                // already knowing its real instance number, but one a legitimate operator who already
+                // knows their own devices' instance numbers has no routine reason to use), asking for
+                // one of nine standard identity properties. Every byte this fingerprint needs is
+                // already available as rendered BacnetApdu::values entries
+                // ("object=device,4194303"/"property=<name>") -- unlike the Modbus fingerprints
+                // above, no raw-byte matching was needed here at all.
+                bool is_wildcard_device = false;
+                std::string matched_property;
+                for (const auto& v : bf.npdu.apdu.values) {
+                    if (v == "object=device,4194303") {
+                        is_wildcard_device = true;
+                    } else if (v.rfind("property=", 0) == 0) {
+                        matched_property = v.substr(9);
+                    }
+                }
+                static const std::set<std::string> kNmapBacnetFingerprintProperties = {
+                    "application-software-version", "description",       "firmware-revision",
+                    "location",                     "model-name",        "object-identifier",
+                    "object-name",                  "vendor-identifier", "vendor-name"};
+                if (is_wildcard_device && kNmapBacnetFingerprintProperties.count(matched_property)) {
+                    record_always_notable(
+                        "bacnet-scanner-nmap", DetectionCategory::ProtocolMisuse,
+                        mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip,
+                        "bacnet", dp.dst_port,
+                        "BACnet ReadProperty request byte-exact matches a known nmap-shaped scanner "
+                        "fingerprint (CyberICS scada-scan.rules) -- Device object wildcard instance "
+                        "4194303 queried for '" +
+                            matched_property +
+                            "', a pattern a legitimate operator who already knows their own devices' "
+                            "real instance numbers has no routine reason to use",
+                        DetectionSeverity::Informational);
+                }
             }
         }
 
@@ -778,6 +924,77 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 record_always_notable("modbus-exception-burst", DetectionCategory::ProtocolMisuse,
                                        mitre_t0855_unauthorized_command_message(), dp.dst_ip, dp.src_ip,
                                        "modbus", dp.src_port, d.str(), DetectionSeverity::Moderate);
+            }
+        }
+
+        // --- Modbus: known scanner-tool byte-exact fingerprints (Batch 2 items 10-11) --------------
+        // Gated to the request side (dp.dst_port == MODBUS_TCP_PORT), same convention as the
+        // Diagnostics/Read-Device-ID/Report-Server-ID blocks above -- every fingerprint below is a
+        // fixed, tool-generated PROBE, which only ever travels client -> server. Every byte each
+        // fingerprint checks is already an individually-decoded ModbusFrame field (transaction_id/
+        // protocol_id/mbap_length/unit_id/function_code) or raw_pdu_data (already exposed "for hex
+        // fallback/JSON", modbus.hpp, covering the PDU bytes after the function code) -- no new
+        // decode work or raw-frame-byte exposure was needed for this batch, resolving what the
+        // research doc's own readiness note had flagged as a possible open architecture question.
+        if (dp.dst_port == MODBUS_TCP_PORT) {
+            // Item 10: Metasploit's scada/modbus_findunitid / modbus_detect auxiliary modules' own
+            // fixed Read Holding Registers probe -- CyberICS SID 101563260, exact byte match
+            // |21 00 00 00 00 06 01 04 00 01 00 00|. Broken down: transaction_id=0x2100,
+            // protocol_id=0x0000, mbap_length=6, unit_id=1, function_code=0x04 (Read Holding
+            // Registers), PDU data (raw_pdu_data) = start_address 0x0001, quantity 0x0000 -- a
+            // request asking for ZERO registers, which has no legitimate purpose and is fixed only by
+            // the module's own hardcoded probe framing. Moderate, not Informational (unlike the nmap
+            // fingerprints below): Metasploit is exploit-adjacent tooling, not pure reconnaissance --
+            // see the research doc's own "Informational-to-Moderate" call.
+            if (mb.transaction_id == 0x2100 && mb.protocol_id == 0x0000 && mb.mbap_length == 6 &&
+                mb.unit_id == 1 && mb.function_code == 0x04 &&
+                raw_pdu_matches(mb.raw_pdu_data, {0x00, 0x01, 0x00, 0x00})) {
+                record_always_notable(
+                    "modbus-scanner-metasploit", DetectionCategory::ProtocolMisuse,
+                    mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip, "modbus",
+                    dp.dst_port,
+                    "Modbus request byte-exact matches Metasploit's scada/modbus_findunitid / "
+                    "modbus_detect auxiliary modules' own fixed probe framing (a Read Holding "
+                    "Registers request for zero registers, transaction ID 0x2100) -- an automated "
+                    "scanner/exploit-framework fingerprint, not ordinary engineering-tool traffic",
+                    DetectionSeverity::Moderate);
+            }
+
+            // Item 11: nmap's modbus-discover.nse -- CyberICS SIDs 101563263/101563264, independently
+            // cross-checked against nmap's own published source during this project's original
+            // research pass. Two distinct fixed probes, the SAME function codes as Batch 1 items 4/5's
+            // generic new-vs-known findings, but nmap's own fixed framing is a distinct, higher-
+            // confidence, tool-specific signal worth its own finding rather than folding into the
+            // generic one -- two separate finding_kind tags (not one shared tag) so a conduit hit by
+            // BOTH nmap probes gets two findings, not one silently overwriting the other's own
+            // description (see always_notable_key's own comment on why finding_kind exists at all).
+            if (mb.transaction_id == 0x0000 && mb.protocol_id == 0x0000 && mb.mbap_length == 2 &&
+                mb.unit_id == 1 && mb.function_code == 0x11 && mb.raw_pdu_data.empty()) {
+                // Report Server ID (0x11) -- |00 00 00 00 00 02 01 11|, no PDU data beyond the
+                // function code itself.
+                record_always_notable(
+                    "modbus-scanner-nmap-report-server-id", DetectionCategory::ProtocolMisuse,
+                    mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip, "modbus",
+                    dp.dst_port,
+                    "Modbus Report Server ID request byte-exact matches nmap's modbus-discover.nse own "
+                    "fixed probe framing (transaction ID 0x0000, unit ID 1) -- reconnaissance tooling, "
+                    "not ordinary engineering-tool traffic",
+                    DetectionSeverity::Informational);
+            }
+            if (mb.transaction_id == 0x0000 && mb.protocol_id == 0x0000 && mb.mbap_length == 5 &&
+                mb.unit_id == 1 && mb.function_code == 0x2B &&
+                raw_pdu_matches(mb.raw_pdu_data, {0x0E, 0x01, 0x00})) {
+                // Read Device Identification (0x2B, MEI 0x0E) -- |00 00 00 00 00 05 01 2b 0e 01 00|:
+                // MEI type 0x0E, Read Device ID code 0x01 ("Read Device ID (basic)"), object ID 0x00.
+                record_always_notable(
+                    "modbus-scanner-nmap-read-device-id", DetectionCategory::ProtocolMisuse,
+                    mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip, "modbus",
+                    dp.dst_port,
+                    "Modbus Read Device Identification request byte-exact matches nmap's "
+                    "modbus-discover.nse own fixed probe framing (transaction ID 0x0000, unit ID 1, "
+                    "MEI type 0x0E, Read Device ID code 0x01) -- reconnaissance tooling, not ordinary "
+                    "engineering-tool traffic",
+                    DetectionSeverity::Informational);
             }
         }
     }

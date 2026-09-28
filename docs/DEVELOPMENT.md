@@ -13419,6 +13419,80 @@ it done as its own patch.
     `man/conduitscope.1` (`detect` COMMANDS entry updated to name all twelve patterns) all updated
     in the same increment.
 
+93. **Batch 2: six more Snort-style pattern extensions to `detect` -- DNP3 control-plane operations
+    plus known Modbus/BACnet scanner-tool fingerprints.** Jurgen's direct follow-up after item 92
+    shipped -- "continue with batch 2", the same confirmation pattern as item 92's own "continue with
+    batch 1". Sourced from Quickdraw-Snort's `dnp3.rules`, CyberICS's `scada-scan.rules`, and nmap's
+    own published NSE source (`modbus-discover.nse`, cross-checked during the original research pass;
+    the BACnet-related NSE content needed a fresh fetch during this batch's own implementation, since
+    the research document itself flagged that one item as not yet ready). Full record in
+    [docs/design/detection-engine.md](design/detection-engine.md)'s own "Batch 2" section.
+
+    Confirmed readiness before writing any code: function code 0x12 ("Stop Application") was already
+    named in `dnp3.cpp`'s own function-code table. The six: DNP3 Stop Application
+    (`EngineeringStationActivity`/T0858, always-notable, Critical); a DNP3 Write-classified function
+    (`dnp3_write_function_names()`, the same read/write classification `Policy::parse_policy_text`'s
+    own `functions: [write]` keyword expansion already uses) addressed to one of DNP3's three reserved
+    broadcast destination addresses 0xFFFF/0xFFFE/0xFFFD (`ProtocolMisuse`/T0855, always-notable,
+    Critical -- a SEPARATE check from the function-name chain, so a broadcast Stop Application or
+    Cold Restart produces BOTH its own finding and this one); a DNP3 object-group/variation
+    enumeration sweep -- a master's Read requests spanning 5+ distinct object group/variation pairs
+    against one outstation within 60 seconds, genuinely WINDOWED (`Dnp3EnumerationSweepState`, a SET
+    of distinct pairs, not a count) -- a deliberate departure from the research document's own
+    readiness note, which suggested reusing the unwindowed BACnet Who-Is-flood mechanism; the
+    pattern's own wire condition text ("within a short window") calls for real time-windowing instead
+    (`EngineeringStationActivity`/**T0861**, Point & Tag Identification -- picked over the more
+    generic T0888 used elsewhere for the more semantically precise fit, already in
+    `mitre_attack_ics.hpp`'s existing table, no new technique needed -- always-notable, Moderate); a
+    Modbus request byte-exact matching Metasploit's `scada/modbus_findunitid`/`modbus_detect`
+    auxiliary modules' own fixed Read Holding Registers probe (transaction ID 0x2100, quantity 0) --
+    `ProtocolMisuse`/T0888, always-notable, Moderate (exploit-adjacent tooling, not pure
+    reconnaissance); two Modbus requests byte-exact matching nmap's `modbus-discover.nse` own fixed
+    Report Server ID / Read Device Identification probes -- `ProtocolMisuse`/T0888, always-notable,
+    Informational, two distinct `finding_kind` tags so a conduit hit by both gets two findings; and a
+    BACnet ReadProperty request for the Device object's wildcard/"any" instance (device,4194303,
+    BACnet's own 22-bit-all-ones convention) asking for one of nine standard identity properties --
+    `ProtocolMisuse`/T0888, always-notable, Informational.
+
+    The two Modbus scanner-tool fingerprints resolved an open design question the research document
+    itself raised: whether byte-exact fingerprinting would need new raw-frame-byte exposure, since
+    every prior `detect_engine.cpp` pattern read a decoded/named field, never raw payload bytes. It
+    did not -- every byte each fingerprint touches is already an individually-decoded `ModbusFrame`
+    field (`transaction_id`/`protocol_id`/`mbap_length`/`unit_id`/`function_code`) or available via
+    `raw_pdu_data` (already exposed "for hex fallback/JSON"). A new `raw_pdu_matches()` helper (exact
+    length-and-content comparison) was the only new machinery needed. The BACnet fingerprint needed no
+    raw-byte matching at all -- `decode_object_property_reference` (`bacnet.cpp`) already renders the
+    object identifier and property as their own named strings (`"object=device,4194303"`/
+    `"property=<name>"`), so this is a plain field comparison. That same research pass also found the
+    CyberICS ruleset actually ships NINE BACnet-nmap SIDs (101563265-101563273), not the eight the
+    original research pass estimated from the repo's rule count alone (Vendor-Name, SID 101563273,
+    was missed the first time) -- corrected in this batch's own implementation.
+
+    Three of the six (Stop Application, the broadcast command, and the enumeration sweep) are
+    independently verified against this project's own REAL capture,
+    `tests/real_captures/dnp3/dnp3_test_data_part1.pcap` -- an unplanned, welcome bonus matching item
+    92's own precedent with `modbus_test_data_part1.pcap`: this real capture genuinely contains a
+    Stop Application, a broadcast Disable Unsolicited Responses (and a broadcast Stop Application,
+    confirming the broadcast check and the function-specific chain fire together as designed), and a
+    genuine 5-distinct-group/variation enumeration sweep -- confirmed via manual verification against
+    the real CLI output before writing `real_dnp3_detect_batch2_findings`'s own assertion. New
+    synthetic fixture `tests/sample_detect_snort_patterns_batch2.pcap`
+    (`build_detect_snort_patterns_batch2_sample`, 26 packets, 11 findings) covers all six patterns
+    plus eight negative/contrast conduits proving each pattern's own condition is genuinely required
+    (a non-broadcast Stop Application; a broadcast Read, which is Read-classified not Write; an
+    under-threshold enumeration sweep; a windowed-out enumeration sweep; a Metasploit near-miss
+    quantity; two nmap near-misses; a BACnet wildcard-instance request for a property outside the
+    nine-property set; and a BACnet request for one of the nine properties against a real,
+    non-wildcard device instance).
+
+    Full CTest across all four standing build configurations (default GCC: 2186/2186; ASan/UBSan
+    `build-fuzz`: 2263/2263, including the 77-test fuzz corpus regression;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2172/2172; MinGW-w64 cross-compile,
+    build-only there) -- 100% pass, zero regressions. `docs/design/detection-engine.md` (new "Batch
+    2" section), `docs/USER_GUIDE.md` (new "Batch 2" subsection with a real-capture worked example,
+    two new LIMITATIONS bullets), and `man/conduitscope.1` (`detect` COMMANDS entry updated to name
+    all eighteen patterns across three batches) all updated in the same increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

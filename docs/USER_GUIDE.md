@@ -1359,6 +1359,82 @@ real capture produces, plus this batch's own synthetic fixture and its four nega
 conduits, is exercised by this project's own CTest suite (`real_modbus_diagnostics_*`/
 `real_modbus_detect_batch1_all_findings`/`detect_snort_patterns_batch1_all_findings`).)
 
+#### Batch 2: DNP3 control-plane operations plus known scanner-tool fingerprints
+
+A direct follow-up to Batch 1, sourced from Quickdraw-Snort's `dnp3.rules`, CyberICS's
+`scada-scan.rules`, and nmap's own published NSE source (`docs/research/2026-09-detect-pattern-
+candidates-batch2.md`'s own Batch 2 section has the full research record,
+`docs/design/detection-engine.md`'s own "Batch 2" section has the full implementation record):
+
+- **DNP3 Stop Application** (function 0x12) -- the outstation's application layer is being halted
+  without a full device restart, distinct from the pre-existing Cold/Warm Restart finding.
+- **DNP3 broadcast write/operate command** -- any DNP3 function this engine already classifies as
+  Write (Cold/Warm Restart, Stop Application, Operate, Enable/Disable Unsolicited Responses, and
+  others) addressed to one of DNP3's three reserved broadcast destination addresses (0xFFFF/0xFFFE/
+  0xFFFD) -- a single message with plant-wide blast radius, reported as its OWN finding alongside
+  whatever function-specific finding the same command also produces (a broadcast Stop Application
+  fires both).
+- **DNP3 object-group/variation enumeration sweep** -- a single master's Read requests span 5 or
+  more distinct object group/variation combinations against one outstation within 60 seconds --
+  windowed, the same discipline the Modbus exception-burst pattern above already established, since
+  a genuine enumeration sweep has to be close together in time to mean anything.
+- **Known Modbus scanner-tool fingerprint (Metasploit)** -- a request byte-exact matches
+  Metasploit's `scada/modbus_findunitid`/`modbus_detect` auxiliary modules' own fixed Read Holding
+  Registers probe (transaction ID 0x2100, a request for zero registers) -- Moderate severity,
+  exploit-adjacent tooling rather than pure reconnaissance.
+- **Known Modbus scanner-tool fingerprints (nmap)** -- a request byte-exact matches nmap's
+  `modbus-discover.nse` own fixed Report Server ID or Read Device Identification probe framing --
+  the same function codes Batch 1's own new-vs-known findings already watch generically, but nmap's
+  own fixed byte framing is a distinct, higher-confidence, tool-specific signal reported as its own
+  finding alongside the generic one.
+- **Known BACnet scanner-tool fingerprint (nmap)** -- a ReadProperty request for the Device object's
+  wildcard/"any" instance (device,4194303 -- BACnet's own 22-bit-all-ones convention for addressing
+  a device without already knowing its real instance number) asking for one of nine standard
+  identity properties (Application-Software-Version/Description/Firmware-Revision/Location/
+  Model-Name/Object-Identifier/Object-Name/Vendor-Identifier/Vendor-Name) -- a pattern a legitimate
+  operator who already knows their own devices' real instance numbers has no routine reason to use.
+
+Three of these six (Stop Application, the broadcast command, and the enumeration sweep) are
+independently verified against this project's own REAL capture,
+`tests/real_captures/dnp3/dnp3_test_data_part1.pcap` -- not just a synthetic fixture:
+
+```
+$ conduitscope detect -r tests/real_captures/dnp3/dnp3_test_data_part1.pcap
+...
+[Engineering-Station Activity] T0861 (Point & Tag Identification)
+  evidence: Confirmed  novelty: N/A  severity: Moderate
+  10.0.0.9 -> 10.0.0.3:20000 (dnp3)
+  DNP3 Read requests from this master spanned 5 distinct object group/variation combinations against this outstation within 60s -- an engineering-tool-shaped enumeration sweep rather than routine periodic polling
+  first seen: 2004-10-11 14:42:34.952032Z  last seen: 2004-10-11 14:42:34.952032Z  packets: 1
+
+[Protocol Misuse] T0855 (Unauthorized Command Message)
+  evidence: Confirmed  novelty: N/A  severity: Critical
+  10.0.0.8 -> 10.0.0.3:20000 (dnp3)
+  DNP3 Disable Unsolicited Responses addressed to reserved broadcast destination address 0xffff -- reaches every outstation on the segment at once, a single message with plant-wide blast radius
+  first seen: 2004-10-11 16:09:10.238687Z  last seen: 2004-10-11 16:09:19.359091Z  packets: 2
+
+[Engineering-Station Activity] T0858 (Change Operating Mode)
+  evidence: Confirmed  novelty: N/A  severity: Critical
+  10.0.0.9 -> 10.0.0.3:20000 (dnp3)
+  DNP3 Stop Application request -- an outstation's application layer is being halted without a full device restart
+  first seen: 2004-10-11 16:46:21.093332Z  last seen: 2004-10-11 16:46:22.837583Z  packets: 2
+
+[Protocol Misuse] T0855 (Unauthorized Command Message)
+  evidence: Confirmed  novelty: N/A  severity: Critical
+  10.0.0.9 -> 10.0.0.3:20000 (dnp3)
+  DNP3 Stop Application addressed to reserved broadcast destination address 0xffff -- reaches every outstation on the segment at once, a single message with plant-wide blast radius
+  first seen: 2004-10-11 16:46:21.093332Z  last seen: 2004-10-11 16:46:22.837583Z  packets: 2
+```
+
+(This same real capture's own pre-existing dnp3-restart/dnp3-unsolicited-misuse findings from
+earlier work are omitted above for brevity. Note the last two findings above: a broadcast Stop
+Application correctly produces BOTH its own function-specific finding AND the broadcast finding,
+confirming the two patterns are independent. The three scanner-tool fingerprints (Metasploit/nmap
+Modbus, nmap BACnet) have no real-capture evidence -- no real capture in this project happens to
+have been generated by those tools -- so they rely entirely on this batch's own synthetic fixture,
+`tests/sample_detect_snort_patterns_batch2.pcap`, exercised by `detect_snort_patterns_batch2_
+all_findings`/`real_dnp3_detect_batch2_findings` in this project's own CTest suite.)
+
 #### Worked example
 
 ```
@@ -6233,6 +6309,19 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   (`threshold: count 3-5, seconds 60`) -- a small, documented judgment-call default, not a precise
   vendor-mandated value; a deployment that wants a different count/window has no flag to change it
   today. See "Batch 1" above.
+- **`detect`'s Batch 2 DNP3 object-group/variation enumeration sweep pattern uses a fixed threshold
+  (5 distinct group/variation pairs) and window (60s), not configurable from the command line** --
+  the same posture as the exception-code-burst pattern above, another small, documented judgment-call
+  default rather than a precise vendor-mandated value. See "Batch 2" above.
+- **`detect`'s Batch 2 Modbus scanner-tool fingerprints (Metasploit/nmap) are byte-exact matches
+  against each tool's own DEFAULT probe framing** -- a scanner run with non-default settings, a
+  different tool version whose framing has since changed, or a hand-crafted request that happens to
+  carry different transaction-ID/unit-ID bytes than the ones cited here will not match. These
+  fingerprints are a strong POSITIVE signal when they do fire (byte-exact evidence a specific tool's
+  default probe was used), never a completeness claim about scanner traffic in general -- ordinary
+  reconnaissance (Batch 1's own Read Device Identification/Report Server ID new-vs-known findings, or
+  this batch's own BACnet ReadProperty wildcard-instance pattern) is the broader, tool-agnostic
+  detection surface for that. See "Batch 2" above.
 - **`detect`'s evidence/novelty/severity never assert malicious intent.**
   `evidence` says how reliably this tool observed the event; `severity`
   says how much it would matter if genuine; `novelty` says whether it

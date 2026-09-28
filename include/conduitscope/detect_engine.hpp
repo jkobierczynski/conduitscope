@@ -144,10 +144,69 @@
 //     logic can trigger this too, the same posture as the Modbus write-without-prior-read pattern
 //     above). Windowed (unlike bacnet_who_is_count_by_source_'s own whole-capture running count) --
 //     see modbus_exception_burst_state_'s own comment for why.
+//
+// Six more patterns ("Batch 2"), a direct follow-up to Batch 1 -- DNP3 control-plane operations plus
+// known Modbus/BACnet scanner-tool fingerprints (docs/research/2026-09-detect-pattern-candidates-
+// batch2.md's own Batch 2 section has the full research/scoping record for each, including exact SID
+// citations):
+//   - DNP3 Stop Application (function 0x12) -- always-notable, EngineeringStationActivity/T0858,
+//     Critical severity. Distinct from the pre-existing Cold/Warm Restart finding: this halts the
+//     outstation's application layer without a full device restart. Pure wiring -- 0x12 was already
+//     named in dnp3.cpp's own function-code table before this batch.
+//   - DNP3 broadcast write/operate command: any DNP3 function this codebase already classifies as
+//     Write (dnp3_write_function_names(), dnp3.hpp) addressed to one of DNP3's three reserved
+//     broadcast destination addresses (0xFFFF/0xFFFE/0xFFFD) -- always-notable, ProtocolMisuse/T0855,
+//     Critical severity (a single message with plant-wide blast radius). Deliberately NOT folded into
+//     the per-function-name chain above -- a broadcast Cold Restart or Stop Application should still
+//     produce BOTH its own function-specific finding and this one, not just one or the other. See
+//     detect_engine.cpp's own call-site comment.
+//   - DNP3 object-group/variation enumeration sweep: a single master's Read (0x01) requests against
+//     one outstation span an unusually wide spread of distinct object group/variation combinations
+//     within a short window -- always-notable, EngineeringStationActivity/T0861 (Point & Tag
+//     Identification -- picked over the more generic T0888 already used elsewhere in this file
+//     because T0861 is the more semantically precise fit for a points-list-shaped sweep specifically,
+//     see detect_engine.cpp's own call-site comment), Moderate severity. WINDOWED (unlike
+//     bacnet_who_is_count_by_source_'s own whole-capture running count) -- the research doc's own
+//     readiness note suggested reusing that unwindowed mechanism, but the pattern's own wire
+//     condition text ("within a short window") calls for real time-windowing instead, the same
+//     departure already made once for modbus_exception_burst_state_ in Batch 1; see
+//     dnp3_enumeration_sweep_state_'s own comment for the full reasoning.
+//   - Known Modbus scanner-tool fingerprint, Metasploit's scada/modbus_findunitid / modbus_detect
+//     auxiliary modules -- an exact MBAP+PDU byte match (transaction ID, protocol ID, length, unit
+//     ID, function code, and PDU data all fixed by the tool itself) on TCP/502 -- always-notable,
+//     ProtocolMisuse/T0888, Moderate severity (Metasploit is exploit-adjacent tooling, not pure
+//     reconnaissance, so this sits slightly above the nmap fingerprints below -- see the research
+//     doc's own "Informational-to-Moderate" call and detect_engine.cpp's own call-site comment for
+//     why Moderate was picked). Needed NO new decode work and no raw-frame-byte exposure: every byte
+//     this fingerprint touches is already available as an individually-decoded ModbusFrame field
+//     (transaction_id/protocol_id/mbap_length/unit_id/function_code) or via raw_pdu_data (already
+//     exposed "for hex fallback/JSON", modbus.hpp) for the PDU bytes after the function code --
+//     confirmed during this batch's own implementation pass, resolving what the research doc's own
+//     readiness note had flagged as possibly needing new raw-byte architecture.
+//   - Known Modbus scanner-tool fingerprints, nmap's modbus-discover.nse -- two more exact byte
+//     matches (Report Server ID and Read Device Identification, the SAME function codes Batch 1's
+//     new-vs-known items 4/5 already watch generically, but nmap's own fixed probe framing is a
+//     distinct, higher-confidence, tool-specific signal) -- always-notable, ProtocolMisuse/T0888,
+//     Informational severity (pure reconnaissance tooling, not exploit-adjacent).
+//   - Known BACnet scanner-tool fingerprint, a ReadProperty (confirmed service 12) request whose
+//     ObjectIdentifier is the Device object's wildcard/"any" instance (device,4194303 -- BACnet's own
+//     22-bit-all-ones convention for "whichever device answers, regardless of its real instance
+//     number") for one of nine specific standard identity properties (Application-Software-Version/
+//     Description/Firmware-Revision/Location/Model-Name/Object-Identifier/Object-Name/Vendor-
+//     Identifier/Vendor-Name) -- always-notable, ProtocolMisuse/T0888, Informational severity. The
+//     research doc's own readiness note flagged this item as needing one more research pass (the
+//     CyberICS ruleset's exact rule content, not just its count/target, hadn't been fetched yet);
+//     that pass ran as part of this batch's own implementation and also found the CyberICS ruleset
+//     actually ships NINE BACnet-nmap SIDs (101563265-101563273), not the eight the original research
+//     pass estimated from the repo's rule count alone (Vendor-Name, SID 101563273, was missed) -- see
+//     detect_engine.cpp's own call-site comment for the full byte-level derivation. Resolved purely
+//     from already-decoded BacnetApdu::values entries ("object=device,4194303"/"property=<name>"),
+//     no raw-byte matching needed here either.
 #pragma once
 
 #include <cstdint>
 #include <iosfwd>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -456,6 +515,28 @@ private:
         double window_start = 0.0;
     };
     std::unordered_map<std::string, ModbusExceptionBurstState> modbus_exception_burst_state_;
+
+    // DNP3 object-group/variation enumeration sweep state (Batch 2 item 9), per (master_ip,
+    // outstation_ip) key ("<master_ip>|<outstation_ip>") -- `distinct_group_variations` is the SET of
+    // (group, variation) pairs seen across this master's own Read requests to this outstation since
+    // `window_start`, reset (cleared, window_start moved to dp.timestamp) whenever a new Read's gap
+    // since `window_start` exceeds kDnp3EnumerationSweepWindowSeconds (detect_engine.cpp) -- the same
+    // windowed-reset shape modbus_exception_burst_state_ above already established, deliberately
+    // chosen over bacnet_who_is_count_by_source_'s own unwindowed whole-capture running count even
+    // though the research doc's own readiness note for this pattern suggested reusing that mechanism:
+    // the pattern's own wire condition ("an unusually wide spread of distinct object groups/
+    // variations... within a short window") explicitly calls for time-windowing, and a whole-capture
+    // running count would treat four unrelated single-object polls spread across an hour-long capture
+    // the same as four different object types requested within one burst -- not the same signal. A
+    // SET, not a count (unlike modbus_exception_burst_state_'s own plain counter): the pattern is
+    // about DIVERSITY of what's being read, not how many times something was read, so a master
+    // re-reading the same handful of object types many times within the window must never trip this
+    // on repetition alone.
+    struct Dnp3EnumerationSweepState {
+        double window_start = 0.0;
+        std::set<std::pair<uint8_t, uint8_t>> distinct_group_variations;  // (group, variation)
+    };
+    std::unordered_map<std::string, Dnp3EnumerationSweepState> dnp3_enumeration_sweep_state_;
 
     size_t total_packets_ = 0;
 };
