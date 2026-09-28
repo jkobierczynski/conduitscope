@@ -55,6 +55,14 @@ dependency-free as before, and those two just report that clearly at runtime
 instead of not existing. See [docs/USER_GUIDE.md](docs/USER_GUIDE.md)'s LIVE CAPTURE
 section.
 
+## Screenshots
+
+![Conduitscope](docs/conduitscope.jpg)
+
+## Made with Claude
+
+Made with Claude Sonnet 5 High
+
 ## Why not just use tshark?
 
 Fair question -- tshark wins on raw protocol-decoding breadth (thousands of
