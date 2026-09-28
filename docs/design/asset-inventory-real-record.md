@@ -5,11 +5,14 @@ scaffolding, EtherNet/IP CIP Identity wiring, S7comm-Plus dispatch, OPC UA ident
 S7comm SZL decode + wiring, BACnet ReadPropertyMultiple decode + Device-object identity correlation,
 DNP3 Device Attributes decode + identity correlation, role classification, tag/point/DB touch
 summarization), Phase 8 (CSV/CMDB export), Phase 9 (STIX/TAXII-lite export), and Phase 10
-(firewall-ACL-draft export). Grok review item 2 is now fully closed.** Written in response to
+(firewall-ACL-draft export). Grok review item 2 is now fully closed.** Plus a Phase 11 follow-up
+(edges/conduits CSV export, STIX relationship objects) requested directly by Jurgen after reviewing
+the Phase 8-10 delivery -- beyond Grok gap #2's own scope, see Phase 11 below. Written in response to
 [Grok's ten-point ICS/OT improvement review](../reviews/2026-09-grok-ics-ot-improvement-areas.md)
 (item 2) -- see [docs/reviews/2026-09-grok-response.md](../reviews/2026-09-grok-response.md) for the
 fact-check of that review against the repository, and `docs/DEVELOPMENT.md`'s ROADMAP items 75-76,
-79, 81-83, and 86 for the changelog-style writeup of what shipped and its exact verification numbers.
+79, 81-83, 86, and 87 for the changelog-style writeup of what shipped and its exact verification
+numbers.
 
 ## Context
 
@@ -705,6 +708,33 @@ simplification and the deterministic-not-random UUID choice), `docs/DEVELOPMENT.
 `man/conduitscope.1` all updated in the same increment. **Grok gap #2 is now fully closed** -- all
 ten phases across items 0-10 are implemented and shipped.
 
+## Phase 11 -- Follow-up: edges/conduits CSV + STIX relationship objects (shipped)
+
+Requested directly by Jurgen after reviewing the Phase 8-10 delivery above -- beyond Grok gap #2's
+original ten-point ask (already fully closed by Phase 10), not a new gap. See `docs/DEVELOPMENT.md`'s
+ROADMAP item 87 for the full changelog-style writeup; summarized here for this design doc's own
+record.
+
+**`--edges-csv FILE`/`--conduits-csv FILE`** (new `write_inventory_edges_csv`/
+`write_inventory_conduits_csv`): SEPARATE CSV files, not new `--format` values, reusing the exact
+column/escaping conventions Phase 8's asset CSV already established. This directly supersedes open
+question #2 below's original resolution ("asset-centric CSV only") -- Jurgen revisited that choice
+after seeing the shipped asset CSV and asked for the edges/conduits view too, so both now exist as
+separate opt-in files rather than either being folded into `--format csv` itself.
+
+**STIX `relationship` objects** (extending Phase 9's `write_inventory_stix_json`): one
+`relationship` SRO per `InventoryEdge`, appended into the bundle's same flat `objects` array,
+`relationship_type: "communicates-with"` (a producer-defined type per STIX 2.1 section 3.7.2.4 --
+no common-relationships-table entry fits infrastructure-to-infrastructure), `source_ref`/
+`target_ref` pointing at the edge's client/server `infrastructure` ids respectively -- this is how
+"linked nodes' incoming/outgoing edges" (Jurgen's own framing) is encoded: standard STIX
+source/target semantics, not a bespoke field. This means the STIX bundle is no longer purely
+asset-only (Phase 9's own framing above); it still never carries zone/conduit data.
+
+Verification: 2140/2140 (default GCC, up from Phase 10's 2137); ASan/UBSan 2216/2216; no-live-capture
+2127/2127; MinGW-w64 clean; clean-room extract-rebuild-test before delivery -- same bar every prior
+phase met. `docs/USER_GUIDE.md` and `man/conduitscope.1` updated in the same increment.
+
 ## Testing & fixtures (every phase)
 
 New `tools/make_sample_pcap.py`-generated pcap per new decoded message type (Phase 0-1 needed none --
@@ -726,8 +756,10 @@ message types) all updated in the same phase as the code, per this project's sta
    decodes. **Resolved (implicitly, by this plan's own Phase 0 scoping): scoped out entirely** --
    no protocol here ever surfaced a rack/slot value to promote, so the question never came back up
    during Phases 1-10.
-2. Phase 8: asset-centric CSV only, or also an edges/conduits CSV for the CMDB use case? **Resolved:
-   asset-centric CSV only** -- confirmed with Jurgen before implementing (see Phase 8 above).
+2. Phase 8: asset-centric CSV only, or also an edges/conduits CSV for the CMDB use case? **Resolved
+   at the time: asset-centric CSV only** -- confirmed with Jurgen before implementing (see Phase 8
+   above). **Revisited in Phase 11 below: Jurgen asked for the edges/conduits CSV too**, after
+   seeing the shipped asset CSV -- both now exist as separate opt-in files.
 3. Phase 9: is a STIX 2.1 JSON bundle file sufficient ("TAXII-lite"), or was actual TAXII transport
    part of the ask? **Resolved: a standalone STIX 2.1 bundle file is the whole scope** -- confirmed
    with Jurgen before implementing (see Phase 9 above); conduitscope implements no TAXII client or

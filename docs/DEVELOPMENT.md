@@ -12776,7 +12776,11 @@ it done as its own patch.
     ships asset-centric CSV only, no separate edges/conduits export;
     Phase 9 ships a standalone STIX 2.1 bundle file only, no TAXII client
     or server (a transport protocol genuinely out of scope for a passive
-    analysis CLI).
+    analysis CLI). (Both later extended at Jurgen's request -- see item 87
+    below: a separate edges/conduits CSV was added alongside this item's
+    own asset-only one, and the STIX bundle gained `relationship` objects
+    linking assets together; TAXII transport itself remains out of scope,
+    unchanged.)
 
     **Phase 8 (`inventory --format csv`)**: new `write_inventory_report_csv`
     renders `report.assets` ONLY (deliberately asset-centric, not
@@ -12860,6 +12864,102 @@ it done as its own patch.
     `docs/design/asset-inventory-real-record.md` (Phase 8/9/10 sections
     and Status line), and `man/conduitscope.1` all updated in the same
     increment.
+
+87. **Asset inventory: edges/conduits CSV export, and STIX relationship
+    objects -- follow-up to item 86, requested directly by Jurgen after
+    reviewing the Phase 8/9/10 delivery.** Grok gap #2 was already fully
+    closed by item 86; this is further refinement beyond Grok's original
+    ten-point review, not a new gap. Two additions, both reusing
+    already-populated `AssetInventoryReport` data (no new decode):
+
+    **`--edges-csv FILE`** (new `write_inventory_edges_csv`): a SEPARATE
+    CSV file (not a `--format` value) rendering `report.edges` -- the
+    host-to-host communication matrix item 86's own `--format csv` stayed
+    deliberately asset-only to exclude. One row per `InventoryEdge`:
+    client_ip, server_ip, protocol, server_port, server_port_service,
+    observed_functions (comma-joined via the same `protocol_list_text`
+    the asset CSV's own `protocols` column already uses), packet_count,
+    direction_source, first_seen, last_seen. `server_port_service` is
+    included (a static /etc/services-style lookup, same spirit as the
+    asset CSV's own `mac_vendor` column); hostname is NOT, matching the
+    asset CSV's own precedent of excluding it (DNS-based, rarely
+    available for this offline pcap-analysis tool, unlike the text/JSON
+    writers which do include it). `InventoryEdge::top_touched_addresses`
+    (item 84's per-edge address tracking) is deliberately not a column --
+    a nested, variable-length list doesn't fit a flat CSV row without
+    either a second join convention or a second file; `text`/`json`
+    remain the only formats carrying that data.
+
+    **`--conduits-csv FILE`** (new `write_inventory_conduits_csv`):
+    likewise a separate CSV, rendering `report.conduits` (the inferred
+    zone-to-zone summary). One row per `InventoryConduit`: from_zone,
+    to_zone, protocol, port, port_service, edge_count, packet_count.
+    Unlike the edges CSV's own always-"tcp" `service_name` lookup (a
+    precedent inherited unchanged from the existing JSON writer), this
+    one looks up the correct transport via the same `conduit_is_udp`
+    helper Phase 10's ACL renderers already use, since a conduit -- unlike
+    an edge -- has no remaining client/server TCP-vs-UDP ambiguity by the
+    time it's this aggregated.
+
+    **STIX `relationship` objects** (extending `write_inventory_stix_json`):
+    the bundle's `objects` array (one flat list per STIX 2.1 -- SDOs and
+    SROs share it) now also carries one `relationship` SRO per
+    `InventoryEdge`, appended after every `infrastructure` SDO -- this is
+    what actually links the per-asset nodes into a graph a STIX consumer
+    can traverse; the original asset-only bundle had no such linkage.
+    `relationship_type` is the producer-defined string `"communicates-with"`
+    (STIX 2.1's own common-relationships table has no
+    infrastructure-to-infrastructure entry to reuse, so this follows
+    section 3.7.2.4's explicit allowance for a producer-defined type --
+    the same "spec-conformant, honestly not an enumerated standard value"
+    posture `infrastructure_types: ["unknown"]` already takes). Direction
+    ("linked nodes' incoming/outgoing edges", Jurgen's own framing) is
+    encoded the standard STIX way, not a separate field: `source_ref` is
+    always the edge's own client IP's infrastructure id (the initiator),
+    `target_ref` the server IP's -- so, from a given node's own
+    perspective, any relationship where it's `source_ref` is one of its
+    outgoing edges, any relationship where it's `target_ref` one of its
+    incoming ones; a STIX consumer builds that view the normal way, by
+    filtering the bundle's relationship objects on that node's own id.
+    `id`/`created`/`modified` follow the exact same
+    deterministic-UUID/STIX-timestamp convention item 86 already
+    established for the infrastructure objects -- the relationship id's
+    own key reuses this file's internal `edge_key(protocol, client_ip,
+    server_ip, server_port)` (the same string that already uniquely
+    identifies this edge inside the engine), which, unlike the bundle id's
+    own capture-path-derived key, contains no filesystem path, so (like
+    the infrastructure ids) it's safe to pin exactly in a CTest assertion
+    across checkouts/CI runners. `source_ref`/`target_ref` reuse the SAME
+    deterministic infrastructure ids the SDOs above already use, so every
+    relationship always resolves within its own bundle. Carries
+    `x_conduitscope_protocol`/`_server_port`/`_server_port_service` (if
+    resolved)/`_packet_count`/`_direction_source`/`_observed_functions`
+    (if non-empty) as `x_`-prefixed custom properties, plus a
+    plain-English `description`.
+
+    A pre-existing test (`inventory_stix_is_asset_only_no_other_sections`)
+    was renamed to `inventory_stix_never_includes_zone_or_conduit_data`
+    and its own comment corrected: the STIX bundle is no longer purely
+    asset-only now that it carries edge-derived relationships, but it
+    still never carries zone/conduit data (`from_zone`/`to_zone` and
+    similar field names stay exclusive to `text`/`json`/the new
+    `--edges-csv`/`--conduits-csv` files) -- the FAIL_REGULAR_EXPRESSION
+    was widened to also check for those field names, not just the
+    already-checked `"edges"`/`"zones"`/`"conduits"` JSON keys.
+
+    **Verification bar met**: 2140/2140 (default GCC build, up from item
+    86's 2137 -- 3 new STIX relationship tests, plus a pre-existing STIX
+    test renamed/corrected in place, plus the pre-existing inventory
+    diagram/policy-out smoke test extended to also cover
+    `--edges-csv`/`--conduits-csv`, including their own empty-capture
+    cases); ASan/UBSan 2216/2216 (including all 76
+    `fuzz_*_corpus_regression` cases -- no new fuzz harness needed, since,
+    like item 86 before it, this is pure post-processing/rendering over
+    already-decoded, already-validated data, nothing new parses untrusted
+    bytes); no-live-capture 2127/2127; MinGW-w64 cross-compile confirmed
+    to still compile and link cleanly; plus a clean-room extract-rebuild-
+    test before delivery. `docs/USER_GUIDE.md` and `man/conduitscope.1`
+    updated in the same increment.
 
 ### Protocols not covered at all
 

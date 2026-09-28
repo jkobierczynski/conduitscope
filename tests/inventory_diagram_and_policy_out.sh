@@ -20,7 +20,11 @@ ACL_CISCO="$(mktemp)"
 ACL_FORTINET="$(mktemp)"
 ACL_PALOALTO="$(mktemp)"
 EMPTY_ACL="$(mktemp)"
-trap 'rm -f "$MMD" "$DOT" "$POLICY" "$EMPTY_POLICY" "$ACL_CISCO" "$ACL_FORTINET" "$ACL_PALOALTO" "$EMPTY_ACL"' EXIT
+EDGES_CSV="$(mktemp)"
+CONDUITS_CSV="$(mktemp)"
+EMPTY_EDGES_CSV="$(mktemp)"
+EMPTY_CONDUITS_CSV="$(mktemp)"
+trap 'rm -f "$MMD" "$DOT" "$POLICY" "$EMPTY_POLICY" "$ACL_CISCO" "$ACL_FORTINET" "$ACL_PALOALTO" "$EMPTY_ACL" "$EDGES_CSV" "$CONDUITS_CSV" "$EMPTY_EDGES_CSV" "$EMPTY_CONDUITS_CSV"' EXIT
 
 echo "=== mermaid diagram ==="
 "$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --diagram "$MMD" --output /dev/null
@@ -56,3 +60,22 @@ cat "$ACL_PALOALTO"
 echo "=== empty-capture acl-out ==="
 "$CONDUITSCOPE" inventory --read "$EMPTY_PCAP" --acl-out "$EMPTY_ACL" --output /dev/null
 cat "$EMPTY_ACL"
+
+# Follow-up to Grok gap #2 phase 8, added after initial delivery at Jurgen's request: --edges-csv/
+# --conduits-csv, both separate FILE outputs from --format csv's own asset-only stdout CSV -- see
+# write_inventory_edges_csv/_conduits_csv's own doc comments (asset_inventory.hpp).
+echo "=== edges-csv ==="
+"$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --edges-csv "$EDGES_CSV" --output /dev/null
+cat "$EDGES_CSV"
+
+echo "=== conduits-csv ==="
+"$CONDUITSCOPE" inventory --read "$INVENTORY_PCAP" --conduits-csv "$CONDUITS_CSV" --output /dev/null
+cat "$CONDUITS_CSV"
+
+echo "=== empty-capture edges-csv ==="
+"$CONDUITSCOPE" inventory --read "$EMPTY_PCAP" --edges-csv "$EMPTY_EDGES_CSV" --output /dev/null
+cat "$EMPTY_EDGES_CSV"
+
+echo "=== empty-capture conduits-csv ==="
+"$CONDUITSCOPE" inventory --read "$EMPTY_PCAP" --conduits-csv "$EMPTY_CONDUITS_CSV" --output /dev/null
+cat "$EMPTY_CONDUITS_CSV"

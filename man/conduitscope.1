@@ -1461,10 +1461,13 @@ double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
 .BR \-T ", " \-\-format " " {text,json,csv,stix}
-Report format. \fBcsv\fR and \fBstix\fR are both deliberately asset-only
-(one row/object per device, for CMDB import or a STIX 2.1 bundle) \-\- use
-\fBtext\fR/\fBjson\fR for the full asset/communications/zones/conduits
-picture. Default: text.
+Report format. \fBcsv\fR is deliberately asset-only (one row per device,
+for CMDB import); \fBstix\fR is a STIX 2.1 bundle, one \fBinfrastructure\fR
+object per device plus one \fBrelationship\fR object per host-to-host edge
+linking them together \-\- see \fB\-\-edges\-csv\fR/\fB\-\-conduits\-csv\fR
+below for the same edge/conduit data as flat CSV. Use \fBtext\fR/\fBjson\fR
+for the full asset/communications/zones/conduits picture in one file.
+Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
@@ -1510,6 +1513,17 @@ extended ACL, FortiGate \fBconfig firewall\fR blocks, or Palo Alto PAN-OS
 inferred conduit; transport (tcp/udp) follows the same port-based rule
 \fBinventory\fR itself uses to recognize UDP traffic (BACnet/IP,
 EtherNet/IP CIP I/O) \-\- every other conduit is TCP. Default: cisco.
+.TP
+.B \-\-edges\-csv \fIFILE\fR
+Also write the host-to-host communication matrix (\fBreport.edges\fR) as a
+SEPARATE CSV file here, one row per client/server/protocol/port pair \-\-
+\fB\-\-format csv\fR's own CSV is deliberately asset-only and never
+includes this.
+.TP
+.B \-\-conduits\-csv \fIFILE\fR
+Also write the inferred zone-to-zone conduit summary
+(\fBreport.conduits\fR) as a CSV file here, one row per (from_zone,
+to_zone, protocol, port).
 .TP
 .B \-\-mac\-vendor
 Same meaning as \fBdecode\fR's \fB\-\-mac\-vendor\fR, applied to the report's

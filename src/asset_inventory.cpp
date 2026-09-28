@@ -1434,15 +1434,42 @@ void write_inventory_report_csv(std::ostream& out, const AssetInventoryReport& r
     }
 }
 
+void write_inventory_edges_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver) {
+    out << "client_ip,server_ip,protocol,server_port,server_port_service,observed_functions,"
+           "packet_count,direction_source,first_seen,last_seen\n";
+    for (const auto& e : report.edges) {
+        std::string port_service;
+        if (auto s = resolver.service_name(e.server_port, "tcp")) port_service = *s;
+        out << csv_escape(e.client_ip) << ',' << csv_escape(e.server_ip) << ',' << csv_escape(e.protocol) << ','
+            << e.server_port << ',' << csv_escape(port_service) << ','
+            << csv_escape(protocol_list_text(e.observed_functions)) << ',' << e.packet_count << ','
+            << csv_escape(direction_source_name(e.direction_source)) << ','
+            << csv_escape(format_epoch_seconds(e.first_seen)) << ','
+            << csv_escape(format_epoch_seconds(e.last_seen)) << "\n";
+    }
+}
+
+void write_inventory_conduits_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver) {
+    out << "from_zone,to_zone,protocol,port,port_service,edge_count,packet_count\n";
+    for (const auto& c : report.conduits) {
+        std::string port_service;
+        if (auto s = resolver.service_name(c.port, conduit_is_udp(c) ? "udp" : "tcp")) port_service = *s;
+        out << csv_escape(c.from_zone) << ',' << csv_escape(c.to_zone) << ',' << csv_escape(c.protocol) << ','
+            << c.port << ',' << csv_escape(port_service) << ',' << c.edge_count << ',' << c.packet_count << "\n";
+    }
+}
+
 void write_inventory_stix_json(std::ostream& out, const AssetInventoryReport& report, const std::string& capture_path,
                                 const Resolver& resolver) {
     out << "{\n";
     out << "  \"type\": \"bundle\",\n";
     out << "  \"id\": \"bundle--" << deterministic_uuid("bundle:" + capture_path) << "\",\n";
     out << "  \"objects\": [";
+    bool any_object = false;
     for (size_t i = 0; i < report.assets.size(); ++i) {
         const InventoryAsset& a = report.assets[i];
-        out << (i == 0 ? "\n" : "");
+        out << (any_object ? ",\n" : "\n");
+        any_object = true;
         out << "    {\n";
         out << "      \"type\": \"infrastructure\",\n";
         out << "      \"spec_version\": \"2.1\",\n";
@@ -1488,9 +1515,56 @@ void write_inventory_stix_json(std::ostream& out, const AssetInventoryReport& re
         out << ",\n      \"x_conduitscope_ever_client\": " << (a.ever_client ? "true" : "false");
         out << ",\n      \"x_conduitscope_ever_server\": " << (a.ever_server ? "true" : "false");
         out << ",\n      \"x_conduitscope_packet_count\": " << a.packet_count;
-        out << "\n    }" << (i + 1 < report.assets.size() ? "," : "") << "\n";
+        out << "\n    }";
     }
-    out << (report.assets.empty() ? "]\n" : "  ]\n");
+    // Follow-up, added after initial delivery at Jurgen's request -- see this function's own doc
+    // comment (asset_inventory.hpp) for the full relationship-object design. One `relationship` SRO
+    // per InventoryEdge, appended into this SAME flat `objects` array (STIX 2.1 bundles hold SDOs
+    // and SROs together, there is no second array) -- this is what actually links the
+    // `infrastructure` nodes above into a graph a STIX consumer can traverse.
+    for (const auto& e : report.edges) {
+        out << (any_object ? ",\n" : "\n");
+        any_object = true;
+        out << "    {\n";
+        out << "      \"type\": \"relationship\",\n";
+        out << "      \"spec_version\": \"2.1\",\n";
+        out << "      \"id\": \"relationship--"
+            << deterministic_uuid("relationship:" + edge_key(e.protocol, e.client_ip, e.server_ip, e.server_port))
+            << "\",\n";
+        out << "      \"created\": \"" << format_stix_timestamp(e.first_seen) << "\",\n";
+        out << "      \"modified\": \"" << format_stix_timestamp(e.last_seen) << "\",\n";
+        // Producer-defined relationship_type (STIX 2.1 section 3.7.2.4) -- section 6's own
+        // common-relationships table has no infrastructure-to-infrastructure entry to reuse.
+        out << "      \"relationship_type\": \"communicates-with\",\n";
+        // Direction is encoded the standard STIX way (source_ref/target_ref), not a separate field
+        // -- see this function's own doc comment for exactly how a consumer reads incoming/outgoing
+        // from this. source_ref/target_ref reuse the SAME deterministic ids the infrastructure
+        // objects above already use, so they always resolve within this same bundle.
+        out << "      \"source_ref\": \"infrastructure--" << deterministic_uuid("infrastructure:" + e.client_ip)
+            << "\",\n";
+        out << "      \"target_ref\": \"infrastructure--" << deterministic_uuid("infrastructure:" + e.server_ip)
+            << "\",\n";
+        out << "      \"description\": \""
+            << json_escape(e.protocol + " (port " + std::to_string(e.server_port) + ")") << "\",\n";
+        out << "      \"x_conduitscope_protocol\": \"" << json_escape(e.protocol) << "\",\n";
+        out << "      \"x_conduitscope_server_port\": " << e.server_port;
+        if (auto s = resolver.service_name(e.server_port, "tcp")) {
+            out << ",\n      \"x_conduitscope_server_port_service\": \"" << json_escape(*s) << "\"";
+        }
+        out << ",\n      \"x_conduitscope_packet_count\": " << e.packet_count;
+        out << ",\n      \"x_conduitscope_direction_source\": \"" << direction_source_name(e.direction_source)
+            << "\"";
+        if (!e.observed_functions.empty()) {
+            out << ",\n      \"x_conduitscope_observed_functions\": [";
+            for (size_t j = 0; j < e.observed_functions.size(); ++j) {
+                if (j) out << ", ";
+                out << "\"" << json_escape(e.observed_functions[j]) << "\"";
+            }
+            out << "]";
+        }
+        out << "\n    }";
+    }
+    out << (any_object ? "\n  ]\n" : "]\n");
     out << "}\n";
 }
 

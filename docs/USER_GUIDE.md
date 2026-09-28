@@ -50,6 +50,7 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy FILE [-o FILE] [-
 conduitscope inventory (-r FILE | -i INTERFACE) [-o FILE] [-T text|json|csv|stix] [--strict]
                         [--zone-prefix N] [--diagram FILE] [--diagram-format mermaid|dot] [--policy-out FILE]
                         [--acl-out FILE] [--acl-format cisco|fortinet|paloalto]
+                        [--edges-csv FILE] [--conduits-csv FILE]
                         [-f BPF] [--duration SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
 conduitscope version
@@ -386,7 +387,7 @@ doesn't cover).
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | Same meaning as `decode --no-promiscuous`. |
 | `-o, --output FILE` | stdout | Write the report here instead of stdout. |
-| `-T, --format {text,json,csv,stix}` | `text` | Report format. `text` is the human-readable report shown below; `json` mirrors its structure. `csv` and `stix` are both deliberately **asset-only** (one row/object per device, for CMDB import or a STIX 2.1 bundle) -- use `text`/`json` for the full asset/communications/zones/conduits picture. See "CSV output" and "STIX output" below. |
+| `-T, --format {text,json,csv,stix}` | `text` | Report format. `text` is the human-readable report shown below; `json` mirrors its structure. `csv` is deliberately **asset-only** (one row per device, for CMDB import); `stix` is a STIX 2.1 bundle -- one `infrastructure` object per device plus, since Phase 11, one `relationship` object per host-to-host edge linking them together (still no zone/conduit data). See `--edges-csv`/`--conduits-csv` below for the same edge/conduit data as flat CSV, or `text`/`json` for the full asset/communications/zones/conduits picture in one file. See "CSV output" and "STIX output" below. |
 | `--strict` | off | Same meaning as `decode --strict`: abort on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a warning and continuing. |
 | `--zone-prefix N` | `24` | CIDR prefix length (`0`-`32`) inferred zones are grouped by: every observed asset IP is masked to this many bits, and one zone is emitted per distinct resulting network. Narrow it (e.g. `16`) to lump a wider address range into fewer, bigger zones; widen it (e.g. `28`) for finer-grained, smaller zones. |
 | `--diagram FILE` | *(none)* | Also write a zone/conduit diagram to this file. Format controlled by `--diagram-format`. |
@@ -394,6 +395,8 @@ doesn't cover).
 | `--policy-out FILE` | *(none)* | Also write the inferred zone/conduit model as a `policy`-format YAML file, directly loadable by `policy validate --policy` -- closing the loop: discover, then enforce. See "Closing the loop" below. |
 | `--acl-out FILE` | *(none)* | Also write the inferred zone/conduit model as a firewall ACL **DRAFT** here. Format controlled by `--acl-format`. **Never something to deploy as-is** -- see "Firewall ACL draft export" below. |
 | `--acl-format {cisco,fortinet,paloalto}` | `cisco` | ACL dialect for `--acl-out`: Cisco IOS/ASA `object-group` + extended ACL, FortiGate `config firewall` blocks, or Palo Alto PAN-OS `set` commands. |
+| `--edges-csv FILE` | *(none)* | Also write the host-to-host communication matrix (the edges `text`/`json` show under COMMUNICATIONS) as a SEPARATE CSV file here, one row per client/server/protocol/port pair. `--format csv`'s own CSV is deliberately asset-only and never includes this. See "Edges CSV output" below. |
+| `--conduits-csv FILE` | *(none)* | Also write the inferred zone-to-zone conduit summary as a CSV file here, one row per (from-zone, to-zone, protocol, port). See "Conduits CSV output" below. |
 | `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default) | Same meaning as `decode --mac-vendor`, applied to the report's asset/edge MAC addresses. |
 | `--resolve` | off | Same meaning as `decode --resolve`: enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS** -- file-only. |
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
@@ -866,8 +869,11 @@ policy file), and `inventory` prints a note to that effect.
 
 `--format csv` renders **only the asset list** as CSV -- one row per
 device, deliberately asset-centric rather than edge-centric, matching a
-CMDB import (device inventory), not a communications matrix. There is no
-edges/zones/conduits CSV; use `--format text`/`json` for that.
+CMDB import (device inventory), not a communications matrix. For the
+edges/conduits views as CSV, see `--edges-csv`/`--conduits-csv` below
+(separate opt-in files, not additional `--format` values); for the full
+asset/communications/zones/conduits picture in one file, use `--format
+text`/`json`.
 
 Columns, in order: `ip`, `mac`, `mac_vendor`, `vendor`, `product`,
 `firmware_revision`, `serial_number`, `plant_identification`,
@@ -889,15 +895,75 @@ ip,mac,mac_vendor,vendor,product,firmware_revision,serial_number,plant_identific
 192.168.1.50,00:0c:29:11:22:33,,,,,,,,Unknown,enip,true,false,2023-11-14 22:46:40.000000Z,2023-11-14 22:46:48.008000Z,9
 ```
 
+#### Edges CSV output (`--edges-csv`)
+
+`--edges-csv FILE` writes the host-to-host communication matrix (the same
+edges `text`/`json` show under COMMUNICATIONS) as a SEPARATE CSV file, one
+row per `client_ip`/`server_ip`/`protocol`/`server_port` combination --
+added in Phase 11, since `--format csv` above stays deliberately
+asset-only. It writes to this file only, independent of `-T/--format`
+(you can combine `--edges-csv` with any report format on stdout).
+
+Columns, in order: `client_ip`, `server_ip`, `protocol`, `server_port`,
+`server_port_service`, `observed_functions` (comma-joined, quoted when it
+contains a comma -- same convention as the asset CSV's own `protocols`
+column), `packet_count`, `direction_source` (`handshake`/`content`/
+`port-heuristic` -- see LIMITATIONS' own direction-determination entry),
+`first_seen`, `last_seen`. `server_port_service` is a static
+`/etc/services`-style lookup (same spirit as the asset CSV's own
+`mac_vendor` column); unlike `text`/`json`, this CSV does NOT include
+`client_hostname`/`server_hostname` (DNS-based, rarely available for this
+offline pcap-analysis tool -- same precedent the asset CSV's own omission
+of `hostname` already set), nor the per-edge top-touched-address list
+(nested/variable-length, doesn't fit a flat row -- use `text`/`json` for
+that).
+
+```sh
+$ conduitscope inventory -r tests/sample_enip.pcap --edges-csv /tmp/edges.csv -o /dev/null
+$ cat /tmp/edges.csv
+client_ip,server_ip,protocol,server_port,server_port_service,observed_functions,packet_count,direction_source,first_seen,last_seen
+192.168.1.50,192.168.1.10,enip,44818,enip,"Read_Tag, Write_Tag",9,port-heuristic,2023-11-14 22:46:40.000000Z,2023-11-14 22:46:48.008000Z
+```
+
+#### Conduits CSV output (`--conduits-csv`)
+
+`--conduits-csv FILE` writes the inferred zone-to-zone conduit summary
+(the same conduits `text`/`json` show under INFERRED CONDUITS) as a CSV
+file, one row per `(from_zone, to_zone, protocol, port)` -- also added in
+Phase 11, and likewise independent of `-T/--format`.
+
+Columns, in order: `from_zone`, `to_zone`, `protocol`, `port`,
+`port_service`, `edge_count`, `packet_count`. `port_service` looks up the
+conduit's own correct transport (tcp/udp, via the same rule `--acl-out`
+already uses to recognize BACnet/IP and EtherNet/IP CIP I/O as UDP) --
+unlike the edges CSV above, which always looks up `tcp` (inherited
+unchanged from the pre-existing JSON writer's own precedent), since a
+conduit has no remaining client/server TCP-vs-UDP ambiguity by the time
+it's this aggregated. No IP/MAC/hostname lookup applies here at all -- a
+conduit has no IP or MAC of its own, only zone names and a port.
+
+```sh
+$ conduitscope inventory -r tests/sample_inventory.pcap --conduits-csv /tmp/conduits.csv -o /dev/null
+$ cat /tmp/conduits.csv
+from_zone,to_zone,protocol,port,port_service,edge_count,packet_count
+zone_10_0_5_0_24,zone_192_168_1_0_24,dnp3,20000,dnp3,1,2
+zone_10_0_5_0_24,zone_192_168_1_0_24,enip,44818,enip,1,4
+zone_10_0_5_0_24,zone_192_168_1_0_24,s7comm,102,mms,1,4
+zone_192_168_1_0_24,zone_192_168_1_0_24,bacnet,47808,bacnet,1,2
+zone_192_168_1_0_24,zone_192_168_1_0_24,modbus,502,modbus,1,2
+```
+
 #### STIX output (`--format stix`)
 
-`--format stix` renders **only the asset list**, as a minimal, valid
+`--format stix` renders the asset list plus the edges linking those assets
+together, as a minimal, valid
 [STIX 2.1](https://docs.oasis-open.org/cti/stix/v2.1/stix-v2.1.html)
-JSON bundle: one `infrastructure` object per asset. This is intentionally
-"lite" -- a standalone bundle file a human or another tool can hand to a
-TAXII server or any other STIX consumer. **conduitscope implements no
-TAXII client or server** -- that is a transport protocol, out of scope
-for a passive analysis CLI.
+JSON bundle: one `infrastructure` object per asset, plus (since Phase 11)
+one `relationship` object per host-to-host edge -- no zone/conduit data
+either way. This is intentionally "lite" -- a standalone bundle file a
+human or another tool can hand to a TAXII server or any other STIX
+consumer. **conduitscope implements no TAXII client or server** -- that is
+a transport protocol, out of scope for a passive analysis CLI.
 
 `infrastructure_types` is always `["unknown"]`: STIX 2.1's own
 `infrastructure-type-ov` open vocabulary has no ICS/OT entry (its members
@@ -921,6 +987,27 @@ reserved for implementation-defined deterministic UUIDs -- spec-conformant,
 just not a spec-required *random* one. See LIMITATIONS for what this does
 and doesn't guarantee.
 
+**Relationship objects (Phase 11):** the bundle's `objects` array also
+carries one `relationship` object per edge (STIX 2.1 bundles hold SDOs
+and SROs together in the same flat array -- there is no separate array
+for relationships), linking the `infrastructure` nodes above into a graph
+a STIX consumer can traverse. `relationship_type` is the producer-defined
+string `"communicates-with"` -- STIX 2.1's own common-relationships table
+has no infrastructure-to-infrastructure entry to reuse, so this follows
+the spec's own allowance (section 3.7.2.4) for a producer-defined type
+when no common one fits. **Direction ("linked nodes' incoming/outgoing
+edges") is encoded the standard STIX way, via `source_ref`/`target_ref`,
+not a separate field:** `source_ref` is always the edge's client (the
+initiator), `target_ref` its server -- so, read from a given
+`infrastructure` node's own id, any relationship where it appears as
+`source_ref` is one of *that node's* outgoing edges, and any relationship
+where it appears as `target_ref` is one of its incoming ones; build that
+per-node view by filtering the bundle's `relationship` objects on the
+node's own id. Each relationship also carries `x_conduitscope_protocol`,
+`_server_port`, `_server_port_service` (if resolved), `_packet_count`,
+`_direction_source`, and `_observed_functions` (if non-empty) as custom
+properties, plus a plain-English `description`.
+
 ```sh
 $ conduitscope inventory -r tests/sample_enip.pcap --format stix
 {
@@ -930,7 +1017,7 @@ $ conduitscope inventory -r tests/sample_enip.pcap --format stix
     {
       "type": "infrastructure",
       "spec_version": "2.1",
-      "id": "infrastructure--...",
+      "id": "infrastructure--151c5cd9-4a77-8131-9376-6fb94d6ee481",
       "created": "2023-11-14T22:46:40.000Z",
       "modified": "2023-11-14T22:46:48.008Z",
       "name": "192.168.1.10",
@@ -941,7 +1028,30 @@ $ conduitscope inventory -r tests/sample_enip.pcap --format stix
       "x_conduitscope_product": "Conduit-ENIP-Sample",
       ...
     },
-    ...
+    {
+      "type": "infrastructure",
+      "spec_version": "2.1",
+      "id": "infrastructure--152a54d9-4a83-80f5-9383-e7b94d7a3ac5",
+      "name": "192.168.1.50",
+      ...
+    },
+    {
+      "type": "relationship",
+      "spec_version": "2.1",
+      "id": "relationship--148352bf-ec49-85d3-b99d-527615770043",
+      "created": "2023-11-14T22:46:40.000Z",
+      "modified": "2023-11-14T22:46:48.008Z",
+      "relationship_type": "communicates-with",
+      "source_ref": "infrastructure--152a54d9-4a83-80f5-9383-e7b94d7a3ac5",
+      "target_ref": "infrastructure--151c5cd9-4a77-8131-9376-6fb94d6ee481",
+      "description": "enip (port 44818)",
+      "x_conduitscope_protocol": "enip",
+      "x_conduitscope_server_port": 44818,
+      "x_conduitscope_server_port_service": "enip",
+      "x_conduitscope_packet_count": 9,
+      "x_conduitscope_direction_source": "port-heuristic",
+      "x_conduitscope_observed_functions": ["Read_Tag", "Write_Tag"]
+    }
   ]
 }
 ```
@@ -5037,24 +5147,29 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   tracked (already-tracked addresses keep incrementing past it; new ones simply aren't admitted), and
   a final top-32-by-touch-count cutoff for what's actually shown in the report -- neither is currently
   exposed on the CLI as a tunable.
-- **`inventory --format csv`/`stix` are both deliberately asset-only, never edge/zone/conduit
-  data.** A CMDB import (CSV) and a STIX infrastructure bundle are both device-inventory shapes;
-  Grok's own review asked for exactly that for these two exports, not a communications matrix. Use
-  `--format text`/`json` for the full asset/communications/zones/conduits picture. `--acl-out` is
-  the mirror image -- zones/conduits only, no asset identity at all, since a firewall ACL has no
-  place for vendor/product/firmware fields.
-- **`inventory --format stix`'s object `id`s are deterministic, not random.** Every STIX SDO id
-  this tool emits is derived from a stable per-object key (the capture's own file path for the
-  bundle; each asset's own IP for its `infrastructure` object) via a non-cryptographic 64-bit
-  FNV-1a hash, formatted as an RFC 9562 version-8 ("custom") UUID -- version 8 is specifically
-  reserved for implementation-defined deterministic UUIDs, so this is a spec-conformant UUID, just
-  not the spec's more common *random* kind. This means: the same capture, read twice, produces a
-  byte-for-byte identical bundle (useful for diffing runs or re-generating idempotently), but two
-  *different* captures of the same real device at the same IP address will get the *same*
-  `infrastructure` id if the capture's own file path also matches (id derivation has no awareness of
-  a device's real-world identity beyond what's in this one report) -- these ids are stable
-  identifiers for objects *within one conduitscope report*, not globally unique identifiers for
-  real-world assets across reports the way a CMDB's own asset ID would be.
+- **`inventory --format csv` is deliberately asset-only, never edge/zone/conduit data.** A CMDB
+  import is a device-inventory shape; Grok's own review asked for exactly that, not a
+  communications matrix. `--format stix`'s bundle also carries `relationship` objects for edges
+  since Phase 11 (see "STIX output" above), but still never zone/conduit data. For the edges/
+  conduits views as flat CSV, use `--edges-csv`/`--conduits-csv` (separate opt-in files, added in
+  Phase 11); for the full asset/communications/zones/conduits picture in one file, use `--format
+  text`/`json`. `--acl-out` is the mirror image of the asset-centric exports -- zones/conduits only,
+  no asset identity at all, since a firewall ACL has no place for vendor/product/firmware fields.
+- **`inventory --format stix`'s object `id`s are deterministic, not random.** Every STIX object id
+  this tool emits (both `infrastructure` SDOs and, since Phase 11, `relationship` SROs) is derived
+  from a stable per-object key (the capture's own file path for the bundle; each asset's own IP for
+  its `infrastructure` object; each edge's own protocol/client-ip/server-ip/port for its
+  `relationship` object -- never the capture path, so a relationship's id, like an asset's, is
+  identical across checkouts/re-runs regardless of the capture file's own filesystem location) via
+  a non-cryptographic 64-bit FNV-1a hash, formatted as an RFC 9562 version-8 ("custom") UUID --
+  version 8 is specifically reserved for implementation-defined deterministic UUIDs, so this is a
+  spec-conformant UUID, just not the spec's more common *random* kind. This means: the same
+  capture, read twice, produces a byte-for-byte identical bundle (useful for diffing runs or
+  re-generating idempotently), but two *different* captures of the same real device at the same IP
+  address will get the *same* `infrastructure` id if the capture's own file path also matches (id
+  derivation has no awareness of a device's real-world identity beyond what's in this one report)
+  -- these ids are stable identifiers for objects *within one conduitscope report*, not globally
+  unique identifiers for real-world assets across reports the way a CMDB's own asset ID would be.
 - **`inventory --acl-out`'s FortiGate/Palo Alto renderers create one service object per distinct
   (port, transport) pair actually observed, not per conduit.** Two zone-pairs that happen to share
   a port (e.g. two independent Modbus/502 conduits between different zone pairs) share one service
@@ -5063,6 +5178,14 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   conduit at the *same* port (not expected with this engine's own ten protocols, each carrying its
   own conventional port) would silently reuse the first one's service object name; review the
   generated file's own service-object section if a capture mixes unusual, non-default ports.
+- **`--edges-csv`'s `server_port_service` column always looks up `tcp`, even for a UDP-carrying
+  edge (BACnet/IP, EtherNet/IP CIP I/O) -- so that column renders empty for those edges even though
+  a service name may exist for the port under `udp`.** Inherited unchanged from the pre-existing
+  `text`/`json` writers' own always-`tcp` lookup convention for edges (edges only ever know their
+  own protocol name, not that protocol's transport, without re-deriving it). `--conduits-csv`'s own
+  `port_service` column does NOT have this gap -- it looks up the conduit's actual transport via the
+  same rule `--acl-out` already uses to recognize UDP traffic, since a conduit (unlike an edge) has
+  no client/server ambiguity left to resolve by the time it's this aggregated.
 - **Direction/initiator determination is, in general, only ever as good as
   the evidence available for a given flow -- it can't always be established
   with certainty, only approximately.** "Approximately" has one precise

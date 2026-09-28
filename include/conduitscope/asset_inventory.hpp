@@ -751,6 +751,39 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
 // own single-"time"-column precedent rather than JSON's two-field one).
 void write_inventory_report_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver);
 
+// Follow-up to Phase 8 above, added after initial delivery at Jurgen's request: a SEPARATE CSV
+// export of `report.edges` (the host-to-host communication matrix Phase 8's own asset-centric CSV
+// deliberately left out -- see that function's doc comment) to `out`, one row per InventoryEdge.
+// `resolver`: same convention as every other writer in this file, with the same asset-CSV precedent
+// for what's included -- `server_port_service` (a static /etc/services-style lookup, the same
+// spirit as Phase 8's own `mac_vendor` column) is included, but hostname is NOT: DNS-based, and,
+// like Phase 8's own asset CSV, deliberately excluded from every CSV export in this file since it
+// needs a live resolver this offline pcap-analysis tool rarely has (write_inventory_report_csv
+// already omits it for the same reason, even though write_inventory_report_json/`_text` both
+// include it).
+// Columns (in order): client_ip, server_ip, protocol, server_port, server_port_service,
+// observed_functions (comma-joined via `protocol_list_text`, same reuse-not-reinvent posture as
+// Phase 8's own `protocols` column), packet_count, direction_source (the exact lowercase,
+// hyphenated string `direction_source_name` gives every other writer), first_seen, last_seen (both
+// `format_epoch_seconds` text, matching Phase 8's own single-column-per-timestamp CSV convention,
+// not JSON's raw+rendered pair). `InventoryEdge::top_touched_addresses` is deliberately NOT a
+// column here -- it's a nested, variable-length (up to 32 entries) per-edge list, which doesn't fit
+// a flat CSV row without either a second join convention or a second file; use `--format text`/
+// `json` for that data. Quoting/escaping: this file's own local `csv_escape`, identical to every
+// other CSV writer here.
+void write_inventory_edges_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver);
+
+// Follow-up to Phase 8, added alongside write_inventory_edges_csv above at Jurgen's request: a CSV
+// export of `report.conduits` (the inferred zone-to-zone communication summary -- see
+// InventoryConduit's own comment) to `out`, one row per InventoryConduit. Columns (in order):
+// from_zone, to_zone, protocol, port, port_service (resolver-supplied, same convention as
+// write_inventory_edges_csv's own `server_port_service` -- looked up via the conduit's own
+// `conduit_is_udp` transport, unlike the edges CSV/JSON's own always-"tcp" lookup, since a conduit
+// (unlike an edge) has no client/server TCP-vs-UDP ambiguity left to resolve by the time it's this
+// aggregated), edge_count, packet_count. No hostname/MAC lookup applies here at all -- a conduit
+// has no IP/MAC of its own, only zone names and a port.
+void write_inventory_conduits_csv(std::ostream& out, const AssetInventoryReport& report, const Resolver& resolver);
+
 // Phase 9 of Grok gap #2 ("STIX/TAXII-lite export", docs/design/asset-inventory-real-record.md).
 // Renders `report.assets` as a minimal, valid STIX 2.1 bundle to `out` -- ONE `infrastructure` SDO
 // per asset (again deliberately asset-only, same posture and same reasoning as
@@ -791,6 +824,35 @@ void write_inventory_report_csv(std::ostream& out, const AssetInventoryReport& r
 // `format_stix_timestamp` (STIX's required millisecond-precision "T"-separated RFC 3339 shape --
 // distinct from every other timestamp renderer in this codebase, which all use
 // `time_format.hpp`'s space-separated, microsecond-precision convention instead).
+//
+// Follow-up, added after initial delivery at Jurgen's request: the bundle's `objects` array (a
+// single flat list per STIX 2.1 -- SDOs and SROs share it, there is no second top-level array) also
+// carries one `relationship` SRO per InventoryEdge, appended after every `infrastructure` SDO --
+// this is what actually links the per-asset `infrastructure` nodes into a graph a STIX consumer can
+// traverse; the asset-only bundle above had nothing of the sort. `relationship_type` is the
+// producer-defined string `"communicates-with"` -- STIX 2.1's own common-relationships table
+// (section 6) has no infrastructure-to-infrastructure entry at all (its entries are almost all
+// indicator/malware/threat-actor-centric), so this follows section 3.7.2.4's explicit allowance for
+// a producer-defined type when no common one fits, the same "spec-conformant, honestly not one of
+// the enumerated standard values" posture `infrastructure_types: ["unknown"]` above already takes.
+// Direction is encoded the standard STIX way, not a separate field: `source_ref` is always the
+// edge's own `client_ip` (the initiator) and `target_ref` its `server_ip` -- so, read from a given
+// `infrastructure` node's own perspective, any relationship where it's `source_ref` is one of ITS
+// outgoing edges, and any relationship where it's `target_ref` is one of ITS incoming edges; a STIX
+// consumer builds that per-node incoming/outgoing view the normal way, by filtering the bundle's
+// relationship objects on that node's own id -- this project doesn't duplicate that view onto the
+// infrastructure objects themselves. Each relationship's `id`/`created`/`modified` follow exactly
+// the same deterministic-UUID/STIX-timestamp convention as the infrastructure objects above
+// (`created`/`modified` from the edge's own `first_seen`/`last_seen`; the id key reuses this file's
+// own internal `edge_key(protocol, client_ip, server_ip, server_port)` -- the SAME string that
+// already uniquely identifies this exact edge inside the engine itself, rather than inventing a
+// second key scheme). `source_ref`/`target_ref` point at the SAME deterministic infrastructure ids
+// the asset objects above already use (`"infrastructure:" + ip`), so a relationship always resolves
+// to a real object already present in this same bundle. Carries `x_conduitscope_protocol`,
+// `_server_port`, `_server_port_service` (if resolved), `_packet_count`, `_direction_source`, and
+// `_observed_functions` (if non-empty) as the same kind of `x_`-prefixed custom properties the
+// infrastructure objects already carry, plus a plain-English `description` ("<protocol> (port
+// <port>)").
 void write_inventory_stix_json(std::ostream& out, const AssetInventoryReport& report,
                                 const std::string& capture_path, const Resolver& resolver);
 

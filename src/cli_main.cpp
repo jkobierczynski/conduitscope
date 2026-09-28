@@ -1340,7 +1340,8 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                    const std::string& format, bool strict, bool quiet, uint8_t zone_prefix_len,
                    const std::string& diagram_path, const std::string& diagram_format,
                    const std::string& policy_out_path, const std::string& acl_out_path,
-                   const std::string& acl_format, const ResourceLimitCliVars& limit_vars,
+                   const std::string& acl_format, const std::string& edges_csv_path,
+                   const std::string& conduits_csv_path, const ResourceLimitCliVars& limit_vars,
                    bool oui_enabled, bool resolve_hostnames,
                    const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
                    std::ostream& diag) {
@@ -1445,6 +1446,27 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                      << "' has no address/service/rule objects and is not a loadable ACL file as-is "
                         "-- see the file's own header comment\n";
             }
+        }
+        // Follow-up to Phase 8 of Grok gap #2, added after initial delivery at Jurgen's request --
+        // see write_inventory_edges_csv's own doc comment (asset_inventory.hpp) for why this is a
+        // SEPARATE file from --format csv's own asset-only output, not a second --format value.
+        if (!edges_csv_path.empty()) {
+            std::ofstream edges_csv_out(edges_csv_path, std::ios::binary);
+            if (!edges_csv_out) {
+                std::cerr << "error: cannot open edges CSV output file '" << edges_csv_path << "'\n";
+                return 1;
+            }
+            write_inventory_edges_csv(edges_csv_out, report, resolver);
+        }
+        // Follow-up to Phase 8, added alongside --edges-csv above at Jurgen's request -- see
+        // write_inventory_conduits_csv's own doc comment (asset_inventory.hpp).
+        if (!conduits_csv_path.empty()) {
+            std::ofstream conduits_csv_out(conduits_csv_path, std::ios::binary);
+            if (!conduits_csv_out) {
+                std::cerr << "error: cannot open conduits CSV output file '" << conduits_csv_path << "'\n";
+                return 1;
+            }
+            write_inventory_conduits_csv(conduits_csv_out, report, resolver);
         }
 
         if (!interface_name.empty() && !quiet) {
@@ -2342,6 +2364,8 @@ int main(int argc, char** argv) {
     std::string inventory_policy_out;
     std::string inventory_acl_out;
     std::string inventory_acl_format = "cisco";
+    std::string inventory_edges_csv;
+    std::string inventory_conduits_csv;
     bool inventory_mac_vendor = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
     ResourceLimitCliVars inventory_limit_vars;
@@ -2414,6 +2438,15 @@ int main(int argc, char** argv) {
                       "FortiGate 'config firewall' blocks, or Palo Alto PAN-OS 'set' commands")
         ->transform(CLI::IsMember({"cisco", "fortinet", "paloalto"}))
         ->capture_default_str();
+    inventory_cmd->add_option(
+        "--edges-csv", inventory_edges_csv,
+        "Also write the host-to-host communication matrix (report.edges) as a SEPARATE CSV file "
+        "here, one row per client/server/protocol/port pair -- --format csv's own CSV is "
+        "deliberately asset-only and never includes this");
+    inventory_cmd->add_option(
+        "--conduits-csv", inventory_conduits_csv,
+        "Also write the inferred zone-to-zone conduit summary (report.conduits) as a CSV file "
+        "here, one row per (from_zone, to_zone, protocol, port)");
     inventory_cmd->add_flag("--mac-vendor", inventory_mac_vendor,
                              "Enable OUI (MAC vendor) resolution in the report; off by default to "
                              "keep output compact -- see docs/MANUAL.md's OUTPUT FORMATS section. "
@@ -2678,6 +2711,7 @@ int main(int argc, char** argv) {
                               inventory_strict, quiet, static_cast<uint8_t>(inventory_zone_prefix),
                               inventory_diagram_file, inventory_diagram_format, inventory_policy_out,
                               inventory_acl_out, inventory_acl_format,
+                              inventory_edges_csv, inventory_conduits_csv,
                               inventory_limit_vars,
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
                               inventory_services_file, *diag);
