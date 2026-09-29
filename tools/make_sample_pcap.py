@@ -18982,6 +18982,212 @@ def build_detect_snort_patterns_batch3_sample():
     (TESTS_DIR / "sample_detect_snort_patterns_batch3.pcap").write_bytes(data)
 
 
+def build_detect_snort_patterns_batch4_sample():
+    """Batch 4 -- four more pattern extensions to `detect`, a direct follow-up to Batch 3, sourced
+    fresh from Digital Bond Quickdraw-Snort's own s7.rules/enip.rules/bacnet.rules/omron.rules
+    (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 4 section has the full
+    research/scoping record). Unlike Batch 3, every item here is a new-vs-known "second-plus
+    originator" finding except item 21c (the BACnet NAK, always-notable) -- so most scenarios come in
+    a first-originator/second-originator pair, the same "prove new-vs-known needs two" shape items
+    9/10/17 already established in Batches 2-3.
+
+    Scenarios:
+      1) S7 Read SZL request (SZL-ID 0x0011) from the FIRST originator ever seen enumerating a given
+         PLC -- no finding yet.
+      2) The same request from a SECOND, DIFFERENT originator against the SAME PLC -- fires
+         s7-szl-new-originator (EngineeringStationActivity/T0888, Informational).
+      3) EtherNet/IP ListIdentity request whose Sender Context's own top 4 bytes are the Redpoint
+         Nmap NSE script's fixed fingerprint (wire bytes C1 DE BE D1 at encapsulation-header offset
+         16) -- fires enip-list-identity-redpoint-fingerprint (ProtocolMisuse/T0888, Informational).
+      4) The matching ListIdentity RESPONSE, echoing the identical Sender Context back (as a real
+         target would) -- must NOT produce a second finding (proves the !ef.has_identity request-side
+         gate matters, not just the magic bytes).
+      5) A ListIdentity request with an ordinary (non-matching) Sender Context, from a second,
+         different originator against the SAME server as scenario 3 -- must NOT fire the fingerprint
+         (proves the exact-byte match matters, not just "any ListIdentity"); this also, correctly,
+         fires the pre-existing generic enip-new-originator-discovery finding (Batch 3 item 17) on
+         this same conduit, since it IS a second, different originator querying this server.
+      6) BACnet Register-Foreign-Device request from the FIRST originator ever seen registering with
+         a given BBMD -- no finding yet.
+      7) The same request from a SECOND, DIFFERENT device against the SAME BBMD -- fires
+         bacnet-foreign-device-register-new-originator (EngineeringStationActivity/T0888,
+         Informational).
+      8) BACnet Read-Foreign-Device-Table request from the FIRST originator ever seen reading a given
+         BBMD's own tables -- no finding yet.
+      9) A Read-Broadcast-Distribution-Table request (a DIFFERENT BVLC function than scenario 8,
+         deliberately) from a SECOND, different originator against the SAME BBMD -- fires
+         bacnet-bbmd-table-read-new-originator, proving both functions share one tracking bucket.
+      10) BACnet BVLC-Result carrying Register-Foreign-Device NAK (0x0030), sent by a BBMD back to a
+          client whose registration attempt it refused -- fires bacnet-bbmd-nak
+          (ProtocolMisuse/T0855, Moderate), always-notable (no baseline/first-occurrence needed).
+      11) BACnet BVLC-Result carrying Successful-Completion (0x0000) instead -- must NOT fire (proves
+          the specific-NAK-code gate matters, not just "any BVLC-Result").
+      12) FINS Controller Data Read (command 0x0501) from the FIRST originator ever seen enumerating
+          a given PLC's own identity -- no finding yet.
+      13) The same command from a SECOND, DIFFERENT originator against the SAME PLC -- fires
+          fins-new-originator-discovery (EngineeringStationActivity/T0888, Informational).
+    """
+    S7_ENG_A_IP, S7_ENG_A_MAC = "192.168.1.140", mac("00:0c:29:cd:20:40")
+    S7_ENG_B_IP, S7_ENG_B_MAC = "192.168.1.141", mac("00:0c:29:cd:20:41")
+    S7_PLC_IP, S7_PLC_MAC = "192.168.1.142", mac("00:0c:29:cd:20:42")
+
+    ENIP_FP_CLIENT_IP, ENIP_FP_CLIENT_MAC = "192.168.1.143", mac("00:0c:29:cd:20:43")
+    ENIP_FP_SERVER_IP, ENIP_FP_SERVER_MAC = "192.168.1.144", mac("00:0c:29:cd:20:44")
+    ENIP_FP_CLIENT2_IP, ENIP_FP_CLIENT2_MAC = "192.168.1.145", mac("00:0c:29:cd:20:45")
+
+    BACNET_FD_A_IP, BACNET_FD_A_MAC = "192.168.1.146", mac("00:0c:29:cd:20:46")
+    BACNET_FD_B_IP, BACNET_FD_B_MAC = "192.168.1.147", mac("00:0c:29:cd:20:47")
+    BACNET_BBMD1_IP, BACNET_BBMD1_MAC = "192.168.1.148", mac("00:0c:29:cd:20:48")
+
+    BACNET_RD_A_IP, BACNET_RD_A_MAC = "192.168.1.149", mac("00:0c:29:cd:20:49")
+    BACNET_RD_B_IP, BACNET_RD_B_MAC = "192.168.1.150", mac("00:0c:29:cd:20:4a")
+    BACNET_BBMD2_IP, BACNET_BBMD2_MAC = "192.168.1.151", mac("00:0c:29:cd:20:4b")
+
+    BACNET_BBMD3_IP, BACNET_BBMD3_MAC = "192.168.1.152", mac("00:0c:29:cd:20:4c")
+    BACNET_NAK_CLIENT_IP, BACNET_NAK_CLIENT_MAC = "192.168.1.153", mac("00:0c:29:cd:20:4d")
+    BACNET_BBMD4_IP, BACNET_BBMD4_MAC = "192.168.1.154", mac("00:0c:29:cd:20:4e")
+    BACNET_SUCCESS_CLIENT_IP, BACNET_SUCCESS_CLIENT_MAC = "192.168.1.155", mac("00:0c:29:cd:20:4f")
+
+    FINS_ENG_A_IP, FINS_ENG_A_MAC = "192.168.1.156", mac("00:0c:29:cd:20:50")
+    FINS_ENG_B_IP, FINS_ENG_B_MAC = "192.168.1.157", mac("00:0c:29:cd:20:51")
+    FINS_PLC_IP, FINS_PLC_MAC = "192.168.1.158", mac("00:0c:29:cd:20:52")
+
+    packets = []
+    ident = 1
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, pident):
+        tcp = tcp_header(src_port, dst_port, 1000 + pident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4700 + pident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def add_udp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, pident):
+        udp = udp_header(src_port, dst_port, payload)
+        ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x4800 + pident) + udp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # --- S7 Read SZL (Userdata/CPU-functions/Read-SZL, request side) -- see build_s7comm_szl_sample's
+    # --- own userdata_param/szl_request_data helpers, reproduced here for two custom client IPs. ----
+    def s7_userdata_param(funcgroup: int, subfunc: int, req_type: int) -> bytes:
+        return bytes([0x00, 0x01, 0x12, 0x04, 0x11, (req_type << 6) | funcgroup, subfunc, 0x00])
+
+    def s7_szl_request_data(szl_id: int, szl_index: int) -> bytes:
+        return bytes([0x00, 0x09]) + struct.pack("!H", 0x0004) + struct.pack("!HH", szl_id, szl_index)
+
+    def add_s7_szl_request(src_ip, src_mac, pdu_ref: int, pident: int):
+        param = s7_userdata_param(0x04, 0x01, 0x01)  # CPU functions / Read SZL / request
+        data = s7_szl_request_data(0x0011, 0x0000)
+        req = s7_header(0x07, pdu_ref, len(param), len(data)) + param + data
+        cotp = tpkt_frame(COTP_DT_HEADER, req)
+        add_tcp(src_ip, src_mac, S7_PLC_IP, S7_PLC_MAC, 49700 + pdu_ref, 102, cotp, pident)
+
+    # 1) First originator -- no finding yet.
+    add_s7_szl_request(S7_ENG_A_IP, S7_ENG_A_MAC, 1, ident)
+    ident += 1
+    # 2) Second, different originator against the same PLC -- fires s7-szl-new-originator.
+    add_s7_szl_request(S7_ENG_B_IP, S7_ENG_B_MAC, 2, ident)
+    ident += 1
+
+    # --- EtherNet/IP ListIdentity, Redpoint Nmap NSE fingerprint --------------------------------
+    # Wire bytes C1 DE BE D1 at encapsulation-header offset 16 fall in the TOP 4 bytes of the 8-byte
+    # Sender Context field (offset 12-19) -- EnipHeader::sender_context is decoded little-endian
+    # (read_u64le: first byte read is the LSB), so the bottom 4 bytes of this 8-byte value are
+    # arbitrary/unconstrained and the top 4 must decode to exactly this byte sequence.
+    redpoint_context = b"\x12\x34\x56\x78" + bytes([0xC1, 0xDE, 0xBE, 0xD1])
+    ordinary_context = b"\x00\x00\x00\x00\x00\x00\x00\x01"
+
+    # 3) ListIdentity request carrying the Redpoint fingerprint -- fires
+    #    enip-list-identity-redpoint-fingerprint.
+    add_tcp(ENIP_FP_CLIENT_IP, ENIP_FP_CLIENT_MAC, ENIP_FP_SERVER_IP, ENIP_FP_SERVER_MAC, 49710, ENIP_PORT,
+            enip_message(0x0063, data=b"", session_handle=0, sender_context=redpoint_context), ident)
+    ident += 1
+
+    # 4) The matching response, echoing the SAME Sender Context back, carrying a minimal ListIdentity
+    #    identity item so ef.has_identity is set (see decode_list_identity_response, enip.cpp: proto
+    #    version(2LE) + sin_family(2BE) + sin_port(2BE) + sin_addr(4BE) + sin_zero(8) + vendor_id(2LE)
+    #    + device_type(2LE) + product_code(2LE) + rev_major(1)+rev_minor(1) + status(2LE) + serial(4LE)
+    #    + name_len(1) + name) -- must NOT produce a second finding (the !ef.has_identity request-side
+    #    gate).
+    identity_item_body = (struct.pack("<H", 1) + struct.pack(">H", 2) + struct.pack(">H", 44818) +
+                           struct.pack(">I", 0) + bytes(8) + struct.pack("<H", 0x1234) +
+                           struct.pack("<H", 0x000E) + struct.pack("<H", 0x0065) + bytes([1, 1]) +
+                           struct.pack("<H", 0) + struct.pack("<I", 0xDEADBEEF) + bytes([0]))
+    list_identity_resp_data = (struct.pack("<H", 1) +
+                                struct.pack("<HH", 0x000C, len(identity_item_body)) + identity_item_body)
+    add_tcp(ENIP_FP_SERVER_IP, ENIP_FP_SERVER_MAC, ENIP_FP_CLIENT_IP, ENIP_FP_CLIENT_MAC, ENIP_PORT, 49710,
+            enip_message(0x0063, data=list_identity_resp_data, session_handle=0,
+                         sender_context=redpoint_context),
+            ident)
+    ident += 1
+
+    # 5) ListIdentity request with an ORDINARY Sender Context, from a second, different originator
+    #    against the SAME server as scenario 3 -- must NOT fire the fingerprint (proves the exact-byte
+    #    match matters), but correctly fires the pre-existing generic enip-new-originator-discovery
+    #    (Batch 3 item 17) on this conduit, since it IS a second, different originator.
+    add_tcp(ENIP_FP_CLIENT2_IP, ENIP_FP_CLIENT2_MAC, ENIP_FP_SERVER_IP, ENIP_FP_SERVER_MAC, 49711, ENIP_PORT,
+            enip_message(0x0063, data=b"", session_handle=0, sender_context=ordinary_context), ident)
+    ident += 1
+
+    # --- BACnet BVLC-level foreign-device/broadcast-distribution-table functions ------------------
+    def bvlc_register_foreign_device(ttl_seconds: int) -> bytes:
+        return bytes([0x81, 0x05]) + struct.pack("!H", 6) + struct.pack("!H", ttl_seconds)
+
+    def bvlc_read_foreign_device_table() -> bytes:
+        return bytes([0x81, 0x06]) + struct.pack("!H", 4)
+
+    def bvlc_read_broadcast_distribution_table() -> bytes:
+        return bytes([0x81, 0x02]) + struct.pack("!H", 4)
+
+    def bvlc_result(result_code: int) -> bytes:
+        return bytes([0x81, 0x00]) + struct.pack("!H", 6) + struct.pack("!H", result_code)
+
+    # 6) Register-Foreign-Device from the FIRST originator -- no finding yet.
+    packets.append(bacnet_frame(dst=BACNET_BBMD1_MAC, src=BACNET_FD_A_MAC, dport=BACNET_PORT,
+                                 bvlc=bvlc_register_foreign_device(300), src_ip=BACNET_FD_A_IP,
+                                 dst_ip=BACNET_BBMD1_IP))
+    # 7) Register-Foreign-Device from a SECOND, different device against the SAME BBMD -- fires
+    #    bacnet-foreign-device-register-new-originator.
+    packets.append(bacnet_frame(dst=BACNET_BBMD1_MAC, src=BACNET_FD_B_MAC, dport=BACNET_PORT,
+                                 bvlc=bvlc_register_foreign_device(300), src_ip=BACNET_FD_B_IP,
+                                 dst_ip=BACNET_BBMD1_IP))
+
+    # 8) Read-Foreign-Device-Table from the FIRST originator -- no finding yet.
+    packets.append(bacnet_frame(dst=BACNET_BBMD2_MAC, src=BACNET_RD_A_MAC, dport=BACNET_PORT,
+                                 bvlc=bvlc_read_foreign_device_table(), src_ip=BACNET_RD_A_IP,
+                                 dst_ip=BACNET_BBMD2_IP))
+    # 9) Read-Broadcast-Distribution-Table (a DIFFERENT BVLC function) from a SECOND, different
+    #    originator against the SAME BBMD -- fires bacnet-bbmd-table-read-new-originator, proving
+    #    both functions share one tracking bucket.
+    packets.append(bacnet_frame(dst=BACNET_BBMD2_MAC, src=BACNET_RD_B_MAC, dport=BACNET_PORT,
+                                 bvlc=bvlc_read_broadcast_distribution_table(), src_ip=BACNET_RD_B_IP,
+                                 dst_ip=BACNET_BBMD2_IP))
+
+    # 10) BVLC-Result carrying Register-Foreign-Device NAK (0x0030), sent BY the BBMD BACK to the
+    #     client whose registration it refused -- fires bacnet-bbmd-nak (always-notable).
+    packets.append(bacnet_frame(dst=BACNET_NAK_CLIENT_MAC, src=BACNET_BBMD3_MAC, dport=BACNET_PORT,
+                                 bvlc=bvlc_result(0x0030), src_ip=BACNET_BBMD3_IP,
+                                 dst_ip=BACNET_NAK_CLIENT_IP))
+    # 11) BVLC-Result carrying Successful-Completion (0x0000) instead -- must NOT fire (proves the
+    #     specific-NAK-code gate, not just "any BVLC-Result").
+    packets.append(bacnet_frame(dst=BACNET_SUCCESS_CLIENT_MAC, src=BACNET_BBMD4_MAC, dport=BACNET_PORT,
+                                 bvlc=bvlc_result(0x0000), src_ip=BACNET_BBMD4_IP,
+                                 dst_ip=BACNET_SUCCESS_CLIENT_IP))
+
+    # --- FINS Controller Data Read (command 0x0501) ------------------------------------------------
+    # 12) First originator -- no finding yet.
+    add_udp(FINS_ENG_A_IP, FINS_ENG_A_MAC, FINS_PLC_IP, FINS_PLC_MAC, FINS_UDP_PORT, FINS_UDP_PORT,
+            fins_frame(0x0501, body=b"", is_response=False), ident)
+    ident += 1
+    # 13) Second, different originator against the same PLC -- fires fins-new-originator-discovery.
+    add_udp(FINS_ENG_B_IP, FINS_ENG_B_MAC, FINS_PLC_IP, FINS_PLC_MAC, FINS_UDP_PORT, FINS_UDP_PORT,
+            fins_frame(0x0501, body=b"", is_response=False), ident)
+    ident += 1
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_080_000 + i, i * 1000)
+    (TESTS_DIR / "sample_detect_snort_patterns_batch4.pcap").write_bytes(data)
+
+
 def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
     """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
     umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
@@ -21020,6 +21226,7 @@ if __name__ == "__main__":
     build_detect_snort_patterns_batch1_sample()
     build_detect_snort_patterns_batch2_sample()
     build_detect_snort_patterns_batch3_sample()
+    build_detect_snort_patterns_batch4_sample()
     build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()

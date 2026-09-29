@@ -13572,6 +13572,79 @@ it done as its own patch.
     [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)'s
     own "Cross-batch notes" section all updated in the same increment.
 
+95. **Batch 4: four more `detect` pattern extensions -- Digital Bond Quickdraw-Snort's remaining
+    protocol-specific rulesets (S7, EtherNet/IP, BACnet, OMRON FINS).** Unlike items 92-94, this batch
+    did not start from a pre-scoped item list Jurgen had already confirmed -- it started from an
+    open-ended "Do you find more ICS attack patterns?", answered with fresh research (a new "Batch 4"
+    section appended to
+    [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md),
+    sourced from Digital Bond's own `s7.rules`/`enip.rules`/`bacnet.rules`/`omron.rules`), presented as
+    candidate-only, and confirmed with a plain "yes" before any implementation began -- the same
+    confirm-before-build discipline items 92-94 each followed, just with the research step folded into
+    this batch instead of a prior one. Full record in
+    [docs/design/detection-engine.md](design/detection-engine.md)'s own "Batch 4" section.
+
+    Unlike every prior batch, all four items needed **zero new decode work outright** -- every field
+    each pattern reads was already decoded before this batch began. The four: a second-plus originator
+    issuing an S7 Read SZL (Userdata function group, System Status List query) against a PLC already
+    queried by a different client in the same capture, the S7-native analog to Batch 3's own
+    EtherNet/IP List*-new-originator item (`EngineeringStationActivity`/T0888, new-vs-known,
+    Informational); an EtherNet/IP ListIdentity request whose Sender Context field byte-exact matches
+    the Redpoint Nmap NSE script's own fixed fingerprint (Quickdraw-Snort SID 1111517) -- derived by
+    hand from `EnipHeader::sender_context`'s own little-endian decode loop
+    (`(sender_context >> 32) == 0xD1BEDEC1`, since the fingerprint bytes sit at bytes 4-7 of the
+    8-byte field, landing in the decoded `uint64_t`'s top 32 bits), then verified against a real fixture
+    decode before being trusted, plus confirmed genuinely present in this project's own real capture
+    `tests/real_captures/enip/enip_list_identity.pcap` -- an unplanned bonus, the third batch in a row
+    to find one (`ProtocolMisuse`/T0888, always-notable, Informational, explicitly gated on
+    `!ef.has_identity` so the target's own echoed response doesn't double-fire); three BACnet BVLC-level
+    patterns sharing the same always-decoded `BacnetFrame` fields -- a second-plus originator
+    Register-Foreign-Device against the same BBMD (`EngineeringStationActivity`/T0888, new-vs-known,
+    Informational), a second-plus originator reading a BBMD's own Foreign-Device-Table or
+    Broadcast-Distribution-Table -- two distinct BVLC function codes (0x06/0x02) deliberately folded
+    into ONE shared tracking map and finding, reasoned as the same "read this BBMD's own routing
+    config" capability (`EngineeringStationActivity`/T0888, new-vs-known, Informational), and a
+    BVLC-Result NAK carrying one of three specific codes (Register-Foreign-Device/Read-BDT/Read-FDT
+    NAK) -- deliberately only 3 of Wireshark's own 6 documented NAK codes wired, matching the three
+    request-side findings above; requires the reversed client/server role convention this codebase's
+    pre-existing `dnp3-unsolicited-misuse` pattern already established (the NAK's sender is the BBMD,
+    not the requester), caught and fixed before testing by explicitly checking that precedent rather
+    than pattern-matching the surrounding request-direction code (`ProtocolMisuse`/T0855,
+    always-notable, Moderate); and a second-plus originator issuing an OMRON FINS Controller Data Read
+    (command 0x0501) against the same PLC, over either FINS/TCP or FINS/UDP since this codebase already
+    decodes both (`EngineeringStationActivity`/T0888, new-vs-known, Informational).
+
+    One item from the original research candidates was deliberately deferred, not silently narrowed:
+    EtherNet/IP's own UDP-broadcast variant of the Redpoint fingerprint (SID 1111518) is not
+    implementable today, confirmed by directly reading `src/enip.cpp` and finding
+    `EnipUdpDecoder::decode` only ever calls `try_parse_cip_io`, never the encapsulation-command parse
+    path the fingerprint needs -- the same UDP-discovery gap item 94's own List*-new-originator finding
+    already carries, extending that same `docs/USER_GUIDE.md` LIMITATIONS bullet rather than duplicating
+    it. A second, unrelated ambiguity was flagged for future research rather than guessed at: Digital
+    Bond's own `modicon.rules` names UMAS function 0x58 "Upload Ladder Logic" while this codebase's own
+    UMAS source, the `yanissec/umas-wireshark-dissector`, names the same function code `CHECK_PLC` -- a
+    genuine disagreement between two independent reverse-engineering sources with no official UMAS spec
+    to arbitrate, left unimplemented and noted in the research doc, design doc, and USER_GUIDE.md.
+
+    New synthetic fixture `tests/sample_detect_snort_patterns_batch4.pcap`
+    (`build_detect_snort_patterns_batch4_sample`, 13 packets, 7 findings) covers all four items (six
+    sub-patterns) plus six pure-negative contrast conduits (a first S7 SZL originator; an EtherNet/IP
+    ListIdentity request with a non-matching Sender Context; the same fingerprinted request's own
+    echoed response, proving it doesn't double-fire; a first BACnet Register-Foreign-Device originator;
+    a first BACnet BBMD-table-read originator against a function code deliberately different from its
+    own paired second originator's, proving the shared bucket; a BVLC-Result carrying the "successful
+    completion" code instead of a NAK; and a first FINS Controller Data Read originator).
+
+    Full CTest across all four standing build configurations (default GCC: 2191/2191; ASan/UBSan
+    `build-fuzz`: 2268/2268, including the 77-test fuzz corpus regression, 489.95s wall time;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2177/2177; MinGW-w64 cross-compile,
+    build-only there) -- 100% pass, zero regressions. `docs/design/detection-engine.md` (new "Batch 4"
+    section), `docs/USER_GUIDE.md` (new "Batch 4" subsection with a real-capture worked example, one
+    extended and one new LIMITATIONS bullet), `man/conduitscope.1` (`detect` COMMANDS entry updated to
+    describe all four batches' patterns by name), and
+    [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)'s
+    own "Cross-batch notes" section all updated in the same increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -270,6 +270,72 @@
 //     unexpected-cot/iec104-reset-process sources -- a distinct wire condition, not a variant of
 //     either. Pure wiring against iec104_common_address, already decoded and tracked per-ASDU since
 //     item 3's own type/COT/IOA-range work.
+//
+// Four more patterns ("Batch 4"), a direct follow-up to Batch 3 -- Digital Bond Quickdraw-Snort's
+// remaining protocol-specific rulesets (s7.rules, enip.rules, bacnet.rules, omron.rules), read fresh
+// rather than re-mined from Batches 1-3's own already-exhausted sources (modbus.rules/dnp3.rules/
+// CyberICS/nmap/CVE/Claroty) (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 4
+// section has the full research/scoping record for each, including exact SID citations):
+//   - S7 Read SZL enumeration from a new originator (Quickdraw-Snort s7.rules SIDs 1111301/1111302,
+//     "S7 Enumerate Redpoint NSE Request CPU Function Read SZL attempt") -- NEW-VS-KNOWN,
+//     EngineeringStationActivity/T0888, same "second-plus originator to this PLC is new, first is not"
+//     mechanism as the pre-existing CIP/UMAS/CIP-List* sources (s7_szl_originators_by_server_). The
+//     Snort rule itself matches the Read SZL request SHAPE generically (S7 Userdata/CPU-functions/Read-
+//     SZL, any SZL-ID), not a tool-specific byte fingerprint the way Batch 2's Metasploit/nmap Modbus
+//     matches were -- so this reads as "a new engineering tool enumerated this PLC's identity", the S7
+//     analog of the CIP-List*/UMAS-READ_ID/FINS-Controller-Data-Read findings, not a Redpoint-specific
+//     signature. Gated the same way the pre-existing S7 PLC Control/Stop/download findings already are
+//     (dp.dst_port == 102, a Job-side request addressed TO the PLC). Pure wiring against
+//     S7CommResult::has_userdata_szl/userdata_szl_is_response, already decoded before this batch.
+//   - EtherNet/IP List Identity via the Redpoint Nmap NSE script specifically (Quickdraw-Snort
+//     enip.rules SID 1111517, TCP/44818; SID 1111518's own UDP variant is deliberately NOT implemented
+//     here -- see below) -- a genuine byte-exact TOOL fingerprint (unlike the item above): Redpoint's
+//     own NSE script hardcodes a fixed 4-byte value in the encapsulation header's own 8-byte Sender
+//     Context field. Always-notable, ProtocolMisuse/T0888, Informational severity -- distinct from and
+//     in addition to the pre-existing generic enip-new-originator-discovery finding (Batch 3 item 17),
+//     the same "generic pattern plus a specific tool fingerprint" relationship Batch 1's Read-Device-
+//     Identification/Report-Server-ID findings already have with their own Batch 2 Metasploit/nmap
+//     fingerprints. Request side only (!ef.has_identity -- the target echoes the Sender Context
+//     verbatim in its own response, so without this the same probe would produce two findings with
+//     client/server swapped on the second one). SID 1111518's UDP variant is genuinely NOT
+//     implementable today without new decode work: confirmed by reading src/enip.cpp this session that
+//     EnipUdpDecoder::decode calls try_parse_cip_io only, never the encapsulation-command parse path,
+//     so a UDP ListIdentity packet (the actual real-world discovery mechanism -- broadcast to port
+//     44818 rather than opened per-target over TCP) is invisible to this decoder entirely -- the same
+//     gap Batch 3 item 17's own LIMITATIONS entry already documents for the generic finding. Flagged
+//     honestly as out of scope for this batch rather than silently narrowed or silently claimed.
+//   - BACnet foreign-device/broadcast-distribution-table reconnaissance and misuse (Quickdraw-Snort
+//     bacnet.rules, 9 SIDs 1111701-1111709 collapsing into three wire-level shapes): (a) a Register-
+//     Foreign-Device request (BVLC function 0x05) -- NEW-VS-KNOWN, EngineeringStationActivity/T0888,
+//     bacnet_foreign_device_register_originators_by_server_; (b) a Read-Foreign-Device-Table or Read-
+//     Broadcast-Distribution-Table request (BVLC functions 0x06/0x02, folded into one finding/one
+//     tracking map -- both are a read-only query against the same BBMD's own routing configuration) --
+//     NEW-VS-KNOWN, EngineeringStationActivity/T0888, bacnet_bbmd_table_read_originators_by_server_;
+//     (c) a BVLC-Result (function 0x00) carrying one of the three matching NAK codes -- 0x0030
+//     (Register-Foreign-Device NAK), 0x0020 (Read-Broadcast-Distribution-Table NAK), or 0x0040 (Read-
+//     Foreign-Device-Table NAK), verified directly against Wireshark's own packet-bvlc.c
+//     bvlc_result_names table this session -- ALWAYS-NOTABLE (not new-vs-known: a NAK is the device's
+//     own explicit refusal, real evidence regardless of who sent it), ProtocolMisuse/T0855, Moderate
+//     severity. All three BacnetFrame fields (bvlc_function, has_result_code/result_code,
+//     has_registration_ttl) were already decoded before this batch -- zero new decode work. Only three
+//     of BVLC-Result's own six documented NAK codes are wired (matching the three request-side findings
+//     (a)/(b) above); Write-Broadcast-Distribution-Table NAK (0x0010), Delete-Foreign-Device-Table-Entry
+//     NAK (0x0050), and Distribute-Broadcast-To-Network NAK (0x0060) are deliberately left for a future
+//     batch, since this one has no paired request-side finding for any of those three yet.
+//   - OMRON FINS Controller Data Read from a new originator (Quickdraw-Snort omron.rules SIDs 1111401-
+//     1111404, TCP/9600 and UDP/9600, command code 0x0501) -- NEW-VS-KNOWN, EngineeringStationActivity/
+//     T0888, fins_originators_by_server_, same mechanism as the S7/CIP/UMAS sources above -- the FINS
+//     analog of Modbus Read Device Identification/CIP List Identity/S7 Read SZL/UMAS READ_ID. Both TCP
+//     and UDP FINS are already decoded by this codebase (unlike EtherNet/IP's own UDP gap above), so no
+//     UDP scope limitation applies here; pure wiring against FinsFrame::command/command_name, already
+//     decoded and named ("Controller Data Read") before this batch.
+//   - Digital Bond's own modicon.rules (Schneider Modicon Function Code 90, i.e. UMAS) needed NO new
+//     work: its Download Ladder Logic rule (UMAS function 0x34, DOWNLOAD_BLOCK) is already wired as
+//     T0843 by the pre-existing UMAS work. Its Upload Ladder Logic rule (UMAS function 0x58) was
+//     deliberately NOT wired -- Digital Bond's own rule message calls 0x58 "Upload Ladder Logic" but
+//     the yanissec/umas-wireshark-dissector source this codebase's own UMAS decoder is built from names
+//     it CHECK_PLC, a genuine unresolved naming disagreement between two independent reverse-engineering
+//     sources -- flagged for one more research pass rather than guessed at.
 #pragma once
 
 #include <cstdint>
@@ -468,9 +534,12 @@ private:
         // finish() can pick the right description template for a non-remote-access candidate:
         // "cip-new-originator", "umas-new-originator-reservation",
         // "umas-new-originator-discovery", "modbus-new-originator-read-device-id",
-        // "modbus-new-originator-report-server-id", or "enip-new-originator-discovery" (Batch 3
-        // item 17) each read differently even though they share the same category/technique shape
-        // in some cases. Remote-access candidates render from
+        // "modbus-new-originator-report-server-id", "enip-new-originator-discovery" (Batch 3
+        // item 17), "s7-szl-new-originator" (Batch 4 item 19), "fins-new-originator-discovery"
+        // (Batch 4 item 22), "bacnet-foreign-device-register-new-originator" (Batch 4 item 21a), or
+        // "bacnet-bbmd-table-read-new-originator" (Batch 4 item 21b) each read differently even
+        // though they share the same category/technique shape in some cases. Remote-access
+        // candidates render from
         // is_remote_access instead (their own source_tag is always "remote-access", never checked).
         std::string source_tag;
     };
@@ -616,6 +685,29 @@ private:
     // a client credited here for a List* query isn't implicitly credited as a known CIP originator, and
     // vice versa, since each is a genuinely separate capability/activity being observed.
     std::unordered_map<std::string, std::vector<std::string>> enip_list_discovery_originators_by_server_;
+
+    // S7 Read SZL originator tracking (Batch 4 item 19) -- same "second-plus originator to a given
+    // server is new, first is not" mechanism as cip_originators_by_server_/
+    // enip_list_discovery_originators_by_server_ above, keyed by the target PLC's own IP.
+    std::unordered_map<std::string, std::vector<std::string>> s7_szl_originators_by_server_;
+
+    // FINS Controller Data Read originator tracking (Batch 4 item 22) -- same mechanism, keyed by
+    // the target PLC's own IP.
+    std::unordered_map<std::string, std::vector<std::string>> fins_originators_by_server_;
+
+    // BACnet Register-Foreign-Device originator tracking (Batch 4 item 21a) -- same mechanism, keyed
+    // by the BBMD's own IP. A separate map from bacnet_bbmd_table_read_originators_by_server_ below:
+    // registering as a foreign device and reading a BBMD's own table are two structurally different
+    // capabilities (one changes the BBMD's own state, the other only reads it), so a client credited
+    // for one isn't implicitly credited as a known source of the other.
+    std::unordered_map<std::string, std::vector<std::string>> bacnet_foreign_device_register_originators_by_server_;
+
+    // BACnet Read-Foreign-Device-Table / Read-Broadcast-Distribution-Table originator tracking
+    // (Batch 4 item 21b) -- same mechanism, keyed by the BBMD's own IP. Both BVLC functions folded
+    // into one map (not two): they're both a read-only query against the same BBMD's own routing
+    // configuration, the same "distinct capability, one map" reasoning that keeps
+    // enip_list_discovery_originators_by_server_ a single map across its own three commands.
+    std::unordered_map<std::string, std::vector<std::string>> bacnet_bbmd_table_read_originators_by_server_;
 
     size_t total_packets_ = 0;
 };

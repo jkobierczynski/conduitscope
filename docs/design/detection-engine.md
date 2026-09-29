@@ -969,6 +969,130 @@ a finding of their own. `opcua_detect_weak_session_findings` and
 `real_opcua_detect_weak_session_findings` (`CMakeLists.txt`) cover item 15 against the pre-existing
 synthetic fixture and the real capture described above, respectively.
 
+## Batch 4: four more patterns (Digital Bond Quickdraw-Snort's remaining protocol-specific rulesets)
+
+A direct follow-up to Batch 3. Jurgen asked "Do you find more ICS attack patterns?" once Batch 3
+shipped -- an open-ended research request, not a pre-scoped item list the way Batches 1-3 each were.
+Research ran fresh this session: `modbus.rules`/`dnp3.rules` (Batches 1-2) and the CyberICS/nmap/CVE/
+Claroty material (Batches 2-3) were already fully mined, so this pass went back to Digital Bond's own
+Quickdraw-Snort repository and read the protocol-specific rule files that hadn't been fetched yet --
+`s7.rules`, `enip.rules`, `bacnet.rules`, `omron.rules` (plus `modicon.rules` for completeness) --
+written up as items 19-22 in `docs/research/2026-09-detect-pattern-candidates-batch2.md`'s own new
+"Batch 4" section, then confirmed with a plain "yes" once presented.
+
+| # | Pattern (as implemented) | Category / technique | Evidence | Severity | Novelty |
+|---|---|---|---|---|---|
+| 19 | S7 Read SZL request from a second, different originator to the same PLC | EngineeringStationActivity / T0888 | Confirmed (new-vs-known) | Informational | First Occurrence / Confirmed New |
+| 20 | EtherNet/IP ListIdentity request byte-exact matching the Redpoint Nmap NSE script's own fixed Sender Context | ProtocolMisuse / T0888 | Confirmed (always-notable) | Informational | N/A |
+| 21a | BACnet Register-Foreign-Device from a second, different device to the same BBMD | EngineeringStationActivity / T0888 | Confirmed (new-vs-known) | Informational | First Occurrence / Confirmed New |
+| 21b | BACnet Read-Foreign-Device-Table or Read-Broadcast-Distribution-Table from a second, different originator to the same BBMD | EngineeringStationActivity / T0888 | Confirmed (new-vs-known) | Informational | First Occurrence / Confirmed New |
+| 21c | BACnet BVLC-Result carrying a Register-Foreign-Device/Read-Broadcast-Distribution-Table/Read-Foreign-Device-Table NAK | ProtocolMisuse / T0855 | Confirmed (always-notable) | Moderate | N/A |
+| 22 | FINS Controller Data Read from a second, different originator to the same PLC | EngineeringStationActivity / T0888 | Confirmed (new-vs-known) | Informational | First Occurrence / Confirmed New |
+
+Implementation notes, by pattern:
+
+- **Pattern 19 needed zero new decode work.** `S7CommResult::has_userdata_szl`/
+  `userdata_szl_is_response` were already decoded (item 3's own Grok gap #2 work, well before this
+  batch). Unlike the Snort rule's own byte-exact Redpoint match (which also matches transaction/PDU-
+  reference bytes this codebase doesn't bother comparing), this pattern reads as "a new engineering
+  tool enumerated this PLC's identity" generically -- the Quickdraw rule itself matches the Read SZL
+  request SHAPE (any SZL-ID), not a tool-specific fingerprint, so implementing it as a byte-exact match
+  would have been a narrower claim than the rule's own condition actually supports. Same "second-plus
+  originator to a given server is new, first is not" mechanism as every other engineering-tool-
+  enumeration source in this engine, its own dedicated map (`s7_szl_originators_by_server_`). Gated
+  the same way the pre-existing S7 PLC Control/Stop/download findings already are (`dp.dst_port ==
+  102`, a Job/Userdata-side request addressed TO the PLC).
+- **Pattern 20 needed zero new decode work, but its own byte-order derivation needed independent
+  verification before being trusted.** Redpoint's NSE script hardcodes wire bytes `C1 DE BE D1` at
+  encapsulation-header offset 16, which falls inside the 8-byte Sender Context field (offset 12-19).
+  `EnipHeader::sender_context` is decoded little-endian (`read_u64le`, `enip.cpp`: the first byte read
+  becomes the value's own low byte), so those four wire bytes land in the TOP 32 bits of the decoded
+  `uint64_t` -- `(sender_context >> 32) == 0xD1BEDEC1` is the equivalent check. This was derived by
+  hand from `read_u64le`'s own loop, then verified against this batch's own synthetic fixture's real
+  decode output (not shipped on the arithmetic alone) -- and confirmed correct on the first real run,
+  no fixture rework needed. Request side only (`!ef.has_identity` -- the target echoes the Sender
+  Context verbatim in its own response, so without this gate the same probe would produce a second
+  finding with client/server swapped; proven by this batch's own fixture scenario 4, a synthetic
+  response carrying the identical context). Distinct from and in addition to the pre-existing generic
+  `enip-new-originator-discovery` finding (Batch 3 item 17) -- the same "generic pattern plus a
+  specific tool fingerprint" relationship Batch 1's Read-Device-Identification/Report-Server-ID
+  findings already have with their own Batch 2 Metasploit/nmap fingerprints. SID 1111518's own UDP
+  variant was deliberately NOT implemented: confirmed by reading `src/enip.cpp` this session that
+  `EnipUdpDecoder::decode` calls `try_parse_cip_io` only, never the encapsulation-command parse path,
+  so a UDP ListIdentity packet (the actual real-world discovery mechanism) is invisible to this decoder
+  entirely -- the same gap Batch 3 item 17's own `docs/USER_GUIDE.md` LIMITATIONS entry already
+  documents for the generic finding; flagged honestly as out of scope rather than silently narrowed.
+- **Pattern 21 (a/b/c) needed zero new decode work.** `BacnetFrame::bvlc_function`/`has_result_code`/
+  `result_code`/`has_registration_ttl` were all already decoded. These are BVLC-level functions
+  carrying no NPDU of their own at all (`bacnet.hpp`'s own file header comment), so unlike the
+  pre-existing who-Is-flood pattern (which reads `bf.npdu.apdu.*`), 21a/21b/21c read `bf.bvlc_function`
+  directly and are NOT gated on `bf.has_npdu`. 21a (Register-Foreign-Device, function 0x05) and 21b
+  (Read-Foreign-Device-Table/Read-Broadcast-Distribution-Table, functions 0x06/0x02) each use their
+  own dedicated originator-tracking map -- registering as a foreign device and reading a BBMD's own
+  tables are two structurally different capabilities, so a client credited for one isn't implicitly
+  credited for the other; 21b folds both its own BVLC functions into ONE map (proven by this batch's
+  own fixture: scenario 8 is a Read-Foreign-Device-Table from the first originator, scenario 9 is a
+  Read-Broadcast-Distribution-Table -- a DIFFERENT function -- from a second originator, and it still
+  fires). 21c is always-notable, not new-vs-known (a NAK is the device's own explicit refusal, real
+  evidence regardless of who sent it), and uses the REVERSED client/server role convention the
+  pre-existing `dnp3-unsolicited-misuse` pattern already established for a response-direction finding:
+  `dp.src_ip` is the BBMD sending the NAK, so `record_always_notable` is called with `dp.dst_ip,
+  dp.src_ip, ..., dp.src_port` (the original requester, the BBMD, the BBMD's own port) -- an easy
+  transposition to get backwards, caught before it shipped by checking this exact precedent rather than
+  writing the call by pattern-matching the surrounding (request-direction) code. Only three of
+  BVLC-Result's own six documented NAK codes are wired (0x0030/0x0020/0x0040, verified directly against
+  Wireshark's own `packet-bvlc.c` `bvlc_result_names` table this session) -- matching the three
+  request-side findings 21a/21b above; Write-Broadcast-Distribution-Table NAK (0x0010),
+  Delete-Foreign-Device-Table-Entry NAK (0x0050), and Distribute-Broadcast-To-Network NAK (0x0060) are
+  deliberately left for a future batch, since this one has no paired request-side finding for any of
+  those three yet.
+- **Pattern 22 needed zero new decode work.** `FinsFrame::command`/`command_name` already named
+  command 0x0501 "Controller Data Read" before this batch. Both TCP and UDP FINS are already decoded by
+  this codebase (unlike EtherNet/IP's own UDP gap, pattern 20 above), so no UDP scope limitation
+  applies here -- the shipped fixture uses FINS/UDP (port 9600) since that's the more common real-world
+  transport for this command. Same "second-plus originator" mechanism as every other engineering-tool-
+  enumeration source in this engine, its own dedicated map (`fins_originators_by_server_`).
+- **Digital Bond's own `modicon.rules` needed no new work at all, but exposed a real, unresolved naming
+  disagreement worth recording rather than silently guessing past.** Its Download Ladder Logic rule
+  (Schneider Modicon Function Code 90, i.e. UMAS function `0x34`) is already wired as T0843 by the
+  pre-existing UMAS work (Grok gap #4 Phase 6) -- confirmed by reading the rule's own byte match
+  (`|00 5a 01 34 00 01|`: unit id 0, function 0x5A/UMAS, session key 0x01, UMAS function 0x34/
+  DOWNLOAD_BLOCK) against `umas.hpp`'s own function-code table. Its Upload Ladder Logic rule (function
+  `0x58`) was deliberately NOT wired: Digital Bond's own rule message calls 0x58 "Upload Ladder Logic",
+  but the `yanissec/umas-wireshark-dissector` source this codebase's own UMAS decoder is built from
+  names it `CHECK_PLC` -- two independent reverse-engineering sources disagreeing on what the same
+  function code does, and UMAS has no official public specification to settle it against (per
+  `umas.hpp`'s own header comment). Flagged for one more research pass (checking whether a third
+  source, or the raw data-field content of a real UMAS upload sequence, settles which name is correct)
+  rather than picking a side.
+- **`fox.rules` (Tridium Niagara Fox) is out of scope for this codebase entirely** -- it decodes no
+  part of the Niagara Fox protocol, and adding it would be new-protocol-scale work (comparable to the
+  UMAS decoder itself), not a `detect`-layer addition. Noted for completeness, not proposed here.
+- **Item 20 is independently verified against a REAL capture**,
+  `tests/real_captures/enip/enip_list_identity.pcap` -- an unplanned, welcome bonus matching every
+  prior batch's own precedent, and the first Batch 4 item confirmed against real traffic rather than
+  only a synthetic fixture. This capture's own filename only promised a plain ListIdentity exchange,
+  not necessarily this specific tool's own probe, so the match was verified against the real CLI output
+  (not assumed from the filename) before `real_enip_detect_list_identity_redpoint_fingerprint` was
+  written -- the capture genuinely carries Redpoint's own fixed Sender Context fingerprint, between
+  `10.1.1.167` and `10.1.1.164:44818`.
+
+Fixtures: `tests/sample_detect_snort_patterns_batch4.pcap`
+(`build_detect_snort_patterns_batch4_sample()`, 13 packets) covers all four items, each as a
+first-originator/second-originator pair (or, for pattern 21c, a positive/negative NAK-code pair) --
+the same "new-vs-known needs two" and "the specific gate matters, not just the general shape"
+discipline items 9/10/17 already established. Two negatives worth calling out specifically: scenario 4
+(the ListIdentity response echoing the Redpoint context back) proves pattern 20's own request-side gate
+matters, and scenario 5 (an ordinary, non-matching Sender Context from a second ListIdentity originator
+against the same server as scenario 3) correctly fires the pre-existing generic
+`enip-new-originator-discovery` while correctly NOT firing pattern 20's own fingerprint -- proving the
+two findings are independent, not that one subsumes the other. `detect_snort_patterns_batch4_all_findings`
+(`CMakeLists.txt`) pins the full seven-finding report end to end and asserts, via
+`FAIL_REGULAR_EXPRESSION`, that none of the six negative-only conduits (the four "first originator"
+IPs, plus the BVLC-Result Successful-Completion pair) produced a finding of their own.
+`real_enip_detect_list_identity_redpoint_fingerprint` covers item 20 against the real capture described
+above.
+
 ## Explicitly out of scope
 
 - **Evidence/novelty/severity retrofit onto pre-existing engines.** See "Four-axis model" above.

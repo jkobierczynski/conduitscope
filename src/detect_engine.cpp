@@ -13,6 +13,7 @@
 #include "conduitscope/bacnet.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/enip.hpp"
+#include "conduitscope/fins.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
 #include "conduitscope/modbus.hpp"
@@ -354,6 +355,38 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 s7_setup_comm_state_[dp.src_ip + "|" + dp.dst_ip].other_function_seen = true;
             }
         }
+
+        // --- S7 Read SZL enumeration from a new originator (engineering-station reconnaissance,
+        // --- Batch 4 item 19) ---------------------------------------------------------------------
+        // Quickdraw-Snort's own s7.rules SIDs 1111301/1111302 name this exact shape ("S7 Enumerate
+        // Redpoint NSE Request CPU Function Read SZL attempt"), matching the Read SZL request
+        // structurally (any SZL-ID), not a tool-specific byte fingerprint. Already decoded and named
+        // by this codebase's own src/s7comm.cpp before this batch (has_userdata_szl/
+        // userdata_szl_is_response) -- zero new decode work. A separate rosctr (Userdata, 0x07) from
+        // the has_function branch above (Job/Ack_Data, rosctr 0x01/0x03), so this is a sibling check,
+        // not folded into that if/else-if chain. Request side only (!userdata_szl_is_response); like
+        // the pre-existing CIP-List*/UMAS/FINS engineering-tool-enumeration sources, only a SECOND,
+        // DIFFERENT originator querying the SAME PLC within this capture is flagged.
+        if (sr.has_userdata_szl && !sr.userdata_szl_is_response) {
+            auto& originators = s7_szl_originators_by_server_[dp.dst_ip];
+            bool already_seen = false;
+            for (const auto& o : originators) {
+                if (o == dp.src_ip) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                if (!originators.empty()) {
+                    record_new_conduit_candidate(
+                        DetectionCategory::EngineeringStationActivity,
+                        mitre_t0888_remote_system_information_discovery(),
+                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "s7comm", dp.dst_port,
+                        "s7-szl-new-originator", DetectionSeverity::Informational);
+                }
+                originators.push_back(dp.src_ip);
+            }
+        }
     }
 
     // --- DNP3: Cold/Warm Restart (firmware/logic change), unsolicited misuse (protocol misuse) -----
@@ -652,6 +685,114 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                     DetectionSeverity::Informational);
             }
         }
+
+        // --- BACnet foreign-device/broadcast-distribution-table reconnaissance and misuse (Batch 4
+        // --- item 21) --------------------------------------------------------------------------
+        // Quickdraw-Snort bacnet.rules, 9 SIDs (1111701-1111709) collapsing into three wire-level
+        // shapes -- see this file's own header comment (detect_engine.hpp) for the full mapping.
+        // These are BVLC-level functions, carrying no NPDU of their own at all (bacnet.hpp's own
+        // file header comment), so unlike who-Is above these are NOT gated on bf.has_npdu -- checked
+        // directly against bf.bvlc_function/has_result_code/result_code instead, all already decoded
+        // before this batch.
+        if (bf.bvlc_function == 0x05) {
+            // (a) Register-Foreign-Device request -- a device asking this BBMD to relay broadcasts
+            // to it from off its local subnet; a network-topology change, not a data read. Same
+            // "second-plus originator to a given server is new, first is not" mechanism as the
+            // pre-existing CIP/UMAS/S7/FINS engineering-tool sources.
+            auto& originators = bacnet_foreign_device_register_originators_by_server_[dp.dst_ip];
+            bool already_seen = false;
+            for (const auto& o : originators) {
+                if (o == dp.src_ip) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                if (!originators.empty()) {
+                    record_new_conduit_candidate(
+                        DetectionCategory::EngineeringStationActivity,
+                        mitre_t0888_remote_system_information_discovery(),
+                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "bacnet", dp.dst_port,
+                        "bacnet-foreign-device-register-new-originator", DetectionSeverity::Informational);
+                }
+                originators.push_back(dp.src_ip);
+            }
+        } else if (bf.bvlc_function == 0x06 || bf.bvlc_function == 0x02) {
+            // (b) Read-Foreign-Device-Table or Read-Broadcast-Distribution-Table request --
+            // reconnaissance against the BBMD's own routing configuration. Both functions folded
+            // into one finding/one tracking map -- see this file's own header comment for why.
+            auto& originators = bacnet_bbmd_table_read_originators_by_server_[dp.dst_ip];
+            bool already_seen = false;
+            for (const auto& o : originators) {
+                if (o == dp.src_ip) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                if (!originators.empty()) {
+                    record_new_conduit_candidate(
+                        DetectionCategory::EngineeringStationActivity,
+                        mitre_t0888_remote_system_information_discovery(),
+                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "bacnet", dp.dst_port,
+                        "bacnet-bbmd-table-read-new-originator", DetectionSeverity::Informational);
+                }
+                originators.push_back(dp.src_ip);
+            }
+        } else if (bf.bvlc_function == 0x00 && bf.has_result_code &&
+                   (bf.result_code == 0x0030 || bf.result_code == 0x0020 || bf.result_code == 0x0040)) {
+            // (c) BVLC-Result NAK for one of the three request shapes above -- a real refusal, worth
+            // an always-notable finding regardless of who sent the original request (unlike (a)/(b),
+            // this needs no "new vs. known" judgment: the device's own explicit denial is the
+            // evidence). Codes verified directly against Wireshark's own packet-bvlc.c
+            // bvlc_result_names table this session, not assumed.
+            const char* reason = bf.result_code == 0x0030   ? "Register-Foreign-Device NAK"
+                                  : bf.result_code == 0x0020 ? "Read-Broadcast-Distribution-Table NAK"
+                                                              : "Read-Foreign-Device-Table NAK";
+            // Reverse roles, same convention as dnp3-unsolicited-misuse above: dp.src_ip is the BBMD
+            // sending the NAK, dp.dst_ip is the original requester it's refusing.
+            record_always_notable(
+                "bacnet-bbmd-nak", DetectionCategory::ProtocolMisuse,
+                mitre_t0855_unauthorized_command_message(), dp.dst_ip, dp.src_ip, "bacnet", dp.src_port,
+                std::string("BACnet BVLC-Result ") + reason +
+                    " -- this client's own foreign-device or broadcast-distribution-table request was "
+                    "explicitly refused by the BBMD",
+                DetectionSeverity::Moderate);
+        }
+    }
+
+    // --- OMRON FINS: Controller Data Read from a new originator (engineering-station reconnaissance,
+    // --- Batch 4 item 22) -------------------------------------------------------------------------
+    // Quickdraw-Snort omron.rules SIDs 1111401-1111404 (TCP/9600 and UDP/9600, command code 0x0501,
+    // "Controller Data Read" -- already decoded and named by this codebase's own src/fins.cpp before
+    // this batch, zero new decode work). Pulls the target PLC's model/version identification off the
+    // wire -- the FINS analog of Modbus Read Device Identification/CIP List Identity/S7 Read SZL/
+    // UMAS READ_ID. Both TCP and UDP FINS are already decoded by this codebase (unlike EtherNet/IP's
+    // own UDP gap, item 20 above), so no UDP scope limitation applies here. Request side only
+    // (!ff.is_response); same "second-plus originator to this PLC is new, first is not" mechanism as
+    // every other engineering-tool-enumeration source in this engine.
+    if (dp.protocol == "fins" && dp.result) {
+        const FinsFrame& ff = dp.result->as<FinsFrame>();
+        if (!ff.is_response && ff.command == 0x0501) {
+            auto& originators = fins_originators_by_server_[dp.dst_ip];
+            bool already_seen = false;
+            for (const auto& o : originators) {
+                if (o == dp.src_ip) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                if (!originators.empty()) {
+                    record_new_conduit_candidate(
+                        DetectionCategory::EngineeringStationActivity,
+                        mitre_t0888_remote_system_information_discovery(),
+                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "fins", dp.dst_port,
+                        "fins-new-originator-discovery", DetectionSeverity::Informational);
+                }
+                originators.push_back(dp.src_ip);
+            }
+        }
     }
 
     // --- OPC UA: weak-session pattern -- SecurityPolicy=None channel, or anonymous session identity
@@ -810,6 +951,33 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 }
                 originators.push_back(dp.src_ip);
             }
+        }
+
+        // --- EtherNet/IP List Identity via the Redpoint Nmap NSE script (protocol misuse, Batch 4
+        // --- item 20) --------------------------------------------------------------------------
+        // Quickdraw-Snort enip.rules SID 1111517 (TCP/44818): a genuine byte-exact TOOL fingerprint,
+        // distinct from the generic new-originator finding above -- Redpoint's own NSE script
+        // hardcodes a fixed 4-byte value (wire bytes C1 DE BE D1) at offset 16 of the 24-byte
+        // encapsulation header, which falls inside the 8-byte Sender Context field (offset 12-19).
+        // EnipHeader::sender_context is decoded little-endian (read_u64le, enip.cpp: first byte read
+        // is the LSB), so those four wire bytes at offsets 16-19 land in the TOP 32 bits of the
+        // decoded uint64_t -- (sender_context >> 32) == 0xD1BEDEC1 is the equivalent check, verified
+        // against this batch's own synthetic fixture's real decode JSON output before being written
+        // here, not derived from byte-order reasoning alone. Request side only
+        // (!ef.has_identity -- the target echoes the Sender Context verbatim in its own response per
+        // EnipHeader::sender_context's own comment, so without this gate the same probe would
+        // produce a second finding with client/server swapped). SID 1111518's own UDP variant is
+        // deliberately not implemented -- see this file's own header comment (detect_engine.hpp) for
+        // why.
+        if (ef.header.command_name == "ListIdentity" && !ef.has_identity &&
+            (ef.header.sender_context >> 32) == uint64_t{0xD1BEDEC1}) {
+            record_always_notable(
+                "enip-list-identity-redpoint-fingerprint", DetectionCategory::ProtocolMisuse,
+                mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip, "enip",
+                dp.dst_port,
+                "EtherNet/IP ListIdentity request byte-exact matches the Redpoint Nmap NSE script's "
+                "own fixed Sender Context fingerprint (Quickdraw-Snort enip.rules SID 1111517)",
+                DetectionSeverity::Informational);
         }
     }
 
@@ -1369,6 +1537,35 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
                   << " to " << c.server_ip
                   << " -- a different client than the one(s) already seen querying this target's own "
                      "device identity/services/interfaces in this capture";
+            } else if (c.source_tag == "s7-szl-new-originator") {
+                // Batch 4 item 19 -- S7 Read SZL enumeration from a second, different originator
+                // (s7_szl_originators_by_server_, detect_engine.hpp).
+                d << "S7 Read SZL request from a new originator " << c.client_ip << " to " << c.server_ip
+                  << " -- a different client than the one(s) already seen enumerating this PLC's own "
+                     "identity/version information in this capture";
+            } else if (c.source_tag == "fins-new-originator-discovery") {
+                // Batch 4 item 22 -- FINS Controller Data Read from a second, different originator
+                // (fins_originators_by_server_, detect_engine.hpp).
+                d << "FINS Controller Data Read from a new originator " << c.client_ip << " to "
+                  << c.server_ip
+                  << " -- a different client than the one(s) already seen reading this PLC's own "
+                     "model/version identification in this capture";
+            } else if (c.source_tag == "bacnet-foreign-device-register-new-originator") {
+                // Batch 4 item 21a -- Register-Foreign-Device from a second, different originator
+                // (bacnet_foreign_device_register_originators_by_server_, detect_engine.hpp).
+                d << "BACnet Register-Foreign-Device request from a new originator " << c.client_ip
+                  << " to " << c.server_ip
+                  << " -- a different device than the one(s) already seen registering as a foreign "
+                     "device with this BBMD in this capture";
+            } else if (c.source_tag == "bacnet-bbmd-table-read-new-originator") {
+                // Batch 4 item 21b -- Read-Foreign-Device-Table/Read-Broadcast-Distribution-Table
+                // from a second, different originator (bacnet_bbmd_table_read_originators_by_server_,
+                // detect_engine.hpp).
+                d << "BACnet Read-Foreign-Device-Table/Read-Broadcast-Distribution-Table request from "
+                     "a new originator "
+                  << c.client_ip << " to " << c.server_ip
+                  << " -- a different client than the one(s) already seen reading this BBMD's own "
+                     "routing configuration in this capture";
             } else {
                 // "cip-new-originator" -- the remaining, original non-remote-access source (the
                 // fallback here, not because it's the only other one, but because it was this

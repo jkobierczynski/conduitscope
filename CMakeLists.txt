@@ -16121,6 +16121,40 @@ add_test(NAME real_opcua_detect_weak_session_findings
 set_tests_properties(real_opcua_detect_weak_session_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[Protocol Misuse\\] T0886 \\(Remote Services\\).*192\\.168\\.41\\.176 -> 192\\.168\\.41\\.212:12001 \\(opcua\\).*OPC UA OpenSecureChannel request negotiating SecurityPolicy=None -- this channel carries no encryption or message signing at all.*\\[Protocol Misuse\\] T0886 \\(Remote Services\\).*192\\.168\\.41\\.176 -> 192\\.168\\.41\\.212:12001 \\(opcua\\).*OPC UA ActivateSession request using an anonymous identity token -- no real authentication for this engineering session")
 
+# ---------------------------------------------------------------------------------------------
+# Batch 4 -- four more pattern extensions to `detect`, sourced fresh from Digital Bond Quickdraw-
+# Snort's own s7.rules/enip.rules/bacnet.rules/omron.rules (docs/research/2026-09-detect-pattern-
+# candidates-batch2.md's own Batch 4 section). tests/sample_detect_snort_patterns_batch4.pcap (13
+# packets, build_detect_snort_patterns_batch4_sample, tools/make_sample_pcap.py) covers all four
+# items, each with a first-originator/second-originator pair (or, for item 21c's always-notable
+# NAK, a positive/negative pair) proving the "new vs. known needs two" and "the specific gate
+# matters, not just the general shape" discipline every prior batch's own fixture established --
+# see that fixture's own docstring for the full scenario list.
+# ---------------------------------------------------------------------------------------------
+
+# All 7 findings (5 new-vs-known new-originator sources plus 1 always-notable BACnet NAK plus 1
+# collateral, correctly-fired pre-existing enip-new-originator-discovery from scenario 5's own
+# second ListIdentity originator), first-seen order, plus a FAIL_REGULAR_EXPRESSION proving none
+# of the six negative-only conduits (.140 first S7 originator, .146 first foreign-device-register
+# originator, .149 first BBMD-table-read originator, .154/.155 the BVLC-Result Successful-
+# Completion pair, .156 first FINS originator) produced any finding at all.
+add_test(NAME detect_snort_patterns_batch4_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch4.pcap")
+set_tests_properties(detect_snort_patterns_batch4_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 13.*findings: 7 \\(Critical 0, Moderate 1, Informational 6\\).*evidence: Confirmed 7, Heuristic 0.*Engineering-Station Activity: 5.*Firmware/Logic Change: 0.*Remote-Access Channel: 0.*Protocol Misuse: 2.*\\[Protocol Misuse\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: N/A  severity: Informational.*192\\.168\\.1\\.143 -> 192\\.168\\.1\\.144:44818 \\(enip\\).*EtherNet/IP ListIdentity request byte-exact matches the Redpoint Nmap NSE script's own fixed Sender Context fingerprint \\(Quickdraw-Snort enip\\.rules SID 1111517\\).*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.153 -> 192\\.168\\.1\\.152:47808 \\(bacnet\\).*BACnet BVLC-Result Register-Foreign-Device NAK -- this client's own foreign-device or broadcast-distribution-table request was explicitly refused by the BBMD.*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.141 -> 192\\.168\\.1\\.142:102 \\(s7comm\\).*S7 Read SZL request from a new originator 192\\.168\\.1\\.141 to 192\\.168\\.1\\.142 -- a different client than the one\\(s\\) already seen enumerating this PLC's own identity/version information in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.145 -> 192\\.168\\.1\\.144:44818 \\(enip\\).*EtherNet/IP List Identity/Services/Interfaces from a new originator 192\\.168\\.1\\.145 to 192\\.168\\.1\\.144 -- a different client than the one\\(s\\) already seen querying this target's own device identity/services/interfaces in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.147 -> 192\\.168\\.1\\.148:47808 \\(bacnet\\).*BACnet Register-Foreign-Device request from a new originator 192\\.168\\.1\\.147 to 192\\.168\\.1\\.148 -- a different device than the one\\(s\\) already seen registering as a foreign device with this BBMD in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.150 -> 192\\.168\\.1\\.151:47808 \\(bacnet\\).*BACnet Read-Foreign-Device-Table/Read-Broadcast-Distribution-Table request from a new originator 192\\.168\\.1\\.150 to 192\\.168\\.1\\.151 -- a different client than the one\\(s\\) already seen reading this BBMD's own routing configuration in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Engineering-Station Activity\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: First Occurrence  severity: Informational.*192\\.168\\.1\\.157 -> 192\\.168\\.1\\.158:9600 \\(fins\\).*FINS Controller Data Read from a new originator 192\\.168\\.1\\.157 to 192\\.168\\.1\\.158 -- a different client than the one\\(s\\) already seen reading this PLC's own model/version identification in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\)"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.140|192\\.168\\.1\\.146|192\\.168\\.1\\.149|192\\.168\\.1\\.154|192\\.168\\.1\\.155|192\\.168\\.1\\.156")
+
+# Item 20 AGAIN, this time against a REAL capture (tests/real_captures/enip/enip_list_identity.pcap)
+# -- confirmed during this batch's own research/implementation pass to genuinely carry the Redpoint
+# Nmap NSE script's own fixed Sender Context fingerprint, an unplanned bonus matching every prior
+# batch's own "check real captures too" discipline: this capture's own name suggested it might be a
+# plain ListIdentity exchange, not necessarily this specific tool's own probe, so this was verified
+# against the real CLI output before being written here, not assumed from the filename alone.
+add_test(NAME real_enip_detect_list_identity_redpoint_fingerprint
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/enip/enip_list_identity.pcap")
+set_tests_properties(real_enip_detect_list_identity_redpoint_fingerprint PROPERTIES
+  PASS_REGULAR_EXPRESSION "findings: 1 \\(Critical 0, Moderate 0, Informational 1\\).*\\[Protocol Misuse\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: N/A  severity: Informational.*10\\.1\\.1\\.167 -> 10\\.1\\.1\\.164:44818 \\(enip\\).*EtherNet/IP ListIdentity request byte-exact matches the Redpoint Nmap NSE script's own fixed Sender Context fingerprint \\(Quickdraw-Snort enip\\.rules SID 1111517\\)")
+
 
 # ---------------------------------------------------------------------------------------------
 # UMAS-over-Modbus/TCP (umas.hpp/cpp, Grok gap #4 Phase 5 -- "Unity Pro/UMAS is in scope as new

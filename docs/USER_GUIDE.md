@@ -1493,6 +1493,59 @@ CIP Reset, CIP List* new-originator, IEC 104 broadcast interrogation) are covere
 synthetic fixture, `tests/sample_detect_snort_patterns_batch3.pcap`, exercised by
 `detect_snort_patterns_batch3_all_findings` in this project's own CTest suite.
 
+#### Batch 4: Digital Bond Quickdraw-Snort's remaining protocol-specific rulesets (S7, EtherNet/IP, BACnet, FINS)
+
+A direct follow-up to Batch 3, from an open-ended "do you find more ICS attack patterns?" research
+request rather than a pre-scoped item list -- sourced fresh from Digital Bond Quickdraw-Snort's own
+`s7.rules`/`enip.rules`/`bacnet.rules`/`omron.rules` (`docs/research/2026-09-detect-pattern-
+candidates-batch2.md`'s own Batch 4 section has the full research record, `docs/design/detection-
+engine.md`'s own "Batch 4" section has the full implementation record). Unlike Batches 1-3, every
+item here needed zero new decode work -- the remaining `detect` surface across the protocols this
+tool already speaks turned out to be almost entirely reporting over already-decoded fields:
+
+- **S7 Read SZL from a new originator** -- a new engineering tool enumerating a PLC's own identity/
+  version information, the S7 analog of Modbus Read Device Identification/CIP List Identity/UMAS
+  READ_ID/FINS Controller Data Read.
+- **EtherNet/IP ListIdentity, the Redpoint Nmap NSE script's own fingerprint** -- a byte-exact match
+  on a fixed 4-byte value this specific reconnaissance tool hardcodes in the encapsulation header's
+  own Sender Context field, distinct from (and fired in addition to) the generic CIP List* new-
+  originator finding from Batch 3.
+- **BACnet Register-Foreign-Device from a new device** -- a device asking a BBMD to relay broadcasts
+  to it from off its own local subnet, a network-topology change rather than a data read.
+- **BACnet Read-Foreign-Device-Table / Read-Broadcast-Distribution-Table from a new originator** --
+  reconnaissance against a BBMD's own routing configuration; both BVLC functions share one finding,
+  since they're the same read-only-query-against-this-BBMD's-own-config capability.
+- **BACnet BVLC-Result NAK** -- a Register-Foreign-Device, Read-Broadcast-Distribution-Table, or
+  Read-Foreign-Device-Table request was explicitly refused by the BBMD -- always-notable (a NAK is
+  the device's own refusal, real evidence regardless of who sent the original request).
+- **FINS Controller Data Read from a new originator** -- the FINS analog of the S7/CIP/UMAS
+  enumeration findings above; both FINS/TCP and FINS/UDP are already decoded, so unlike the
+  EtherNet/IP fingerprint above, no transport-scope limitation applies here.
+
+The EtherNet/IP ListIdentity fingerprint is independently verified against a REAL capture,
+`tests/real_captures/enip/enip_list_identity.pcap` -- not just a synthetic fixture (this capture's
+own filename only promised a plain ListIdentity exchange; the Redpoint-specific match was confirmed
+against the real CLI output, not assumed from the name, before being relied on here):
+
+```
+$ conduitscope detect -r tests/real_captures/enip/enip_list_identity.pcap
+...
+[Protocol Misuse] T0888 (Remote System Information Discovery)
+  evidence: Confirmed  novelty: N/A  severity: Informational
+  10.1.1.167 -> 10.1.1.164:44818 (enip)
+  EtherNet/IP ListIdentity request byte-exact matches the Redpoint Nmap NSE script's own fixed Sender Context fingerprint (Quickdraw-Snort enip.rules SID 1111517)
+  first seen: 2015-03-31 17:41:35.089710Z  last seen: 2015-03-31 17:41:35.089710Z  packets: 1
+```
+
+The other five findings are covered by this batch's own synthetic fixture,
+`tests/sample_detect_snort_patterns_batch4.pcap`, exercised by
+`detect_snort_patterns_batch4_all_findings` in this project's own CTest suite. Digital Bond's own
+`modicon.rules` needed no new work: its Download Ladder Logic rule (UMAS function 0x34) is already
+covered by the pre-existing UMAS wiring; its Upload Ladder Logic rule (function 0x58) was
+deliberately left unimplemented -- Digital Bond's own rule message and the dissector source this
+codebase's UMAS decoder is built from disagree on what that function code actually does, and UMAS has
+no official specification to settle it, so this was flagged for further research rather than guessed.
+
 #### Worked example
 
 ```
@@ -6386,8 +6439,17 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   encapsulation commands -- so a UDP-broadcast discovery scan (the more common mechanism for this
   reconnaissance shape in real deployments, where a scanning tool broadcasts List Identity/Services to
   UDP port 44818 rather than opening a TCP session per target) is not seen by this finding at all. Only
-  a List* command sent over an already-open TCP connection is detected. See "Batch 3" above and
-  `docs/design/detection-engine.md`'s own "Batch 3" section.
+  a List* command sent over an already-open TCP connection is detected. **Batch 4's own EtherNet/IP
+  ListIdentity Redpoint-fingerprint pattern shares this exact gap** -- its own SID 1111518 UDP variant
+  was deliberately not implemented for the same reason. See "Batch 3"/"Batch 4" above and
+  `docs/design/detection-engine.md`'s own "Batch 3"/"Batch 4" sections.
+- **`detect`'s Batch 4 BACnet BVLC-Result NAK pattern only wires three of the six documented NAK
+  codes** (Register-Foreign-Device NAK, Read-Broadcast-Distribution-Table NAK, Read-Foreign-Device-
+  Table NAK) -- matching the three request-side findings this batch also implements. Write-Broadcast-
+  Distribution-Table NAK, Delete-Foreign-Device-Table-Entry NAK, and Distribute-Broadcast-To-Network
+  NAK are real, already-decoded (`BacnetFrame::result_code`) BVLC-Result values this pattern does not
+  flag, deliberately left for a future batch rather than paired with a request-side finding this one
+  doesn't have yet. See "Batch 4" above.
 - **`detect`'s evidence/novelty/severity never assert malicious intent.**
   `evidence` says how reliably this tool observed the event; `severity`
   says how much it would matter if genuine; `novelty` says whether it
