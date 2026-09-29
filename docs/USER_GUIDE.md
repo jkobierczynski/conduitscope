@@ -4073,11 +4073,24 @@ packets where they apply:
   otherwise applicable, and for Unconfirmed-Request (which has no invoke ID
   at all).
 - `bacnet_segmented`: `true`/`false` -- Confirmed-Request/Complex-ACK's SEG
-  bit. When `true`, the service data is a single segment of a larger,
-  multi-datagram message; this decoder does no cross-packet APDU
-  reassembly, so `bacnet_values` is absent and a note explains the service
-  data is shown as raw hex instead (see docs/PROTOCOL_COVERAGE.md's BACnet/IP
-  section).
+  bit. When `true`, this datagram carries one segment of a larger,
+  multi-datagram message; this decoder reassembles the segments of a
+  single (flow, invoke-id) across separate UDP datagrams and re-decodes
+  the reassembled service data the same way a non-segmented message would
+  get (see docs/PROTOCOL_COVERAGE.md's BACnet/IP section for the full
+  design and its NAK-retransmission limitation). Two more fields are only
+  present when `bacnet_segmented` is `true`:
+  - `bacnet_reassembly_completed`: `true` once this segment was the one
+    that completed its reassembly (in which case `bacnet_values` below
+    reflects the full reassembled message, not just this segment); `false`
+    on every other segment of that reassembly, whether still in progress
+    or abandoned because a sequence-number gap broke the strict in-order
+    accumulation (a note on the packet explains which).
+  - `bacnet_reassembly_segment_count`: only present alongside
+    `bacnet_reassembly_completed: true` -- the total number of segments
+    that were reassembled into this message.
+  Every segment's own raw hex is still shown regardless of reassembly
+  outcome (a single UDP datagram is still only one segment on its own).
 - `bacnet_values`: an array of decoded field/value strings (e.g.
   `"object=analog-input,3"`, `"property=present-value"`,
   `"value=(Real) 72.500000"`, `"priority=8"`), present only for the
@@ -4086,7 +4099,9 @@ packets where they apply:
   Error) when a single primitive value was actually present to decode --
   absent for every other service (shown as raw hex with a note instead) and
   for a constructed/array PropertyValue (also raw hex with a note -- see
-  docs/PROTOCOL_COVERAGE.md).
+  docs/PROTOCOL_COVERAGE.md). For a segmented Confirmed-Request/Complex-ACK,
+  this is only populated on the segment where `bacnet_reassembly_completed`
+  is `true`, from the fully reassembled service data.
 
 All array fields are capped at 50 entries for a single heavily-batched
 request/response; see docs/PROTOCOL_COVERAGE.md for where the full list still shows
@@ -5345,12 +5360,15 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   object -- any other property, or the same properties read off a
   non-Device object, decodes normally into `bacnet_values` but is never
   promoted to `vendor`/`product`/`firmware_revision`/`serial_number`.
-  Segmented APDUs are decoded only at the header level (sequence-number/
-  proposed-window-size); the segment's own service data is never
-  value-decoded, since this decoder does no cross-packet APDU reassembly
-  (the same posture General TCP stream reassembly's own scope note takes
-  for what it does and doesn't cover, just at BACnet's own layer instead of
-  TCP's). The 54-frame real capture that validates this decoder (see
+  Segmented Confirmed-Request/Complex-ACK APDUs ARE reassembled across
+  separate UDP datagrams and value-decoded once complete (see
+  docs/PROTOCOL_COVERAGE.md's Segmentation paragraph for the design,
+  mirroring DNP3's own cross-packet application-layer reassembly), but one
+  real gap remains: a NAK-driven retransmission of an already-buffered
+  segment isn't recognized as a retry -- it's evaluated by the same strict
+  in-order rule as any other segment, so a retransmission sent out of the
+  expected order abandons the reassembly instead. The 54-frame real capture
+  that validates this decoder (see
   `tests/real_captures/bacnet/ATTRIBUTION.md`) is genuine but narrow: 100%
   Original-Unicast-NPDU, plain (no DEST/SRC/Network-Layer-Message) NPDU,
   Confirmed-Request/Complex-ACK ReadProperty traffic against one property

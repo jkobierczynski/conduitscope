@@ -3145,6 +3145,58 @@ def build_bacnet_sample():
                                   bvlc=bytes([0x99, 0x99, 0x99, 0x99]))
     packets.append(add_unrelated)
 
+    # ---------------------------------------------------------------------------------------------
+    # Cross-packet APDU segment reassembly (BacnetReassemblyState, decoder.cpp's BACnet call site --
+    # see bacnet.hpp's file header comment's "Cross-packet segment reassembly" section). Packets
+    # 26/27 above (invoke-id 30/31) exercise the ISOLATED-segment case (a mid-stream continuation
+    # with no sequence-number-0 start ever seen, since they're the only segmented packets on their
+    # own invoke-id) -- these new packets exercise actual multi-segment completion.
+    # ---------------------------------------------------------------------------------------------
+
+    # 62-63) A segmented Confirmed-Request ReadPropertyMultiple, split across two UDP datagrams
+    #     (sequence-number 0/more-follows=1, then sequence-number 1/more-follows=0) -- the
+    #     concatenated bytes decode as an ordinary, unsegmented ReadPropertyMultiple request would,
+    #     through the identical decode_read_property_multiple_request dispatch. invoke-id=60, a
+    #     fresh id not reused by any other segmented packet in this fixture (so its own reassembly
+    #     buffer never interacts with theirs).
+    seg_req_full = bacnet_read_access_spec(8, 1234, [121, 70, 44, 12, 372])
+    seg_req_split = len(seg_req_full) // 2
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, seg_req_full[:seg_req_split], invoke_id=60,
+                                              segmented=True, seq=0, more=True, window=8)))
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, seg_req_full[seg_req_split:], invoke_id=60,
+                                              segmented=True, seq=1, more=False, window=8)))
+
+    # 64-66) A segmented Complex-ACK ReadPropertyMultiple, split across THREE UDP datagrams,
+    #     answering with the same five Device-object identity properties packets 52/53 above use
+    #     unsegmented -- proves reassembly reaches this decoder's own device-identity correlation
+    #     too (has_device_identity/device_vendor_name/etc.), not just plain `values`. Explicit
+    #     unicast addressing (like 52/53) so it also exercises identity correlation via a
+    #     reassembled decode from the asset-inventory-facing address pair. invoke-id=61.
+    seg_ack_full = bacnet_read_access_result(8, 1234, rpm_identity_results)
+    seg_ack_third = len(seg_ack_full) // 3
+    seg_ack_parts = [seg_ack_full[:seg_ack_third], seg_ack_full[seg_ack_third:2 * seg_ack_third],
+                      seg_ack_full[2 * seg_ack_third:]]
+    for i, part in enumerate(seg_ack_parts):
+        add(bvlc_message(0x0A, npdu_header() +
+                          apdu_complex_ack(14, part, invoke_id=61, segmented=True, seq=i,
+                                           more=(i != len(seg_ack_parts) - 1), window=8)),
+            src=RPM_DEVICE_MAC, dst=RPM_CLIENT_MAC, src_ip=RPM_DEVICE_IP, dst_ip=RPM_CLIENT_IP)
+
+    # 67-68) A segmented Confirmed-Request with a GAP in its sequence numbers (0, then 2 -- segment
+    #     1 never arrives) -- must NOT guess at the missing byte range: the reassembly is abandoned
+    #     with an honest note, and segment 68's own service data stays raw hex, exactly as an
+    #     isolated segment's would. invoke-id=62.
+    gap_full = bacnet_read_access_spec(0, 3, [85])
+    gap_split = len(gap_full) // 2
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, gap_full[:gap_split], invoke_id=62,
+                                              segmented=True, seq=0, more=True, window=8)))
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, gap_full[gap_split:], invoke_id=62,
+                                              segmented=True, seq=2, more=False, window=8)))
+
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_005_000 + i, i * 1000)
@@ -8168,9 +8220,12 @@ def build_mqtt_sample():
     PUBACK + PINGREQ) coalesced by the sender/OS into one TCP segment; an invalid QoS=3 PUBLISH; a
     CONNECT-shaped byte whose Protocol Name is neither "MQTT" nor "MQIsdp" (a structural-gate
     REJECTION regression case -- this packet must NOT be recognized as MQTT at all); an unrecognized
-    MQTT5 Property Identifier (decode_properties' own contained-failure fallback); and a genuinely
+    MQTT5 Property Identifier (decode_properties' own contained-failure fallback); a genuinely
     truncated/incomplete final packet (the TCP-reassembly "buffering, waiting for more" path,
-    mirroring sample_opcua.pcap's own equivalent case). No real capture happens to be attributed for
+    mirroring sample_opcua.pcap's own equivalent case); and an MQTTS (MQTT-over-TLS, port 8883)
+    TLS ClientHello, detection-only, proving decoder.cpp's own generic TLS-ClientHello recognition
+    call site labels it "mqtts" (mirrors sample_fox.pcap's own FOXS/port-4911 fixture packet -- see
+    mqtt.hpp's own "PORT 8883 / MQTTS" section). No real capture happens to be attributed for
     this fixture set yet at the time each packet was written -- see tests/real_captures/mqtt/
     ATTRIBUTION.md (if present) for the current state of that search."""
     packets = []
@@ -8426,9 +8481,18 @@ def build_mqtt_sample():
     h(True, mqtt_packet(12, 0))
     h(False, mqtt_packet(13, 0))
 
+    # ---------------------------------------------------------------------------------------------
+    # Flow I: MQTTS (MQTT-over-TLS, port 8883) -- a TLS ClientHello only, proving decoder.cpp's own
+    #    generic TLS-ClientHello recognition call site labels it "mqtts" (detection only -- this
+    #    decoder cannot and does not see inside the TLS-encrypted MQTT traffic itself). Mirrors
+    #    build_fox_sample()'s own FOXS (port 4911) fixture packet.
+    # ---------------------------------------------------------------------------------------------
+    i = make_flow(61200, dport=8883)
+    i(True, tls_client_hello(hostname="mqtt-broker.plant.example"))
+
     data = pcap_global_header()
-    for i, pkt in enumerate(packets):
-        data += pcap_record(pkt, 1_700_020_000 + i, i * 1000)
+    for idx, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_020_000 + idx, idx * 1000)
     (TESTS_DIR / "sample_mqtt.pcap").write_bytes(data)
 
 

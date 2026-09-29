@@ -3483,10 +3483,54 @@ add_test(NAME bacnet_unrelated_udp_traffic_not_misdetected
 set_tests_properties(bacnet_unrelated_udp_traffic_not_misdetected PROPERTIES
   PASS_REGULAR_EXPRESSION "51000->51001\n")
 
+# 62-68) Cross-packet APDU segmentation reassembly (see bacnet.hpp's "Cross-packet segment
+# reassembly" section and reassemble_bacnet_apdu_segment in bacnet.cpp). Three fixture scenarios,
+# each spanning its own invoke-id so they can't cross-contaminate each other's reassembly state:
+#   - invoke-id=60 (packets 62-63): a 2-segment Confirmed-Request ReadPropertyMultiple that
+#     completes cleanly and gets the exact same value-decode a non-segmented request would.
+#   - invoke-id=61 (packets 64-66): a 3-segment Complex-ACK ReadPropertyMultiple that completes
+#     and, because its reassembled data is a Device-object identity read, still gets the
+#     device-identity correlation promoted onto the summary/JSON fields.
+#   - invoke-id=62 (packets 67-68): a sequence-number gap (segment jumps straight to
+#     sequence-number 2 without an intervening 1) that must be honestly abandoned rather than
+#     silently reassembled wrong -- the segment's own raw hex is all that's shown.
+add_test(NAME bacnet_segment_reassembly_first_segment_in_progress_noted
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_segment_reassembly_first_segment_in_progress_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=60 readPropertyMultiple\n *note: segmented APDU:[^\n]*\n *note: continuing a segmented BACnet APDU reassembly for this \\(flow, invoke-id\\) \\(sequence-number 0\\): 9 service-data byte\\(s\\) buffered across 1 segment\\(s\\) so far, still waiting for more-follows=0")
+
+add_test(NAME bacnet_segment_reassembly_confirmed_request_completes_and_decodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_segment_reassembly_confirmed_request_completes_and_decodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=60 readPropertyMultiple \\[read-access-spec\\[0\\]-object=device,1234 \\+5 more\\]\n *note: segmented APDU:[^\n]*\n *note: completed a 2-segment BACnet APDU reassembled across separate UDP datagrams \\(18 service-data byte\\(s\\) total\\)")
+
+add_test(NAME bacnet_segment_reassembly_complex_ack_completes_with_device_identity
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_segment_reassembly_complex_ack_completes_with_device_identity PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=61 readPropertyMultiple \\[read-access-result\\[0\\]-object=device,1234 \\+10 more\\] device-identity\\(vendor=Acme Controls model=Widget 9000 firmware=3\\.2\\.1 app-sw-version=App 1\\.0\\.0 serial=SN-00012345\\)\n *note: segmented APDU:[^\n]*\n *note: completed a 3-segment BACnet APDU reassembled across separate UDP datagrams \\(92 service-data byte\\(s\\) total\\)")
+
+add_test(NAME bacnet_segment_reassembly_sequence_gap_abandons_and_stays_raw
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
+set_tests_properties(bacnet_segment_reassembly_sequence_gap_abandons_and_stays_raw PROPERTIES
+  PASS_REGULAR_EXPRESSION "invoke-id=62 readPropertyMultiple\n *note: segmented APDU:[^\n]*\n *note: segmented BACnet APDU \\(sequence-number 2\\) does not continue the in-progress reassembly for this \\(flow, invoke-id\\) as expected \\(expected sequence-number 1, same PDU type/service-choice\\) -- discarding 4 already-buffered byte\\(s\\) and abandoning this reassembly; service data not reassembled, shown above as this segment's own raw hex only")
+
+# JSON mirror: bacnet_reassembly_completed/bacnet_reassembly_segment_count only ever appear on a
+# segmented APDU (bacnet_segmented=true), and bacnet_reassembly_segment_count is only emitted
+# alongside bacnet_reassembly_completed=true -- see write_bacnet_json_fields's own comment.
+add_test(NAME bacnet_segment_reassembly_json_fields_on_completion
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format json)
+set_tests_properties(bacnet_segment_reassembly_json_fields_on_completion PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 60,\n *\"bacnet_segmented\": true,\n *\"bacnet_reassembly_completed\": true,\n *\"bacnet_reassembly_segment_count\": 2,")
+
+add_test(NAME bacnet_segment_reassembly_json_fields_on_abandonment
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format json)
+set_tests_properties(bacnet_segment_reassembly_json_fields_on_abandonment PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 62,\n *\"bacnet_segmented\": true,\n *\"bacnet_reassembly_completed\": false,\n *\"bacnet_has_device_identity\": false,")
+
 add_test(NAME bacnet_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --stats)
 set_tests_properties(bacnet_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +61[^\n]*\n[^\n]*\nprotocols:\n *bacnet +57\n *udp +4\nbacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n.*readPropertyMultiple +10\n")
+  PASS_REGULAR_EXPRESSION "packets: +68[^\n]*\n[^\n]*\nprotocols:\n *bacnet +64\n *udp +4\nbacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n.*readPropertyMultiple +17\n")
 
 # --------------------------------------------------------------------------
 # Real-world BACnet/IP capture -- see tests/real_captures/bacnet/ATTRIBUTION.md for provenance: a
@@ -4761,7 +4805,7 @@ add_test(NAME mqtt_does_not_crash
 add_test(NAME mqtt_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --stats)
 set_tests_properties(mqtt_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +55[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *tcp +3.*\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
+  PASS_REGULAR_EXPRESSION "packets: +56[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *mqtts +1\n *tcp +3.*\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
 
 # Flow A: full MQTT 3.1.1 lifecycle, port 61000.
 add_test(NAME mqtt_v311_full_lifecycle_text
@@ -4975,12 +5019,29 @@ set_tests_properties(mqtt_unexpected_port_note PROPERTIES
 add_test(NAME mqtt_protocol_filter_only_decodes_mqtt
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --protocol mqtt --stats)
 set_tests_properties(mqtt_protocol_filter_only_decodes_mqtt PROPERTIES
-  PASS_REGULAR_EXPRESSION "protocols:\n *mqtt +52\n *tcp +3")
+  PASS_REGULAR_EXPRESSION "protocols:\n *mqtt +52\n *mqtts +1\n *tcp +3")
 
 add_test(NAME mqtt_extra_port_option_accepted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --mqtt-port 52000 --mqtt-port 52001 --format json)
 set_tests_properties(mqtt_extra_port_option_accepted PROPERTIES
   FAIL_REGULAR_EXPRESSION "not a configured/standard MQTT port")
+
+# MQTTS (MQTT-over-TLS, port 8883) -- decoder.cpp's own generic TLS-ClientHello recognition call
+# site (the same one that already labels port 443 "https", 636/3269 "ldaps", and 4911 "foxs")
+# labels it "mqtts", detection only -- this decoder never sees inside the TLS-encrypted payload.
+# Packet #56, the last packet in sample_mqtt.pcap (see build_mqtt_sample's own Flow I).
+add_test(NAME mqtts_tls_clienthello_port_8883_detected
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text -v)
+set_tests_properties(mqtts_tls_clienthello_port_8883_detected PROPERTIES
+  PASS_REGULAR_EXPRESSION "#56  [^\n]*\\[mqtts\\]  MQTTS/TLS ClientHello \\(MQTT over TLS, port 8883\\) \\(SNI: mqtt-broker.plant.example\\)")
+
+# --protocol mqtt still tries MQTTS detection port-independently (the same exception FOXS's own
+# --protocol fox already has), and --protocol modbus (an unrelated filter) does NOT claim it at
+# all -- proving this detection is gated by MqttOnly/Auto, not always-on.
+add_test(NAME mqtts_not_claimed_by_unrelated_protocol_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --protocol modbus --format text)
+set_tests_properties(mqtts_not_claimed_by_unrelated_protocol_filter PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[mqtts\\]")
 
 # --------------------------------------------------------------------------
 # Real-world MQTT captures -- see tests/real_captures/mqtt/ATTRIBUTION.md for provenance: a real

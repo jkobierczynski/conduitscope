@@ -1630,15 +1630,23 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             bool want_bacnet = options_.protocol_filter == ProtocolFilter::Auto ||
                                 options_.protocol_filter == ProtocolFilter::BacnetOnly;
             if (want_bacnet) {
-                // Migration batch 2: try_parse_bacnet is now reached through BacnetDecoder::decode
-                // -- BACnet/IP is purely stateless, so ctx is passed only because
-                // ProtocolDecoder::decode's signature requires one. Unlike EtherNet/IP's CIP I/O
-                // and HART-IP's own UDP path, no new result-wrapper type was needed -- BacnetFrame
+                // Migration batch 2: try_parse_bacnet is now reached through BacnetDecoder::decode.
+                // try_parse_bacnet/decode_apdu themselves stay purely stateless -- but decode()
+                // itself is no longer purely a pass-through: a segmented Confirmed-Request/
+                // Complex-ACK APDU now drives BacnetReassemblyState's own cross-packet buffering
+                // (see bacnet.hpp's file header comment's "Cross-packet segment reassembly"
+                // section), which needs a real directional flow_key the same way HART-IP/DHCPv6's
+                // own UDP call sites already supply one -- BacnetDecoder::decode further folds
+                // invoke-id into it locally (bacnet.cpp) since one direction can have more than
+                // one segmented exchange outstanding at once. Unlike EtherNet/IP's CIP I/O and
+                // HART-IP's own UDP path, no new result-wrapper type was needed -- BacnetFrame
                 // already carries everything this call site dual-writes, so decode() returns it
                 // unwrapped. See bacnet.hpp/bacnet.cpp.
                 DecodeContext bacnet_ctx;
                 bacnet_ctx.packet_index = index;
                 bacnet_ctx.protocol_id = "bacnet";
+                bacnet_ctx.flow_key = format_flow_endpoint(out.src_ip, udp.src_port) + "->" +
+                                       format_flow_endpoint(out.dst_ip, udp.dst_port);
                 bacnet_ctx.flow_states = &registry_flow_state_;
                 if (auto bacnet = bacnet_decoder().decode(udp.payload, bacnet_ctx)) {
                     const BacnetFrame& bf = bacnet->as<BacnetFrame>();
@@ -2969,7 +2977,14 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // 1911) never runs against this port at all.
         bool want_fox_early = options_.protocol_filter == ProtocolFilter::Auto ||
                                options_.protocol_filter == ProtocolFilter::FoxOnly;
-        if (want_lateral_movement_early || want_enterprise_trust_early || want_fox_early) {
+        // MQTTS (MQTT-over-TLS, TCP port 8883) is layered into this SAME ClientHello call site --
+        // see mqtt.hpp's own "PORT 8883 / MQTTS" section. Detection-only, the same FOXS-mirroring
+        // shape: MQTTS's own payload is as opaque to a passive capture as HTTPS/LDAPS/FOXS-over-TLS
+        // already are, so the real, cleartext MqttDecoder (gated to TCP port 1883) never runs
+        // against this port at all.
+        bool want_mqtt_early = options_.protocol_filter == ProtocolFilter::Auto ||
+                                options_.protocol_filter == ProtocolFilter::MqttOnly;
+        if (want_lateral_movement_early || want_enterprise_trust_early || want_fox_early || want_mqtt_early) {
             if (auto hello = try_parse_tls_client_hello(tcp.payload)) {
                 bool alpn_confirms_http =
                     std::find(hello->alpn_protocols.begin(), hello->alpn_protocols.end(), "http/1.1") !=
@@ -2989,6 +3004,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 bool require_fox_tls_port = options_.protocol_filter == ProtocolFilter::Auto;
                 bool foxs_port_match = port_in(tcp.src_port, FOX_TLS_PORT, {}) ||
                                         port_in(tcp.dst_port, FOX_TLS_PORT, {});
+                // No --extra-mqtt-tls-port widening -- see mqtt.hpp's own MQTT_TLS_PORT comment
+                // for why this stays a single, fixed port rather than growing its own extra-ports
+                // list (the same rationale FOX_TLS_PORT already gives).
+                bool require_mqtt_tls_port = options_.protocol_filter == ProtocolFilter::Auto;
+                bool mqtts_port_match = port_in(tcp.src_port, MQTT_TLS_PORT, {}) ||
+                                         port_in(tcp.dst_port, MQTT_TLS_PORT, {});
 
                 if (want_fox_early && !alpn_confirms_http &&
                     (!require_fox_tls_port || foxs_port_match) &&
@@ -3001,6 +3022,24 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     out.summary = s.str();
                     out.notes.push_back("TLS ClientHello on a standard/configured FOXS port (4911), "
                                          "and ALPN did not confirm HTTP -- most likely Fox-over-TLS, "
+                                         "but this decoder cannot see inside it (TLS-encrypted); any "
+                                         "other TLS-wrapped protocol sharing this port would look "
+                                         "identical at this layer");
+                    return out;
+                }
+
+                if (want_mqtt_early && !alpn_confirms_http &&
+                    (!require_mqtt_tls_port || mqtts_port_match) &&
+                    !(want_lateral_movement_early && https_port_match) &&
+                    !(want_enterprise_trust_early && ldaps_port_match) &&
+                    !(want_fox_early && foxs_port_match)) {
+                    out.protocol = "mqtts";
+                    std::ostringstream s;
+                    s << "MQTTS/TLS ClientHello (MQTT over TLS, port 8883)";
+                    if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
+                    out.summary = s.str();
+                    out.notes.push_back("TLS ClientHello on a standard/configured MQTTS port (8883), "
+                                         "and ALPN did not confirm HTTP -- most likely MQTT-over-TLS, "
                                          "but this decoder cannot see inside it (TLS-encrypted); any "
                                          "other TLS-wrapped protocol sharing this port would look "
                                          "identical at this layer");
@@ -3022,9 +3061,9 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 }
 
                 if (!want_lateral_movement_early) {
-                    // Only EnterpriseTrustOnly was requested and this ClientHello wasn't tagged
-                    // "ldaps" above -- fall through without claiming generic "https", which belongs
-                    // to Tier 2's own filter value.
+                    // Only EnterpriseTrustOnly/FoxOnly/MqttOnly was requested and this ClientHello
+                    // wasn't tagged "ldaps"/"foxs"/"mqtts" above -- fall through without claiming
+                    // generic "https", which belongs to Tier 2's own filter value.
                 } else {
                     out.protocol = "https";
                     std::ostringstream s;

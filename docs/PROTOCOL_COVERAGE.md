@@ -1495,9 +1495,29 @@ tracking across packets (this decoder is, like every protocol in this codebase, 
 message decoder with TCP-stream-level reassembly only -- it decodes each PUBREC/PUBREL/PUBCOMP on
 its own, it does not track which QoS 2 flow they belong to); MQTT-SN (the UDP-based MQTT variant for
 constrained devices -- an entirely different wire format, out of scope); TLS decryption (as with
-every protocol here, this decoder reads whatever bytes are on the wire -- it doesn't strip TLS); and
-Sparkplug B's own STATE topic JSON payload is shown as raw text (`mqtt_sparkplug_state_text`), not
-further parsed as JSON.
+every protocol here, this decoder reads whatever bytes are on the wire -- it doesn't strip TLS, but
+see "Port 8883 / MQTTS" below for the one piece of TLS-wrapped-session metadata it does surface);
+and Sparkplug B's own STATE topic JSON payload is shown as raw text (`mqtt_sparkplug_state_text`),
+not further parsed as JSON.
+
+#### Port 8883 / MQTTS
+
+A small, low-risk addition to this codebase's existing generic TLS-ClientHello recognition call
+site -- the same one that already labels port 443 `"https"`, ports 636/3269 `"ldaps"`, and port
+4911 `"foxs"` -- extended to also recognize port 8883 and label it `"mqtts"` (`MQTTS/TLS
+ClientHello`). This is detection only: MQTTS's own payload is TLS-encrypted, exactly as opaque to
+a passive capture as HTTPS/LDAPS/FOXS-over-TLS already are elsewhere in this codebase, and the
+real, cleartext `MqttDecoder` never runs against this port at all. This closes part of a gap
+Grok's own product-strategy review named directly -- "encrypted OPC UA/BACnet-SC/MQTTS: [at
+least] session metadata" -- without pretending to decode encrypted MQTT: the ClientHello's own SNI
+(RFC 6066) still names the broker hostname in plaintext even under TLS 1.3, so a capture now shows
+"an encrypted MQTT-shaped conduit exists here, to broker X" instead of a bare, unlabeled `https`-
+looking TLS flow on a nonstandard port (or nothing at all outside the standard HTTPS/LDAPS/FOXS
+ports this call site already knew about). `--protocol mqtt` forces this detection port-
+independently, the same exception every other `GateKind::TcpPort`-adjacent TLS detection in this
+codebase already has; there is no `--extra-mqtt-tls-ports` widening of its own, the same "small
+detection addition, not a new fully-general feature" scope FOXS's own port 4911 addition
+establishes.
 
 #### Validation
 
@@ -2573,14 +2593,34 @@ The first byte's top 4 bits select one of 8 PDU types:
 A PDU type outside `0`-`7` is not recognized -- the BVLC/NPDU layers still
 decode, only the APDU itself is left unrecognized, with a note.
 
-**Segmentation**: SEG/MOR are the Segmented-Message/More-Follows bits.
-When SEG is set, this decoder decodes the sequence-number/
-proposed-window-size header fields but does NOT attempt to value-decode
-that segment's own service data: a single UDP datagram carries one
-segment, not the whole reassembled service message, and this decoder (like
-every other UDP-based protocol in this codebase) does no cross-packet
-reassembly -- the segment's raw bytes are shown as hex only, with a note
-explaining why.
+**Segmentation**: SEG/MOR are the Segmented-Message/More-Follows bits. When
+SEG is set, this decoder decodes the sequence-number/proposed-window-size
+header fields, and (for Confirmed-Request/Complex-ACK, the two PDU types
+that carry service data) reassembles the segments of a single (flow,
+invoke-id) into the original service message and re-runs the same
+value-decoder a non-segmented message would get -- mirroring the DNP3
+decoder's own cross-packet application-layer reassembly
+(`Dnp3ReassemblyState`). Reassembly is strict in-order: a sequence-number
+that doesn't continue the buffered run is treated as a new/abandoned
+transfer rather than guessed at, and each pending reassembly is capped by
+the same `--max-reassembly-bytes`/`--max-reassembly-segments` limits DNP3
+already uses (default 65536 bytes / 500 segments). Every segment's own raw
+hex is still shown regardless (a single UDP datagram is still only one
+segment on its own), and a note is attached to every segment explaining
+its role in the reassembly (still buffering, completed and reassembled, or
+abandoned and why). Segment-ACK/Error/Reject/Abort PDUs, which carry no
+service data of their own, are unaffected. Verified against
+`bacnet-stack`'s (github.com/stargieg/bacnet-stack) `apdu_handler()` in
+`src/apdu.c`: the service-choice byte is read unconditionally after the
+sequence-number/proposed-window-size header on EVERY segment, not only the
+first, which is why this decoder's reassembly discards the repeated
+per-segment service-choice byte rather than treating it as service data.
+One real limitation: a NAK-driven retransmission of an already-buffered
+sequence number (the BACnet Segment-ACK/retry mechanism) is not
+special-cased -- a retransmitted segment is evaluated by the same
+strict-in-order rule as any other segment, so a retry sent out of the
+expected order abandons the reassembly rather than being recognized as a
+retry. This is a known first-pass gap, not a silent one.
 
 **Error PDUs**: this decoder value-decodes only the GENERIC error shape
 (errorClass + errorCode, both application-tagged Enumerated). Several
@@ -2733,10 +2773,11 @@ ASHRAE-reserved range) is rendered `"unknown(N)"` or
 different WebSocket-based transport under BVLC Type `0x82`, not `0x81`);
 Secure-BVLL's encrypted payload; every Network Layer Message's own data
 (named only); every APDU service outside the "first pass" list (named
-only) -- WritePropertyMultiple in particular, see above; cross-packet APDU
-segmentation reassembly; MS/TP, ARCNET, LonTalk, or BACnet/SC MAC address
-formats appearing inside DADR/SADR (only their raw bytes are shown -- this
-decoder only ever sees BACnet/IP's own Ethernet/IPv4 framing).
+only) -- WritePropertyMultiple in particular, see above; NAK-driven
+segment retransmission recognition (see the Segmentation paragraph above);
+MS/TP, ARCNET, LonTalk, or BACnet/SC MAC address formats appearing inside
+DADR/SADR (only their raw bytes are shown -- this decoder only ever sees
+BACnet/IP's own Ethernet/IPv4 framing).
 
 #### Validation
 

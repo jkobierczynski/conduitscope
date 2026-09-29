@@ -144,13 +144,48 @@
 //   7 Abort: byte0 = type<<4 | reserved(2 bits)<<1 | SRV ; original-invoke-id(1) ; abort-
 //       reason(1) (a fixed 12-entry ASHRAE table -- no further data).
 // SEG/MOR here are the same Segmented-Message/More-Follows bits BACAPP_SEGMENTED_REQUEST (0x08)
-// and BACAPP_MORE_SEGMENTS (0x04) -- when SEG is set, this decoder decodes the sequence-
-// number/proposed-window-size header fields but does NOT attempt to value-decode that segment's
-// own service-request/service-ACK data: a single UDP datagram carries one segment, not the whole
-// reassembled service message, and this decoder (like every other UDP-based protocol in this
-// codebase) does no cross-packet reassembly -- decoding one segment's raw bytes as if they were a
-// complete, self-contained service request would misrepresent partial data as complete. The
-// segment's raw bytes are shown as hex only, with a note explaining why.
+// and BACAPP_MORE_SEGMENTS (0x04) -- when SEG is set, decode_apdu (per-segment, stateless) decodes
+// the sequence-number/proposed-window-size header fields and shows THAT segment's own raw
+// service-request/service-ACK bytes as hex only (decoding one segment's bytes in isolation as if
+// they were a complete, self-contained service request would misrepresent partial data as
+// complete) -- but see "Cross-packet segment reassembly" below: a SEPARATE, stateful layer now
+// buffers segments across UDP datagrams and, once a message is complete, value-decodes the
+// concatenated whole through the exact same "first pass" service dispatch every non-segmented
+// APDU already goes through.
+//
+// Cross-packet segment reassembly (BacnetReassemblyState, decoder.cpp's BACnet call site --
+// bacnet.cpp/bacnet.hpp stay stateless, per-segment; only the caller in decoder.cpp holds
+// cross-packet state, the same split this codebase's other reassembling decoders use): BACnet
+// segmentation repeats invoke-id/sequence-number/proposed-window-size/service-choice on EVERY
+// segment, not just the first -- confirmed against the reference open-source C implementation
+// bacnet-stack's own apdu_handler (github.com/stargieg/bacnet-stack, src/apdu.c: `if
+// (service_data->segmented_message) { sequence_number = ...; proposed_window_number = ...; }
+// *service_choice = apdu[len++];`, unconditional, no sequence-number==0 special case), which is
+// also exactly what this file's own decode_apdu already did for every segment before reassembly
+// existed -- so reassembly buffers each segment's OWN data bytes (BacnetApdu::segment_data_bytes,
+// everything after that segment's own service-choice byte) keyed by (directional UDP flow,
+// invoke-id) and concatenates them in sequence-number order. Reassembly is STRICT in-order, the
+// same posture Dnp3ReassemblyState (dnp3.hpp/dnp3.cpp) already established for its own
+// FIR/FIN-bit fragment reassembly: a segment whose sequence-number isn't exactly the previous
+// one's own sequence-number + 1 abandons the in-progress reassembly for that (flow, invoke-id)
+// with an honest note, rather than guessing at out-of-order placement -- BACnet's own
+// window-based flow control (proposed-window-size / Segment-ACK) means a compliant sender under
+// normal network conditions never sends segments out of order in the first place, so this is not
+// a meaningfully weaker posture than a full out-of-order-tolerant reassembler would be, just an
+// honest one about what this decoder actually verified. On MOR=0 (the last segment), the
+// concatenated bytes are decoded through decode_service_data -- the IDENTICAL dispatch a
+// non-segmented APDU of the same service-choice goes through, so a segmented ReadPropertyMultiple
+// gets the same field-level decode a non-segmented one already does, not a separate/weaker path --
+// and BacnetApdu::reassembly_completed/reassembly_segment_count on that final segment's own
+// packet record the outcome. CLI-configurable via --max-reassembly-bytes/--max-reassembly-segments
+// (resource_limits.hpp), defaulting to the same 64 KiB / 500-segment ceiling DNP3's own reassembly
+// already defaults to (a comparably small-message protocol) -- exceeding either abandons the
+// in-progress reassembly with an honest note, the same DNP3-mirroring safety-cap posture. NOT
+// reassembled: Segment-ACK's own NAK-retransmission dance (a segment resent after a NAK is simply
+// a second observation of that sequence-number, which this decoder's strict last_seq+1 check
+// would see as "not the expected next segment" and abandon -- a genuine, stated limitation, not a
+// silent gap) and any segmented message whose capture starts mid-stream (the segment that began
+// it was never seen, so there is nothing to buffer into).
 //
 // Service choice tables (packet-bacapp.c's BACnetConfirmedServiceChoice[]/
 // BACnetUnconfirmedServiceChoice[], transcribed in full into bacnet.cpp's kBacnetConfirmed
@@ -288,8 +323,11 @@
 // particular is NOT decoded even though ReadPropertyMultiple now is (see above): it shares
 // ReadPropertyMultiple-Request's per-object ObjectIdentifier framing but each property entry is
 // followed by its own PropertyValue (and optional Priority), a third repeated-record shape this
-// first pass does not add just because a sibling service's list-of-objects shape now is; cross-
-// packet APDU segmentation reassembly;
+// first pass does not add just because a sibling service's list-of-objects shape now is (cross-
+// packet APDU segmentation reassembly is NOW implemented -- see "Cross-packet segment
+// reassembly" above -- but only reassembles bytes for services this first-pass set already
+// value-decodes; a segmented WritePropertyMultiple still reassembles correctly, just renders as
+// raw hex once complete, same as a non-segmented one already would);
 // MS/TP, ARCNET, LonTalk, or BACnet/SC MAC address formats appearing inside DADR/SADR (only their
 // raw bytes are shown -- this decoder only ever sees BACnet/IP's own Ethernet/IPv4 framing, so a
 // non-6-byte DADR/SADR here would only ever appear on NPDU traffic forwarded from a non-IP BACnet
@@ -393,6 +431,28 @@ struct BacnetApdu {
     std::string data_hex;
     size_t data_length = 0;
 
+    // Set only when segmented==true: the raw bytes of THIS segment's own service-data
+    // continuation (everything on the wire after this segment's own service-choice byte, the
+    // same bytes data_hex above renders for a human reading one segment in isolation). Exposed
+    // purely as plumbing for the cross-packet reassembly layer (BacnetReassemblyState,
+    // decoder.cpp's BACnet call site) to buffer and concatenate across segments -- decode_apdu/
+    // try_parse_bacnet itself never reassembles anything (see decode_service_data in bacnet.cpp).
+    std::vector<uint8_t> segment_data_bytes;
+
+    // Populated ONLY by the cross-packet reassembly layer (BacnetReassemblyState, decoder.cpp),
+    // never by decode_apdu/try_parse_bacnet itself, which sees one segment at a time and has no
+    // cross-packet state -- see this file's header comment's segmentation paragraph, now
+    // implemented (this used to be a stated "explicitly out of scope" gap, see the "Explicitly
+    // out of scope" paragraph further down, which the reassembly's own file-header note updates).
+    // Set true on the specific packet whose own MOR=0 segment completed a contiguous
+    // sequence-number 0..N run: `values`/has_device_identity/etc. above are then populated
+    // exactly as they would be for an equivalent NON-segmented APDU of the same service, decoded
+    // from the concatenated bytes -- the reassembly layer re-dispatches through the SAME
+    // decode_service_data used for the non-segmented case, so a segmented ReadPropertyMultiple
+    // gets the identical decode a non-segmented one would, not a separate/weaker code path.
+    bool reassembly_completed = false;
+    size_t reassembly_segment_count = 0;  // total segments (0..N) concatenated to produce this
+
     std::string summary;
 };
 
@@ -471,14 +531,39 @@ struct BacnetFrame {
 // file's header comment's "structural detection gate" paragraph.
 std::optional<BacnetFrame> try_parse_bacnet(ByteSpan udp_payload);
 
+// Cross-packet BACnet segment reassembly state -- see bacnet.hpp's file header comment's
+// "Cross-packet segment reassembly" section for the full design. Reached via
+// DecodeContext::flow_state<BacnetReassemblyState>(FlowStateKeying::DirectionalFlow), the same
+// interface Dnp3ReassemblyState (dnp3.hpp) uses for its own FIR/FIN fragment reassembly --
+// DIRECTIONAL, not session-keyed, because a Confirmed-Request's segments and the Complex-ACK
+// responding to it travel in OPPOSITE directions and must never share one reassembly buffer.
+// Unlike Dnp3ReassemblyState, BACnet also needs invoke-id-level disambiguation WITHIN one
+// direction (more than one segmented exchange could in principle be outstanding to the same peer
+// at once) -- BacnetDecoder::decode achieves this by folding invoke-id into the flow_key string
+// itself before the flow_state<>() lookup (see bacnet.cpp), so this class itself stays a plain
+// per-(flow,invoke-id) buffer with no invoke-id field of its own.
+class BacnetReassemblyState : public DecoderFlowState {
+public:
+    bool in_progress = false;
+    std::vector<uint8_t> buffered_data_bytes;  // concatenated segment_data_bytes so far
+    int last_seq = -1;                          // -1 == no segment buffered yet
+    size_t segment_count = 0;
+    uint8_t pdu_type = 0;        // 0 (Confirmed-Request) or 3 (Complex-ACK) -- must stay consistent
+    uint8_t service_choice = 0;  // from the first (sequence-number 0) segment -- must match every
+                                   // later segment, or the reassembly is abandoned (see bacnet.cpp)
+};
+
 // Migration batch 2 (BACnet/IP, Stage 10) -- id()=="bacnet", GateKind::UdpPortIndependent (tried
 // opportunistically regardless of port, the same posture EnipUdpDecoder/HartIpUdpDecoder have --
-// see either's own comment in enip.hpp/hartip.hpp). Purely stateless and, unlike EtherNet/IP's
-// CIP I/O and HART-IP's own UDP path, needs no wrapper result type at all: BacnetFrame already
-// carries everything the legacy call site dual-wrote, so decode() is a direct pass-through onto
-// try_parse_bacnet, mirroring EnipUdpDecoder's own "no new result type" shape in enip.hpp/
-// enip.cpp. The second, simpler UdpPortIndependent use in this batch -- no shared id(), no
-// port-exclusion helper, no coalescing loop.
+// see either's own comment in enip.hpp/hartip.hpp). Unlike EtherNet/IP's CIP I/O and HART-IP's
+// own UDP path, needs no wrapper result type at all: BacnetFrame already carries everything the
+// legacy call site dual-wrote, so decode() is mostly a pass-through onto try_parse_bacnet --
+// mirroring EnipUdpDecoder's own "no new result type" shape in enip.hpp/enip.cpp -- EXCEPT when
+// the parsed APDU is one segment of a segmented Confirmed-Request/Complex-ACK, in which case
+// decode() also drives BacnetReassemblyState's own cross-packet buffering (see bacnet.hpp's file
+// header comment and bacnet.cpp). try_parse_bacnet/decode_apdu themselves stay purely stateless,
+// exactly as before -- only this one call site holds cross-packet state, the same split this
+// codebase's other reassembling decoders (Dnp3Decoder, CotpReassemblyState's own callers) use.
 class BacnetDecoder : public ProtocolDecoder {
 public:
     std::string_view id() const override { return "bacnet"; }

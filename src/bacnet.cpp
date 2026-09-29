@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/resource_limits.hpp"
 
 namespace conduitscope {
 
@@ -982,10 +983,17 @@ void decode_service_data(BacnetApdu& apdu, ByteSpan data, std::vector<std::strin
         apdu.data_shown_as_hex = true;
         apdu.data_hex = to_hex(data, "");
         apdu.data_length = data.size();
+        // Plumbing for the cross-packet reassembly layer (BacnetReassemblyState, decoder.cpp's
+        // BACnet call site) -- see BacnetApdu::segment_data_bytes's own comment. decode_apdu/
+        // try_parse_bacnet itself never reassembles anything (it sees one segment at a time and
+        // has no cross-packet state); it just also hands back this segment's own raw data bytes
+        // so the stateful caller can buffer and concatenate them.
+        apdu.segment_data_bytes = data.to_vector();
         notes.push_back(
             "segmented APDU: this datagram carries one segment of a larger message; its service data is "
-            "not value-decoded (this decoder does no cross-packet APDU reassembly), only shown as raw hex "
-            "-- see bacnet.hpp's file header comment");
+            "not value-decoded on its own (see decoder.cpp's cross-packet reassembly, which decodes the "
+            "full concatenated message once every segment has been seen), only shown here as this "
+            "segment's own raw hex");
         return;
     }
     if (!apdu.has_service_choice) return;
@@ -1499,9 +1507,139 @@ std::optional<BacnetFrame> try_parse_bacnet(ByteSpan udp_payload) {
     }
 }
 
-std::optional<ProtocolResult> BacnetDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+// Drives BacnetReassemblyState's own cross-packet buffering for one segment of a segmented
+// Confirmed-Request/Complex-ACK APDU -- see bacnet.hpp's file header comment's "Cross-packet
+// segment reassembly" section for the full design (strict in-order, DNP3-mirroring safety caps,
+// re-dispatch through the identical decode_service_data a non-segmented APDU already uses). A
+// no-op (returns immediately) for any PDU type that can't carry SEG at all, or when
+// `apdu.segmented` is false -- BacnetDecoder::decode below only calls this when it's actually
+// worth calling, but this function stays defensive about it regardless, the same belt-and-
+// suspenders posture this file already applies elsewhere.
+void reassemble_bacnet_apdu_segment(BacnetApdu& apdu, DecodeContext& ctx, std::vector<std::string>& notes) {
+    if (!apdu.segmented || (apdu.pdu_type != 0 && apdu.pdu_type != 3) || apdu.invoke_id < 0) return;
+
+    // Fold invoke-id into the flow_key ctx already carries (decoder.cpp's BACnet call site sets
+    // it to the directional UDP src->dst endpoint pair) -- see BacnetReassemblyState's own
+    // comment for why invoke-id-level disambiguation is needed on top of the directional flow.
+    ctx.flow_key += "#invoke" + std::to_string(apdu.invoke_id);
+    auto& state = ctx.flow_state<BacnetReassemblyState>(FlowStateKeying::DirectionalFlow);
+
+    if (!state.in_progress) {
+        if (apdu.sequence_number != 0) {
+            notes.push_back(
+                "segmented BACnet APDU continuation (sequence-number " +
+                std::to_string(apdu.sequence_number) +
+                ") with no reassembly in progress for this (flow, invoke-id) -- the segment that "
+                "began it (sequence-number 0) was never seen (capture may start mid-message) or "
+                "the reassembly was already completed/abandoned; service data not reassembled, "
+                "shown above as this segment's own raw hex only");
+            return;
+        }
+        state = BacnetReassemblyState{};
+        state.in_progress = true;
+        state.pdu_type = apdu.pdu_type;
+        state.service_choice = apdu.service_choice;
+    } else {
+        int expected_seq = (state.last_seq + 1) & 0xFF;
+        if (apdu.pdu_type != state.pdu_type || apdu.service_choice != state.service_choice ||
+            static_cast<int>(apdu.sequence_number) != expected_seq) {
+            notes.push_back(
+                "segmented BACnet APDU (sequence-number " + std::to_string(apdu.sequence_number) +
+                ") does not continue the in-progress reassembly for this (flow, invoke-id) as "
+                "expected (expected sequence-number " + std::to_string(expected_seq) +
+                ", same PDU type/service-choice) -- discarding " +
+                std::to_string(state.buffered_data_bytes.size()) +
+                " already-buffered byte(s) and abandoning this reassembly; service data not "
+                "reassembled, shown above as this segment's own raw hex only");
+            state = BacnetReassemblyState{};
+            return;
+        }
+    }
+
+    // Safety caps against a pathological/malformed capture stalling a reassembly open forever and
+    // growing this (flow, invoke-id)'s state without bound -- a real segmented message is nowhere
+    // near either limit. CLI-configurable via --max-reassembly-bytes/--max-reassembly-segments --
+    // see resource_limits.hpp. 0/unset keeps these two literal defaults, the same ones
+    // Dnp3ReassemblyState (dnp3.cpp) already defaults to for its own comparably small-message
+    // fragment reassembly.
+    const size_t kMaxBufferedBytes = resource_limits().max_reassembly_bytes.value_or(65536);
+    const size_t kMaxSegments = resource_limits().max_reassembly_segments.value_or(500);
+
+    state.buffered_data_bytes.insert(state.buffered_data_bytes.end(), apdu.segment_data_bytes.begin(),
+                                      apdu.segment_data_bytes.end());
+    state.last_seq = apdu.sequence_number;
+    ++state.segment_count;
+
+    if (state.buffered_data_bytes.size() > kMaxBufferedBytes || state.segment_count > kMaxSegments) {
+        notes.push_back(
+            "segmented BACnet APDU reassembly for this (flow, invoke-id) exceeded its safety cap (" +
+            std::to_string(state.buffered_data_bytes.size()) + " byte(s) across " +
+            std::to_string(state.segment_count) +
+            " segment(s)) -- abandoning it; service data not reassembled");
+        state = BacnetReassemblyState{};
+        return;
+    }
+
+    if (apdu.more_follows) {
+        notes.push_back(
+            "continuing a segmented BACnet APDU reassembly for this (flow, invoke-id) (sequence-"
+            "number " + std::to_string(apdu.sequence_number) + "): " +
+            std::to_string(state.buffered_data_bytes.size()) + " service-data byte(s) buffered "
+            "across " + std::to_string(state.segment_count) +
+            " segment(s) so far, still waiting for more-follows=0");
+        return;
+    }
+
+    // more-follows == false: the message is complete. Re-dispatch the concatenated bytes through
+    // the IDENTICAL decode_service_data a non-segmented APDU of this same service-choice already
+    // goes through -- temporarily clearing `segmented` so it takes the value-decode path instead
+    // of its own "segmented, raw hex only" early return, then restoring it (this PACKET's own
+    // segment-header bit is still true on the wire regardless of what the reassembly achieved).
+    size_t total_bytes = state.buffered_data_bytes.size();
+    size_t total_segments = state.segment_count;
+    ByteSpan reassembled(state.buffered_data_bytes.data(), state.buffered_data_bytes.size());
+    apdu.segmented = false;
+    decode_service_data(apdu, reassembled, notes, /*is_ack=*/state.pdu_type == 3);
+    apdu.segmented = true;
+    apdu.reassembly_completed = true;
+    apdu.reassembly_segment_count = total_segments;
+    notes.push_back(
+        "completed a " + std::to_string(total_segments) +
+        "-segment BACnet APDU reassembled across separate UDP datagrams (" +
+        std::to_string(total_bytes) + " service-data byte(s) total)");
+    state = BacnetReassemblyState{};
+}
+
+std::optional<ProtocolResult> BacnetDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
     auto frame = try_parse_bacnet(payload);
     if (!frame) return std::nullopt;
+    if (frame->has_npdu && frame->npdu.has_apdu) {
+        BacnetApdu& apdu = frame->npdu.apdu;
+        if (apdu.segmented && (apdu.pdu_type == 0 || apdu.pdu_type == 3)) {
+            // try_parse_bacnet already copied npdu.notes into frame->notes ONCE, before this
+            // point -- decoder.cpp's own BACnet call site reads only frame->notes, never
+            // npdu.notes directly (see bacnet.cpp's own `for (const auto& n : frame.npdu.notes)
+            // frame.notes.push_back(n);` inside try_parse_bacnet) -- so any note
+            // reassemble_bacnet_apdu_segment adds to npdu.notes from here on must be copied over
+            // too, or it silently never reaches the packet's own visible notes.
+            size_t notes_before = frame->npdu.notes.size();
+            reassemble_bacnet_apdu_segment(apdu, ctx, frame->npdu.notes);
+            for (size_t i = notes_before; i < frame->npdu.notes.size(); ++i) {
+                frame->notes.push_back(frame->npdu.notes[i]);
+            }
+            if (apdu.reassembly_completed) {
+                // Match decode_apdu's own convention (bacnet.cpp) for how a decoded service's
+                // summary propagates up to the NPDU/BVLC level (npdu.summary = apdu.summary,
+                // frame.summary = "BVLC <function> " + npdu.summary) -- now that reassembly gave
+                // this segment's own apdu.values/has_device_identity/etc. real content, re-render
+                // both so the head-line summary reflects it too, not just the notes a -v reader
+                // would need to see.
+                apdu.summary = apdu_summary(apdu);
+                frame->npdu.summary = apdu.summary;
+                frame->summary = "BVLC " + frame->bvlc_function_name + " " + frame->npdu.summary;
+            }
+        }
+    }
     return ProtocolResult::make<BacnetFrame>("bacnet", std::move(*frame));
 }
 

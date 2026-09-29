@@ -2207,10 +2207,23 @@ through its ten points in order, starting with items 1-3, one at a time:
   interfaces" half of Grok's ask was already solved by the existing `LiveCapture` poll loop, and
   that `PcapWriter` already existed as a reusable non-rotating building block. Grok review item 5 is
   now fully closed.
-- **Items 6-10** (decode depth on process-critical protocols, a 62443/NIS2 evidence pack, Zeek/CEF/
-  syslog integration, parser trustworthiness, and product packaging) are not yet scheduled. The
-  response document notes that item 9 (parser trustworthiness: ASan/UBSan in CI, fuzzing on the
-  high-value parsers) is already substantially standing practice, not an open item.
+- **Item 6 (decode depth where the process lives) is partially done.** Two of the six
+  protocol-depth items Grok named are now implemented: BACnet Confirmed-Request/Complex-ACK
+  segmentation is reassembled across separate UDP datagrams and value-decoded once complete
+  (strict in-order, resource-capped, mirroring DNP3's own cross-packet reassembly -- see
+  `bacnet.hpp`'s "Cross-packet segment reassembly" section), and MQTTS (port 8883) session
+  metadata is now detected via a TLS ClientHello/SNI check, the same pattern already used for
+  HTTPS/LDAPS/FOXS (see `mqtt.hpp`'s "PORT 8883 / MQTTS" section). OPC UA Variant/DataValue,
+  EtherCAT CoE SDO mailbox, and MMS/GOOSE dataset members tied to IED names were re-checked and
+  confirmed already done (stale claims by the time of this follow-up, not real gaps). S7 symbolic
+  addressing on real TIA traffic and encrypted-session metadata for OPC UA/BACnet-SC remain open,
+  the former blocked on access to a real TIA Portal capture rather than on effort. See
+  [docs/reviews/2026-09-grok-response.md](reviews/2026-09-grok-response.md)'s item 6 for the full
+  writeup.
+- **Items 7-10** (a 62443/NIS2 evidence pack, Zeek/CEF/syslog integration, parser trustworthiness,
+  and product packaging) are not yet scheduled. The response document notes that item 9 (parser
+  trustworthiness: ASan/UBSan in CI, fuzzing on the high-value parsers) is already substantially
+  standing practice, not an open item.
 
 
 ## PROTOCOL DETECTION

@@ -1043,7 +1043,9 @@ Same as \fB\-\-modbus\-port\fR, for OPC UA. Repeatable. TCP only.
 .TP
 .B \-\-mqtt\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for MQTT (built\-in default: 1883).
-Repeatable. TCP only.
+Repeatable. TCP only. Does NOT widen the separate, fixed TCP port\-8883
+MQTTS (MQTT\-over\-TLS) detection below, which has no \fB\-\-extra\-\fR
+widening of its own, the same posture the FOXS/port\-4911 detection has.
 .TP
 .B \-\-bgp\-port \fIPORT\fR
 Same as \fB\-\-modbus\-port\fR, for BGP (built\-in default: 179).
@@ -1309,17 +1311,19 @@ Stop after decoding this many packets. Default: 0 (unlimited). With
 .B \-\-max\-reassembly\-bytes \fIN\fR
 Override every cross-segment payload-buffering byte cap at once: the
 general TCP reassembly path (default 16 MiB), DNP3 fragment reassembly
-(default 64 KiB), COTP TSDU reassembly (default 1 MiB), and OPC UA's/
-FF-HSE's own declared-length plausibility ceiling (default 16 MiB each).
-Default: 0 (leave every site at its own default). See
+(default 64 KiB), BACnet segmented-APDU reassembly (default 64 KiB, the
+same default DNP3 uses), COTP TSDU reassembly (default 1 MiB), and OPC
+UA's/FF-HSE's own declared-length plausibility ceiling (default 16 MiB
+each). Default: 0 (leave every site at its own default). See
 \fBdocs/DEVELOPMENT.md\fR's "External code review and engineering
 priorities" item 7 for the full constant-by-constant mapping.
 .TP
 .B \-\-max\-reassembly\-segments \fIN\fR
 Override every cross-segment frame/segment-count cap at once: the general
 TCP reassembly path (default 20,000 segments), DNP3 fragment reassembly
-(default 500 frames), and COTP TSDU reassembly (default 2,000 frames).
-Default: 0 (leave every site at its own default).
+(default 500 frames), BACnet segmented-APDU reassembly (default 500
+segments, the same default DNP3 uses), and COTP TSDU reassembly (default
+2,000 frames). Default: 0 (leave every site at its own default).
 .TP
 .B \-\-max\-recursion\-depth \fIN\fR
 Override every recursive-decode depth cap at once: MMS Data-value nesting

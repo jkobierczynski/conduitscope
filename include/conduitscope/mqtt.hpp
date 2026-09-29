@@ -120,9 +120,30 @@
 // feature deliberately goes further than for transaction correlation, which MQTT's own packet
 // identifiers would support similarly but this first-pass release does not add); retained-message
 // and Will-message delivery semantics (this decoder reports what a CONNECT's Will fields or a
-// PUBLISH's RETAIN bit literally say, not what a broker later does with them); and TLS (MQTT over
-// 8883 is out of scope entirely -- this decoder, like every other in this codebase, only ever sees
-// cleartext capture content).
+// PUBLISH's RETAIN bit literally say, not what a broker later does with them); and TLS-encrypted
+// MQTT payload decode (this decoder, like every other in this codebase, only ever sees cleartext
+// capture content, so a genuinely TLS-encrypted MQTT session's actual CONNECT/PUBLISH/... packets
+// are never reachable here) -- but see "PORT 8883 / MQTTS" below for what IS still surfaced about
+// that traffic: detection, not decode.
+//
+// ---------------------------------------------------------------------------------------------
+// PORT 8883 / MQTTS (MQTT wrapped in TLS): NOT a decode target for this decoder at all -- MQTTS's
+// payload is TLS-encrypted, exactly as opaque to a passive capture as HTTPS/LDAPS/FOXS-over-TLS
+// already are elsewhere in this codebase. decoder.cpp's existing generic TLS-ClientHello
+// recognition call site (the same one that already labels port 443 "https", ports 636/3269
+// "ldaps", and port 4911 "foxs") is extended, as a small, low-risk addition, to also recognize
+// port 8883 and label it "MQTTS/TLS ClientHello" -- see that call site's own comment for the
+// exact, FOXS-mirroring shape this takes. This is exactly the "at least session metadata" gap
+// Grok's product-strategy review named for encrypted OPC UA/BACnet-SC/MQTTS: without decryption
+// keys the actual MQTT traffic is unrecoverable, but the ClientHello's own SNI (RFC 6066, see
+// tls_sni.hpp) still names the broker hostname in plaintext even under TLS 1.3, and simply seeing
+// a TLS ClientHello on MQTT's own registered TLS port is itself a real "an encrypted OT-adjacent
+// conduit exists here" finding an asset inventory or policy review benefits from, even with zero
+// visibility into what's inside it. MQTT_TLS_PORT below is that detection's only port constant;
+// it is NOT part of GateKind::TcpPort dispatch (the real MqttDecoder below never runs against
+// port 8883 traffic) and has no --extra-mqtt-tls-ports widening of its own -- the same "small
+// detection addition, not a new fully-general feature" scope FOX_TLS_PORT already establishes
+// (see fox.hpp).
 //
 // ---------------------------------------------------------------------------------------------
 // Sparkplug B: an Eclipse Tahu specification layering a structured topic namespace and a
@@ -183,6 +204,10 @@ namespace conduitscope {
 // The IANA-registered MQTT port -- recorded as an "expected port" annotation only, never a
 // detection gate, the same posture every other protocol's own port gets in this codebase.
 constexpr uint16_t MQTT_PORT = 1883;
+
+// MQTTS (MQTT-over-TLS) -- detection only, see this file's own "PORT 8883 / MQTTS" section
+// above; never reaches MqttDecoder::decode at all.
+constexpr uint16_t MQTT_TLS_PORT = 8883;
 
 // Renders `millis` (milliseconds since the Unix epoch, Sparkplug's own DateTime/timestamp
 // convention -- see mqtt.hpp's file header comment) as an ISO-8601 UTC calendar timestamp,

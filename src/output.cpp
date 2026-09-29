@@ -3402,6 +3402,23 @@ void write_bacnet_json_fields(std::ostream& out, const BacnetFrame& bf) {
                 out << "    \"bacnet_service_name\": \"" << json_escape(apdu.service_choice_name) << "\",\n";
             out << "    \"bacnet_invoke_id\": " << apdu.invoke_id << ",\n";
             out << "    \"bacnet_segmented\": " << (apdu.segmented ? "true" : "false") << ",\n";
+            // Cross-packet reassembly outcome -- only meaningful (and only ever set) on a
+            // segmented APDU; see bacnet.hpp's BacnetReassemblyState/reassemble_bacnet_apdu_segment
+            // for how these get populated. bacnet_reassembly_completed=true on the final segment of
+            // a reassembly that value-decoded successfully (bacnet_values above then reflects the
+            // full reassembled message, not just this segment); false on every non-final segment of
+            // an in-progress reassembly and on a segment whose reassembly was abandoned (see the
+            // "note:" entries for why). bacnet_reassembly_segment_count is only emitted alongside
+            // bacnet_reassembly_completed=true, matching how the "completed a N-segment..." note
+            // itself only fires on that same packet.
+            if (apdu.segmented) {
+                out << "    \"bacnet_reassembly_completed\": "
+                    << (apdu.reassembly_completed ? "true" : "false") << ",\n";
+                if (apdu.reassembly_completed) {
+                    out << "    \"bacnet_reassembly_segment_count\": " << apdu.reassembly_segment_count
+                        << ",\n";
+                }
+            }
             if (!apdu.values.empty()) {
                 out << "    \"bacnet_values\": [";
                 for (size_t i = 0; i < apdu.values.size(); ++i) {

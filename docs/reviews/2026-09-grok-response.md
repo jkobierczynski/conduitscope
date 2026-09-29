@@ -150,22 +150,41 @@ switch, an outstanding caveat carried forward honestly in
 implied as covered. Grok review item 5 is now fully closed.
 
 **6. Decode depth where the process lives -- mixed; the IPv6 framing is
-stale as of item 1's own Phase 1/2 work, the rest holds.** `decode`
-itself already recognizes IPv6 on the wire (has for a while -- see
-DEVELOPMENT.md's IPv6 attack-detection work), and `policy validate` as of
-this document's own item-1 work now at least distinguishes an IPv6
-endpoint with an honest reason string instead of a generic "no declared
-zone" miss, rather than the flat "no IPv6 anywhere" gap Grok describes --
-though full IPv6 zoning (CIDR-equivalent v6 zones) is still not built.
-The specific protocol-depth items (OPC UA Variant/DataValue, EtherCAT
-CoE SDO mailbox, BACnet ReadPropertyMultiple/segmentation, S7 symbolic
-addressing on real TIA traffic, MMS/GOOSE dataset members tied to IED
-names, and encrypted-session metadata for OPC UA/BACnet-SC/MQTTS) were
-not individually re-verified against each decoder for this pass -- they
-read as plausible remaining gaps given this project's own documented
-"first pass" scoping language in files like `bacnet.hpp` and `opcua.hpp`,
-but each deserves its own direct check before being scheduled, not a
-blanket "confirmed."
+stale as of item 1's own Phase 1/2 work, and two of the six named
+protocol-depth items are now closed.** `decode` itself already recognizes
+IPv6 on the wire (has for a while -- see DEVELOPMENT.md's IPv6
+attack-detection work), and `policy validate` as of this document's own
+item-1 work now at least distinguishes an IPv6 endpoint with an honest
+reason string instead of a generic "no declared zone" miss, rather than
+the flat "no IPv6 anywhere" gap Grok describes -- though full IPv6 zoning
+(CIDR-equivalent v6 zones) is still not built. Of the six specific
+protocol-depth items Grok named, each was individually re-verified against
+its own decoder rather than taken on faith: OPC UA Variant/DataValue,
+EtherCAT CoE SDO mailbox, and MMS/GOOSE dataset members tied to IED names
+were confirmed already done (stale claims, not real gaps, by the time this
+follow-up check happened); S7 symbolic addressing on real TIA traffic
+remains genuinely blocked, not on effort but on access to a real TIA
+Portal capture to validate field offsets against (no synthetic fixture can
+substitute for that without risking a silently-wrong decode). The
+remaining two -- **BACnet ReadPropertyMultiple/segmentation** and
+**encrypted-session metadata for MQTTS** -- are now implemented. BACnet
+Confirmed-Request/Complex-ACK APDUs whose SEG bit is set are reassembled
+across separate UDP datagrams (strict in-order, resource-capped, mirroring
+DNP3's own cross-packet reassembly) and re-decoded with the same
+value-decoder a non-segmented message gets, including Device-object
+identity correlation surviving a segmented ACK; see `bacnet.hpp`'s
+"Cross-packet segment reassembly" section and
+docs/PROTOCOL_COVERAGE.md's BACnet/IP Segmentation paragraph for the full
+design, verified against `bacnet-stack`'s (github.com/stargieg/bacnet-stack)
+`apdu_handler()` for the per-segment service-choice-byte wire shape. MQTTS
+(port 8883) is now detected the same way this codebase's other
+TLS-wrapped OT protocols are (HTTPS/LDAPS/FOXS): a TLS ClientHello on
+that port is recognized and its SNI, when present, extracted as session
+metadata -- see `mqtt.hpp`'s new "PORT 8883 / MQTTS" section. Encrypted-
+session metadata for OPC UA and BACnet/SC remain unimplemented (BACnet/SC
+in particular is an entirely different WebSocket-based transport, not a
+TLS-ClientHello-on-a-known-port case like MQTTS/HTTPS/LDAPS/FOXS, and
+would need its own scoping pass).
 
 **7. Evidence pack for 62443/NIS2/NERC CIP/NIST 800-82 -- confirmed as
 not built.** `policy validate`'s report has a zone/conduit violation
