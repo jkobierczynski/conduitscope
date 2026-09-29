@@ -26,6 +26,7 @@
 
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/policy.hpp"
+#include "conduitscope/security_event_format.hpp"  // write_policy_report_cef/_leef/_syslog
 
 namespace conduitscope {
 
@@ -624,5 +625,33 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
 void write_policy_report_json(std::ostream& out, const PolicyReport& report, const Policy& policy,
                                const std::string& capture_path, const std::string& policy_path,
                                const Resolver& resolver);
+
+// Renders every FlowVerdict::Violation in `report` (across flows, ethernet_flows, and udp_flows --
+// every kind of violation this engine can produce, not just TCP) as CEF (`policy validate --format
+// cef`), one line per violating flow -- see security_event_format.hpp for the shared CEF
+// primitives and the full design record. Allowed/Unclassified flows are never rendered: an
+// Unclassified flow means "no conduit declared an opinion about this traffic," not a policy
+// breach, so it stays out of a curated security-event export the same way `baseline check`'s own
+// KnownOperation matches stay out of its findings list. Device Product is "conduitscope-policy";
+// Device Event Class ID is the fixed literal "policy-violation" (PolicyReport's own FlowVerdict has
+// no finer per-violation type the way DetectionFinding's technique citation does); Severity is a
+// fixed 8 (CEF's own High band) for every violation -- a confirmed breach of a declared zone/
+// conduit policy is a strong, unconditional signal, deliberately placed below DetectionSeverity::
+// Critical's own 9 (which is reserved for a genuine operational-impact event like a PLC stop) but
+// above a "new, previously unseen" baseline finding's own weaker signal. Extension fields:
+// src/dst/dpt (flows/udp_flows) or smac/dmac (ethernet_flows, CEF's own standard MAC-address keys
+// -- smac is the flow's own known transmitting side, dmac its peer)/proto/msg (the flow's own
+// `reason`)/cat ("policy-violation") plus cs1/cs1Label="Client Zone" and cs2/cs2Label="Server Zone"
+// (flows/udp_flows) or cs1/cs1Label="VLAN Zone" (ethernet_flows)/cnt (packet_count).
+void write_policy_report_cef(std::ostream& out, const PolicyReport& report);
+
+// Renders every FlowVerdict::Violation in `report` as LEEF 2.0 (`policy validate --format leef`) --
+// same finding-to-field mapping as write_policy_report_cef above, see security_event_format.hpp.
+void write_policy_report_leef(std::ostream& out, const PolicyReport& report);
+
+// Renders every FlowVerdict::Violation in `report` as RFC 5424 syslog wrapping a CEF payload
+// (`policy validate --format syslog`), one line per violation, MSGID "policy" -- see
+// security_event_format.hpp's own render_rfc5424_line for the full header rationale.
+void write_policy_report_syslog(std::ostream& out, const PolicyReport& report);
 
 }  // namespace conduitscope

@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "conduitscope/decoder.hpp"
+#include "conduitscope/security_event_format.hpp"  // write_baseline_check_report_cef/_leef/_syslog
 
 namespace conduitscope {
 
@@ -608,5 +609,33 @@ void write_baseline_check_report_text(std::ostream& out, const BaselineCheckRepo
 // s7comm NewTargetRange findings only, omitted entirely (not merely empty) when off or inapplicable.
 void write_baseline_check_report_json(std::ostream& out, const BaselineCheckReport& report,
                                        bool symbolic_addresses = false);
+
+// Renders every finding in `report` as CEF (`baseline check --format cef`), one line per finding --
+// see security_event_format.hpp for the shared CEF primitives and the full design record. Every
+// BaselineFinding already IS a curated anomaly (a KnownOperation match never produces one -- see
+// BaselineCheckReport::findings' own comment), so unlike `policy validate`'s CEF export this one
+// needs no verdict filter. Device Product is "conduitscope-baseline"; Device Event Class ID is
+// baseline_verdict_name(verdict) ("new-conduit", "control-plane-operation", ...) -- a stable,
+// already-existing identifier this codebase's own text/JSON writers already use, reused here
+// rather than inventing a second naming scheme; Name is a short human label for the same verdict
+// (baseline_verdict_display_name, this file). Severity: ControlPlaneOperation -> 9 (CEF's own
+// Very-High band -- the same "always worth a human's attention regardless of baseline" weight
+// DetectionSeverity::Critical carries for the analogous `detect` findings), NewConduit -> 6,
+// NewOperation -> 5, NewConduitKnownZone -> 4 (a deliberately conservative, zone-vouched-for
+// finding -- see BaselineVerdict::NewConduitKnownZone's own comment -- placed lower than a
+// wholesale NewConduit), NewTargetRange -> 3 (the narrowest of the "new" findings: an
+// already-known operation's range merely extended, not a wholly unfamiliar conduit/operation).
+// Extension fields: src/dst/dpt/proto/cat (the verdict name)/msg (a constructed description built
+// from operation_key and, for NewConduitKnownZone, zone_name)/cnt (packet_count).
+void write_baseline_check_report_cef(std::ostream& out, const BaselineCheckReport& report);
+
+// Renders every finding in `report` as LEEF 2.0 (`baseline check --format leef`) -- same
+// finding-to-field mapping as write_baseline_check_report_cef above, see security_event_format.hpp.
+void write_baseline_check_report_leef(std::ostream& out, const BaselineCheckReport& report);
+
+// Renders every finding in `report` as RFC 5424 syslog wrapping a CEF payload (`baseline check
+// --format syslog`), one line per finding, MSGID "baseline" -- see security_event_format.hpp's own
+// render_rfc5424_line for the full header rationale.
+void write_baseline_check_report_syslog(std::ostream& out, const BaselineCheckReport& report);
 
 }  // namespace conduitscope

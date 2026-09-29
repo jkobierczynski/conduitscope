@@ -1297,6 +1297,12 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         PolicyReport report = engine.finish(resolver);
         if (format == "json") {
             write_policy_report_json(*out, report, policy, capture_label, policy_path, resolver);
+        } else if (format == "cef") {
+            write_policy_report_cef(*out, report);
+        } else if (format == "leef") {
+            write_policy_report_leef(*out, report);
+        } else if (format == "syslog") {
+            write_policy_report_syslog(*out, report);
         } else {
             write_policy_report_text(*out, report, policy, capture_label, policy_path, resolver, summarize_unclassified);
         }
@@ -1569,6 +1575,12 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
         DetectionReport report = engine.finish(policy ? &*policy : nullptr, baseline ? &*baseline : nullptr);
         if (format == "json") {
             write_detection_report_json(*out, report, capture_label, resolver);
+        } else if (format == "cef") {
+            write_detection_report_cef(*out, report);
+        } else if (format == "leef") {
+            write_detection_report_leef(*out, report);
+        } else if (format == "syslog") {
+            write_detection_report_syslog(*out, report);
         } else {
             write_detection_report_text(*out, report, capture_label, resolver);
         }
@@ -1775,6 +1787,12 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         report.truncation_reasons = engine.truncation_reasons();
         if (format == "json") {
             write_baseline_check_report_json(*out, report, symbolic_addresses);
+        } else if (format == "cef") {
+            write_baseline_check_report_cef(*out, report);
+        } else if (format == "leef") {
+            write_baseline_check_report_leef(*out, report);
+        } else if (format == "syslog") {
+            write_baseline_check_report_syslog(*out, report);
         } else {
             write_baseline_check_report_text(*out, report, symbolic_addresses);
         }
@@ -2560,8 +2578,12 @@ int main(int argc, char** argv) {
         "-o,--output", policy_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
         "glues onto this flag -- always use the double dash for a long option name");
-    policy_validate_cmd->add_option("-T,--format", policy_format, "Report format: text or json")
-        ->transform(CLI::IsMember({"text", "json"}))
+    policy_validate_cmd
+        ->add_option("-T,--format", policy_format,
+                     "Report format: text/json (the full report), or cef/leef/syslog (curated "
+                     "one-liners, one per FlowVerdict::Violation only -- see docs/USER_GUIDE.md's "
+                     "SECURITY EVENT EXPORT section)")
+        ->transform(CLI::IsMember({"text", "json", "cef", "leef", "syslog"}))
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
                                    "Abort on the first malformed packet instead of reporting it and continuing");
@@ -2788,8 +2810,11 @@ int main(int argc, char** argv) {
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
         "glues onto this flag -- always use the double dash for a long option name");
     detect_cmd
-        ->add_option("-T,--format", detect_format, "Report format: text or json")
-        ->transform(CLI::IsMember({"text", "json"}))
+        ->add_option("-T,--format", detect_format,
+                     "Report format: text/json (the full report), or cef/leef/syslog (curated "
+                     "one-liners, one per finding -- see docs/USER_GUIDE.md's SECURITY EVENT "
+                     "EXPORT section)")
+        ->transform(CLI::IsMember({"text", "json", "cef", "leef", "syslog"}))
         ->capture_default_str();
     detect_cmd->add_flag("--strict", detect_strict,
                           "Abort on the first malformed packet instead of reporting it and continuing");
@@ -2922,8 +2947,12 @@ int main(int argc, char** argv) {
         "-o,--output", baseline_check_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
         "glues onto this flag -- always use the double dash for a long option name");
-    baseline_check_cmd->add_option("-T,--format", baseline_check_format, "Report format: text or json")
-        ->transform(CLI::IsMember({"text", "json"}))
+    baseline_check_cmd
+        ->add_option("-T,--format", baseline_check_format,
+                     "Report format: text/json (the full report), or cef/leef/syslog (curated "
+                     "one-liners, one per finding -- see docs/USER_GUIDE.md's SECURITY EVENT "
+                     "EXPORT section)")
+        ->transform(CLI::IsMember({"text", "json", "cef", "leef", "syslog"}))
         ->capture_default_str();
     baseline_check_cmd->add_flag("--strict", baseline_check_strict,
                                   "Abort on the first malformed packet instead of warning and continuing");

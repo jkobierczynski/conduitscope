@@ -402,6 +402,7 @@
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/mitre_attack_ics.hpp"
 #include "conduitscope/policy.hpp"  // Policy -- optional finish() input, for T0886-vs-T0822
+#include "conduitscope/security_event_format.hpp"  // write_detection_report_cef/_leef/_syslog
 
 namespace conduitscope {
 
@@ -822,5 +823,28 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
 // cites) so a consumer always has the full citation text available without a second lookup.
 void write_detection_report_json(std::ostream& out, const DetectionReport& report,
                                   const std::string& capture_path, const Resolver& resolver);
+
+// Renders `report` as CEF (`detect --format cef`), one line per finding, ready to feed a SIEM --
+// see security_event_format.hpp for the shared CEF primitives and the full design record. Device
+// Product is "conduitscope-detect"; Device Event Class ID is the finding's own technique.id
+// ("T0858") -- a stable, MITRE-citable identifier, exactly CEF's own definition of that field
+// ("a unique identifier for each event-type"); Name is technique.name ("Change Operating Mode").
+// Severity: DetectionSeverity::Critical -> 9, Moderate -> 5, Informational -> 2 (the middle of each
+// of CEF's own Low/Medium/Very-High bands, since this engine's own three-level severity has no
+// finer distinction to place within a band). Extension fields: src/dst/dpt (only when server_port
+// != 0)/proto/msg/cat (detection_category_name) plus cs1/cs1Label="Evidence"
+// (detection_evidence_name), cs2/cs2Label="Novelty" (detection_novelty_name), cnt (packet_count),
+// and start/end (first_seen/last_seen, CEF's own standard millisecond-since-epoch time keys).
+void write_detection_report_cef(std::ostream& out, const DetectionReport& report);
+
+// Renders `report` as LEEF 2.0 (`detect --format leef`) -- same finding-to-field mapping as
+// write_detection_report_cef above (Device Product "conduitscope-detect", Event ID technique.id,
+// `sev` the same 0-10 number CEF's own Severity would carry), see security_event_format.hpp.
+void write_detection_report_leef(std::ostream& out, const DetectionReport& report);
+
+// Renders `report` as RFC 5424 syslog wrapping a CEF payload (`detect --format syslog`), one line
+// per finding, MSGID "detect" -- see security_event_format.hpp's own render_rfc5424_line for the
+// full header rationale.
+void write_detection_report_syslog(std::ostream& out, const DetectionReport& report);
 
 }  // namespace conduitscope

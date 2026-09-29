@@ -217,9 +217,22 @@ phase rather than the fuller per-protocol ICSNPP-compatible logs a later
 phase may add; see `output.hpp`'s `ZeekWriter` class comment and
 `docs/USER_GUIDE.md`'s own "Zeek conn.log export" section for the exact
 field-by-field scope. CEF/LEEF/syslog one-liner output for existing SOC
-pipelines is the one item left fully unbuilt. The "read the same taps
-dumpcap/tshark write" half is already true (pcap/pcapng input, described
-in USER_GUIDE.md's own "pcap vs pcapng" section).
+pipelines has now shipped too, closing out this bullet's last remaining
+item: `policy validate`/`baseline check`/`detect` each accept three more
+`-T` values (`cef`/`leef`/`syslog`), rendering their own already-curated
+findings (policy violations, baseline anomalies, detect's MITRE-mapped
+findings -- never a raw per-packet export) as one line per finding, ready
+to feed a SIEM. CEF verified against microfocus.com's own implementation
+guide, LEEF against IBM's own LEEF Version 2 guide, and the syslog
+transport against RFC 5424 directly -- see `security_event_format.hpp`
+and `docs/USER_GUIDE.md`'s own "SECURITY EVENT EXPORT (CEF/LEEF/syslog)"
+section for the exact field-by-field scope, including why
+`Unclassified` policy flows are deliberately excluded and why the syslog
+transport's own TIMESTAMP/HOSTNAME/PROCID stay at RFC 5424's `-` NILVALUE
+rather than guess at values this tool has no honest way to report. The
+"read the same taps dumpcap/tshark write" half is already true (pcap/pcapng
+input, described in USER_GUIDE.md's own "pcap vs pcapng" section). Only
+the JSON `schema_version` field noted above remains open on this item.
 
 **9. Trustworthiness of the parser -- mostly already done; the review is
 behind the current state.** This is the clearest case of Grok working

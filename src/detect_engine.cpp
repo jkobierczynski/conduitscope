@@ -2029,4 +2029,66 @@ void write_detection_report_json(std::ostream& out, const DetectionReport& repor
     out << "}\n";
 }
 
+namespace {
+
+// Middle-of-band CEF 0-10 severity for each DetectionSeverity -- see write_detection_report_cef's
+// own doc comment (detect_engine.hpp) for why the middle of the band, not an edge.
+int detection_severity_to_cef(DetectionSeverity severity) {
+    switch (severity) {
+        case DetectionSeverity::Critical: return 9;
+        case DetectionSeverity::Moderate: return 5;
+        case DetectionSeverity::Informational: return 2;
+    }
+    return 2;
+}
+
+// Builds one finding's own CEF/LEEF extension field list -- shared by write_detection_report_cef
+// and write_detection_report_leef so the two never drift on which fields each finding carries.
+std::vector<std::pair<std::string, std::string>> detection_finding_extension_fields(const DetectionFinding& f) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    fields.emplace_back("src", f.client_ip);
+    fields.emplace_back("dst", f.server_ip);
+    if (f.server_port != 0) fields.emplace_back("dpt", std::to_string(f.server_port));
+    fields.emplace_back("proto", f.protocol);
+    fields.emplace_back("cat", detection_category_name(f.category));
+    fields.emplace_back("msg", f.description);
+    fields.emplace_back("cs1Label", "Evidence");
+    fields.emplace_back("cs1", detection_evidence_name(f.evidence));
+    fields.emplace_back("cs2Label", "Novelty");
+    fields.emplace_back("cs2", detection_novelty_name(f.novelty));
+    fields.emplace_back("cnt", std::to_string(f.packet_count));
+    // CEF's own standard dictionary keys "start"/"end": milliseconds since epoch. LEEF's guide
+    // documents the same two keys with the same meaning, so this one field list serves both.
+    fields.emplace_back("start", std::to_string(static_cast<long long>(f.first_seen * 1000.0)));
+    fields.emplace_back("end", std::to_string(static_cast<long long>(f.last_seen * 1000.0)));
+    return fields;
+}
+
+}  // namespace
+
+void write_detection_report_cef(std::ostream& out, const DetectionReport& report) {
+    for (const auto& f : report.findings) {
+        out << render_cef_line("conduitscope-detect", f.technique.id, f.technique.name,
+                                detection_severity_to_cef(f.severity), detection_finding_extension_fields(f))
+            << "\n";
+    }
+}
+
+void write_detection_report_leef(std::ostream& out, const DetectionReport& report) {
+    for (const auto& f : report.findings) {
+        auto fields = detection_finding_extension_fields(f);
+        fields.emplace_back("sev", std::to_string(detection_severity_to_cef(f.severity)));
+        out << render_leef_line("conduitscope-detect", f.technique.id, fields) << "\n";
+    }
+}
+
+void write_detection_report_syslog(std::ostream& out, const DetectionReport& report) {
+    for (const auto& f : report.findings) {
+        int cef_severity = detection_severity_to_cef(f.severity);
+        std::string cef_payload = render_cef_line("conduitscope-detect", f.technique.id, f.technique.name,
+                                                    cef_severity, detection_finding_extension_fields(f));
+        out << render_rfc5424_line(cef_severity, "detect", cef_payload) << "\n";
+    }
+}
+
 }  // namespace conduitscope

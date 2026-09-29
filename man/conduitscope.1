@@ -607,12 +607,17 @@ double-dash long option name glues onto this flag's own short form
 filename value) instead of erroring -- always use the double dash for a
 long option name.
 .TP
-.BR \-T ", " \-\-format " " {text,json,csv,fields}
+.BR \-T ", " \-\-format " " {text,json,csv,fields,zeek}
 Output format. Default: text. \fBfields\fR mirrors tshark's own \fB\-T
 fields\fR: print only the \fB\-e\fR/\fB\-\-field\fR values requested,
 tab-separated, one line per packet -- see \fB\-e\fR below and
-\fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section. \fB\-T\fR is the short
-form's own letter, mirroring tshark's own \fB\-T\fR (this codebase's
+\fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section. \fBzeek\fR writes a real
+Zeek \fBconn.log\fR -- one row per TCP/UDP connection (not per packet), in
+Zeek's own TSV envelope, with \fBservice\fR naming whichever protocol
+conduitscope decoded -- see \fBdocs/USER_GUIDE.md\fR's "Zeek conn.log
+export (-T zeek)" subsection for exactly which fields this first pass
+populates versus leaves at Zeek's own "-" unset marker. \fB\-T\fR is the
+short form's own letter, mirroring tshark's own \fB\-T\fR (this codebase's
 \fB\-f\fR is reserved for \fB\-\-filter\fR instead, tshark's own
 convention).
 .TP
@@ -1503,8 +1508,10 @@ Write the report here instead of stdout. Caution: a single-dash typo of a
 double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
-.BR \-T ", " \-\-format " " {text,json}
-Report format. Default: text.
+.BR \-T ", " \-\-format " " {text,json,cef,leef,syslog}
+Report format. text/json render the full report; cef/leef/syslog render one line per
+flow whose verdict is a Violation, ready for a SIEM -- see docs/USER_GUIDE.md's
+SECURITY EVENT EXPORT (CEF/LEEF/syslog) section. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
@@ -1701,8 +1708,10 @@ Write the report here instead of stdout. Caution: a single-dash typo of a
 double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
-.BR \-T ", " \-\-format " " {text,json}
-Report format. Default: text.
+.BR \-T ", " \-\-format " " {text,json,cef,leef,syslog}
+Report format. text/json render the full report; cef/leef/syslog render one line per
+finding, ready for a SIEM -- see docs/USER_GUIDE.md's SECURITY EVENT EXPORT
+(CEF/LEEF/syslog) section. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
@@ -1882,8 +1891,10 @@ Write the report here instead of stdout. Caution: a single-dash typo of a
 double-dash long option name glues onto this flag's own short form instead
 of erroring -- always use the double dash for a long option name.
 .TP
-.BR \-T ", " \-\-format " " {text,json}
-Report format. Default: text.
+.BR \-T ", " \-\-format " " {text,json,cef,leef,syslog}
+Report format. text/json render the full report; cef/leef/syslog render one line per
+finding, ready for a SIEM -- see docs/USER_GUIDE.md's SECURITY EVENT EXPORT
+(CEF/LEEF/syslog) section. Default: text.
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.

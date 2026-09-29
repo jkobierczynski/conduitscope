@@ -156,6 +156,7 @@ add_library(conduitscope_core STATIC
   src/baseline.cpp
   src/mitre_attack_ics.cpp
   src/detect_engine.cpp
+  src/security_event_format.cpp
   src/flow_direction.cpp
   src/live_capture.cpp
   src/bpf_filter.cpp
@@ -9080,6 +9081,29 @@ add_test(NAME policy_wrong_port_is_a_violation
 set_tests_properties(policy_wrong_port_is_a_violation PROPERTIES
   PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(1 violation\\(s\\), 0 unclassified flow\\(s\\)\\).*a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502")
 
+add_test(NAME policy_wrong_port_cef_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml" --format cef)
+set_tests_properties(policy_wrong_port_cef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^CEF:0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|Zone/Conduit Policy Violation\\|8\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3\n$")
+
+add_test(NAME policy_wrong_port_leef_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml" --format leef)
+set_tests_properties(policy_wrong_port_leef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^LEEF:2\\.0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|src=192\\.168\\.1\\.50\tdst=192\\.168\\.1\\.10\tdpt=502\tproto=modbus\tcat=policy-violation\tmsg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502\tcs1Label=Client Zone\tcs1=hmi_zone\tcs2Label=Server Zone\tcs2=plc_zone\tcnt=3\tsev=8\n$")
+
+add_test(NAME policy_wrong_port_syslog_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/wrong_port.yaml" --format syslog)
+set_tests_properties(policy_wrong_port_syslog_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^<107>1 - - conduitscope - policy - CEF:0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|Zone/Conduit Policy Violation\\|8\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3\n$")
+
+# An Allowed/Unclassified-only report (no Violation anywhere) produces zero lines in every one of
+# the three curated-export formats -- see write_policy_report_cef's own doc comment (policy_engine.hpp)
+# for why: an Unclassified flow is "no conduit declared an opinion," not a policy breach.
+add_test(NAME policy_compliant_cef_format_produces_no_lines
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml" --format cef)
+set_tests_properties(policy_compliant_cef_format_produces_no_lines PROPERTIES
+  PASS_REGULAR_EXPRESSION "^$")
+
 add_test(NAME policy_no_conduit_for_zone_pair_is_a_violation
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/no_conduit_for_zone_pair.yaml")
 set_tests_properties(policy_no_conduit_for_zone_pair_is_a_violation PROPERTIES
@@ -14241,6 +14265,26 @@ set_tests_properties(baseline_learn_twice_then_check_clean PROPERTIES
 # never be attributed to the KNOWN conduit (192.168.1.50 -> PLC, exact match already learned) --
 # exactly one finding (NewConduit), and the known conduit's own identical operation counts as a
 # clean match, not a second finding.
+add_test(NAME baseline_check_mutated_cef_format
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_cef.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_cef.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_cef.json' --format cef '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_check_mutated_cef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "CEF:0\\|conduitscope\\|conduitscope-baseline\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|new-target-range\\|New Target Range\\|3\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=new-target-range msg=new-target-range: operation \"Read Holding Registers\" \\(observed range 200-205 not fully covered by the baseline\\) cnt=2\nCEF:0\\|conduitscope\\|conduitscope-baseline\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|new-operation\\|New Operation\\|5\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=new-operation msg=new-operation: operation \"Write Multiple Registers\" cnt=1\n")
+
+add_test(NAME baseline_check_mutated_leef_format
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_leef.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_leef.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_leef.json' --format leef '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_check_mutated_leef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "LEEF:2\\.0\\|conduitscope\\|conduitscope-baseline\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|new-target-range\\|src=192\\.168\\.1\\.50\tdst=192\\.168\\.1\\.10\tdpt=502\tproto=modbus\tcat=new-target-range\tmsg=new-target-range: operation \"Read Holding Registers\" \\(observed range 200-205 not fully covered by the baseline\\)\tcnt=2\tsev=3\nLEEF:2\\.0\\|conduitscope\\|conduitscope-baseline\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|new-operation\\|src=192\\.168\\.1\\.50\tdst=192\\.168\\.1\\.10\tdpt=502\tproto=modbus\tcat=new-operation\tmsg=new-operation: operation \"Write Multiple Registers\"\tcnt=1\tsev=5\n")
+
+add_test(NAME baseline_check_mutated_syslog_format
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_syslog.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_syslog.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_mutated_syslog.json' --format syslog '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap'")
+set_tests_properties(baseline_check_mutated_syslog_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "<109>1 - - conduitscope - baseline - CEF:0\\|conduitscope\\|conduitscope-baseline\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|new-target-range\\|New Target Range\\|3\\|.*\n<108>1 - - conduitscope - baseline - CEF:0\\|conduitscope\\|conduitscope-baseline\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|new-operation\\|New Operation\\|5\\|.*\n")
+
+add_test(NAME baseline_check_unmodified_fixture_zero_findings_cef_produces_no_lines
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_zero_findings_cef.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_zero_findings_cef.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' 2>/dev/null && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_zero_findings_cef.json' --format cef '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap'")
+set_tests_properties(baseline_check_unmodified_fixture_zero_findings_cef_produces_no_lines PROPERTIES
+  PASS_REGULAR_EXPRESSION "^$")
+
 add_test(NAME baseline_check_two_conduit_isolation
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_two_conduit.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_two_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_two_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'")
 set_tests_properties(baseline_check_two_conduit_isolation PROPERTIES
@@ -16074,6 +16118,30 @@ add_test(NAME detect_sample_detect_text_all_findings
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap")
 set_tests_properties(detect_sample_detect_text_all_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "total packets: 12.*findings: 9 \\(Critical 5, Moderate 4, Informational 0\\).*evidence: Confirmed 8, Heuristic 1.*  Engineering-Station Activity: 0.*  Firmware/Logic Change: 4.*  Remote-Access Channel: 1.*  Protocol Misuse: 4.*\\[Firmware/Logic Change\\] T0843 \\(Program Download\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.10:102 \\(s7comm\\).*S7comm block download \\(Request Download\\) -- a program/logic block is being written TO the CPU from an engineering station.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.61:20000 \\(dnp3\\).*DNP3 Cold Restart request -- an outstation is being commanded to restart.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.62:20000 \\(dnp3\\).*DNP3 Unsolicited Response from an outstation this capture never saw a master enable unsolicited responses on \\(Enable Unsolicited Responses, function 0x14\\) -- either enabled before this capture began, or genuinely unexpected.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Moderate.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.63:2404 \\(iec104\\).*IEC 104 ASDU with cause-of-transmission \"unknown type identification\" \\(type C_IC_NA_1\\) -- the receiving end's own reported COT is one of IEC 60870-5-101/104's four error codes.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.63:2404 \\(iec104\\).*IEC 104 Reset Process command \\(C_RP_NA_1\\) -- a controlling station commanded a process reset.*\\[Firmware/Logic Change\\] T0816 \\(Device Restart/Shutdown\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.64:47808 \\(bacnet\\).*BACnet ReinitializeDevice request -- a device is being commanded to restart or change its reinitialization state.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: N/A  severity: Critical.*192\\.168\\.1\\.60 -> 192\\.168\\.1\\.64:47808 \\(bacnet\\).*BACnet DeviceCommunicationControl request -- a device's own communication can be silenced or re-enabled by this service.*\\[Protocol Misuse\\] T0855 \\(Unauthorized Command Message\\).*evidence: Confirmed  novelty: First Occurrence  severity: Moderate.*192\\.168\\.1\\.67 -> 192\\.168\\.1\\.65:44818 \\(enip\\).*CIP Forward_Open from a new originator 192\\.168\\.1\\.67 to 192\\.168\\.1\\.65 -- a different engineering/control client than the one\\(s\\) already seen opening a connection to this target in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Remote-Access Channel\\] T0886 \\(Remote Services\\).*evidence: Heuristic  novelty: First Occurrence  severity: Moderate.*192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 \\(rdp\\).*New rdp \\(remote-access\\) session 192\\.168\\.1\\.68 -> 192\\.168\\.1\\.69:3389 -- first occurrence within this capture; no --baseline-file was supplied, so this may already be a normal, previously-established channel -- rerun with --baseline-file for a stronger signal")
+
+# CEF/LEEF/syslog: one line per finding, first-seen order -- same 9 findings the text report above
+# pins, checked here via the first (T0843) and last (T0886) finding's own line plus a middle one
+# (T0855, the CIP Forward_Open new-originator finding) to prove severity varies by
+# DetectionSeverity (9/5/5) without re-asserting the text report's own full field-by-field coverage.
+add_test(NAME detect_sample_detect_cef_format
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap" --format cef)
+set_tests_properties(detect_sample_detect_cef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0843\\|Program Download\\|9\\|src=192\\.168\\.1\\.60 dst=192\\.168\\.1\\.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download \\(Request Download\\) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000\n.*CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0855\\|Unauthorized Command Message\\|5\\|src=192\\.168\\.1\\.67 dst=192\\.168\\.1\\.65 dpt=44818 proto=enip cat=Protocol Misuse msg=CIP Forward_Open from a new originator 192\\.168\\.1\\.67 to 192\\.168\\.1\\.65.*cs2=First Occurrence cnt=1 start=1700020010010 end=1700020010010\nCEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0886\\|Remote Services\\|5\\|src=192\\.168\\.1\\.68 dst=192\\.168\\.1\\.69 dpt=3389 proto=rdp cat=Remote-Access Channel.*cs1=Heuristic cs2Label=Novelty cs2=First Occurrence cnt=1 start=1700020011011 end=1700020011011\n$")
+
+add_test(NAME detect_sample_detect_leef_format
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap" --format leef)
+set_tests_properties(detect_sample_detect_leef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^LEEF:2\\.0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0843\\|src=192\\.168\\.1\\.60\tdst=192\\.168\\.1\\.10\tdpt=102\tproto=s7comm\tcat=Firmware/Logic Change\tmsg=S7comm block download.*\tsev=9\n.*LEEF:2\\.0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0886\\|src=192\\.168\\.1\\.68\tdst=192\\.168\\.1\\.69\tdpt=3389\tproto=rdp.*\tsev=5\n$")
+
+add_test(NAME detect_sample_detect_syslog_format
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap" --format syslog)
+set_tests_properties(detect_sample_detect_syslog_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^<106>1 - - conduitscope - detect - CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0843\\|Program Download\\|9\\|.*\n<108>1 - - conduitscope - detect - CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0886\\|Remote Services\\|5\\|.*\n$")
+
+add_test(NAME detect_no_findings_cef_format_produces_no_lines
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus_pairing.pcap" --format cef)
+set_tests_properties(detect_no_findings_cef_format_produces_no_lines PROPERTIES
+  PASS_REGULAR_EXPRESSION "^$")
 
 # JSON shape: summary counts, a sample of the techniques_referenced array (all 10 curated
 # mitre_attack_ics.hpp entries are always emitted, regardless of which this report actually

@@ -5190,6 +5190,178 @@ CLI flags. `policy validate` takes the identical `--mac-vendor`/`--resolve`/
 way -- see POLICY FILE FORMAT's "`policy validate`" section for exactly
 which report fields get which annotation.
 
+## SECURITY EVENT EXPORT (CEF/LEEF/syslog)
+
+Grok review item 8's other half (docs/reviews/2026-09-grok-ics-ot-improvement-areas.md) --
+"integrate instead of replacing the stack" -- alongside the Zeek `conn.log`
+export above: `policy validate`, `baseline check`, and `detect` each accept
+three more `-T`/`--format` values, `cef`/`leef`/`syslog`, that render their
+own already-curated findings as one line per finding, ready to feed a SIEM.
+Jurgen's own `AskUserQuestion` scoping decisions for this feature: curated
+findings only (never a per-packet export -- every decoded packet stays
+completely out of scope here, exactly like the Zeek export above never
+became a general packet-export format either), delivered as new `-T` values
+on the three existing subcommands rather than a new dedicated `export`
+subcommand.
+
+**What counts as a "curated finding" differs slightly by subcommand,
+matching each report's own existing definition of "worth listing":**
+
+- `detect --format cef/leef/syslog`: every `DetectionFinding` in the report
+  (identical to what `-T text`/`-T json` already list).
+- `policy validate --format cef/leef/syslog`: only flows whose verdict is
+  `Violation` -- across all three of `policy validate`'s own flow lists
+  (ordinary TCP flows, Ethernet/VLAN flows, and UDP BACnet/CIP-I/O flows).
+  `Unclassified` is deliberately never rendered: it means "no conduit
+  declared an opinion about this traffic," not a confirmed policy breach,
+  the same distinction `baseline check` draws below for `KnownOperation`.
+  `Allowed` flows are, naturally, not findings either.
+- `baseline check --format cef/leef/syslog`: every finding in the report
+  (identical to `-T text`/`-T json`'s own `findings` list) -- a
+  `KnownOperation` match was never a finding to begin with (see
+  `BaselineCheckReport::findings`'s own definition), so nothing extra needs
+  filtering here.
+
+A capture that produces zero curated findings in a given subcommand emits
+**zero lines** under any of these three formats -- not an empty CEF/LEEF
+envelope, not a "0 findings" placeholder line, nothing at all. Point a
+collector at conduitscope's stdout across many runs and only genuine
+findings ever arrive.
+
+### Format primer
+
+All three formats were verified against their own primary source before
+implementation (this project's standing discipline for every wire/file
+format it produces, same as the Zeek export above): CEF against
+microfocus.com's own "Implementing ArcSight Common Event Format (CEF)"
+documentation; LEEF against IBM's own "IBM Security QRadar Log Event
+Extended Format (LEEF) Version 2" guide; the syslog transport against
+RFC 5424 (`https://www.rfc-editor.org/rfc/rfc5424.html`), cross-checked
+against a real-world "syslog prefix + CEF payload" example from NXLog's own
+CEF-over-syslog integration guide.
+
+**CEF** (`-T cef`): one pipe-delimited header plus space-separated
+`key=value` extension pairs per line --
+
+```
+CEF:0|conduitscope|<device product>|<version>|<event class id>|<name>|<severity>|<extension>
+```
+
+`Device Vendor` is always `conduitscope`; `Device Version` is this build's
+own reported version (`conduitscope version`); `Device Product` differs per
+subcommand (`conduitscope-detect`/`conduitscope-policy`/
+`conduitscope-baseline`) so a SIEM can build one parser/dashboard per
+subcommand without parsing `Device Event Class ID` first. `Severity` is
+CEF's own documented 0-10 scale (0-3=Low, 4-6=Medium, 7-8=High,
+9-10=Very-High) -- see "Severity mapping" below for exactly how each
+subcommand's own finding shape decides it.
+
+**LEEF** (`-T leef`): the same idea, LEEF 2.0's own five-pipe-field header
+and tab-separated extension pairs (LEEF 2.0's own default delimiter, used
+here without an explicit sixth delimiter-override field) --
+
+```
+LEEF:2.0|conduitscope|<device product>|<version>|<event id>|<tab-separated extension>
+```
+
+LEEF has no standard numeric-severity extension key of its own the way CEF
+has `Severity` in its header; `sev` is a de facto QRadar convention this
+renderer uses, carrying the exact same 0-10 number CEF's own `Severity`
+field would.
+
+**syslog** (`-T syslog`): an RFC 5424 header wrapping a CEF payload (never
+LEEF -- LEEF's own guide describes it as a QRadar-specific file format with
+syslog as one optional transport among several, with no documented
+header-field convention the way CEF's real-world ecosystem has converged
+on) --
+
+```
+<PRI>1 - - conduitscope - <msgid> - CEF:0|conduitscope|...
+```
+
+`PRI` is `facility*8+severity`, facility fixed at **13** ("log audit" --
+RFC 5424's own facility table names exactly that value for exactly this
+kind of curated security/audit finding), severity derived from the same
+CEF 0-10 number the payload itself carries (see "Severity mapping" below).
+`TIMESTAMP`/`HOSTNAME`/`PROCID`/`STRUCTURED-DATA` are all RFC 5424's own
+`-` NILVALUE: this tool analyzes a capture file, live or offline, with no
+device clock or hostname more honest to report than the capture's own
+per-finding timestamp -- which two of the three report shapes
+(`PolicyReport`/`BaselineCheckReport`) don't carry at all. Rather than
+populate `TIMESTAMP` for `detect` alone and leave it `-` for the other two,
+every subcommand stays consistent here; `detect`'s own findings still carry
+their real timing in the CEF payload's own `start`/`end` extension keys.
+`MSGID` is the emitting subcommand's own name (`detect`/`policy`/
+`baseline`), matching RFC 5424's own stated purpose for that field
+("filtering of messages on a relay or collector").
+
+### Severity mapping
+
+Each subcommand computes exactly one severity judgment per finding and
+derives every format's own scale from that single number -- never two
+independently-maintained severities per finding that could silently drift
+apart.
+
+`detect`: `DetectionSeverity::Critical` -> CEF 9, `Moderate` -> CEF 5,
+`Informational` -> CEF 2 (the middle of each of CEF's own Low/Medium/
+Very-High bands).
+
+`policy validate`: every violation gets a fixed CEF 8 (High) -- a confirmed
+breach of a declared zone/conduit policy is a strong, unconditional signal,
+placed below `detect`'s own Critical=9 (reserved for a genuine
+operational-impact finding like a PLC stop) and above a merely-new baseline
+observation's weaker signal.
+
+`baseline check`, by `BaselineVerdict`: `ControlPlaneOperation` -> CEF 9
+(the same "always worth a human's attention regardless of baseline" weight
+`DetectionSeverity::Critical` carries for the analogous `detect` findings),
+`NewConduit` -> CEF 6, `NewOperation` -> CEF 5, `NewConduitKnownZone` -> CEF
+4 (a deliberately conservative, zone-vouched-for finding -- see that
+verdict's own definition above), `NewTargetRange` -> CEF 3 (the narrowest
+of the "new" findings: an already-known operation's range merely extended,
+not a wholly unfamiliar conduit or operation).
+
+The syslog PRI's own severity component is derived from this same CEF
+number via one fixed band mapping (never Emergency/Alert -- this tool never
+claims a finding needs immediate all-hands escalation -- and never
+Informational/Debug, since everything reaching this exporter already
+cleared each subcommand's own "curated findings only" bar): Very-High
+(9-10) -> Critical(2), High(7-8) -> Error(3), Medium(4-6) -> Warning(4),
+Low(0-3) -> Notice(5).
+
+### Worked example
+
+```
+$ conduitscope policy validate --read capture.pcap --policy plant.yaml --format cef
+CEF:0|conduitscope|conduitscope-policy|0.2.9|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3
+
+$ conduitscope detect --read capture.pcap --format syslog
+<106>1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.2.9|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000
+```
+
+### Extension fields, by subcommand
+
+`detect`: `src`/`dst`/`dpt` (only when the finding has a meaningful server
+port)/`proto`/`cat` (the finding's own category name)/`msg` (its
+human-readable description)/`cs1Label="Evidence"`+`cs1`
+(`DetectionEvidence`)/`cs2Label="Novelty"`+`cs2` (`DetectionNovelty`)/`cnt`
+(packet count)/`start`+`end` (CEF's own standard millisecond-since-epoch
+time keys, from the finding's `first_seen`/`last_seen`).
+
+`policy validate`: for TCP and UDP flows, `src`/`dst`/`dpt`/`proto`/`cat`
+(the fixed literal `policy-violation`)/`msg` (the flow's own violation
+`reason`)/`cs1Label="Client Zone"`+`cs1`/`cs2Label="Server Zone"`+`cs2`/
+`cnt`. For Ethernet/VLAN flows (which have no IP/port at all), `smac`/
+`dmac` (CEF's own standard MAC-address keys -- `smac` is the flow's own
+known transmitting side, `dmac` its peer) in place of `src`/`dst`/`dpt`,
+`cs1Label="VLAN Zone"`+`cs1` in place of the two zone fields, everything
+else the same.
+
+`baseline check`: `src`/`dst`/`dpt`/`proto`/`cat` (the verdict's own
+machine-stable name, e.g. `new-conduit`)/`msg` (a description built from
+the finding's `operation_key`, plus its zone-vouching context for
+`NewConduitKnownZone` or its observed range for `NewTargetRange`)/`cnt`.
+
 ## CAPTURED FRAME PADDING
 
 Ethernet requires a minimum frame size (60 bytes, excluding the trailing
@@ -5239,6 +5411,18 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   own synthesized sequential identifier, not Zeek's own uid algorithm --
   see "Zeek `conn.log` export (`-T zeek`)" above for the full field-by-
   field accounting and why each gap is scoped this way.
+- **CEF/LEEF/syslog export (`policy validate`/`baseline check`/`detect
+  --format cef/leef/syslog`) renders curated findings only, never a
+  per-packet export.** `policy validate` further limits itself to
+  `FlowVerdict::Violation` -- an `Unclassified` flow means "no conduit
+  declared an opinion," not a confirmed breach, so it's deliberately never
+  rendered here even though it does appear in `-T text`/`-T json`.
+  `TIMESTAMP`/`HOSTNAME`/`PROCID` in the syslog transport are always RFC
+  5424's own `-` NILVALUE (this tool has no meaningful device clock or
+  hostname to report for an offline capture-file analysis, and two of the
+  three report shapes carry no per-finding timestamp at all) -- see
+  "SECURITY EVENT EXPORT (CEF/LEEF/syslog)" above for the full design
+  record.
 - **`decode -w` against a multi-interface pcapng source writes every packet
   under one link type.** pcapng (unlike classic pcap) allows a single file
   to declare more than one Interface Description Block with different link

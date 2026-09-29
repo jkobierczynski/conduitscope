@@ -2043,4 +2043,87 @@ void write_baseline_check_report_json(std::ostream& out, const BaselineCheckRepo
     out << "}\n";
 }
 
+namespace {
+
+// Short human labels for each BaselineVerdict -- CEF/LEEF's own "Name" field, alongside
+// baseline_verdict_name's own machine-stable "Device Event Class ID" string. See
+// write_baseline_check_report_cef's own doc comment (baseline.hpp) for the full rationale.
+const char* baseline_verdict_display_name(BaselineVerdict verdict) {
+    switch (verdict) {
+        case BaselineVerdict::KnownOperation: return "Known Operation";  // never actually emitted --
+                                                                          // see findings' own comment
+        case BaselineVerdict::NewConduitKnownZone: return "New Conduit (Zone-Vouched)";
+        case BaselineVerdict::NewConduit: return "New Conduit";
+        case BaselineVerdict::NewOperation: return "New Operation";
+        case BaselineVerdict::NewTargetRange: return "New Target Range";
+        case BaselineVerdict::ControlPlaneOperation: return "Control-Plane Operation";
+    }
+    return "Baseline Anomaly";
+}
+
+int baseline_verdict_to_cef_severity(BaselineVerdict verdict) {
+    switch (verdict) {
+        case BaselineVerdict::ControlPlaneOperation: return 9;
+        case BaselineVerdict::NewConduit: return 6;
+        case BaselineVerdict::NewOperation: return 5;
+        case BaselineVerdict::NewConduitKnownZone: return 4;
+        case BaselineVerdict::NewTargetRange: return 3;
+        case BaselineVerdict::KnownOperation: return 0;  // never actually emitted
+    }
+    return 0;
+}
+
+std::string baseline_finding_description(const BaselineFinding& f) {
+    std::string desc = std::string(baseline_verdict_name(f.verdict)) + ": operation \"" + f.operation_key + "\"";
+    if (f.verdict == BaselineVerdict::NewConduitKnownZone && !f.zone_name.empty()) {
+        desc += " (zone \"" + f.zone_name + "\" already has this operation baselined on another host)";
+    }
+    if (f.verdict == BaselineVerdict::NewTargetRange) {
+        desc += " (observed range " + std::to_string(f.observed_start) + "-" + std::to_string(f.observed_end) +
+                " not fully covered by the baseline)";
+    }
+    return desc;
+}
+
+std::vector<std::pair<std::string, std::string>> baseline_finding_extension_fields(const BaselineFinding& f) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    fields.emplace_back("src", f.client_ip);
+    fields.emplace_back("dst", f.server_ip);
+    if (f.server_port != 0) fields.emplace_back("dpt", std::to_string(f.server_port));
+    fields.emplace_back("proto", f.protocol);
+    fields.emplace_back("cat", baseline_verdict_name(f.verdict));
+    fields.emplace_back("msg", baseline_finding_description(f));
+    fields.emplace_back("cnt", std::to_string(f.packet_count));
+    return fields;
+}
+
+}  // namespace
+
+void write_baseline_check_report_cef(std::ostream& out, const BaselineCheckReport& report) {
+    for (const auto& f : report.findings) {
+        out << render_cef_line("conduitscope-baseline", baseline_verdict_name(f.verdict),
+                                baseline_verdict_display_name(f.verdict), baseline_verdict_to_cef_severity(f.verdict),
+                                baseline_finding_extension_fields(f))
+            << "\n";
+    }
+}
+
+void write_baseline_check_report_leef(std::ostream& out, const BaselineCheckReport& report) {
+    for (const auto& f : report.findings) {
+        auto fields = baseline_finding_extension_fields(f);
+        fields.emplace_back("sev", std::to_string(baseline_verdict_to_cef_severity(f.verdict)));
+        out << render_leef_line("conduitscope-baseline", baseline_verdict_name(f.verdict), fields) << "\n";
+    }
+}
+
+void write_baseline_check_report_syslog(std::ostream& out, const BaselineCheckReport& report) {
+    for (const auto& f : report.findings) {
+        int cef_severity = baseline_verdict_to_cef_severity(f.verdict);
+        std::string cef_payload =
+            render_cef_line("conduitscope-baseline", baseline_verdict_name(f.verdict),
+                             baseline_verdict_display_name(f.verdict), cef_severity, baseline_finding_extension_fields(f));
+        out << render_rfc5424_line(cef_severity, "baseline", cef_payload) << "\n";
+    }
+}
+
 }  // namespace conduitscope

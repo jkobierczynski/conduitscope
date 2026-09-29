@@ -1971,4 +1971,122 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
     out << "}\n";
 }
 
+namespace {
+
+constexpr int kPolicyViolationCefSeverity = 8;  // CEF's own High band -- see
+                                                 // write_policy_report_cef's own doc comment
+                                                 // (policy_engine.hpp) for the full rationale.
+constexpr const char* kPolicyViolationEventClassId = "policy-violation";
+constexpr const char* kPolicyViolationName = "Zone/Conduit Policy Violation";
+
+std::vector<std::pair<std::string, std::string>> flow_violation_extension_fields(const FlowReport& f) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    fields.emplace_back("src", f.client_ip);
+    fields.emplace_back("dst", f.server_ip);
+    if (f.server_port != 0) fields.emplace_back("dpt", std::to_string(f.server_port));
+    fields.emplace_back("proto", join_comma(f.protocols));
+    fields.emplace_back("cat", kPolicyViolationEventClassId);
+    fields.emplace_back("msg", f.reason);
+    fields.emplace_back("cs1Label", "Client Zone");
+    fields.emplace_back("cs1", f.client_zone);
+    fields.emplace_back("cs2Label", "Server Zone");
+    fields.emplace_back("cs2", f.server_zone);
+    fields.emplace_back("cnt", std::to_string(f.packet_count));
+    return fields;
+}
+
+std::vector<std::pair<std::string, std::string>> udp_flow_violation_extension_fields(const UdpFlowReport& f) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    fields.emplace_back("src", f.client_ip);
+    fields.emplace_back("dst", f.server_ip);
+    if (f.server_port != 0) fields.emplace_back("dpt", std::to_string(f.server_port));
+    fields.emplace_back("proto", f.protocol);
+    fields.emplace_back("cat", kPolicyViolationEventClassId);
+    fields.emplace_back("msg", f.reason);
+    fields.emplace_back("cs1Label", "Client Zone");
+    fields.emplace_back("cs1", f.client_zone);
+    fields.emplace_back("cs2Label", "Server Zone");
+    fields.emplace_back("cs2", f.server_zone);
+    fields.emplace_back("cnt", std::to_string(f.packet_count));
+    return fields;
+}
+
+std::vector<std::pair<std::string, std::string>> ethernet_flow_violation_extension_fields(
+    const EthernetFlowReport& f) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    // smac/dmac: CEF's own standard dictionary MAC-address keys. src_mac is this flow's own known
+    // transmitting side (see EthernetFlowReport::src_mac's own comment); the other member of the
+    // canonicalized mac_a/mac_b pair is its peer -- see write_policy_report_cef's own doc comment.
+    fields.emplace_back("smac", f.src_mac);
+    fields.emplace_back("dmac", f.src_mac == f.mac_a ? f.mac_b : f.mac_a);
+    fields.emplace_back("proto", f.protocol);
+    fields.emplace_back("cat", kPolicyViolationEventClassId);
+    fields.emplace_back("msg", f.reason);
+    fields.emplace_back("cs1Label", "VLAN Zone");
+    fields.emplace_back("cs1", f.vlan_zone);
+    fields.emplace_back("cnt", std::to_string(f.packet_count));
+    return fields;
+}
+
+}  // namespace
+
+void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
+    for (const auto& f : report.flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        out << render_cef_line("conduitscope-policy", kPolicyViolationEventClassId, kPolicyViolationName,
+                                kPolicyViolationCefSeverity, flow_violation_extension_fields(f))
+            << "\n";
+    }
+    for (const auto& f : report.ethernet_flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        out << render_cef_line("conduitscope-policy", kPolicyViolationEventClassId, kPolicyViolationName,
+                                kPolicyViolationCefSeverity, ethernet_flow_violation_extension_fields(f))
+            << "\n";
+    }
+    for (const auto& f : report.udp_flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        out << render_cef_line("conduitscope-policy", kPolicyViolationEventClassId, kPolicyViolationName,
+                                kPolicyViolationCefSeverity, udp_flow_violation_extension_fields(f))
+            << "\n";
+    }
+}
+
+void write_policy_report_leef(std::ostream& out, const PolicyReport& report) {
+    for (const auto& f : report.flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        auto fields = flow_violation_extension_fields(f);
+        fields.emplace_back("sev", std::to_string(kPolicyViolationCefSeverity));
+        out << render_leef_line("conduitscope-policy", kPolicyViolationEventClassId, fields) << "\n";
+    }
+    for (const auto& f : report.ethernet_flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        auto fields = ethernet_flow_violation_extension_fields(f);
+        fields.emplace_back("sev", std::to_string(kPolicyViolationCefSeverity));
+        out << render_leef_line("conduitscope-policy", kPolicyViolationEventClassId, fields) << "\n";
+    }
+    for (const auto& f : report.udp_flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        auto fields = udp_flow_violation_extension_fields(f);
+        fields.emplace_back("sev", std::to_string(kPolicyViolationCefSeverity));
+        out << render_leef_line("conduitscope-policy", kPolicyViolationEventClassId, fields) << "\n";
+    }
+}
+
+void write_policy_report_syslog(std::ostream& out, const PolicyReport& report) {
+    auto emit = [&out](const std::vector<std::pair<std::string, std::string>>& fields) {
+        std::string cef_payload = render_cef_line("conduitscope-policy", kPolicyViolationEventClassId,
+                                                    kPolicyViolationName, kPolicyViolationCefSeverity, fields);
+        out << render_rfc5424_line(kPolicyViolationCefSeverity, "policy", cef_payload) << "\n";
+    };
+    for (const auto& f : report.flows) {
+        if (f.verdict == FlowVerdict::Violation) emit(flow_violation_extension_fields(f));
+    }
+    for (const auto& f : report.ethernet_flows) {
+        if (f.verdict == FlowVerdict::Violation) emit(ethernet_flow_violation_extension_fields(f));
+    }
+    for (const auto& f : report.udp_flows) {
+        if (f.verdict == FlowVerdict::Violation) emit(udp_flow_violation_extension_fields(f));
+    }
+}
+
 }  // namespace conduitscope
