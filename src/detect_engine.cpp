@@ -1175,27 +1175,27 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             const char* function_label = nullptr;
             switch (base_fc) {
                 case 0x01:
-                    max_quantity = 2000;
+                    max_quantity = uint16_t{2000};
                     function_label = "Read Coils";
                     break;
                 case 0x02:
-                    max_quantity = 2000;
+                    max_quantity = uint16_t{2000};
                     function_label = "Read Discrete Inputs";
                     break;
                 case 0x03:
-                    max_quantity = 125;
+                    max_quantity = uint16_t{125};
                     function_label = "Read Holding Registers";
                     break;
                 case 0x04:
-                    max_quantity = 125;
+                    max_quantity = uint16_t{125};
                     function_label = "Read Input Registers";
                     break;
                 case 0x0F:
-                    max_quantity = 1968;
+                    max_quantity = uint16_t{1968};
                     function_label = "Write Multiple Coils";
                     break;
                 case 0x10:
-                    max_quantity = 123;
+                    max_quantity = uint16_t{123};
                     function_label = "Write Multiple Registers";
                     break;
                 default:
