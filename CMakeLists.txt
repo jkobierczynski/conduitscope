@@ -12741,6 +12741,75 @@ add_test(NAME fields_dash_e_without_fields_format_notes_and_continues
 set_tests_properties(fields_dash_e_without_fields_format_notes_and_continues PROPERTIES
   PASS_REGULAR_EXPRESSION "note: -e/--field only applies with --format fields \\(-T fields\\); ignoring.*\\[modbus\\]")
 
+# --format zeek: a real Zeek conn.log export (Grok review item 8's "optional Zeek/Malcolm
+# exporter or Zeek-style TSV" bullet -- see output.hpp's ZeekWriter class comment and
+# docs/USER_GUIDE.md's own Zeek export section for exactly which Conn::Info fields this first
+# pass populates versus leaves at Zeek's own "-" unset marker, and why).
+
+# The full TSV envelope (header block through the one data row a single-flow capture produces)
+# -- #open/#close carry today's wall-clock time, so those two lines are matched loosely rather
+# than pinned to an exact date. sample_modbus.pcap is a single TCP flow (HMI:51000 <-> PLC:502),
+# so this also proves orig/resp orientation (orig = whoever sent the first packet, the HMI here),
+# packet/byte counts split correctly by direction (1 orig packet/66 bytes, 2 resp packets/146
+# bytes), `service` populated from the decoded protocol name, and every genuinely-unset-in-this-
+# first-pass field (orig_bytes/resp_bytes/conn_state/local_orig/local_resp/missed_bytes/history/
+# tunnel_parents) rendered as Zeek's own "-" marker, never guessed at.
+add_test(NAME zeek_format_full_envelope_single_flow
+  COMMAND conduitscope decode --format zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(zeek_format_full_envelope_single_flow PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#separator \\\\x09\n#set_separator\t,\n#empty_field\t\\(empty\\)\n#unset_field\t-\n#path\tconn\n#open\t[0-9-]+\n#fields\tts\tuid\tid\\.orig_h\tid\\.orig_p\tid\\.resp_h\tid\\.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state\tlocal_orig\tlocal_resp\tmissed_bytes\thistory\torig_pkts\torig_ip_bytes\tresp_pkts\tresp_ip_bytes\ttunnel_parents\n#types\ttime\tstring\taddr\tport\taddr\tport\tenum\tstring\tinterval\tcount\tcount\tstring\tbool\tbool\tcount\tstring\tcount\tcount\tcount\tcount\tset\\[string\\]\n1700000000\\.000000\tC00000000000000001\t192\\.168\\.1\\.50\t51000\t192\\.168\\.1\\.10\t502\ttcp\tmodbus\t2\\.002000\t-\t-\t-\t-\t-\t-\t-\t1\t66\t2\t146\t-\n#close\t[0-9-]+\n$")
+
+# Multiple TCP flows -> multiple conn.log rows, in first-seen (chronological) order, each with
+# its own sequentially-assigned uid -- sample_mqtt.pcap has several independent MQTT sessions on
+# different ephemeral source ports, so this also proves the flow key correctly keys by the full
+# 4-tuple (not just by service), not folding distinct sessions into one row.
+add_test(NAME zeek_format_multiple_flows_chronological_distinct_uids
+  COMMAND conduitscope decode --format zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(zeek_format_multiple_flows_chronological_distinct_uids PROPERTIES
+  PASS_REGULAR_EXPRESSION "C00000000000000001\t192\\.168\\.1\\.50\t61000\t192\\.168\\.1\\.10\t1883\ttcp\tmqtt\t.*\n1700020016\\.016000\tC00000000000000002\t192\\.168\\.1\\.50\t62000\t192\\.168\\.1\\.10\t1883\ttcp\tmqtt\t")
+
+# `service` is populated from conduitscope's own decoded protocol name, so the plain MQTT
+# sessions and the one MQTTS (TLS-wrapped, port 8883) session in the same capture get correctly
+# DIFFERENT service values -- proves this isn't just echoing the destination port.
+add_test(NAME zeek_format_service_field_distinguishes_mqtt_from_mqtts
+  COMMAND conduitscope decode --format zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(zeek_format_service_field_distinguishes_mqtt_from_mqtts PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50\t61200\t192\\.168\\.1\\.10\t8883\ttcp\tmqtts\t")
+
+# A TCP flow this codebase never recognized any application-layer protocol on (bare "tcp", the
+# generic transport-only fallback -- see DecodedPacket::protocol's own comment) must NOT populate
+# `service`: it renders as Zeek's own "-" unset marker, not the misleading literal "tcp" -- proves
+# the exclusion list in ZeekWriter::write_packet actually filters, not just documents intent.
+add_test(NAME zeek_format_service_unset_for_unrecognized_application_protocol
+  COMMAND conduitscope decode --format zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
+set_tests_properties(zeek_format_service_unset_for_unrecognized_application_protocol PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50\t55030\t192\\.168\\.1\\.10\t1883\ttcp\t-\t")
+
+# UDP broadcast traffic (BACnet/IP's own Who-Is/I-Am/etc. flood from one source to the broadcast
+# address) aggregates into ONE conn.log row across every packet sharing that same 4-tuple, the
+# same pseudo-connection semantics real Zeek applies to UDP -- not one row per datagram. 62
+# packets on this exact 4-tuple in sample_bacnet.pcap (see the bacnet_stats_counted test's own
+# packet-count accounting), all folding into orig_pkts=62.
+add_test(NAME zeek_format_udp_broadcast_aggregates_into_one_flow
+  COMMAND conduitscope decode --format zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
+set_tests_properties(zeek_format_udp_broadcast_aggregates_into_one_flow PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.10\t47808\t192\\.168\\.1\\.255\t47808\tudp\tbacnet\t[0-9.]+\t-\t-\t-\t-\t-\t-\t-\t62\t")
+
+# Non-IP and non-TCP/UDP traffic (ARP has no IP layer at all) is out of scope for this first pass
+# (see ZeekWriter::write_packet's own scope note) -- produces zero data rows, not a crash or a
+# malformed row with empty/garbage addr fields.
+add_test(NAME zeek_format_non_ip_traffic_produces_no_rows
+  COMMAND conduitscope decode --format zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+set_tests_properties(zeek_format_non_ip_traffic_produces_no_rows PROPERTIES
+  PASS_REGULAR_EXPRESSION "#close\t[0-9-]+\n$"
+  FAIL_REGULAR_EXPRESSION "192\\.168")
+
+# -T (short form of --format) accepts "zeek" too, same as every other --format value.
+add_test(NAME zeek_format_dash_T_short_form_accepts_zeek_value
+  COMMAND conduitscope decode -T zeek --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(zeek_format_dash_T_short_form_accepts_zeek_value PROPERTIES
+  PASS_REGULAR_EXPRESSION "#path\tconn")
+
 # -c is `decode`'s own short alias for --max-packets (mirrors tshark's own -c): stops after
 # exactly 2 of sample_arp.pcap's 6 packets.
 add_test(NAME dash_c_alias_for_max_packets_stops_early

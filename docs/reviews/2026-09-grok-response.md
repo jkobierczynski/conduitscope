@@ -195,18 +195,31 @@ signed/reproducible report bundling tool version + policy hash + capture
 hash + decoder-confidence notes into one artifact (the JSON report has
 none of those fields today). Real gap, not yet scheduled.
 
-**8. Integrate instead of replacing the stack -- mixed.** The JSON
-report schema is genuinely append-only and documented (`docs/USER_GUIDE.md`'s
-own schema sections, and this project's own strict "appended last"
-convention enforced in code review across every recent feature), which
-is most of what "stable and versioned" is really asking for, though there
-is no explicit `schema_version` field on the policy/inventory JSON output
-itself (baseline's own store file does have one, `store.schema_version`,
-so the precedent exists) -- a cheap, worthwhile addition. No Zeek/Malcolm
-exporter, no CEF/LEEF/syslog one-liner output, and no
-"generate-firewall-rules-from-policy" feature exist. The "read the same
-taps dumpcap/tshark write" half is already true (pcap/pcapng input,
-described in USER_GUIDE.md's own "pcap vs pcapng" section).
+**8. Integrate instead of replacing the stack -- mixed, and narrowing.**
+The JSON report schema is genuinely append-only and documented
+(`docs/USER_GUIDE.md`'s own schema sections, and this project's own strict
+"appended last" convention enforced in code review across every recent
+feature), which is most of what "stable and versioned" is really asking
+for, though there is still no explicit `schema_version` field on the
+policy/inventory JSON output itself (baseline's own store file does have
+one, `store.schema_version`, so the precedent exists) -- a cheap,
+worthwhile addition, not yet done. "Generate firewall rules from this
+policy + inventory" turns out to already be a stale claim rather than a
+real gap: `inventory --acl-export` already drafts Cisco/Fortinet/Palo Alto
+ACL rules from a capture's own inferred conduits (Grok gap #2's own Phase
+10, confirmed by direct source read of `write_inventory_acl_cisco`/
+`_fortinet`/`_paloalto` in `src/cli_main.cpp`). A Zeek/Malcolm exporter is
+now the first of this bullet's remaining two items to ship: `decode -T
+zeek` writes a real Zeek `conn.log` (Zeek's own actual field schema and
+TSV envelope, not an invented approximation), scoped -- via an
+`AskUserQuestion` decision with Jurgen -- to a conn.log-foundation-first
+phase rather than the fuller per-protocol ICSNPP-compatible logs a later
+phase may add; see `output.hpp`'s `ZeekWriter` class comment and
+`docs/USER_GUIDE.md`'s own "Zeek conn.log export" section for the exact
+field-by-field scope. CEF/LEEF/syslog one-liner output for existing SOC
+pipelines is the one item left fully unbuilt. The "read the same taps
+dumpcap/tshark write" half is already true (pcap/pcapng input, described
+in USER_GUIDE.md's own "pcap vs pcapng" section).
 
 **9. Trustworthiness of the parser -- mostly already done; the review is
 behind the current state.** This is the clearest case of Grok working

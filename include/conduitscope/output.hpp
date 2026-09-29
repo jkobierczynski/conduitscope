@@ -174,6 +174,60 @@ private:
     bool show_direction_;
 };
 
+// `decode --format zeek` -- Grok review item 8's "optional Zeek/Malcolm exporter or Zeek-style
+// TSV" bullet (docs/reviews/2026-09-grok-ics-ot-improvement-areas.md), scoped (per an
+// AskUserQuestion decision with Jurgen) to a foundation-first phase: Zeek's own real conn.log
+// schema and TSV envelope -- not a made-up "Zeek-style" approximation, and not yet the
+// full per-protocol ICSNPP-compatible logs (modbus_detailed.log, bacnet_property.log, etc.) a
+// later phase may add. conn.log is the right foundation because it's the join key every other
+// Zeek/Malcolm log (including ICSNPP's own) hangs off of via `uid` -- see this class's own .cpp
+// comment for exactly which of Zeek's 21 documented Conn::Info fields this first pass populates
+// honestly versus leaves at Zeek's own "-" unset marker, and why, verified against
+// docs.zeek.org's own conn.log/Conn::Info reference and zed.brimdata.io's own worked TSV example
+// (both cited in output.cpp).
+//
+// Unlike every writer above, this one is NOT a per-packet streamer: Zeek's conn.log is one row
+// per CONNECTION (aggregated over its whole lifetime), not one row per packet, so write_packet()
+// only accumulates into an internal flow table -- nothing is written to `out` until end(), which
+// emits the full TSV (header block, one row per flow in first-seen order, footer) in one shot.
+// This mirrors StatsWriter's own "accumulate via write_packet(), finalize separately" shape just
+// below, but end() (not a separately-named print_summary()) is where ZeekWriter's own
+// finalization happens, since -- unlike StatsWriter, which `info` and `decode --stats` both reuse
+// with two different header styles -- this writer has exactly one caller (`decode --format
+// zeek`) and exactly one output shape, so OutputWriter's own end() hook is already the right,
+// un-duplicated place for it.
+class ZeekWriter : public OutputWriter {
+public:
+    explicit ZeekWriter(std::ostream& out) : out_(out) {}
+    void write_packet(const DecodedPacket& packet) override;
+    void end() override;
+
+private:
+    // One entry per bidirectional flow (proto + unordered {ip:port, ip:port} pair) -- see
+    // output.cpp's own write_packet for exactly how the key is built and how "which side is
+    // orig" is decided (first packet seen for that key, matching Zeek's own actual conn_id
+    // semantics, not this codebase's own separate FlowDirectionTracker heuristic tiers -- a
+    // deliberate choice, see output.cpp).
+    struct ZeekFlow {
+        size_t uid_ordinal = 0;  // assignment order == first-seen order == this flow's row order
+        double first_ts = 0.0, last_ts = 0.0;
+        std::string orig_h, resp_h;
+        uint16_t orig_p = 0, resp_p = 0;
+        std::string proto;  // "tcp" or "udp" -- see output.cpp's own scope note on why this first
+                              // pass covers only those two of Zeek's four transport_proto values
+        std::set<std::string> services;  // distinct DecodedPacket::protocol names seen on this
+                                           // flow, excluding the generic transport-only "tcp"/"udp"
+                                           // fallback labels -- see output.cpp
+        size_t orig_pkts = 0, resp_pkts = 0;
+        uint64_t orig_ip_bytes = 0, resp_ip_bytes = 0;
+    };
+    std::ostream& out_;
+    std::map<std::string, ZeekFlow> flows_;      // keyed by the canonical undirected flow key
+    std::vector<std::string> flow_order_;         // keys in first-seen order, for end()'s own
+                                                    // chronological row output (matches Zeek's own
+                                                    // conn.log ordering)
+};
+
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
 // as usual, then print_summary(out) once at the end (that's separate from
 // OutputWriter::end() so `info` and `decode --stats` can share this class

@@ -2220,10 +2220,23 @@ through its ten points in order, starting with items 1-3, one at a time:
   the former blocked on access to a real TIA Portal capture rather than on effort. See
   [docs/reviews/2026-09-grok-response.md](reviews/2026-09-grok-response.md)'s item 6 for the full
   writeup.
-- **Items 7-10** (a 62443/NIS2 evidence pack, Zeek/CEF/syslog integration, parser trustworthiness,
-  and product packaging) are not yet scheduled. The response document notes that item 9 (parser
-  trustworthiness: ASan/UBSan in CI, fuzzing on the high-value parsers) is already substantially
-  standing practice, not an open item.
+- **Item 8 (integrate instead of replacing the stack) is partially done, and started.** Scoped in
+  three `AskUserQuestion` decisions with Jurgen (Zeek export depth: conn.log foundation first, not
+  the fuller per-protocol ICSNPP-compatible logs yet; CEF/LEEF/syslog content: curated findings
+  only, not every decoded packet; delivery: new `--format` values on existing subcommands, not a
+  new `export` subcommand). `decode -T zeek` now writes a real Zeek `conn.log` -- Zeek's own actual
+  field schema and TSV envelope (verified against docs.zeek.org's own `Conn::Info` reference and a
+  worked example before implementation), not an invented approximation -- see `output.hpp`'s
+  `ZeekWriter` class comment and `docs/USER_GUIDE.md`'s own "Zeek conn.log export" section for
+  exactly which of Zeek's 21 real fields this first pass populates versus leaves at Zeek's own "-"
+  unset marker. "Generate firewall rules from policy + inventory" turned out to already be done
+  (Grok gap #2's own Phase 10, `inventory --acl-export`) -- a stale claim in the original review,
+  not a gap that needed building. `schema_version` on policy/inventory JSON output and CEF/LEEF/
+  syslog one-liners for curated findings (`policy validate`/`baseline check`/`detect`) remain open.
+- **Items 7, 9, 10** (a 62443/NIS2 evidence pack, parser trustworthiness, and product packaging)
+  are not yet scheduled. The response document notes that item 9 (parser trustworthiness: ASan/
+  UBSan in CI, fuzzing on the high-value parsers) is already substantially standing practice, not
+  an open item.
 
 
 ## PROTOCOL DETECTION

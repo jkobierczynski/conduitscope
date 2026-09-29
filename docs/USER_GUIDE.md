@@ -193,7 +193,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
 | `-o, --output FILE` | stdout | Write decoded output here instead of stdout. |
-| `-T, --format {text,json,csv,fields}` | `text` | Output format. `fields` mirrors tshark's own `-T fields`: print only the `-e`/`--field` values requested, tab-separated, one line per packet -- see `-e, --field` below. See OUTPUT FORMATS below. `-T` is the short form's own letter, mirroring tshark's own `-T` (this codebase's `-f` is reserved for `--filter` instead, tshark's own convention). |
+| `-T, --format {text,json,csv,fields,zeek}` | `text` | Output format. `fields` mirrors tshark's own `-T fields`: print only the `-e`/`--field` values requested, tab-separated, one line per packet -- see `-e, --field` below. `zeek` writes a real Zeek `conn.log` -- one row per TCP/UDP connection (not per packet), in Zeek's own TSV envelope -- see OUTPUT FORMATS' own "Zeek `conn.log` export (`-T zeek`)" subsection below for exactly which fields this first pass populates. `-T` is the short form's own letter, mirroring tshark's own `-T` (this codebase's `-f` is reserved for `--filter` instead, tshark's own convention). |
 | `-t, --time-format {e,epoch,r,relative,d,delta,a,absolute,ad,absolute-date}` | `r` | How to render each packet's timestamp. Mirrors tshark's own `-t` mnemonics rather than tcpdump's stacking `-t`/`-tt`/`-ttt` convention. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--time-offset {utc,local,+HH:MM,-HH:MM}` | `utc` | Timezone used to render `--time-format=absolute`/`absolute-date`; ignored by every other `--time-format` value. See OUTPUT FORMATS' "Timestamps" subsection below. |
 | `--protocol NAME` | `auto` | Restrict decoding to one protocol. See docs/PROTOCOL_COVERAGE.md below for the full, current list of valid protocol names (one per subsection there). `auto` opportunistically tries OPC UA, EtherNet/IP, IEC 104, Modbus, TwinCAT/ADS, BGP-4, DNP3, S7comm/COTP, S7comm-Plus, MMS, HART-IP, MQTT, and FF-HSE detection on every TCP payload (in that order -- TwinCAT/ADS right after Modbus, BGP-4 right after TwinCAT/ADS using the strongest structural gate in this whole codebase (a 128-bit Marker that MUST be all-`0xFF`), FF-HSE last of all, even after MQTT, see docs/DEVELOPMENT.md's PROTOCOL DETECTION), CIP I/O, BACnet/IP, HART-IP, and FF-HSE detection on every UDP payload (FF-HSE last there too), PROFINET RT (DCP/cyclic) detection on every non-IPv4 Ethernet frame carrying EtherType `0x8892`, GOOSE detection on every non-IPv4 Ethernet frame carrying EtherType `0x88B8`, Sampled Values detection on every non-IPv4 Ethernet frame carrying EtherType `0x88BA`, EtherCAT detection on every non-IPv4 Ethernet frame carrying EtherType `0x88A4`, regardless of port, and Spanning Tree Protocol (STP/RSTP/MSTP) detection on every classic IEEE 802.3 length-framed Ethernet frame whose LLC header is DSAP=SSAP=`0x42` -- a structurally separate dispatch path from every EtherType-keyed protocol above, so there's no ordering/collision question between them (see docs/DEVELOPMENT.md's PROTOCOL DETECTION below). `enip` covers both EtherNet/IP explicit messaging (TCP) and CIP I/O implicit messaging (UDP). `mms` is IEC 61850 MMS (Manufacturing Message Specification, ISO 9506) -- shares S7comm's exact TPKT/COTP transport and TCP port 102, but is a distinct application protocol; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's MMS section. `s7comm-plus` is S7comm-Plus (TIA Portal / S7-1200/1500) -- shares the same TPKT/COTP transport and TCP port 102, disambiguated by its own protocol id byte; see `--s7comm-port` below and docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. `mqtt` is MQTT (v3.1/v3.1.1/v5.0) plus Sparkplug B -- see `--mqtt-port` below and docs/PROTOCOL_COVERAGE.md's MQTT section. `profinet` covers both DCP and cyclic real-time IO. `sv` is IEC 61850-9-2 Sampled Values. `ethercat` is EtherCAT. `bacnet` is BACnet/IP. `hartip` is HART-IP (covers both UDP and TCP). `opcua` is OPC UA Binary (UA-TCP/Secure Conversation, TCP only). `ff-hse` is FOUNDATION Fieldbus HSE (covers FDA/SM/FMS/LAN Redundancy, on both TCP and UDP) -- see `--ffhse-port` below and docs/PROTOCOL_COVERAGE.md's FOUNDATION Fieldbus HSE section. `twincat` is Beckhoff TwinCAT/ADS over AMS/TCP (TCP port 48898 only; no `--twincat-port` option exists -- a deliberate simplification for this first pass, since AMS/TCP's own structural detection gate is port-independent already, see docs/PROTOCOL_COVERAGE.md's TwinCAT / ADS section) -- see docs/DEVELOPMENT.md's "registration-model decoder refactor" entry for why this is the first protocol built on the newer `ProtocolDecoder` interface. `stp` is Spanning Tree Protocol (STP/RSTP/MSTP) -- no port option, matching GOOSE/SV/EtherCAT/PROFINET's own no-port precedent for a protocol with no port at all; see docs/PROTOCOL_COVERAGE.md's Spanning Tree Protocol section. `devicenet` is DeviceNet (CAN-bus CIP) -- no port option either, the same no-port precedent, but unlike every other value in this list it isn't reached through Ethernet at all: it's gated on the capture's own pcap link type being `LINKTYPE_CAN_SOCKETCAN` (227, standard Linux SocketCAN capture framing -- what `candump -l`/`tcpdump -i can0`/Wireshark itself write capturing a CAN bus), checked before any protocol filter, so `--protocol devicenet` against an ordinary Ethernet-linktype capture simply decodes nothing (every packet still parses at the link layer, just with no application-layer match) rather than erroring; see docs/PROTOCOL_COVERAGE.md's DeviceNet section. `remote-access` covers Tier 1 of the "IT protocols an OT auditor flags" family (RDP/VNC/TeamViewer/AnyDesk/Zoom, each its own `protocol` value even under this one filter name) -- see `--remote-access-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 1 remote-access protocol recognition" section. `lateral-movement` covers Tier 2 of the same family (SMB/SSH/HTTP/HTTPS/SNMPv1v2c/Telnet/FTP/TFTP/QUIC, again each its own `protocol` value under this one filter name) -- see `--lateral-movement-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 2 lateral-movement protocol recognition" section. `enterprise-trust` covers the six port-based protocols of Tier 3 of the same family (NTP/DHCP/LDAP/LDAPS/RADIUS/TACACS+, again each its own `protocol` value under this one filter name) -- see `--enterprise-trust-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 3 enterprise-trust-boundary protocol recognition" section. `eapol` is Tier 3's seventh protocol, IEEE 802.1X/EAPOL -- EtherType-keyed, no port at all, so it has its own dedicated filter value rather than sharing `enterprise-trust`, the same split GOOSE/SV/EtherCAT/PROFINET's own EtherType-keyed filters already have from every port-based one; no port option exists for it. `wireless-backhaul` covers the five port-based protocols of Tier 4 of the same family (CAPWAP control/data, LWAPP control/data, GTP-U, again each its own `protocol` value under this one filter name) -- see `--wireless-backhaul-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 4 wireless-backhaul-and-cellular protocol recognition" section. `pppoe` is Tier 4's sixth protocol, PPPoE -- EtherType-keyed, no port at all, the same split `eapol` has from `enterprise-trust`; no port option exists for it either. `tunnel-vpn` covers the fourteen port/IP-protocol-number-based protocols of Tier 5 of the same family (GRE/NVGRE/EoIP, ESP, AH, IP-in-IP, 6in4, L2TP, IKE, VXLAN, Geneve, WireGuard, OpenVPN, dtls-tunnel, STT, again each its own `protocol` value under this one filter name) -- see `--tunnel-vpn-port` below and docs/PROTOCOL_COVERAGE.md's "Tier 5 generic tunnel/VPN encapsulation recognition" section. `mpls` is Tier 5's sixteenth protocol, MPLS -- EtherType-keyed, no port at all, the same split `eapol`/`pppoe` have from `enterprise-trust`/`wireless-backhaul`; no port option exists for it either. `arp` is ARP (Address Resolution Protocol, RFC 826) -- a brand-new protocol, not part of any Tier family, EtherType-keyed (EtherType `0x0806`), no port at all, the same no-port precedent `stp`/`eapol`/`pppoe`/`mpls` already established; see docs/PROTOCOL_COVERAGE.md's ARP section. `lldp` is LLDP (Link Layer Discovery Protocol, IEEE 802.1AB) -- another brand-new protocol, added right after ARP, not part of any Tier family, EtherType-keyed (EtherType `0x88CC`), no port at all, the same no-port precedent `arp`/`stp`/`eapol`/`pppoe`/`mpls` already established; see docs/PROTOCOL_COVERAGE.md's LLDP section. `bgp` is BGP-4 (RFC 4271, TCP port 179) -- the last piece of the three-stage plan that also added `arp`/`lldp`, but unlike those two it's TCP-port-independent (not EtherType-keyed) and needs TCP stream reassembly plus a message-coalescing loop; see `--bgp-port` above and docs/PROTOCOL_COVERAGE.md's BGP-4 section. `slow-protocols` is IEEE 802.3 "Slow Protocols" (LACP/Marker Protocol/802.3 OAM, told apart by a Subtype byte) -- added right after the three-stage `arp`/`lldp`/`bgp` plan, EtherType-keyed (EtherType `0x8809`), no port at all, the same no-port precedent `arp`/`lldp`/`stp`/`eapol`/`pppoe`/`mpls` already established; see docs/PROTOCOL_COVERAGE.md's IEEE 802.3 Slow Protocols section. |
@@ -4877,6 +4877,106 @@ $ conduitscope decode -r capture.pcap -T fields -e index -e src_ip -e dst_ip -e 
 2	192.168.1.10	192.168.1.50	modbus	Read Holding Registers: response: 20 data byte(s)
 ```
 
+### Zeek `conn.log` export (`-T zeek`)
+
+`-T zeek` (equivalently `--format zeek`) writes a real Zeek `conn.log` --
+Grok review item 8's "optional Zeek/Malcolm exporter or Zeek-style TSV"
+bullet (docs/reviews/2026-09-grok-ics-ot-improvement-areas.md), scoped to
+a conn.log-foundation-first phase via an `AskUserQuestion` decision with
+Jurgen: this is Zeek's own actual `conn.log` field schema and TSV
+envelope, verified against docs.zeek.org's own `Conn::Info` record
+reference and a worked example (zed.brimdata.io's own "Reading Zeek Log
+Formats" page) before implementation -- not a made-up "Zeek-style"
+approximation, and not (yet) the fuller per-protocol ICSNPP-compatible
+logs (`modbus_detailed.log`, `bacnet_property.log`, and similar) a later
+phase may add. `conn.log` is the right foundation regardless of that
+later scope, because it's the join key every other Zeek/Malcolm log
+(including ICSNPP's own) hangs off of via `uid`.
+
+Unlike every other `-T` value, this is **not** one row per packet: Zeek's
+`conn.log` is one row per **connection**, aggregated over its whole
+lifetime, so `decode -T zeek` buffers per-flow state as it reads and
+writes the full TSV (header block through every connection's own row) at
+the very end, once the whole capture has been read. A flow is keyed by
+its full 4-tuple + transport protocol; **only IPv4 TCP/UDP traffic is
+included in this first pass** -- ICMP and every other non-TCP/UDP IP
+protocol produce no row at all, a stated scope boundary (see below), not
+a crash or a guessed-at row. UDP broadcast traffic (e.g. a BACnet/IP
+Who-Is flood from one source to the broadcast address) aggregates into
+**one** row across every datagram sharing that 4-tuple, the same
+pseudo-connection semantics real Zeek applies to UDP.
+
+```
+$ conduitscope decode -r tests/sample_modbus.pcap -T zeek
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	conn
+#open	2026-09-29-09-50-31
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	service	duration	orig_bytes	resp_bytes	conn_state	local_orig	local_resp	missed_bytes	history	orig_pkts	orig_ip_bytes	resp_pkts	resp_ip_bytes	tunnel_parents
+#types	time	string	addr	port	addr	port	enum	string	interval	count	count	string	bool	bool	count	string	count	count	count	count	set[string]
+1700000000.000000	C00000000000000001	192.168.1.50	51000	192.168.1.10	502	tcp	modbus	2.002000	-	-	-	-	-	-	-	1	66	2	146	-
+#close	2026-09-29-09-50-31
+```
+
+Which side is `orig` (originator) versus `resp` (responder) is decided by
+whichever endpoint sent the **first packet** this tool saw for that
+4-tuple -- matching real Zeek's own actual `conn_id` semantics, not this
+codebase's separate `FlowDirectionTracker` heuristic tiers (handshake/
+content/port-heuristic -- see "text (default)" above), which answer a
+different question ("which side is the client") using extra evidence
+beyond just packet order. Real Zeek doesn't second-guess first-packet-seen
+either, so this keeps the exported semantics honestly aligned with what
+Zeek itself would report from the same single-pass capture read.
+
+**Fields this first pass populates**, each drawn from data this tool
+already has on hand per packet: `ts`/`id.orig_h`/`id.orig_p`/`id.resp_h`/
+`id.resp_p`/`proto` (the flow's own identity), `duration` (last packet's
+timestamp minus first), `orig_pkts`/`resp_pkts` and `orig_ip_bytes`/
+`resp_ip_bytes` (packet/byte counts split by direction -- the byte counts
+are whole captured-frame length, i.e. closer to Zeek's own "IP level
+bytes" concept than its separate payload-only `orig_bytes`/`resp_bytes`,
+see below), and `service` -- populated from whichever protocol name this
+tool itself decoded on that flow (`modbus`, `dnp3`, `bacnet`, and so on;
+Zeek's own conn.log documents this field as "a comma-separated list of
+confirmed protocol(s)", so more than one name can appear, comma-joined,
+if a flow's traffic was decoded as more than one protocol across its
+packets). The generic transport-only `tcp`/`udp` fallback protocol names
+(this tool's own "recognized transport, no application-layer match"
+label) are deliberately **excluded** from `service` -- a flow with no
+recognized application protocol gets `service` left unset (`-`), never
+the misleading literal `tcp`/`udp`.
+
+**Fields this first pass leaves at Zeek's own `-` unset marker**, each
+requiring either data this tool's flow model doesn't keep yet or a
+concept it has no equivalent for -- a stated scope boundary, not a silent
+gap or a guess: `orig_bytes`/`resp_bytes` (Zeek's own payload-only,
+gap-corrected byte counts -- this tool has no generic per-protocol L4
+payload-length accounting across its ~90 decoders' own varied framing);
+`conn_state`/`history` (Zeek's own TCP state-machine/flag-history
+tracking -- this tool's flow model doesn't run an equivalent state
+machine); `local_orig`/`local_resp` (Zeek's own `Site::local_nets`
+concept -- this tool has no equivalent "which networks are ours"
+declaration outside the separate policy-engine zone model, which isn't
+wired into this writer); `missed_bytes` (Zeek's own reassembly-gap
+accounting); and `tunnel_parents` (genuine tunnel-encapsulation
+correlation -- this tool decodes GRE/IP-in-IP/VXLAN/etc. as their own
+protocols rather than tracking an encapsulating connection's own `uid`).
+
+The `uid` column is this tool's **own synthesized identifier**
+(`C` + a 17-digit zero-padded sequential counter, assigned in first-seen
+order -- `C00000000000000001`, `C00000000000000002`, ...), not Zeek's own
+uid algorithm (a base62-encoded value derived from an internal random
+seed). This is a deliberate simplification: nothing consuming this
+export needs to reproduce Zeek's own algorithm bit-for-bit -- `uid` only
+has to function as a stable join key across this export's own rows, which
+a simple deterministic counter does, while also making this writer's
+output fully reproducible run to run (the same pcap always produces the
+same `uid` values), which is what lets this feature be tested against
+exact expected output at all (see CMakeLists.txt's own `zeek_format_*`
+tests).
+
 ### Writing a capture file (`-w`)
 
 `-w FILE` (equivalently `--write FILE`) writes every packet that reaches
@@ -5127,6 +5227,18 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   only matters for a file from an unusual/legacy writer, and even then only
   means `conduitscope info`'s packet count would read lower than an external
   tool's for that specific file. See "pcap vs. pcapng" above.
+- **`decode -T zeek`'s conn.log export covers TCP/UDP only, and leaves
+  seven of Zeek's own 21 `Conn::Info` fields unset.** ICMP and every other
+  non-TCP/UDP IP protocol produce no row at all (no ready substitute for
+  Zeek's own type/code-in-the-port-fields ICMP convention). `orig_bytes`/
+  `resp_bytes` (payload-only byte counts), `conn_state`/`history` (TCP
+  state-machine tracking), `local_orig`/`local_resp` (a "local network"
+  concept this tool has no equivalent for outside the separate policy
+  engine), and `missed_bytes` (reassembly-gap accounting) are all left at
+  Zeek's own `-` unset marker rather than guessed at. `uid` is this tool's
+  own synthesized sequential identifier, not Zeek's own uid algorithm --
+  see "Zeek `conn.log` export (`-T zeek`)" above for the full field-by-
+  field accounting and why each gap is scoped this way.
 - **`decode -w` against a multi-interface pcapng source writes every packet
   under one link type.** pcapng (unlike classic pcap) allows a single file
   to declare more than one Interface Description Block with different link

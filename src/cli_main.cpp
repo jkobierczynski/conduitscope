@@ -1006,6 +1006,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             } else if (format == "fields") {
                 writer = std::make_unique<FieldsWriter>(*out, resolver, fields, show_vlan, *parsed_time_format,
                                                           *parsed_time_offset, show_direction);
+            } else if (format == "zeek") {
+                writer = std::make_unique<ZeekWriter>(*out);
             } else {
                 writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
                                                         *parsed_time_offset, show_direction, show_mac, verbose);
@@ -2084,9 +2086,13 @@ int main(int argc, char** argv) {
                             "use the double dash for a long option name");
     decode_cmd
         ->add_option("-T,--format", decode_format,
-                      "Output format: text, json, csv, or fields (fields mirrors tshark's own -T "
-                      "fields -- print only the -e/--field values requested, tab-separated; see -e)")
-        ->transform(CLI::IsMember({"text", "json", "csv", "fields"}))
+                      "Output format: text, json, csv, fields, or zeek (fields mirrors tshark's own -T "
+                      "fields -- print only the -e/--field values requested, tab-separated; see -e. "
+                      "zeek writes a real Zeek conn.log -- one row per TCP/UDP connection, not per "
+                      "packet, in Zeek's own TSV envelope, with `service` naming whichever protocol "
+                      "conduitscope decoded -- see docs/USER_GUIDE.md's Zeek export section for exactly "
+                      "which conn.log fields this first pass populates versus leaves unset)")
+        ->transform(CLI::IsMember({"text", "json", "csv", "fields", "zeek"}))
         ->capture_default_str();
     decode_cmd
         ->add_option("-t,--time-format", decode_time_format,

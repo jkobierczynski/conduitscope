@@ -2,9 +2,11 @@
 #include "conduitscope/output.hpp"
 
 #include <algorithm>
+#include <ctime>
 #include <iomanip>
 #include <sstream>
 
+#include "conduitscope/portable_time.hpp"
 #include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
@@ -5500,6 +5502,175 @@ void FieldsWriter::write_packet(const DecodedPacket& packet) {
         out_ << (it != values.end() ? terminal_escape(it->second) : "");
     }
     out_ << "\n";
+}
+
+namespace {
+// TSV-safe rendering for a Zeek log field -- every string this writer emits (IP-address strings,
+// the synthesized uid, protocol/service names) is drawn from this codebase's own controlled
+// vocabulary (numeric addresses, [a-z0-9-] protocol ids) and can never actually contain a tab or
+// newline, but this is cheap defense in depth against a future field this writer doesn't have yet
+// containing one, matching this codebase's general "escape packet-derived text before it reaches
+// a structured output format" posture (see terminal_escape's/json_escape's own file-header
+// reasoning) -- a raw tab would silently shift every column after it, and a raw newline would
+// forge what looks like an extra row, for any consumer trusting this as real tab-separated data.
+std::string zeek_tsv_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '\t': out += "\\t"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\\': out += "\\\\"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+// Zeek's own %.6f-with-trailing-zeros rendering for `time`/`interval` fields (see the worked
+// conn.log example this writer's own file-header comment cites: "1521911721.255387",
+// "0.004266") -- std::ostringstream with std::fixed/setprecision(6) reproduces this exactly.
+std::string zeek_time_field(double seconds) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6) << seconds;
+    return oss.str();
+}
+}  // namespace
+
+void ZeekWriter::write_packet(const DecodedPacket& p) {
+    // Scope (see output.hpp's own class comment and docs/USER_GUIDE.md's Zeek export section):
+    // only IPv4 TCP/UDP traffic becomes a conn.log row in this first pass. Real Zeek's own
+    // transport_proto enum also has icmp/unknown_transport values and DOES write ICMP to
+    // conn.log, but DecodedPacket has no populated src_port/dst_port for a non-TCP/UDP packet
+    // (has_tcp/has_udp are both false there) and no ready substitute for Zeek's own
+    // type<<8|code-in-the-port-fields ICMP convention -- rather than guess at one, ICMP (and
+    // every other non-TCP/UDP IP protocol) is left out of this export entirely, a stated
+    // first-pass scope boundary, not a silent gap.
+    if (!p.has_ip || !(p.has_tcp || p.has_udp)) return;
+
+    const std::string proto = p.has_tcp ? "tcp" : "udp";
+    const std::string a = p.src_ip + ":" + std::to_string(p.src_port);
+    const std::string b = p.dst_ip + ":" + std::to_string(p.dst_port);
+    // Canonical UNDIRECTED key -- both directions of the same connection must land in the same
+    // flow entry regardless of which one happens to be "src" on a given packet, so the key is
+    // built from the lexicographically SMALLER/LARGER endpoint string, not src/dst.
+    const std::string key = proto + "|" + std::min(a, b) + "|" + std::max(a, b);
+
+    auto it = flows_.find(key);
+    if (it == flows_.end()) {
+        // First packet ever seen for this connection: this side becomes "orig" (the connection
+        // originator) and the other side becomes "resp" -- matching real Zeek's own actual
+        // conn_id semantics (whichever endpoint sent the first packet the analyzer saw), NOT
+        // this codebase's separate FlowDirectionTracker heuristic tiers (handshake/content/
+        // port-heuristic -- see decoder.hpp's DirectionSource), which answer a different
+        // question ("which side is the client") using extra evidence beyond just packet order.
+        // Zeek itself doesn't second-guess first-packet-seen either, so this keeps the exported
+        // uid/orig/resp semantics honestly aligned with what real Zeek would report from the
+        // same single-pass capture read.
+        ZeekFlow flow;
+        flow.uid_ordinal = flow_order_.size();
+        flow.first_ts = flow.last_ts = p.timestamp;
+        flow.orig_h = p.src_ip;
+        flow.orig_p = p.src_port;
+        flow.resp_h = p.dst_ip;
+        flow.resp_p = p.dst_port;
+        flow.proto = proto;
+        flow_order_.push_back(key);
+        it = flows_.emplace(key, std::move(flow)).first;
+    }
+    ZeekFlow& flow = it->second;
+    flow.last_ts = std::max(flow.last_ts, p.timestamp);
+
+    const bool is_orig = (p.src_ip == flow.orig_h && p.src_port == flow.orig_p);
+    if (is_orig) {
+        flow.orig_pkts++;
+        flow.orig_ip_bytes += p.original_len;
+    } else {
+        flow.resp_pkts++;
+        flow.resp_ip_bytes += p.original_len;
+    }
+
+    // `service`: Zeek's own conn.log documents this as "a comma-separated list of confirmed
+    // protocol(s)" -- populated here from DecodedPacket::protocol, EXCLUDING the generic
+    // transport-only "tcp"/"udp" fallback labels decoder.hpp's own DecodedPacket::protocol
+    // comment documents as meaning "recognized transport, no app-layer match" (a bare TCP/UDP
+    // segment carrying no protocol this codebase recognized is not a "confirmed protocol" in
+    // Zeek's own sense of the word, so it must not populate this field -- leaving it genuinely
+    // unset, not misleadingly "tcp"/"udp", is the honest choice here). Every real protocol id
+    // this codebase decodes (a lowercase name like "modbus", "dnp3", "bacnet") is added
+    // verbatim -- these are conduitscope's own protocol identifiers, not guaranteed to be
+    // spelled identically to Zeek's own `service` naming convention for the same protocol (see
+    // docs/USER_GUIDE.md's own caveat on this).
+    if (p.protocol != "tcp" && p.protocol != "udp") {
+        flow.services.insert(p.protocol);
+    }
+}
+
+void ZeekWriter::end() {
+    // Zeek's own real TSV envelope (#separator/#set_separator/#empty_field/#unset_field/#path/
+    // #open/#fields/#types, tab-separated #fields/#types/data rows, "-" for an unset field) --
+    // verified against docs.zeek.org's own Conn::Info record reference and a worked conn.log
+    // example (zed.brimdata.io's own "Reading Zeek Log Formats" page, which quotes the identical
+    // header block and a real data row) before writing this, not assumed from memory alone. See
+    // output.hpp's own ZeekWriter class comment and docs/USER_GUIDE.md's Zeek export section for
+    // exactly which of Zeek's 21 real Conn::Info fields this first pass populates (ts, uid, id.*,
+    // proto, service, duration, orig_pkts, orig_ip_bytes, resp_pkts, resp_ip_bytes) versus leaves
+    // at Zeek's own "-" unset marker (orig_bytes, resp_bytes, conn_state, local_orig, local_resp,
+    // missed_bytes, history, tunnel_parents) and why -- every one of those seven unset fields
+    // would need either real TCP-state tracking this codebase's flow model doesn't keep (
+    // conn_state, history), a "local network" definition this codebase has no equivalent concept
+    // for yet (local_orig, local_resp), true L4-payload-only byte/gap accounting DecodedPacket
+    // doesn't expose generically across ~90 protocols' own framing (orig_bytes, resp_bytes,
+    // missed_bytes), or genuine tunnel-encapsulation correlation (tunnel_parents) -- each a
+    // stated first-pass scope boundary, not a guess dressed up as real data.
+    char open_time[32];
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm tm_buf{};
+        if (!portable_gmtime(now, tm_buf)) tm_buf = std::tm{};
+        std::strftime(open_time, sizeof(open_time), "%Y-%m-%d-%H-%M-%S", &tm_buf);
+    }
+    out_ << "#separator \\x09\n";
+    out_ << "#set_separator\t,\n";
+    out_ << "#empty_field\t(empty)\n";
+    out_ << "#unset_field\t-\n";
+    out_ << "#path\tconn\n";
+    out_ << "#open\t" << open_time << "\n";
+    out_ << "#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\t"
+            "orig_bytes\tresp_bytes\tconn_state\tlocal_orig\tlocal_resp\tmissed_bytes\thistory\t"
+            "orig_pkts\torig_ip_bytes\tresp_pkts\tresp_ip_bytes\ttunnel_parents\n";
+    out_ << "#types\ttime\tstring\taddr\tport\taddr\tport\tenum\tstring\tinterval\tcount\tcount\t"
+            "string\tbool\tbool\tcount\tstring\tcount\tcount\tcount\tcount\tset[string]\n";
+
+    for (const std::string& key : flow_order_) {
+        const ZeekFlow& flow = flows_.at(key);
+        std::ostringstream uid;
+        uid << "C" << std::setw(17) << std::setfill('0') << (flow.uid_ordinal + 1);
+
+        std::string service = "-";
+        if (!flow.services.empty()) {
+            service.clear();
+            bool first = true;
+            for (const std::string& s : flow.services) {
+                if (!first) service += ",";
+                service += zeek_tsv_escape(s);
+                first = false;
+            }
+        }
+
+        out_ << zeek_time_field(flow.first_ts) << "\t" << uid.str() << "\t" << zeek_tsv_escape(flow.orig_h)
+             << "\t" << flow.orig_p << "\t" << zeek_tsv_escape(flow.resp_h) << "\t" << flow.resp_p << "\t"
+             << flow.proto << "\t" << service << "\t" << zeek_time_field(flow.last_ts - flow.first_ts)
+             << "\t"
+             << "-\t-\t-\t-\t-\t-\t-\t"  // orig_bytes resp_bytes conn_state local_orig local_resp
+                                          // missed_bytes history -- see this function's own scope note
+             << flow.orig_pkts << "\t" << flow.orig_ip_bytes << "\t" << flow.resp_pkts << "\t"
+             << flow.resp_ip_bytes << "\t"
+             << "-\n";  // tunnel_parents
+    }
+
+    out_ << "#close\t" << open_time << "\n";
 }
 
 void StatsWriter::write_packet(const DecodedPacket& p) {
