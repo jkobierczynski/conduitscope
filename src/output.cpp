@@ -524,20 +524,36 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // drawing the eye to over everything else in a long decode -- both mean "look at this one".
     bool severe = p.protocol == "parse-error" ||
                   (p.protocol == "modbus" && p.result && p.result->as<ModbusFrame>().is_exception);
+    // An attack-pattern packet (DecodedPacket::has_attack_signature, decoder.hpp -- LAND,
+    // Teardrop, Ping of Death, Smurf, Fraggle, a flood threshold crossing, WinNuke, ICMP
+    // Redirect, IP Source Routing, or an IPv6 analog) gets the whole head line turned red, not
+    // just the summary the way `severe` alone does -- notes are hidden unless -v/--verbose is
+    // given (see below), so without this the only signal an analyst gets from a default `decode`
+    // run would be buried in a note they'd need -v to even see. Every part of the head line that
+    // would otherwise print in the terminal's own default ("normal", typically white-on-dark)
+    // color turns kBoldRed instead; the "[protocol]" tag deliberately keeps its own
+    // protocol_tag_color(p.protocol) regardless (a mixed-protocol capture should still scan by
+    // protocol color first), and the direction-source suffix below keeps its own yellow/dim
+    // (that color already carries a distinct, unrelated meaning -- see its own comment) rather
+    // than being overridden by this.
+    bool attack = p.has_attack_signature;
+    bool red_line = severe || attack;
 
     std::ostringstream head;
+    if (color_ && attack) head << kBoldRed;
     head << "#" << p.index << "  " << time_.format(p.timestamp) << "  "
          << endpoint(p, true, resolver_) << " -> " << endpoint(p, false, resolver_) << "  ";
+    if (color_ && attack) head << kReset;
     if (color_) head << protocol_tag_color(p.protocol);
     head << "[" << p.protocol << "]";
     if (color_) head << kReset;
     head << "  ";
-    if (color_ && severe) head << kBoldRed;
+    if (color_ && red_line) head << kBoldRed;
     // terminal_escape (finding 4) -- p.summary is built directly from wire bytes for several
     // protocols (DNS names, MQTT strings, ...) and, unlike JsonWriter/CsvWriter, this writer puts
     // it straight on the terminal with nothing else in between.
     head << terminal_escape(p.summary);
-    if (color_ && severe) head << kReset;
+    if (color_ && red_line) head << kReset;
     // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
     // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Folded into the head line itself
     // (appended after the summary, purely additive -- notes/eth/etc. below are unaffected) rather

@@ -859,6 +859,26 @@ struct DecodedPacket {
     std::string summary;
     std::vector<std::string> notes;
 
+    // Set true the moment this packet triggers one of attack_detect.hpp's or
+    // ipv6_attack_detect.hpp's own classic DoS/reconnaissance attack-pattern notes -- LAND,
+    // Teardrop, Ping of Death, Smurf, Fraggle, a SYN/ACK/TCP/UDP/ICMP flood threshold crossing,
+    // WinNuke, ICMP Redirect, IP Source Routing (attack_detect.hpp), or an IPv6 analog -- RA
+    // collision/flood, NS/NA spoofing, DHCPv6 exhaustion, a rogue DHCPv6 server
+    // (ipv6_attack_detect.hpp). Populated by Decoder::decode (decoder.cpp) at each of the six
+    // observe_*() call sites, by comparing `notes.size()` immediately before/after the call --
+    // deliberately a structured bool set at the source, not a substring match against note text
+    // at display time, matching this codebase's existing "severe" precedent (TextWriter::
+    // write_packet, output.cpp -- p.protocol == "parse-error" / a Modbus exception) rather than
+    // fragile text sniffing. Distinct from `severe`: a parse error or Modbus exception is a
+    // decode-quality signal, this is a security signal, and a packet can in principle be both (a
+    // malformed TCP LAND packet whose application layer also fails to parse) -- see
+    // TextWriter::write_packet's own `red_line = severe || attack` for how the two combine.
+    // Deliberately NOT set for any OTHER curated note this codebase appends to `notes` (a BSAP
+    // NAK, a DCSync flag, an OT engineering-station finding, ...) -- this field means specifically
+    // "one of attack_detect.hpp's/ipv6_attack_detect.hpp's own named signatures fired", nothing
+    // broader.
+    bool has_attack_signature = false;
+
     // registration-model decoder refactor (see protocol_decoder.hpp): set only by a protocol built
     // on the new ProtocolDecoder interface that chooses to carry its own structured result forward
     // for a renderer to read (TwinCAT, BGP, Slow Protocols, Kerberos, LDAP, SMB, MELSEC, FINS,
