@@ -74,7 +74,8 @@ void evict_if_full(MapT& map, size_t cap) {
 }  // namespace
 
 void Ipv6AttackDetectionState::observe_icmpv6(const Icmpv6Message& msg, const std::string& src_ip,
-                                               std::vector<std::string>& notes) {
+                                               std::vector<std::string>& notes,
+                                               std::string* fired_kind) {
     // Signature (2): RA flood -- see this file's own header comment on why this counts whole-link
     // messages rather than per-destination (an RA's real destination is ff02::1, the all-nodes
     // multicast address, not any one host).
@@ -88,6 +89,7 @@ void Ipv6AttackDetectionState::observe_icmpv6(const Icmpv6Message& msg, const st
                 "succession, often with randomized field values); a WHOLE-CAPTURE count, not a "
                 "per-second rate, the same simplification attack_detect.hpp's own IPv4 flood "
                 "counters use");
+            if (fired_kind) *fired_kind = "ipv6-ra-flood";
         }
 
         // Signature (1): RA identity collision -- see this file's own header comment for exactly
@@ -123,6 +125,7 @@ void Ipv6AttackDetectionState::observe_icmpv6(const Icmpv6Message& msg, const st
                         "observation alone cannot make that determination), and a redundant pair "
                         "of legitimate routers can produce this same structural shape; correlate "
                         "against known network infrastructure before treating this as an attack");
+                    if (fired_kind) *fired_kind = "ipv6-ra-collision";
                     break;
                 }
             }
@@ -152,13 +155,15 @@ void Ipv6AttackDetectionState::observe_icmpv6(const Icmpv6Message& msg, const st
                     "or the DAD-DoS tool dos-new-ip6); worth investigating, since a legitimate "
                     "address handoff (e.g. failover) can occasionally produce a brief, one-time "
                     "version of this same structural shape");
+                if (fired_kind) *fired_kind = "ipv6-na-spoofing";
             }
         }
     }
 }
 
 void Ipv6AttackDetectionState::observe_dhcpv6(const Dhcpv6Message& msg,
-                                               std::vector<std::string>& notes) {
+                                               std::vector<std::string>& notes,
+                                               std::string* fired_kind) {
     if (msg.is_relay) return;  // never decoded through to the inner message -- see this file's own
                                  // OUT OF SCOPE section; client_duid_key/server_duid_key are only
                                  // ever populated for a non-relay message anyway
@@ -179,6 +184,7 @@ void Ipv6AttackDetectionState::observe_dhcpv6(const Dhcpv6Message& msg,
                 ") -- the structural shape of thc-ipv6's flood_dhcpc6 (address-pool starvation via "
                 "many spoofed client identities); counted by distinct identity, not raw packet "
                 "count, so one legitimate client retrying does not trip this");
+            if (fired_kind) *fired_kind = "ipv6-dhcpv6-exhaustion";
         }
     }
 
@@ -199,6 +205,7 @@ void Ipv6AttackDetectionState::observe_dhcpv6(const Dhcpv6Message& msg,
                 "non-authorized servers), though a legitimate high-availability server pair "
                 "produces this same structural shape; correlate against known server inventory "
                 "before treating this as an attack");
+            if (fired_kind) *fired_kind = "ipv6-rogue-dhcpv6-server";
         }
     }
 }

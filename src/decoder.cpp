@@ -1522,8 +1522,12 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
         // parsed. IPv6 has no equivalent call site (see attack_detect.hpp's own file header).
         {
             size_t notes_before = out.notes.size();
-            attack_state_.observe_ipv4(ip, out.notes);
-            if (out.notes.size() > notes_before) out.has_attack_signature = true;
+            std::string attack_kind;
+            attack_state_.observe_ipv4(ip, out.notes, &attack_kind);
+            if (out.notes.size() > notes_before) {
+                out.has_attack_signature = true;
+                out.attack_signature_kind = attack_kind;
+            }
         }
         if (ip.trailing_bytes_trimmed > 0) {
             out.notes.push_back(std::to_string(ip.trailing_bytes_trimmed) +
@@ -1582,8 +1586,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             // subsequently recognized as -- out.notes is additive, never reset below.
             {
                 size_t notes_before = out.notes.size();
-                attack_state_.observe_udp(udp, out.dst_ip, out.notes);
-                if (out.notes.size() > notes_before) out.has_attack_signature = true;
+                std::string attack_kind;
+                attack_state_.observe_udp(udp, out.dst_ip, out.notes, &attack_kind);
+                if (out.notes.size() > notes_before) {
+                    out.has_attack_signature = true;
+                    out.attack_signature_kind = attack_kind;
+                }
             }
 
             // Tried first, port-independently, same rationale as EtherNet/IP explicit messaging's
@@ -2464,8 +2472,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                         // Server DUIDs).
                         {
                             size_t notes_before = out.notes.size();
-                            ipv6_attack_state_.observe_dhcpv6(msg, out.notes);
-                            if (out.notes.size() > notes_before) out.has_attack_signature = true;
+                            std::string attack_kind;
+                            ipv6_attack_state_.observe_dhcpv6(msg, out.notes, &attack_kind);
+                            if (out.notes.size() > notes_before) {
+                                out.has_attack_signature = true;
+                                out.attack_signature_kind = attack_kind;
+                            }
                         }
                         out.result = *result;
                         if (!port_match) {
@@ -2648,8 +2660,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     // ICMP (Echo Request) flood counter.
                     {
                         size_t notes_before = out.notes.size();
-                        attack_state_.observe_icmp(msg, out.dst_ip, out.notes);
-                        if (out.notes.size() > notes_before) out.has_attack_signature = true;
+                        std::string attack_kind;
+                        attack_state_.observe_icmp(msg, out.dst_ip, out.notes, &attack_kind);
+                        if (out.notes.size() > notes_before) {
+                            out.has_attack_signature = true;
+                            out.attack_signature_kind = attack_kind;
+                        }
                     }
                     out.result = *result;
                     return out;
@@ -2680,8 +2696,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     // above, NOT a call into attack_detect.hpp itself (which stays IPv4-only).
                     {
                         size_t notes_before = out.notes.size();
-                        ipv6_attack_state_.observe_icmpv6(msg, out.src_ip, out.notes);
-                        if (out.notes.size() > notes_before) out.has_attack_signature = true;
+                        std::string attack_kind;
+                        ipv6_attack_state_.observe_icmpv6(msg, out.src_ip, out.notes, &attack_kind);
+                        if (out.notes.size() > notes_before) {
+                            out.has_attack_signature = true;
+                            out.attack_signature_kind = attack_kind;
+                        }
                     }
                     out.result = *result;
                     return out;
@@ -2894,8 +2914,12 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // this after that return would miss most of what these signatures actually look like.
         {
             size_t notes_before = out.notes.size();
-            attack_state_.observe_tcp(tcp, out.src_ip, out.dst_ip, out.notes);
-            if (out.notes.size() > notes_before) out.has_attack_signature = true;
+            std::string attack_kind;
+            attack_state_.observe_tcp(tcp, out.src_ip, out.dst_ip, out.notes, &attack_kind);
+            if (out.notes.size() > notes_before) {
+                out.has_attack_signature = true;
+                out.attack_signature_kind = attack_kind;
+            }
         }
 
         if (tcp.payload.empty()) {

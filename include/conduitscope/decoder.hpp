@@ -879,6 +879,23 @@ struct DecodedPacket {
     // broader.
     bool has_attack_signature = false;
 
+    // Which specific attack_detect.hpp/ipv6_attack_detect.hpp signature set has_attack_signature
+    // above -- a short, stable, kebab-case slug ("land", "syn-flood", "ipv6-ra-collision", ...),
+    // empty iff !has_attack_signature. Set by Decoder::decode (decoder.cpp) at the same six
+    // observe_*() call sites has_attack_signature itself is set at, via each function's own
+    // optional `fired_kind` out-parameter -- structured at the source, matching this file's own
+    // has_attack_signature precedent, not a substring match against note text at display time.
+    // Added specifically so TextWriter::write_packet (output.cpp) can show a short, precise
+    // "[attack: <kind>]" text tag instead of coloring the packet's entire head line red -- see
+    // that function's own comment for why whole-line-red was the wrong amount of emphasis on a
+    // capture where a flood/scan threshold crosses more than once (Jurgen's own report, a real
+    // 4SICS port-scan capture where attack_detect.hpp's own TCP-generic-flood counter crossed
+    // its threshold independently of, and on top of, `decode`'s own detect-highlighting feature).
+    // If more than one signature fires on the same packet (rare but possible -- see e.g.
+    // observe_tcp's own doc comment), the LAST one to fire wins, the same simplification
+    // detect_finding_kind below already uses for DetectEngine's own AlwaysNotableHit.
+    std::string attack_signature_kind;
+
     // `decode`'s own "always-notable highlighting" feature (see docs/USER_GUIDE.md's own subsection
     // under `decode`, and DetectEngine::AlwaysNotableHit's own comment, detect_engine.hpp). Set by
     // cli_main.cpp's run_decode AFTER Decoder::decode already produced this packet -- NOT by

@@ -158,16 +158,22 @@ public:
     // source address (format_ipv6), used both as half of an RA identity's key and, for a Neighbor
     // Advertisement with no Target Link-Layer Address option, as a fallback "who sent this"
     // identity (see ipv6_attack_detect.cpp's comment on that fallback).
+    // `fired_kind`, when non-null: see attack_detect.hpp's own observe_ipv4 comment for the full
+    // rationale -- a short, stable, kebab-case slug ("ipv6-ra-collision", "ipv6-ra-flood",
+    // "ipv6-na-spoofing") for whichever of this call's signatures just fired, last-one-wins if more
+    // than one fires in the same call, `nullptr` by default so every existing caller is unaffected.
     void observe_icmpv6(const Icmpv6Message& msg, const std::string& src_ip,
-                         std::vector<std::string>& notes);
+                         std::vector<std::string>& notes, std::string* fired_kind = nullptr);
 
     // Called right after a successful DHCPv6 decode (dhcpv6.hpp). Handles the DHCPv6 exhaustion
     // counter (4, distinct Client DUIDs in SOLICIT/REQUEST) and rogue/multiple-server detection
     // (5, distinct Server DUIDs in ADVERTISE/REPLY). A no-op for a relayed message's RELAY-FORW/
     // RELAY-REPL header (dhcpv6.hpp does not decode through to the inner message -- see this
     // file's OUT OF SCOPE section) since Dhcpv6Message::client_duid_key/server_duid_key are only
-    // ever populated for a non-relay message in the first place.
-    void observe_dhcpv6(const Dhcpv6Message& msg, std::vector<std::string>& notes);
+    // ever populated for a non-relay message in the first place. `fired_kind`: see observe_icmpv6's
+    // own comment above ("ipv6-dhcpv6-exhaustion", "ipv6-rogue-dhcpv6-server").
+    void observe_dhcpv6(const Dhcpv6Message& msg, std::vector<std::string>& notes,
+                         std::string* fired_kind = nullptr);
 
 private:
     static constexpr size_t kMaxTrackedEntries = 4096;

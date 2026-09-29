@@ -526,41 +526,35 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // drawing the eye to over everything else in a long decode -- both mean "look at this one".
     bool severe = p.protocol == "parse-error" ||
                   (p.protocol == "modbus" && p.result && p.result->as<ModbusFrame>().is_exception);
-    // An attack-pattern packet (DecodedPacket::has_attack_signature, decoder.hpp -- LAND,
-    // Teardrop, Ping of Death, Smurf, Fraggle, a flood threshold crossing, WinNuke, ICMP
-    // Redirect, IP Source Routing, or an IPv6 analog) gets the whole head line turned red, not
-    // just the summary the way `severe` alone does -- notes are hidden unless -v/--verbose is
-    // given (see below), so without this the only signal an analyst gets from a default `decode`
-    // run would be buried in a note they'd need -v to even see. Every part of the head line that
-    // would otherwise print in the terminal's own default ("normal", typically white-on-dark)
-    // color turns kBoldRed instead; the "[protocol]" tag deliberately keeps its own
-    // protocol_tag_color(p.protocol) regardless (a mixed-protocol capture should still scan by
-    // protocol color first), and the direction-source suffix below keeps its own yellow/dim
-    // (that color already carries a distinct, unrelated meaning -- see its own comment) rather
-    // than being overridden by this.
-    bool attack = p.has_attack_signature;
-    // `decode`'s own "always-notable highlighting" (--detect-highlight, on by default -- see
-    // DecodedPacket::has_detect_finding's own comment, decoder.hpp) is deliberately NOT folded into
-    // red_line below. A detect-only finding (no severe/attack) is the common case on a busy
-    // capture -- an outbound port-scan probe fires this on every single scanned-port packet, per
-    // this feature's own "fire on every matching packet" design (detect_engine.cpp's
-    // record_always_notable) -- and turning every such line's own IP-decode-plus-summary fully red
-    // buried the actual "IP -> IP  [protocol]  summary" decode underneath a wall of red instead of
-    // drawing the eye to one thing. Reported directly against a real capture (a 4SICS port scan,
-    // decode --detect-highlight's own default output): the IP endpoints and summary should stay in
-    // the terminal's normal color, the "[protocol]" tag keeps its own established color as always,
-    // and only the "[detect: <kind>]" tag itself (appended below) gets a narrowly-scoped red wrap --
-    // so a scan reads as a normal decode line with one precise red flag at the end, not a solid red
-    // line. `severe`/`attack` are unaffected by this and keep their own existing, wider red_line
-    // treatment below (a parse failure or an attack-pattern packet is rare enough on a normal
-    // capture that a fully red line is still the right amount of emphasis for those).
-    bool red_line = severe || attack;
+    // An attack-pattern packet (DecodedPacket::has_attack_signature/attack_signature_kind,
+    // decoder.hpp -- LAND, Teardrop, Ping of Death, Smurf, Fraggle, a flood threshold crossing,
+    // WinNuke, ICMP Redirect, IP Source Routing, or an IPv6 analog) used to get the WHOLE head
+    // line turned red -- reverted after a direct report (Jurgen's own, a real 4SICS port-scan
+    // capture): attack_detect.hpp's own TCP-generic-flood counter crosses its threshold
+    // independently of, and in addition to, `decode`'s own detect-highlighting feature below, so a
+    // busy capture could end up with MULTIPLE separate reasons for a fully red line, each burying
+    // the actual "IP -> IP  [protocol]  summary" decode underneath a wall of red instead of drawing
+    // the eye to one thing -- the exact same problem detect-highlighting's own coloring already had
+    // to solve (see that fix's own history, docs/DEVELOPMENT.md ROADMAP item 99). `attack` now gets
+    // the identical treatment: the IP endpoints and summary stay in the terminal's normal color,
+    // the "[protocol]" tag keeps its own established color as always, and a new "[attack: <kind>]"
+    // tag (appended below, alongside "[detect: <kind>]") carries the signal instead -- which also
+    // fixes a real gap the old whole-line-red design had: under --no-color or piped/non-terminal
+    // output, an attack-pattern packet previously had NO visible signal at all in default text
+    // output (notes, which do carry the full description, are -v/--verbose-only -- see below),
+    // silently violating this codebase's own "nothing here is color-only information" principle
+    // that the tag below already follows for detect findings. (No local `attack` bool here --
+    // p.has_attack_signature is used directly at its one remaining call site below.)
+    // `red_line` is now `severe` alone -- a parse failure or a Modbus exception response is rare
+    // enough on a normal capture, and has no tag of its own to fall back on, that coloring its
+    // summary red (not the endpoints -- `severe` never did that) remains the right amount of
+    // emphasis. `attack`/`has_detect_finding` both instead get their own narrowly-scoped tag below,
+    // independent of this flag and of each other.
+    bool red_line = severe;
 
     std::ostringstream head;
-    if (color_ && attack) head << kBoldRed;
     head << "#" << p.index << "  " << time_.format(p.timestamp) << "  "
          << endpoint(p, true, resolver_) << " -> " << endpoint(p, false, resolver_) << "  ";
-    if (color_ && attack) head << kReset;
     if (color_) head << protocol_tag_color(p.protocol);
     head << "[" << p.protocol << "]";
     if (color_) head << kReset;
@@ -575,10 +569,15 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // color-only information", the same principle the direction-source suffix below already
     // documents for itself. A flagged packet piped to a file or a non-terminal without --color
     // still shows the tag; only the extra red emphasis is color-gated. Colored independently of
-    // red_line above -- see this function's own opening comment for why: a detect-only finding
-    // leaves the IP decode and summary in the terminal's normal color and puts just this tag in
-    // bold red. On a severe/attack line the summary above is already red; this tag simply stays
-    // red too in that case (both kBoldRed, so no visible seam), not a conflict.
+    // red_line and of "[detect: ...]" below -- see this function's own opening comment for why.
+    if (p.has_attack_signature) {
+        if (color_) head << kBoldRed;
+        head << "  [attack: " << terminal_escape(p.attack_signature_kind) << "]";
+        if (color_) head << kReset;
+    }
+    // Same tag-only treatment and same "not color-only" rationale as "[attack: ...]" just above --
+    // see this function's own opening comment for the full history of why both ended up here
+    // rather than reddening the whole line.
     if (p.has_detect_finding) {
         if (color_) head << kBoldRed;
         head << "  [detect: " << terminal_escape(p.detect_finding_kind) << "]";

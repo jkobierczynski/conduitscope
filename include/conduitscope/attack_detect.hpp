@@ -190,21 +190,38 @@ public:
     // dispatch. Handles IP Source Routing (single packet), Ping of Death (single packet, last-
     // fragment structural check), and Teardrop (this fragment vs. the one most recently seen for
     // the same datagram). Appends notes directly to `notes`.
-    void observe_ipv4(const Ipv4Header& ip, std::vector<std::string>& notes);
+    //
+    // `fired_kind`, when non-null, is written with a short, stable, kebab-case slug for whichever
+    // signature just fired ("ip-source-routing", "ping-of-death", "teardrop", ...) -- the SAME
+    // structured-at-the-source discipline this class's own has_attack_signature precedent already
+    // established (decoder.hpp's own comment on that field), not a substring match against the
+    // note text at display time. If more than one signature fires in a single call (possible here:
+    // an IP Source Route option and, on a later fragment, Teardrop, could both apply to packets in
+    // the same short sequence, though never within the SAME call since IP Source Routing returns
+    // before the fragment logic runs), the LAST one to fire wins -- the same "last hit wins on this
+    // packet" simplification `decode`'s own always-notable highlighting already uses for
+    // DetectEngine's AlwaysNotableHit (see that struct's own comment, detect_engine.hpp). Every
+    // existing caller keeps passing nothing and getting `nullptr` (the default), so this is
+    // additive -- see decoder.hpp's own DecodedPacket::attack_signature_kind for the one caller
+    // that does pass a real pointer, and why.
+    void observe_ipv4(const Ipv4Header& ip, std::vector<std::string>& notes,
+                       std::string* fired_kind = nullptr);
 
     // Called right after parse_tcp() succeeds, before any application-layer TCP dispatch. Handles
-    // LAND, WinNuke, and the SYN/ACK/TCP-generic flood counters (keyed by dst_ip).
+    // LAND, WinNuke, and the SYN/ACK/TCP-generic flood counters (keyed by dst_ip). `fired_kind`:
+    // see observe_ipv4's own comment above.
     void observe_tcp(const TcpSegment& tcp, const std::string& src_ip, const std::string& dst_ip,
-                      std::vector<std::string>& notes);
+                      std::vector<std::string>& notes, std::string* fired_kind = nullptr);
 
     // Called right after parse_udp() succeeds. Handles Fraggle and the UDP flood counter.
+    // `fired_kind`: see observe_ipv4's own comment above.
     void observe_udp(const UdpDatagram& udp, const std::string& dst_ip,
-                      std::vector<std::string>& notes);
+                      std::vector<std::string>& notes, std::string* fired_kind = nullptr);
 
     // Called right after a successful ICMP decode. Handles Smurf, ICMP Redirect, and the ICMP
-    // (Echo Request) flood counter.
+    // (Echo Request) flood counter. `fired_kind`: see observe_ipv4's own comment above.
     void observe_icmp(const IcmpMessage& msg, const std::string& dst_ip,
-                       std::vector<std::string>& notes);
+                       std::vector<std::string>& notes, std::string* fired_kind = nullptr);
 
 private:
     static constexpr size_t kMaxTrackedEntries = 4096;

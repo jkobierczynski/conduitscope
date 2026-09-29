@@ -48,13 +48,15 @@ FloodCounters* AttackDetectionState::flood_counters_for(const std::string& dst_i
     return &flood_counts_[dst_ip];
 }
 
-void AttackDetectionState::observe_ipv4(const Ipv4Header& ip, std::vector<std::string>& notes) {
+void AttackDetectionState::observe_ipv4(const Ipv4Header& ip, std::vector<std::string>& notes,
+                                         std::string* fired_kind) {
     if (ipv4_has_source_route_option(ip.options)) {
         notes.push_back(
             "IP Source Route option present (Loose or Strict Source and Record Route) -- lets the "
             "sender dictate this datagram's path, a known technique for bypassing route-based "
             "access controls or masking the traffic's real origin; most networks should be "
             "dropping source-routed packets entirely");
+        if (fired_kind) *fired_kind = "ip-source-routing";
     }
 
     bool is_fragment = ip.flag_mf || ip.fragment_offset != 0;
@@ -71,6 +73,7 @@ void AttackDetectionState::observe_ipv4(const Ipv4Header& ip, std::vector<std::s
                          std::to_string(end) +
                          " bytes, past the 65535-byte maximum a valid IP datagram can ever "
                          "declare -- the classic oversized-ping crash exploit's structural shape");
+        if (fired_kind) *fired_kind = "ping-of-death";
     }
 
     FragmentTrackKey key{ip.src_addr, ip.dst_addr, ip.protocol, ip.identification};
@@ -85,6 +88,7 @@ void AttackDetectionState::observe_ipv4(const Ipv4Header& ip, std::vector<std::s
                 std::to_string(end) + ") overlaps the previous fragment of the same datagram "
                 "(bytes " + std::to_string(prev.start) + "-" + std::to_string(prev.end) +
                 ") -- the classic fragment-reassembly crash exploit's structural shape");
+            if (fired_kind) *fired_kind = "teardrop";
         }
     }
 
@@ -100,12 +104,14 @@ void AttackDetectionState::observe_ipv4(const Ipv4Header& ip, std::vector<std::s
 }
 
 void AttackDetectionState::observe_tcp(const TcpSegment& tcp, const std::string& src_ip,
-                                        const std::string& dst_ip, std::vector<std::string>& notes) {
+                                        const std::string& dst_ip, std::vector<std::string>& notes,
+                                        std::string* fired_kind) {
     if ((tcp.flags & TCP_FLAG_SYN) && src_ip == dst_ip && tcp.src_port == tcp.dst_port) {
         notes.push_back("LAND attack: TCP SYN with identical source and destination (" + src_ip +
                          ":" + std::to_string(tcp.src_port) +
                          ") -- a self-directed connection request, a known DoS primitive against "
                          "stacks that mishandle it");
+        if (fired_kind) *fired_kind = "land";
     }
 
     if ((tcp.flags & TCP_FLAG_URG) && tcp.urgent_pointer != 0 && !tcp.payload.empty() &&
@@ -117,6 +123,7 @@ void AttackDetectionState::observe_tcp(const TcpSegment& tcp, const std::string&
             "structural shape (legitimate URG traffic on this port is essentially unheard of; "
             "note this can also false-positive against genuinely rare legitimate URG usage such "
             "as old Telnet/FTP synchronize signaling, though never on port 139 specifically)");
+        if (fired_kind) *fired_kind = "winnuke";
     }
 
     FloodCounters* counters = flood_counters_for(dst_ip);
@@ -137,12 +144,14 @@ void AttackDetectionState::observe_tcp(const TcpSegment& tcp, const std::string&
         notes.push_back("SYN flood suspected: " + std::to_string(counters->syn_count) +
                          " SYN (no ACK) packets to " + dst_ip +
                          " seen in this capture (threshold: " + std::to_string(flood_threshold) + ")");
+        if (fired_kind) *fired_kind = "syn-flood";
     }
     if (is_ack_only && ++counters->ack_count >= flood_threshold && !counters->ack_flagged) {
         counters->ack_flagged = true;
         notes.push_back("ACK flood suspected: " + std::to_string(counters->ack_count) +
                          " ACK (no SYN) packets to " + dst_ip +
                          " seen in this capture (threshold: " + std::to_string(flood_threshold) + ")");
+        if (fired_kind) *fired_kind = "ack-flood";
     }
     if (++counters->tcp_count >= flood_threshold && !counters->tcp_flagged) {
         counters->tcp_flagged = true;
@@ -151,16 +160,18 @@ void AttackDetectionState::observe_tcp(const TcpSegment& tcp, const std::string&
                          " seen in this capture (threshold: " + std::to_string(flood_threshold) +
                          " -- a broad catch-all bucket, not a single named signature; a SYN or "
                          "ACK flood will typically cross this threshold too)");
+        if (fired_kind) *fired_kind = "tcp-flood";
     }
 }
 
 void AttackDetectionState::observe_udp(const UdpDatagram& udp, const std::string& dst_ip,
-                                        std::vector<std::string>& notes) {
+                                        std::vector<std::string>& notes, std::string* fired_kind) {
     if ((udp.dst_port == 7 || udp.dst_port == 19) && looks_like_broadcast(dst_ip)) {
         notes.push_back(
             "Fraggle attack: UDP " + std::string(udp.dst_port == 7 ? "Echo (port 7)" : "Chargen (port 19)") +
             " request to a broadcast-looking destination (" + dst_ip +
             ") -- amplification/reflection potential, the UDP counterpart to Smurf");
+        if (fired_kind) *fired_kind = "fraggle";
     }
 
     FloodCounters* counters = flood_counters_for(dst_ip);
@@ -170,16 +181,18 @@ void AttackDetectionState::observe_udp(const UdpDatagram& udp, const std::string
         notes.push_back("UDP flood suspected: " + std::to_string(counters->udp_count) +
                          " UDP datagrams to " + dst_ip +
                          " seen in this capture (threshold: " + std::to_string(flood_threshold) + ")");
+        if (fired_kind) *fired_kind = "udp-flood";
     }
 }
 
 void AttackDetectionState::observe_icmp(const IcmpMessage& msg, const std::string& dst_ip,
-                                         std::vector<std::string>& notes) {
+                                         std::vector<std::string>& notes, std::string* fired_kind) {
     if (msg.type == 8 && looks_like_broadcast(dst_ip)) {  // Echo Request
         notes.push_back(
             "Smurf attack: ICMP Echo Request to a broadcast-looking destination (" + dst_ip +
             ") -- every host on that segment would reply to whatever source address this packet "
             "claims, the classic ICMP amplification/reflection pattern");
+        if (fired_kind) *fired_kind = "smurf";
     }
     if (msg.type == 5) {  // Redirect
         notes.push_back(
@@ -188,6 +201,7 @@ void AttackDetectionState::observe_icmp(const IcmpMessage& msg, const std::strin
             " -- ICMP has no authentication, so any host on the local segment can send one of "
             "these to silently retarget a victim's next-hop for a destination; a known MITM/route-"
             "poisoning primitive, more consequential on a flat OT network than a segmented one");
+        if (fired_kind) *fired_kind = "icmp-redirect";
     }
 
     if (msg.type != 8) return;
@@ -198,6 +212,7 @@ void AttackDetectionState::observe_icmp(const IcmpMessage& msg, const std::strin
         notes.push_back("ICMP flood suspected: " + std::to_string(counters->icmp_echo_count) +
                          " Echo Request packets to " + dst_ip +
                          " seen in this capture (threshold: " + std::to_string(flood_threshold) + ")");
+        if (fired_kind) *fired_kind = "icmp-flood";
     }
 }
 

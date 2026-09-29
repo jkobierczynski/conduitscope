@@ -14326,6 +14326,106 @@ it done as its own patch.
     left for `-i`/streaming use; this is scoped now so a future session can
     build directly from this design record rather than re-researching it.
 
+    **Second follow-up fix, same day: `attack`-pattern packets had the exact
+    same whole-line-red bug, just never reported the first time because
+    Jurgen's own screenshot happened to show detect-only lines first.**
+    After the fix above shipped, Jurgen reported "There is still a
+    problem" with a second screenshot of the same 4SICS GeekLounge capture.
+    Rather than a stale build (ruled out directly: Jurgen deleted his local
+    clone, re-cloned, and rebuilt from scratch on both Windows and Linux,
+    confirming his local `output.cpp` already had the fixed `bool red_line =
+    severe || attack;` line), close reading of the second screenshot showed
+    only a FEW specific port-scan packets were still fully red, not most --
+    and those few lines all lined up with `attack_detect.hpp`'s own
+    flood-threshold counters (`DEFAULT_FLOOD_THRESHOLD = 100`, firing once
+    per destination/category) independently crossing their threshold partway
+    through the same capture. `attack_detect.hpp`/`ipv6_attack_detect.hpp`
+    are a separate, much older subsystem from `DetectEngine`'s always-notable
+    findings, and the first fix deliberately left `attack` in `red_line`'s
+    OR, since at the time nothing else conveyed an attack-pattern packet's
+    significance in plain text output at all -- removing the color then
+    would have made it invisible under `--no-color`, not just less red.
+
+    Asked Jurgen directly (`AskUserQuestion`) whether to extend the same
+    tag-only treatment to `attack`-pattern packets, requiring a new
+    `[attack: <kind>]` text tag first (since, unlike `detect`, an
+    attack-pattern packet had no plain-text signal to fall back to).
+    Jurgen's answer: "Yes, same tag-only treatment (Recommended)".
+
+    Implemented by extending the exact same "structured at the source, not
+    text-sniffed" discipline `detect_finding_kind` already established:
+    `AttackDetectionState::observe_ipv4/observe_tcp/observe_udp/observe_icmp`
+    (`attack_detect.hpp`/`.cpp`) and `Ipv6AttackDetectionState::
+    observe_icmpv6/observe_dhcpv6` (`ipv6_attack_detect.hpp`/`.cpp`) each
+    gained a trailing `std::string* fired_kind = nullptr` out-parameter,
+    defaulted for backward compatibility and set immediately after each of
+    the 17 `notes.push_back(...)` call sites (13 IPv4 signatures, 5 IPv6 --
+    `observe_icmpv6` covers two of the five) to one of 18 kebab-case slugs
+    (`ip-source-routing`, `ping-of-death`, `teardrop`, `land`, `winnuke`,
+    `syn-flood`, `ack-flood`, `tcp-flood`, `fraggle`, `udp-flood`, `smurf`,
+    `icmp-redirect`, `icmp-flood`, `ipv6-ra-flood`, `ipv6-ra-collision`,
+    `ipv6-na-spoofing`, `ipv6-dhcpv6-exhaustion`,
+    `ipv6-rogue-dhcpv6-server`) -- "last hit wins" when a single call could
+    theoretically set more than one, the same simplification
+    `DetectEngine`'s own `pending_hit` already uses. `DecodedPacket` gained
+    `std::string attack_signature_kind`, populated at all 6 `decoder.cpp`
+    call sites alongside the existing `has_attack_signature = true`, empty
+    iff `has_attack_signature` is `false`.
+
+    `TextWriter::write_packet` (`output.cpp`): `red_line` narrowed again, to
+    `severe` alone; the whole-line `kBoldRed` wrap around the endpoint line
+    for `attack` was deleted outright, and a new
+    `[attack: <kind>]` tag -- printed right before the pre-existing
+    `[detect: ...]` tag, identical `kBoldRed`/`kReset` scoping -- takes its
+    place. An `attack`-pattern packet's IP endpoints, `[protocol]` tag, and
+    summary text now print in their normal colors, exactly like a
+    detect-only finding; only `severe` (parse-error/Modbus-exception)
+    packets keep the original wider red treatment, since that's a single
+    packet's own malformed content, not a repeatable pattern that can flood
+    a capture. Incidental correctness fix: `attack_signature_kind` is set
+    structurally, not text-sniffed, and the new tag means an attack-pattern
+    packet is no longer color-only information -- previously it had *zero*
+    visible signal under `--no-color`/piped output in default text mode.
+
+    Four pre-existing CTest entries in the "Colorized text output" section
+    were rewritten to match (their old names/regexes asserted the very
+    whole-line-red behavior just removed):
+    `color_attack_pattern_head_line_red` renamed to
+    `color_attack_pattern_tag_scoped_not_whole_line`;
+    `color_non_attack_packet_not_reddened` kept its name, regex updated;
+    `color_attack_pattern_suppressed_by_no_color` renamed to
+    `color_attack_pattern_tag_survives_no_color`;
+    `color_attack_pattern_head_line_red_ipv6` renamed to
+    `color_attack_pattern_tag_scoped_ipv6`. Each regex was verified against
+    real `cat -v`-inspected `--color` output before being written. The IPv6
+    one needed a second pass: a `"#3  [^\n]*\\."` wildcard-prefix form
+    (mirroring how the IPv4 test's own comment describes the "." ESC-byte
+    placeholder technique) failed against CMake's own regex engine even
+    though the literal text was present in the real output -- CMake's regex
+    engine did not backtrack that particular wildcard-then-anchor
+    combination the way a POSIX-standard engine would. Fixed by spelling out
+    the full literal line instead, matching the style the IPv4 test already
+    used successfully; worth remembering as a second, independent instance
+    of this project's "CMake's regex engine has its own dialect surprises,
+    verify before trusting" lesson (the first being the `{n}`
+    bounded-repetition gap already recorded above).
+
+    Full CTest again across all four standing build configurations (default
+    GCC: 2251/2251; ASan/UBSan `build-fuzz`: 2328/2328, zero sanitizer hits;
+    `build_nolive`: 2236/2236; MinGW-w64, build-only there) -- 100% pass,
+    zero regressions.
+
+    `docs/USER_GUIDE.md`'s "Always-notable highlighting" subsection's own
+    "Output" paragraph, which had said `attack`-pattern packets "keep their
+    own existing, wider red treatment," was corrected to describe the new
+    `[attack: <kind>]` tag-only behavior instead.
+
+    Not touched this round, by design: `attack_signature_kind` is not
+    exposed in `json`/`csv`/`fields` output -- it exists purely to drive the
+    new `TextWriter` tag, mirroring how `severe` itself also has no
+    dedicated JSON field. Worth revisiting if Jurgen wants JSON/CSV parity
+    for it later.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

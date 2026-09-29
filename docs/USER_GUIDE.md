@@ -3803,13 +3803,21 @@ itself is colored, not the IP-address decode or the summary text ahead of
 it (those keep their own normal/protocol-tag colors exactly as they would
 on any other packet). A detect-only finding is common enough on a busy
 capture -- a port scan flags every scanned-port packet, for instance -- that
-turning the whole line red the way an `attack`-pattern or malformed-parse
-packet's own summary already does would bury the actual decode underneath
-a wall of red; a single, precisely-placed red tag reads better at a glance
-across many lines. (`attack`-pattern and parse-failure packets keep their
-own existing, wider red treatment -- see LIMITATIONS/OUTPUT FORMATS above
-for those -- since they're rare enough on a normal capture that the wider
-emphasis is still the right amount for them.)
+turning the whole line red would bury the actual decode underneath a wall
+of red; a single, precisely-placed red tag reads better at a glance across
+many lines.
+
+An `attack`-pattern packet (`attack_detect.hpp`/`ipv6_attack_detect.hpp`'s
+own flood/scan/malformed-packet signature detectors -- a separate, older
+subsystem from `DetectEngine`, independent of and sometimes co-occurring
+with a `detect` finding on the same packet) gets the identical tag-only
+treatment: a `[attack: <kind>]` tag, printed immediately before
+`[detect: ...]` when both fire on the same packet, colored the same narrow
+way and equally visible under `--no-color`. Only a `severe` packet -- one
+with a parse error or a Modbus-exception response, a single packet's own
+malformed content rather than a repeatable pattern that can flood a
+capture -- keeps the original wider red treatment across the whole summary;
+see LIMITATIONS/OUTPUT FORMATS above for that.
 
 ```
 $ conduitscope decode -r s7_pi_control.pcap -T text

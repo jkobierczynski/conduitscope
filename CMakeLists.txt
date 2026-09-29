@@ -9003,53 +9003,68 @@ add_test(NAME color_and_no_color_are_mutually_exclusive
 set_tests_properties(color_and_no_color_are_mutually_exclusive PROPERTIES
   PASS_REGULAR_EXPRESSION "excludes")
 
-# An attack-pattern packet (DecodedPacket::has_attack_signature, decoder.hpp -- set from
-# attack_detect.hpp/ipv6_attack_detect.hpp's own curated notes, see decoder.cpp's six
-# observe_*() call sites) gets its WHOLE head line colored kBoldRed under --color, not just the
-# summary the way a parse-error/Modbus-exception "severe" packet already does -- see
-# TextWriter::write_packet's own comment (output.cpp). Packet #1 of sample_attack_detect.pcap is
-# the LAND attack scenario (TCP SYN, identical src/dst -- see attack_detect_land above). The
-# pattern below pins the exact three-part shape: bold red BEFORE the "[tcp]" tag (the "#1 ...  "
-# prefix), the tag itself still wrapped in its own PLAIN kDim protocol_tag_color (not forced red
-# -- proves the tag is the one deliberate exception), then bold red again for the summary.
-add_test(NAME color_attack_pattern_head_line_red
+# An attack-pattern packet (DecodedPacket::has_attack_signature/attack_signature_kind, decoder.hpp
+# -- set from attack_detect.hpp/ipv6_attack_detect.hpp's own curated notes, see decoder.cpp's six
+# observe_*() call sites) used to get its WHOLE head line colored kBoldRed under --color; reverted
+# to a narrowly-scoped "[attack: <kind>]" tag (mirroring detect-highlighting's own "[detect: ...]"
+# tag, see the color_detect_only_* tests below) after a direct report against a real capture where
+# attack_detect.hpp's own flood counters and `decode`'s own detect-highlighting feature both fired
+# on overlapping traffic, producing multiple different reasons for a fully red line -- see
+# TextWriter::write_packet's own comment (output.cpp) and docs/DEVELOPMENT.md ROADMAP item 99 for
+# the full history. Packet #1 of sample_attack_detect.pcap is the LAND attack scenario (TCP SYN,
+# identical src/dst -- see attack_detect_land above). The pattern below pins the exact shape: no
+# bold-red before "#1", the "[tcp]" tag keeps its own plain kDim protocol_tag_color, the summary is
+# unstyled, and bold red starts only at the two spaces immediately before "[attack:" and ends right
+# after the tag's own closing "]".
+add_test(NAME color_attack_pattern_tag_scoped_not_whole_line
   COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap")
-set_tests_properties(color_attack_pattern_head_line_red PROPERTIES
+set_tests_properties(color_attack_pattern_tag_scoped_not_whole_line PROPERTIES
   # A lone "." stands in for the raw ESC (0x1B) byte at each point a new SGR escape starts right
   # after the previous one's reset, with no literal text between them (e.g. "\033[0m\033[2m") --
   # CMake's own regex engine matches literal text across that invisible byte, but only if the
-  # pattern accounts for it; verified against this exact fixture's real `od -c` byte dump before
-  # being written, matching this project's own "never write a CTest assertion you haven't
-  # confirmed against real output" discipline.
-  PASS_REGULAR_EXPRESSION "\\[1;31m#1  [^\n]*\\[0m.\\[2m\\[tcp\\].\\[0m  .\\[1;31mTCP segment 4444 -> 4444 with no payload \\(handshake/ACK/teardown\\).\\[0m")
+  # pattern accounts for it; verified against this exact fixture's real output before being
+  # written, matching this project's own "never write a CTest assertion you haven't confirmed
+  # against real output" discipline.
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  192\\.168\\.1\\.77:4444 -> 192\\.168\\.1\\.77:4444  .\\[2m\\[tcp\\].\\[0m  TCP segment 4444 -> 4444 with no payload \\(handshake/ACK/teardown\\).\\[1;31m  \\[attack: land\\].\\[0m"
+  FAIL_REGULAR_EXPRESSION "\\[1;31m#1")
 
-# Packet #2 (an ordinary TCP segment, no attack signature) must NOT get this treatment -- proves
-# the coloring is keyed on DecodedPacket::has_attack_signature, not applied to every packet once
-# --color is on, and not "sticky" from packet #1's own red line above it.
+# Packet #2 (an ordinary TCP segment, no attack signature) must NOT get any tag or color at all --
+# proves the coloring/tagging is keyed on DecodedPacket::has_attack_signature, not applied to every
+# packet once --color is on, and not "sticky" from packet #1's own tag above it.
 add_test(NAME color_non_attack_packet_not_reddened
   COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap")
 set_tests_properties(color_non_attack_packet_not_reddened PROPERTIES
-  FAIL_REGULAR_EXPRESSION "\\[1;31m#2")
+  FAIL_REGULAR_EXPRESSION "\\[1;31m#2|#2  [^\n]*\\[attack:")
 
-# --no-color must suppress this exactly like every other color path -- no bold-red escape at all,
-# even though packet #1 is still the same LAND attack finding underneath.
-add_test(NAME color_attack_pattern_suppressed_by_no_color
+# The "[attack: <kind>]" tag itself is plain text, not color-only -- unlike the old whole-line-red
+# design (which left an attack-pattern packet with NO visible signal at all under --no-color/piped
+# output in default, non-verbose text -- see TextWriter::write_packet's own comment), the tag
+# survives --no-color unchanged; only the red emphasis is color-gated.
+add_test(NAME color_attack_pattern_tag_survives_no_color
   COMMAND conduitscope --no-color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_attack_detect.pcap")
-set_tests_properties(color_attack_pattern_suppressed_by_no_color PROPERTIES
+set_tests_properties(color_attack_pattern_tag_survives_no_color PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[attack: land\\]"
   FAIL_REGULAR_EXPRESSION "\\[1;31m")
 
 # The IPv6 attack path (ipv6_attack_detect.hpp, wired through a SEPARATE pair of decoder.cpp call
 # sites than the IPv4 one above -- observe_icmpv6/observe_dhcpv6, not observe_tcp/udp/icmp/ipv4)
-# gets the identical treatment. Packet #3 of sample_ipv6_attack_ra_collision.pcap is the second,
-# conflicting Router Advertisement identity (see the RA-collision note itself) -- confirms
-# has_attack_signature is set correctly from BOTH attack-detection state classes, not just the
-# IPv4 one.
-add_test(NAME color_attack_pattern_head_line_red_ipv6
+# gets the identical tag-only treatment. Packet #3 of sample_ipv6_attack_ra_collision.pcap is the
+# second, conflicting Router Advertisement identity (see the RA-collision note itself) -- confirms
+# has_attack_signature/attack_signature_kind are set correctly from BOTH attack-detection state
+# classes, not just the IPv4 one, and that ipv6_attack_detect.cpp's own kind slugs ("ipv6-ra-
+# collision") reach the tag correctly.
+add_test(NAME color_attack_pattern_tag_scoped_ipv6
   COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6_attack_ra_collision.pcap")
-set_tests_properties(color_attack_pattern_head_line_red_ipv6 PROPERTIES
-  # See color_attack_pattern_head_line_red's own comment above for why the "." placeholders are
-  # needed here.
-  PASS_REGULAR_EXPRESSION "\\[1;31m#3  [^\n]*\\[0m.\\[2m\\[icmpv6\\].\\[0m  .\\[1;31m")
+set_tests_properties(color_attack_pattern_tag_scoped_ipv6 PROPERTIES
+  # See color_attack_pattern_tag_scoped_not_whole_line's own comment above for why the "."
+  # placeholders are needed here. Spelled out against the real captured line in full (rather than
+  # a "#3  [^\n]*\\." wildcard prefix) -- CMake's own regex engine did not backtrack that wildcard
+  # combination correctly against this fixture's real output, confirmed by running the test and
+  # seeing it fail even though the literal text is present; verified against real output before
+  # being written, per this project's own "never write a CTest assertion you haven't confirmed
+  # against real output" rule.
+  PASS_REGULAR_EXPRESSION "#3  2\\.002000  fe80::b1 -> ff02::1  .\\[2m\\[icmpv6\\].\\[0m  ICMPv6 Router Advertisement, lifetime=300s, 2 option\\(s\\) \\(SLAAC prefix 2001:db8:bbbb::/64 offered\\).\\[1;31m  \\[attack: ipv6-ra-collision\\].\\[0m"
+  FAIL_REGULAR_EXPRESSION "\\[1;31m#3")
 
 # A detect-only finding (--detect-highlight, no severe/attack -- see DecodedPacket::has_detect_finding's
 # own comment, decoder.hpp) is deliberately NOT treated the same as an attack-pattern packet above:
