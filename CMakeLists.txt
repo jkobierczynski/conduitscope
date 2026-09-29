@@ -9946,7 +9946,7 @@ set_tests_properties(inventory_bacnet_unicast_registers_client_and_server_not_br
 add_test(NAME inventory_json_report_shape
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --format json)
 set_tests_properties(inventory_json_report_shape PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"total_packets\": 14,\n *\"skipped_packets\": 0,\n *\"assets\": \\[.*\"protocols\": \\[\"dnp3\", \"s7comm\"\\],\n *\"role\": \"client\",.*\"edges\": \\[.*\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,.*\"zones\": \\[.*\"name\": \"zone_10_0_5_0_24\",\n *\"network\": \"10\\.0\\.5\\.0/24\",.*\"conduits\": \\[.*\"from_zone\": \"zone_10_0_5_0_24\",\n *\"to_zone\": \"zone_192_168_1_0_24\",\n *\"protocol\": \"dnp3\",\n *\"port\": 20000,")
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 14,\n *\"skipped_packets\": 0,\n *\"observation_truncated\": false,\n *\"truncation_reasons\": \\[\\],\n *\"assets\": \\[.*\"protocols\": \\[\"dnp3\", \"s7comm\"\\],\n *\"role\": \"client\",.*\"edges\": \\[.*\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,.*\"zones\": \\[.*\"name\": \"zone_10_0_5_0_24\",\n *\"network\": \"10\\.0\\.5\\.0/24\",.*\"conduits\": \\[.*\"from_zone\": \"zone_10_0_5_0_24\",\n *\"to_zone\": \"zone_192_168_1_0_24\",\n *\"protocol\": \"dnp3\",\n *\"port\": 20000,")
 
 # A BACnet edge has no server_port_service field (mirrors the resolver's own miss-vs-disabled
 # convention: the annotation is simply omitted, never emitted as null) -- port 47808/tcp isn't in
@@ -14487,6 +14487,130 @@ set_tests_properties(baseline_engine_limits_operations_cap_marks_learn_incomplet
 add_test(NAME baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_defaults.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_defaults.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'; echo EXITCODE=$?")
 set_tests_properties(baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "EXITCODE=0"
+  FAIL_REGULAR_EXPRESSION "INCOMPLETE")
+
+# ---------------------------------------------------------------------------------------------
+# DetectEngine/AssetInventoryEngine/PolicyEngine resource bounds (patch257 Finding 3, mirroring
+# BaselineEngine's own resource-bounding tests immediately above) -- proves each engine's own
+# admission ceilings actually engage: --max-detect-*, --max-inventory-*, --max-policy-* each mark
+# their own report OBSERVATION INCOMPLETE and return kExitObservationIncomplete (6), which for
+# `detect`/`inventory`/`policy validate` takes priority over that subcommand's own ordinary exit
+# codes (unlike `baseline check`, which keeps its pre-existing kExitBaselineIncomplete=5).
+# ---------------------------------------------------------------------------------------------
+
+# sample_detect_bacnet_who_is_flood.pcap drives many distinct BACnet Who-Is source addresses
+# through bacnet_who_is_count_by_source_ -- --max-detect-tracked-keys-per-map 1 forces every
+# source after the first to be refused.
+add_test(NAME detect_engine_limits_tracked_keys_cap_marks_detect_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_bacnet_who_is_flood.pcap' --max-detect-tracked-keys-per-map 1; echo EXITCODE=$?")
+set_tests_properties(detect_engine_limits_tracked_keys_cap_marks_detect_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on bacnet_who_is_count_by_source_.*--max-detect-tracked-keys-per-map.*EXITCODE=6")
+
+# sample_detect.pcap's CIP Forward_Open from a second originator (192.168.1.67) against a target
+# already opened by another client is what --max-detect-originators-per-server 1 forces refused
+# on cip_originators_by_server_.
+add_test(NAME detect_engine_limits_originators_cap_marks_detect_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' --max-detect-originators-per-server 1; echo EXITCODE=$?")
+set_tests_properties(detect_engine_limits_originators_cap_marks_detect_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*originators-per-server limit \\(1\\) reached on cip_originators_by_server_.*--max-detect-originators-per-server.*EXITCODE=6")
+
+# sample_detect.pcap produces 8 findings by default -- --max-detect-findings 3 forces every
+# finding after the third to be refused.
+add_test(NAME detect_engine_limits_findings_cap_marks_detect_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' --max-detect-findings 3; echo EXITCODE=$?")
+set_tests_properties(detect_engine_limits_findings_cap_marks_detect_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*finding limit \\(3\\) reached on findings.*--max-detect-findings.*EXITCODE=6")
+
+# The compiled defaults (20,000/50,000/2,000) must never trip on this codebase's own small
+# fixtures -- mirrors baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture's own role.
+add_test(NAME detect_engine_limits_defaults_do_not_trip_on_a_normal_capture
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap'; echo EXITCODE=$?")
+set_tests_properties(detect_engine_limits_defaults_do_not_trip_on_a_normal_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "EXITCODE=0"
+  FAIL_REGULAR_EXPRESSION "INCOMPLETE")
+
+# sample_inventory.pcap drives multiple distinct asset addresses through assets_ --
+# --max-inventory-assets 1 forces every asset after the first to be refused. (This is also the
+# combination that originally surfaced the assets_/edges_ independent-cap std::out_of_range bug
+# in AssetInventoryEngine::finish()'s conduit-derivation loop, now fixed with a defensive
+# .find()-with-skip -- this test doubles as its regression guard.)
+add_test(NAME inventory_engine_limits_assets_cap_marks_inventory_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap' --max-inventory-assets 1; echo EXITCODE=$?")
+set_tests_properties(inventory_engine_limits_assets_cap_marks_inventory_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on assets_.*--max-inventory-assets.*EXITCODE=6")
+
+# Same fixture, forcing edges_ (independently capped from assets_) to refuse instead.
+add_test(NAME inventory_engine_limits_edges_cap_marks_inventory_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap' --max-inventory-edges 1; echo EXITCODE=$?")
+set_tests_properties(inventory_engine_limits_edges_cap_marks_inventory_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on edges_.*--max-inventory-edges.*EXITCODE=6")
+
+# Same fixture, forcing tcp_sessions_ to refuse -- direction inference for the affected packet
+# falls back to the known-port heuristic rather than dropping the packet (tcp_sessions_ only
+# feeds direction inference, not report content), so this proves the fallback path stays alive
+# under the cap while still marking the capture incomplete.
+add_test(NAME inventory_engine_limits_tcp_sessions_cap_marks_inventory_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap' --max-inventory-tcp-sessions 1; echo EXITCODE=$?")
+set_tests_properties(inventory_engine_limits_tcp_sessions_cap_marks_inventory_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on tcp_sessions_.*--max-inventory-tcp-sessions.*EXITCODE=6")
+
+# sample_inventory.pcap itself has zero notable-IT-protocol traffic, so notable_protocols_ needs
+# a different fixture: sample_doh.pcap (DNS-over-HTTPS) records 2 distinct notable-protocol
+# entries -- --max-inventory-notable-protocols 1 forces the second to be refused.
+add_test(NAME inventory_engine_limits_notable_protocols_cap_marks_inventory_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap' --max-inventory-notable-protocols 1; echo EXITCODE=$?")
+set_tests_properties(inventory_engine_limits_notable_protocols_cap_marks_inventory_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on notable_protocols_.*--max-inventory-notable-protocols.*EXITCODE=6")
+
+# The compiled defaults (200,000/200,000/50,000/50,000) must never trip on this codebase's own
+# small fixtures.
+add_test(NAME inventory_engine_limits_defaults_do_not_trip_on_a_normal_capture
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap'; echo EXITCODE=$?")
+set_tests_properties(inventory_engine_limits_defaults_do_not_trip_on_a_normal_capture PROPERTIES
+  PASS_REGULAR_EXPRESSION "EXITCODE=0"
+  FAIL_REGULAR_EXPRESSION "INCOMPLETE")
+
+# sample_policy_engine.pcap (paired with its own policy_engine_sample.yaml elsewhere in this
+# file) carries multiple distinct TCP flows -- --max-policy-tcp-flows 1 forces every flow after
+# the first to be refused on flows_.
+add_test(NAME policy_engine_limits_tcp_flows_cap_marks_validate_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap' --policy '${POLICY_DIR}/policy_engine_sample.yaml' --max-policy-tcp-flows 1; echo EXITCODE=$?")
+set_tests_properties(policy_engine_limits_tcp_flows_cap_marks_validate_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on flows_.*--max-policy-tcp-flows.*EXITCODE=6")
+
+# sample_policy_udp_bacnet_cip_io.pcap carries multiple distinct UDP BACnet/CIP-I/O flows --
+# --max-policy-udp-flows 1 forces every flow after the first to be refused on udp_flows_.
+add_test(NAME policy_engine_limits_udp_flows_cap_marks_validate_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap' --policy '${POLICY_DIR}/udp_bacnet_cip_io_compliant.yaml' --max-policy-udp-flows 1; echo EXITCODE=$?")
+set_tests_properties(policy_engine_limits_udp_flows_cap_marks_validate_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on udp_flows_.*--max-policy-udp-flows.*EXITCODE=6")
+
+# ethernet_flows_ is only populated once the policy declares at least one VLAN zone -- reuses
+# sample_vlan_zones.pcap + vlan_zone_single_segment.yaml (see the VLAN-zone tests above), whose 6
+# ethernet flows are more than enough for --max-policy-ethernet-flows 1 to force a refusal.
+add_test(NAME policy_engine_limits_ethernet_flows_cap_marks_validate_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap' --policy '${POLICY_DIR}/vlan_zone_single_segment.yaml' --max-policy-ethernet-flows 1; echo EXITCODE=$?")
+set_tests_properties(policy_engine_limits_ethernet_flows_cap_marks_validate_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on ethernet_flows_.*--max-policy-ethernet-flows.*EXITCODE=6")
+
+# sample_policy_engine.pcap + compliant.yaml has zero notable-IT-protocol traffic, so
+# notable_protocols_ needs a different fixture: sample_doh.pcap again (2 distinct entries, same
+# as the AssetInventoryEngine test above) -- --max-policy-notable-protocols 1 forces the second
+# to be refused.
+add_test(NAME policy_engine_limits_notable_protocols_cap_marks_validate_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_doh.pcap' --policy '${POLICY_DIR}/compliant.yaml' --max-policy-notable-protocols 1; echo EXITCODE=$?")
+set_tests_properties(policy_engine_limits_notable_protocols_cap_marks_validate_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on notable_protocols_.*--max-policy-notable-protocols.*EXITCODE=6")
+
+# The compiled defaults (200,000/100,000/100,000/50,000) must never trip on this codebase's own
+# small fixtures. sample_policy_udp_bacnet_cip_io.pcap + udp_bacnet_cip_io_compliant.yaml is used
+# (rather than sample_policy_engine.pcap + compliant.yaml, which reports non-compliant by design)
+# so a clean EXITCODE=0 is the only variable under test here, same spirit as
+# baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture above.
+add_test(NAME policy_engine_limits_defaults_do_not_trip_on_a_normal_capture
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap' --policy '${POLICY_DIR}/udp_bacnet_cip_io_compliant.yaml'; echo EXITCODE=$?")
+set_tests_properties(policy_engine_limits_defaults_do_not_trip_on_a_normal_capture PROPERTIES
   PASS_REGULAR_EXPRESSION "EXITCODE=0"
   FAIL_REGULAR_EXPRESSION "INCOMPLETE")
 

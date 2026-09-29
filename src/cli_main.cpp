@@ -553,6 +553,142 @@ BaselineEngineLimits resolve_baseline_engine_limits(size_t max_tcp_sessions, siz
     return limits;
 }
 
+// patch257 security review finding 3 ("protocol state exhaustion remains a central threat"),
+// invariants 3/5 -- DetectEngine's own three growth ceilings' CLI options, registered only on
+// `detect` (same reasoning as add_baseline_engine_limit_options above: these bound DetectEngine's
+// own per-capture state, not the decode-time budgets add_resource_limit_options covers). Same
+// "0 = leave every site at its own default" convention as every other --max-* flag in this file.
+void add_detect_engine_limit_options(CLI::App* cmd, size_t& max_findings, size_t& max_tracked_keys_per_map,
+                                       size_t& max_originators_per_server) {
+    cmd->add_option(
+           "--max-detect-findings", max_findings,
+           "Cap the number of distinct findings (always-notable findings and new-conduit "
+           "candidates, checked independently) DetectEngine records per capture (default "
+           "20,000). 0 = leave it at its own default; past this, further genuinely new findings "
+           "of that kind are not recorded and the observation is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-detect-tracked-keys-per-map", max_tracked_keys_per_map,
+           "Cap the number of distinct keys DetectEngine tracks in any one of its per-source/"
+           "per-server novelty/burst-tracking maps (default 50,000, applied identically and "
+           "independently to each map). 0 = leave it at its own default; past this, further new "
+           "keys in that map are not tracked and the observation is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-detect-originators-per-server", max_originators_per_server,
+           "Cap the number of distinct originator IPs DetectEngine tracks per server key inside "
+           "its nine per-server originator/writer maps (default 2,000). 0 = leave it at its own "
+           "default; past this, further new originators for that server are not tracked and the "
+           "observation is marked incomplete")
+        ->capture_default_str();
+}
+
+// Resolves the three raw CLI values (0 = unset) into a real DetectEngineLimits, same "always a
+// fully-resolved struct, never a sentinel" convention as resolve_baseline_engine_limits above.
+DetectEngineLimits resolve_detect_engine_limits(size_t max_findings, size_t max_tracked_keys_per_map,
+                                                  size_t max_originators_per_server) {
+    DetectEngineLimits limits;
+    if (max_findings != 0) limits.max_findings = max_findings;
+    if (max_tracked_keys_per_map != 0) limits.max_tracked_keys_per_map = max_tracked_keys_per_map;
+    if (max_originators_per_server != 0) limits.max_originators_per_server = max_originators_per_server;
+    return limits;
+}
+
+// patch257 security review finding 3 fix -- AssetInventoryEngine's own four growth ceilings' CLI
+// options, registered only on `inventory` (same reasoning as add_baseline_engine_limit_options/
+// add_detect_engine_limit_options above). Same "0 = leave every site at its own default"
+// convention as every other --max-* flag in this file.
+void add_inventory_engine_limit_options(CLI::App* cmd, size_t& max_assets, size_t& max_edges,
+                                          size_t& max_tcp_sessions, size_t& max_notable_protocols) {
+    cmd->add_option(
+           "--max-inventory-assets", max_assets,
+           "Cap the number of distinct IP addresses AssetInventoryEngine records as assets per "
+           "capture (default 200,000). 0 = leave it at its own default; past this, further new "
+           "assets observed in the capture are not recorded and the inventory is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-inventory-edges", max_edges,
+           "Cap the number of distinct (client, server, protocol, port) edges AssetInventoryEngine "
+           "records per capture (default 200,000). 0 = leave it at its own default; past this, "
+           "further new edges observed in the capture are not recorded and the inventory is marked "
+           "incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-inventory-tcp-sessions", max_tcp_sessions,
+           "Cap the number of distinct TCP sessions AssetInventoryEngine tracks per capture for "
+           "client/server direction inference (default 50,000). 0 = leave it at its own default; "
+           "past this, further new sessions fall back to the known-port heuristic instead of "
+           "SYN/SYN-ACK tracking and the inventory is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-inventory-notable-protocols", max_notable_protocols,
+           "Cap the number of distinct notable-IT-protocol observations (ROADMAP item 18) "
+           "AssetInventoryEngine records per capture (default 50,000). 0 = leave it at its own "
+           "default; past this, further new combinations are not recorded and the inventory is "
+           "marked incomplete")
+        ->capture_default_str();
+}
+
+// Resolves the four raw CLI values (0 = unset) into a real AssetInventoryEngineLimits, same
+// "always a fully-resolved struct, never a sentinel" convention as resolve_baseline_engine_limits
+// above.
+AssetInventoryEngineLimits resolve_inventory_engine_limits(size_t max_assets, size_t max_edges,
+                                                              size_t max_tcp_sessions,
+                                                              size_t max_notable_protocols) {
+    AssetInventoryEngineLimits limits;
+    if (max_assets != 0) limits.max_assets = max_assets;
+    if (max_edges != 0) limits.max_edges = max_edges;
+    if (max_tcp_sessions != 0) limits.max_tcp_sessions = max_tcp_sessions;
+    if (max_notable_protocols != 0) limits.max_notable_protocols = max_notable_protocols;
+    return limits;
+}
+
+// patch257 security review finding 3 fix -- PolicyEngine's own four growth ceilings' CLI options,
+// registered only on `policy validate` (same reasoning as add_baseline_engine_limit_options/
+// add_detect_engine_limit_options/add_inventory_engine_limit_options above). Same "0 = leave every
+// site at its own default" convention as every other --max-* flag in this file.
+void add_policy_engine_limit_options(CLI::App* cmd, size_t& max_tcp_flows, size_t& max_udp_flows,
+                                       size_t& max_ethernet_flows, size_t& max_notable_protocols) {
+    cmd->add_option(
+           "--max-policy-tcp-flows", max_tcp_flows,
+           "Cap the number of distinct TCP flows PolicyEngine tracks per capture (default "
+           "200,000). 0 = leave it at its own default; past this, further new flows observed in "
+           "the capture are not evaluated and the result is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-policy-udp-flows", max_udp_flows,
+           "Cap the number of distinct UDP flows (BACnet/IP, CIP I/O) PolicyEngine tracks per "
+           "capture (default 100,000). 0 = leave it at its own default; past this, further new "
+           "flows observed in the capture are not evaluated and the result is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-policy-ethernet-flows", max_ethernet_flows,
+           "Cap the number of distinct raw-Ethernet L2 flows (PROFINET RT/GOOSE/SV/EtherCAT) "
+           "PolicyEngine tracks per capture (default 100,000). 0 = leave it at its own default; "
+           "past this, further new flows observed in the capture are not evaluated and the result "
+           "is marked incomplete")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-policy-notable-protocols", max_notable_protocols,
+           "Cap the number of distinct notable-IT-protocol observations (ROADMAP item 18) "
+           "PolicyEngine records per capture (default 50,000). 0 = leave it at its own default; "
+           "past this, further new combinations are not recorded and the result is marked "
+           "incomplete")
+        ->capture_default_str();
+}
+
+// Resolves the four raw CLI values (0 = unset) into a real PolicyEngineLimits, same "always a
+// fully-resolved struct, never a sentinel" convention as resolve_baseline_engine_limits above.
+PolicyEngineLimits resolve_policy_engine_limits(size_t max_tcp_flows, size_t max_udp_flows,
+                                                  size_t max_ethernet_flows, size_t max_notable_protocols) {
+    PolicyEngineLimits limits;
+    if (max_tcp_flows != 0) limits.max_tcp_flows = max_tcp_flows;
+    if (max_udp_flows != 0) limits.max_udp_flows = max_udp_flows;
+    if (max_ethernet_flows != 0) limits.max_ethernet_flows = max_ethernet_flows;
+    if (max_notable_protocols != 0) limits.max_notable_protocols = max_notable_protocols;
+    return limits;
+}
+
 // -------------------------------------------------------------------------------------------
 // `-d`/`--decode-as` (Wireshark/tshark-style "force a decoder onto traffic that wouldn't
 // otherwise be recognized as it") -- see decoder.hpp's own comment on DecodeAsRule/
@@ -1218,11 +1354,26 @@ int run_info(const std::string& input, std::ostream& out) {
 // again).
 constexpr int kExitPolicyNonCompliant = 3;
 
+// patch257 security review finding 3 fix ("protocol state exhaustion remains a central threat"):
+// a SHARED exit code for every subcommand whose own report carries an `observation_truncated`
+// field other than `baseline check` (which keeps its own pre-existing kExitBaselineIncomplete,
+// defined further below near run_baseline_check -- changing an already-shipped exit code's value
+// would break any caller already scripting against it). Returned whenever that report's own
+// engine hit at least one of its internal growth ceilings and therefore only PARTLY observed the
+// capture -- same "never silently produce a clean result from a truncated observation" reasoning
+// as kExitBaselineIncomplete's own comment, generalized across commands instead of duplicated per
+// command. Currently used by `detect`; `inventory` and `policy validate` are still open work
+// (docs/DEVELOPMENT.md) and will return this too once their own engines gain resource bounds. A
+// caller scripting against this exit code should treat 6 as "re-run with a higher
+// --max-<subcommand>-* limit and try again," the same posture kExitBaselineIncomplete's own
+// comment already establishes for `baseline check`.
+constexpr int kExitObservationIncomplete = 6;
+
 int run_policy_validate(const std::string& input, const std::string& interface_name,
                          const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
                          const std::string& policy_path, const std::string& output, const std::string& format,
                          bool strict, bool strict_it_protocols, bool summarize_unclassified, bool quiet,
-                         const ResourceLimitCliVars& limit_vars,
+                         const ResourceLimitCliVars& limit_vars, const PolicyEngineLimits& engine_limits,
                          bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                          bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
@@ -1274,7 +1425,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
         SigintGuard sigint_guard(source.live_ptr());
         Decoder decoder(options);
-        PolicyEngine engine(policy);
+        PolicyEngine engine(policy, engine_limits);
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
@@ -1321,6 +1472,11 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         // the CLI layer rather than inside compliant() itself, so a caller of PolicyReport directly
         // (or the JSON report's own "compliant" field) always sees the same protocol/port/conduit-
         // allow-list-only verdict this engine has always computed.
+        // patch257 finding 3 fix: a truncated observation must never exit 0/kExitPolicyNonCompliant
+        // as if it were an ordinary complete verdict -- takes priority over both, same reasoning as
+        // kExitBaselineIncomplete's own comment (this file): a "COMPLIANT" result from a truncated
+        // observation is not trustworthy.
+        if (report.observation_truncated) return kExitObservationIncomplete;
         bool ok = report.compliant() && (!strict_it_protocols || report.notable_protocols.empty());
         return ok ? 0 : kExitPolicyNonCompliant;
     } catch (const PolicyError& e) {
@@ -1354,7 +1510,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                    const std::string& policy_out_path, const std::string& acl_out_path,
                    const std::string& acl_format, const std::string& edges_csv_path,
                    const std::string& conduits_csv_path, const ResourceLimitCliVars& limit_vars,
-                   bool oui_enabled, bool resolve_hostnames,
+                   const AssetInventoryEngineLimits& engine_limits, bool oui_enabled, bool resolve_hostnames,
                    const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
                    std::ostream& diag) {
     std::ofstream file_out;
@@ -1385,7 +1541,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
         SigintGuard sigint_guard(source.live_ptr());
         Decoder decoder(options);
-        AssetInventoryEngine engine(zone_prefix_len);
+        AssetInventoryEngine engine(zone_prefix_len, engine_limits);
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
@@ -1489,6 +1645,10 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
+        // patch257 finding 3 fix: a truncated observation must never exit 0 -- see
+        // kExitObservationIncomplete's own comment above for why this is a shared exit code, not a
+        // new inventory-specific one.
+        if (report.observation_truncated) return kExitObservationIncomplete;
         return 0;
     } catch (const ResolverError& e) {
         std::cerr << "error: " << e.what() << "\n";
@@ -1519,9 +1679,9 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
                 int duration_seconds, int snaplen, bool promiscuous, const std::string& output,
                 const std::string& format, bool strict, bool quiet, const std::string& policy_path,
                 const std::string& baseline_path, size_t max_baseline_file_bytes,
-                const ResourceLimitCliVars& limit_vars, bool oui_enabled, bool resolve_hostnames,
-                const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
-                std::ostream& diag) {
+                const ResourceLimitCliVars& limit_vars, const DetectEngineLimits& engine_limits,
+                bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
+                bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -1557,7 +1717,7 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
         SigintGuard sigint_guard(source.live_ptr());
         Decoder decoder(options);
-        DetectEngine engine;
+        DetectEngine engine(engine_limits);
 
         PcapPacket pkt;
         size_t index = 0, warnings = 0;
@@ -1593,6 +1753,12 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
+        // patch257 finding 3 fix: a truncated observation must never exit 0 -- same reasoning as
+        // kExitBaselineIncomplete's own comment below (this file), generalized as
+        // kExitObservationIncomplete since `detect` has no separate "compliant/anomaly" ternary of
+        // its own to take priority over (unlike `baseline check`) -- an incomplete observation is
+        // the only condition this exit code needs to report here.
+        if (report.observation_truncated) return kExitObservationIncomplete;
         return 0;
     } catch (const ResolverError& e) {
         std::cerr << "error: " << e.what() << "\n";
@@ -2541,6 +2707,8 @@ int main(int argc, char** argv) {
     bool policy_mac_vendor = false, policy_resolve = false, policy_service_names = true;
     std::string policy_hosts_file, policy_services_file;
     ResourceLimitCliVars policy_limit_vars;
+    size_t policy_max_tcp_flows = 0, policy_max_udp_flows = 0, policy_max_ethernet_flows = 0,
+           policy_max_notable_protocols = 0;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
                                          "Input capture file (classic pcap or pcapng, auto-detected)")
@@ -2588,6 +2756,8 @@ int main(int argc, char** argv) {
     policy_validate_cmd->add_flag("--strict", policy_strict,
                                    "Abort on the first malformed packet instead of reporting it and continuing");
     add_resource_limit_options(policy_validate_cmd, policy_limit_vars);
+    add_policy_engine_limit_options(policy_validate_cmd, policy_max_tcp_flows, policy_max_udp_flows,
+                                     policy_max_ethernet_flows, policy_max_notable_protocols);
     policy_validate_cmd->add_flag(
         "--strict-it-protocols", policy_strict_it_protocols,
         "Also fail compliance (non-zero exit code) when any \"IT protocol an OT auditor flags\" "
@@ -2655,6 +2825,8 @@ int main(int argc, char** argv) {
     bool inventory_mac_vendor = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
     ResourceLimitCliVars inventory_limit_vars;
+    size_t inventory_max_assets = 0, inventory_max_edges = 0, inventory_max_tcp_sessions = 0,
+           inventory_max_notable_protocols = 0;
 
     auto* inventory_input_opt =
         inventory_cmd->add_option("-r,--read", inventory_input,
@@ -2697,6 +2869,8 @@ int main(int argc, char** argv) {
     inventory_cmd->add_flag("--strict", inventory_strict,
                              "Abort on the first malformed packet instead of reporting it and continuing");
     add_resource_limit_options(inventory_cmd, inventory_limit_vars);
+    add_inventory_engine_limit_options(inventory_cmd, inventory_max_assets, inventory_max_edges,
+                                        inventory_max_tcp_sessions, inventory_max_notable_protocols);
     inventory_cmd
         ->add_option("--zone-prefix", inventory_zone_prefix,
                       "CIDR prefix length ([0, 32]) used to group observed asset IPs into "
@@ -2779,6 +2953,7 @@ int main(int argc, char** argv) {
     bool detect_mac_vendor = false, detect_resolve = false, detect_service_names = true;
     std::string detect_hosts_file, detect_services_file;
     ResourceLimitCliVars detect_limit_vars;
+    size_t detect_max_findings = 0, detect_max_tracked_keys_per_map = 0, detect_max_originators_per_server = 0;
 
     auto* detect_input_opt =
         detect_cmd->add_option("-r,--read", detect_input,
@@ -2819,6 +2994,8 @@ int main(int argc, char** argv) {
     detect_cmd->add_flag("--strict", detect_strict,
                           "Abort on the first malformed packet instead of reporting it and continuing");
     add_resource_limit_options(detect_cmd, detect_limit_vars);
+    add_detect_engine_limit_options(detect_cmd, detect_max_findings, detect_max_tracked_keys_per_map,
+                                     detect_max_originators_per_server);
     detect_cmd
         ->add_option("--policy", detect_policy_path,
                       "Policy YAML file (see 'policy validate') -- used only to tell a new "
@@ -3277,6 +3454,9 @@ int main(int argc, char** argv) {
                                     policy_promiscuous, policy_file, policy_output, policy_format, policy_strict,
                                     policy_strict_it_protocols, policy_summarize_unclassified, quiet,
                                     policy_limit_vars,
+                                    resolve_policy_engine_limits(policy_max_tcp_flows, policy_max_udp_flows,
+                                                                  policy_max_ethernet_flows,
+                                                                  policy_max_notable_protocols),
                                     policy_mac_vendor, policy_resolve, policy_hosts_file,
                                     policy_service_names, policy_services_file, *diag);
     }
@@ -3292,6 +3472,9 @@ int main(int argc, char** argv) {
                               inventory_acl_out, inventory_acl_format,
                               inventory_edges_csv, inventory_conduits_csv,
                               inventory_limit_vars,
+                              resolve_inventory_engine_limits(inventory_max_assets, inventory_max_edges,
+                                                               inventory_max_tcp_sessions,
+                                                               inventory_max_notable_protocols),
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
                               inventory_services_file, *diag);
     }
@@ -3299,8 +3482,11 @@ int main(int argc, char** argv) {
         return run_detect(detect_input, detect_interface, detect_filter, detect_duration, detect_snaplen,
                            detect_promiscuous, detect_output, detect_format, detect_strict, quiet,
                            detect_policy_path, detect_baseline_file, detect_max_baseline_file_bytes,
-                           detect_limit_vars, detect_mac_vendor, detect_resolve, detect_hosts_file,
-                           detect_service_names, detect_services_file, *diag);
+                           detect_limit_vars,
+                           resolve_detect_engine_limits(detect_max_findings, detect_max_tracked_keys_per_map,
+                                                         detect_max_originators_per_server),
+                           detect_mac_vendor, detect_resolve, detect_hosts_file, detect_service_names,
+                           detect_services_file, *diag);
     }
     if (baseline_learn_cmd->parsed()) {
         return run_baseline_learn(baseline_learn_inputs, baseline_learn_file, baseline_learn_strict, quiet,

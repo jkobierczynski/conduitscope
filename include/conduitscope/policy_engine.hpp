@@ -360,13 +360,55 @@ struct PolicyReport {
     // even classify" is itself a finding worth surfacing in an audit, not something to pass
     // silently. See cli_main.cpp for how this maps to `policy validate`'s exit code.
     bool compliant() const { return violation_count() == 0 && unclassified_count() == 0; }
+
+    // patch257 security review finding 3 fix ("protocol state exhaustion remains a central
+    // threat") -- true iff this capture's own PolicyEngine hit at least one of its four
+    // PolicyEngineLimits growth ceilings, so `flows`/`ethernet_flows`/`udp_flows`/
+    // `notable_protocols` above may be an incomplete view of what the capture actually contains.
+    // See PolicyEngineLimits' own comment for the refuse-to-grow-further, never-evict admission
+    // policy behind this, mirroring BaselineEngine's/AssetInventoryEngine's own
+    // observation_truncated.
+    bool observation_truncated = false;
+    // One human-readable line per DISTINCT ceiling that was hit, each naming the CLI flag that
+    // raises it -- same dedup rule as BaselineEngine::mark_truncated. Empty iff observation_truncated
+    // is false.
+    std::vector<std::string> truncation_reasons;
+};
+
+// patch257 finding 3 fix -- PolicyEngine's four accumulating containers (flows_/ethernet_flows_/
+// udp_flows_/notable_protocols_) had no growth ceiling at all before this. Same refuse-to-grow-
+// further, never-evict, visibly-mark-truncated posture as BaselineEngineLimits/
+// AssetInventoryEngineLimits and for the identical reason: every one of these containers feeds
+// this engine's own report output (a flow's own compliance verdict), so silently evicting an
+// already-tracked flow to make room for a new one could make an already-reported flow's own
+// verdict silently stop updating. Sized generously, same "one capture's worth of in-memory state"
+// logic as the other two engines' own sizing comments.
+inline constexpr size_t kDefaultMaxPolicyTcpFlows = 200000;
+inline constexpr size_t kDefaultMaxPolicyUdpFlows = 100000;
+inline constexpr size_t kDefaultMaxPolicyEthernetFlows = 100000;
+inline constexpr size_t kDefaultMaxPolicyNotableProtocols = 50000;
+
+struct PolicyEngineLimits {
+    size_t max_tcp_flows = kDefaultMaxPolicyTcpFlows;
+    size_t max_udp_flows = kDefaultMaxPolicyUdpFlows;
+    size_t max_ethernet_flows = kDefaultMaxPolicyEthernetFlows;
+    size_t max_notable_protocols = kDefaultMaxPolicyNotableProtocols;
 };
 
 class PolicyEngine {
 public:
-    explicit PolicyEngine(const Policy& policy)
+    explicit PolicyEngine(const Policy& policy, PolicyEngineLimits limits = PolicyEngineLimits{})
         : policy_(policy), any_vlan_zone_(policy.has_vlan_zone()),
-          any_udp_ip_eligible_conduit_(policy.has_udp_eligible_conduit()) {}
+          any_udp_ip_eligible_conduit_(policy.has_udp_eligible_conduit()), limits_(limits) {}
+
+    // True once at least one of limits_'s four growth ceilings refused to track something new at
+    // least once -- see PolicyEngineLimits' own comment for why refusal, never eviction. Callers
+    // (cli_main.cpp) must surface this rather than let a truncated policy-validate run pass as an
+    // ordinary complete one.
+    bool truncated() const { return truncated_; }
+
+    // One human-readable line per DISTINCT ceiling that was hit. Empty iff truncated() is false.
+    const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
 
     // Folds one already-decoded packet into this engine's per-flow state. Call once per packet, in
     // capture order (same discipline as Decoder::decode).
@@ -557,10 +599,22 @@ private:
                                   const std::string& server_ip, const std::string& mac_a, const std::string& mac_b,
                                   bool has_port, bool is_tcp, uint16_t port);
 
+    // Identical dedup rule to BaselineEngine::mark_truncated (baseline.cpp).
+    void mark_truncated(const std::string& reason);
+
+    // Identical contract to AssetInventoryEngine::admit_tracked_key (asset_inventory.hpp) -- shared
+    // by every one of this engine's four growth-capped containers' own "have I seen this key
+    // before" check.
+    bool admit_tracked_key(bool already_present, size_t current_map_size, size_t ceiling, const char* map_name,
+                            const char* flag_name);
+
     const Policy& policy_;
     bool any_vlan_zone_;  // cached Policy::has_vlan_zone() -- see observe()'s own comment
     bool any_udp_ip_eligible_conduit_;  // cached Policy::has_udp_eligible_conduit() -- see
                                           // observe()'s own comment
+    PolicyEngineLimits limits_;
+    bool truncated_ = false;
+    std::vector<std::string> truncation_reasons_;
     std::unordered_map<std::string, FlowState> flows_;  // keyed by canonical session key
     std::vector<std::string> flow_order_;                // session keys, first-seen order
     std::unordered_map<std::string, UdpFlowState> udp_flows_;  // keyed by protocol + canonical

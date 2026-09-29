@@ -284,6 +284,26 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to the report's flow server port. |
 | `--services FILE` | *(none)* | Same meaning as `decode --services`: Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+| `--max-policy-tcp-flows N` | `200,000` | Cap the number of distinct TCP flows `PolicyEngine` tracks per capture. `0` = leave it at its own compiled default. Past this, further new flows observed in the capture are not evaluated and the result is marked incomplete (see "Resource bounds and OBSERVATION INCOMPLETE" below). |
+| `--max-policy-udp-flows N` | `100,000` | Cap the number of distinct UDP flows (BACnet/IP, CIP I/O) `PolicyEngine` tracks per capture -- only populated once the policy names `bacnet`/`enip`/`any` on a CIDR- or hostname-zone conduit. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
+| `--max-policy-ethernet-flows N` | `100,000` | Cap the number of distinct raw-Ethernet L2 flows (PROFINET RT/GOOSE/SV/EtherCAT) `PolicyEngine` tracks per capture -- only populated once the policy declares at least one VLAN zone. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
+| `--max-policy-notable-protocols N` | `50,000` | Cap the number of distinct notable-IT-protocol observations (see POLICY FILE FORMAT's "Notable IT protocols" subsection below) `PolicyEngine` records per capture. `0` = leave it at its own compiled default. Past this, further new combinations are not recorded and the result is marked incomplete. |
+
+#### Resource bounds and OBSERVATION INCOMPLETE
+
+`PolicyEngine` never evicts an already-tracked entry once observed -- the same never-evict
+admission policy `DetectEngine`'s and `AssetInventoryEngine`'s own resource bounds use (see
+`detect`'s "Resource bounds and OBSERVATION INCOMPLETE" above for the full rationale). `flows_`,
+`udp_flows_`, `ethernet_flows_`, and `notable_protocols_` are each capped independently by the
+flag of the matching name above. Once any one ceiling is reached, the text report gets an `***
+OBSERVATION INCOMPLETE ***` banner naming exactly which ceiling was hit and which flag raises it,
+the JSON report gets `observation_truncated: true` plus a `truncation_reasons` array with the same
+text, and the process exits `kExitObservationIncomplete` (6) -- **taking priority over
+`policy validate`'s own ordinary exit codes 0/3** (see EXIT STATUS below). A `Result: COMPLIANT`
+alongside `observation_truncated: true` means the capture was only PARTLY observed, not confirmed
+clean -- always check this exit code (or `observation_truncated` in JSON) before trusting a
+`COMPLIANT` verdict. The compiled defaults are sized generously above what this project's own
+fixtures and any reasonably-sized single-capture `policy validate` run need.
 
 With `-i`, the report's `capture:` line shows `live:<interface>` in place of a
 file path, and Ctrl+C (or `--duration` elapsing) stops the capture and still
@@ -402,6 +422,28 @@ doesn't cover).
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each edge's server port. |
 | `--services FILE` | *(none)* | Same meaning as `decode --services`: Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+| `--max-inventory-assets N` | `200,000` | Cap the number of distinct IP addresses `AssetInventoryEngine` records as assets per capture. `0` = leave it at its own compiled default. Past this, further new assets observed in the capture are not recorded and the inventory is marked incomplete (see "Resource bounds and OBSERVATION INCOMPLETE" below). |
+| `--max-inventory-edges N` | `200,000` | Cap the number of distinct (client, server, protocol, port) edges `AssetInventoryEngine` records per capture -- independent of `--max-inventory-assets`, so an edge can be refused while its endpoints' own asset records are still tracked, or vice versa. `0` = leave it at its own compiled default. Past this, further new edges are not recorded and the inventory is marked incomplete. |
+| `--max-inventory-tcp-sessions N` | `50,000` | Cap the number of distinct TCP sessions `AssetInventoryEngine` tracks per capture for client/server direction inference. `0` = leave it at its own compiled default. Past this, further new sessions fall back to the known-port heuristic instead of SYN/SYN-ACK tracking for that one packet (the inventory content itself is unaffected -- only the direction-inference method for the affected packet), and the inventory is marked incomplete. |
+| `--max-inventory-notable-protocols N` | `50,000` | Cap the number of distinct notable-IT-protocol observations (see "NOTABLE IT PROTOCOLS" above) `AssetInventoryEngine` records per capture. `0` = leave it at its own compiled default. Past this, further new combinations are not recorded and the inventory is marked incomplete. |
+
+#### Resource bounds and OBSERVATION INCOMPLETE
+
+`AssetInventoryEngine` never evicts an already-tracked entry once observed -- the same
+never-evict admission policy `DetectEngine`'s own resource bounds use (see `detect`'s
+"Resource bounds and OBSERVATION INCOMPLETE" above for the full rationale), since these
+containers ARE the inventory's own report output. `assets_`, `edges_`, `tcp_sessions_`, and
+`notable_protocols_` are each capped independently by the flag of the matching name above, so
+(for example) an edge can reference an endpoint whose own asset record was refused once its own
+cap was hit -- `inventory` accounts for this when deriving zones/conduits rather than assuming
+every edge endpoint always has a corresponding asset. Once any one ceiling is reached, the text
+report gets an `*** OBSERVATION INCOMPLETE ***` banner naming exactly which ceiling was hit and
+which flag raises it, the JSON report gets `observation_truncated: true` plus a
+`truncation_reasons` array with the same text, and the process exits `kExitObservationIncomplete`
+(6) -- taking priority over `inventory`'s own ordinary exit code 0 (see EXIT STATUS below). Always
+check this exit code (or `observation_truncated` in JSON) before trusting an `inventory` report as
+a complete picture of the capture. The compiled defaults are sized generously above what this
+project's own fixtures and any reasonably-sized single-capture `inventory` run need.
 
 Like `policy validate`, `inventory` decodes the capture exactly as `decode`
 would and does not change or duplicate any decoding logic -- see
@@ -1157,6 +1199,27 @@ MITRE mapping table and exactly how each of the three dimensions is decided.
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each finding's server port. |
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
 | `--max-reassembly-bytes N`, `--max-reassembly-segments N`, `--max-recursion-depth N`, `--max-decoded-objects N`, `--max-coalesced-messages N` | *(compile-time defaults)* | Same five resource-exhaustion-limit overrides as `decode`'s own flags of the same name. |
+| `--max-detect-findings N` | `20,000` | Cap the number of distinct findings (always-notable findings and new-conduit candidates, checked independently) `DetectEngine` records per capture. `0` = leave it at its own compiled default. Past this, further genuinely new findings of that kind are not recorded and the report is marked incomplete (see "Resource bounds and OBSERVATION INCOMPLETE" below). |
+| `--max-detect-tracked-keys-per-map N` | `50,000` | Cap the number of distinct keys `DetectEngine` tracks in any one of its per-source/per-server novelty/burst-tracking maps, applied identically and independently to each map. `0` = leave it at its own compiled default. Past this, further new keys in that map are not tracked and the report is marked incomplete. |
+| `--max-detect-originators-per-server N` | `2,000` | Cap the number of distinct originator IPs `DetectEngine` tracks per server key inside its nine per-server originator/writer maps (the CIP/UMAS engineering-station-originator and similar new-vs-known checks). `0` = leave it at its own compiled default. Past this, further new originators for that server are not tracked and the report is marked incomplete. |
+
+#### Resource bounds and OBSERVATION INCOMPLETE
+
+`DetectEngine` never evicts an already-tracked entry once observed -- the containers above
+double as the report's own output, so silently dropping one to make room for another would
+mean silently losing or corrupting an already-reported finding. Instead, once any one of the
+three ceilings above is reached, every further *genuinely new* key/originator/finding of that
+kind is refused (already-tracked keys keep updating normally) and the report is marked
+incomplete: the text report gets an `*** OBSERVATION INCOMPLETE ***` banner naming exactly
+which ceiling was hit and which flag raises it, the JSON report gets `observation_truncated:
+true` plus a `truncation_reasons` array with the same text, and the process exits
+`kExitObservationIncomplete` (6) -- **taking priority over `detect`'s own ordinary exit code 0**
+(see EXIT STATUS below). A caller that only checks for "no findings" and ignores this exit code
+can be misled into reading an incomplete capture as a clean one; always check the exit code (or
+`observation_truncated` in JSON) before trusting a `detect` report's absence of findings. The
+compiled defaults are sized generously above what this project's own fixtures and any
+reasonably-sized single-capture `detect` run need -- raise the relevant `--max-detect-*` flag
+and re-run only if a real, very large or very address-diverse capture legitimately needs it.
 
 #### Two kinds of finding, three independent dimensions
 
@@ -6923,10 +6986,13 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful run, even one that observed zero assets. For `detect`: a report was produced -- **`detect` always returns 0 on a successful run, regardless of how many findings it reports.** Unlike `policy validate`/`baseline check`, `detect` has no compliant/non-compliant concept to report against; it's a reporting tool surfacing findings for a human or a SIEM to triage, not a pass/fail gate. A caller wanting a non-zero result specifically when `detect` finds something should check the JSON report's own `summary.total` rather than the process exit code. |
-| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"); for `detect`, the same for a `--policy` or `--baseline-file` that couldn't be opened or failed to parse. |
+| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit) AND the observation was not truncated (see code 6 below). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful, untruncated run, even one that observed zero assets. For `detect`: a report was produced and the observation was not truncated -- `detect` has no compliant/non-compliant concept to report against; it's a reporting tool surfacing findings for a human or a SIEM to triage, not a pass/fail gate. A caller wanting a non-zero result specifically when `detect` finds something should check the JSON report's own `summary.total` rather than the process exit code. For `baseline check`: the capture was COMPLIANT against the baseline (no findings) and the observation was not truncated. |
+| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"); for `detect`, the same for a `--policy` or `--baseline-file` that couldn't be opened or failed to parse; for `baseline check`/`baseline learn`, the same for an unreadable/malformed `--baseline-file`. |
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
-| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory` (see code 0 above). |
+| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory`/`detect` (see code 0 above); superseded by code 6 when the observation was also truncated (code 6 takes priority -- see below). |
+| 4 | `baseline check` only: the capture and baseline file were both readable and valid, but `BaselineCheckReport::compliant()` is false (at least one finding -- a control-plane operation, a new conduit, or a new/out-of-range operation not covered by the baseline). Deliberately its own value rather than reusing code 3 -- a caller scripting against both subcommands needs to tell which one flagged something without also parsing output. Superseded by code 5 when the observation was also truncated. |
+| 5 | `baseline check` only: `BaselineCheckReport::observation_truncated` is true -- this run's own `BaselineEngine` hit at least one of its four internal growth ceilings (`--max-baseline-tcp-sessions`/`--max-baseline-conduits`/`--max-baseline-operations-per-conduit`/`--max-baseline-ranges-per-operation`), so the capture was only PARTLY observed. Takes priority over both 0 and 4: a truncated observation can only ever produce false negatives, so a plain 0/4 here would risk reading a truncated capture as a clean or fully-characterized one. Treat this as "re-run with a higher `--max-baseline-*` limit," not as clean and not as an ordinary anomaly (code 4). `baseline learn` itself always exits 0 on success (it writes a best-effort, possibly-partial baseline rather than failing outright) but still prints a `warning: ... is INCOMPLETE` line to stderr under the same truncation condition -- check stderr, not the exit code, for `learn`. |
+| 6 | `detect`, `inventory`, and `policy validate` only: the equivalent of code 5 above for these three subcommands' own engines (patch257 security review finding 3) -- `DetectEngine`/`AssetInventoryEngine`/`PolicyEngine` hit at least one of their own internal growth ceilings (`--max-detect-*`/`--max-inventory-*`/`--max-policy-*` respectively -- see each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection above), so the report reflects only PART of what the capture actually contains. Takes priority over every other exit code these three subcommands return, including 0, 3, and (implicitly) a `policy validate` "COMPLIANT" verdict -- the same "truncation can only produce false negatives, so it must never be masked by a clean-looking result" reasoning as code 5. Not returned by `baseline check`, which keeps its own pre-existing code 5 for this condition (an already-shipped exit code's value is never repurposed once released, to avoid breaking scripted callers). |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
 status; they are reported as warnings (to stderr, or `--log-file`) and as

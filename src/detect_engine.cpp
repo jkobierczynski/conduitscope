@@ -236,6 +236,44 @@ bool raw_pdu_matches(const ByteSpan& span, std::initializer_list<uint8_t> expect
 
 }  // namespace
 
+// Identical dedup rule to BaselineEngine::mark_truncated (baseline.cpp) -- see this method's own
+// doc comment (detect_engine.hpp) for why.
+void DetectEngine::mark_truncated(const std::string& reason) {
+    truncated_ = true;
+    for (const std::string& existing : truncation_reasons_) {
+        if (existing == reason) return;
+    }
+    truncation_reasons_.push_back(reason);
+}
+
+bool DetectEngine::admit_tracked_key(bool already_present, size_t current_map_size, const char* map_name) {
+    if (already_present) return true;
+    if (current_map_size < limits_.max_tracked_keys_per_map) return true;
+    mark_truncated(std::string("tracked-key limit (") + std::to_string(limits_.max_tracked_keys_per_map) +
+                    ") reached on " + map_name +
+                    " -- further new keys are not tracked (--max-detect-tracked-keys-per-map)");
+    return false;
+}
+
+bool DetectEngine::admit_originator(const std::vector<std::string>& originators, const std::string& originator,
+                                     const char* map_name) {
+    for (const std::string& existing : originators) {
+        if (existing == originator) return true;
+    }
+    if (originators.size() < limits_.max_originators_per_server) return true;
+    mark_truncated(std::string("originators-per-server limit (") +
+                    std::to_string(limits_.max_originators_per_server) + ") reached on " + map_name +
+                    " -- further new originators are not tracked (--max-detect-originators-per-server)");
+    return false;
+}
+
+bool DetectEngine::admit_finding_slot(size_t current_size, const char* what) {
+    if (current_size < limits_.max_findings) return true;
+    mark_truncated(std::string("finding limit (") + std::to_string(limits_.max_findings) + ") reached on " +
+                    what + " -- further new " + what + " are not recorded (--max-detect-findings)");
+    return false;
+}
+
 void DetectEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
     if (!dp.has_ip) return;
@@ -258,6 +296,7 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         std::string key = always_notable_key(finding_kind, client_ip, server_ip, protocol, server_port);
         auto it = always_notable_.find(key);
         if (it == always_notable_.end()) {
+            if (!admit_finding_slot(always_notable_.size(), "findings")) return;
             DetectionFinding f;
             f.category = category;
             f.technique = technique;
@@ -299,6 +338,7 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         std::string key = new_conduit_key(client_ip, server_ip, protocol, server_port, source_tag);
         auto it = new_conduit_candidates_.find(key);
         if (it == new_conduit_candidates_.end()) {
+            if (!admit_finding_slot(new_conduit_candidates_.size(), "new-conduit candidates")) return;
             NewConduitCandidate c;
             c.category = category;
             c.technique = technique;
@@ -332,7 +372,10 @@ void DetectEngine::observe(const DecodedPacket& dp) {
     // future pass rather than guessed at now.
     if (dp.has_tcp && dp.tcp_flags == "SYN") {
         std::string pkey = dp.src_ip + "|" + dp.dst_ip;
-        PortScanState& pst = port_scan_state_[pkey];
+        auto pit = port_scan_state_.find(pkey);
+        if (admit_tracked_key(pit != port_scan_state_.end(), port_scan_state_.size(), "port_scan_state_")) {
+        if (pit == port_scan_state_.end()) pit = port_scan_state_.emplace(pkey, PortScanState{}).first;
+        PortScanState& pst = pit->second;
         if (pst.distinct_ports.empty() || (dp.timestamp - pst.window_start) > kPortScanWindowSeconds) {
             pst.window_start = dp.timestamp;
             pst.distinct_ports.clear();
@@ -349,6 +392,7 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                     "a small handful of well-known ports",
                 DetectionSeverity::Moderate);
         }
+        }  // admit_tracked_key(port_scan_state_)
     }
 
     // --- S7comm: PLC Control/PLC Stop (mode change), block download (firmware/logic change) -------
@@ -410,13 +454,21 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             // Every branch of this whole if/else-if chain above (including the three not otherwise
             // named here) counts as "some other function was seen" except Setup Communication itself
             // -- a genuine engineering-station session does real work beyond the initial handshake.
-            if (sr.function_name == "Setup Communication") {
-                S7SetupCommProbeState& st = s7_setup_comm_state_[dp.src_ip + "|" + dp.dst_ip];
-                if (st.setup_comm_count == 0) st.first_seen = dp.timestamp;
-                st.last_seen = dp.timestamp;
-                ++st.setup_comm_count;
-            } else {
-                s7_setup_comm_state_[dp.src_ip + "|" + dp.dst_ip].other_function_seen = true;
+            std::string s7key = dp.src_ip + "|" + dp.dst_ip;
+            auto s7it = s7_setup_comm_state_.find(s7key);
+            if (admit_tracked_key(s7it != s7_setup_comm_state_.end(), s7_setup_comm_state_.size(),
+                                   "s7_setup_comm_state_")) {
+                if (s7it == s7_setup_comm_state_.end()) {
+                    s7it = s7_setup_comm_state_.emplace(s7key, S7SetupCommProbeState{}).first;
+                }
+                if (sr.function_name == "Setup Communication") {
+                    S7SetupCommProbeState& st = s7it->second;
+                    if (st.setup_comm_count == 0) st.first_seen = dp.timestamp;
+                    st.last_seen = dp.timestamp;
+                    ++st.setup_comm_count;
+                } else {
+                    s7it->second.other_function_seen = true;
+                }
             }
         }
 
@@ -432,23 +484,30 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         // the pre-existing CIP-List*/UMAS/FINS engineering-tool-enumeration sources, only a SECOND,
         // DIFFERENT originator querying the SAME PLC within this capture is flagged.
         if (sr.has_userdata_szl && !sr.userdata_szl_is_response) {
-            auto& originators = s7_szl_originators_by_server_[dp.dst_ip];
-            bool already_seen = false;
-            for (const auto& o : originators) {
-                if (o == dp.src_ip) {
-                    already_seen = true;
-                    break;
+            auto szlit = s7_szl_originators_by_server_.find(dp.dst_ip);
+            if (admit_tracked_key(szlit != s7_szl_originators_by_server_.end(),
+                                   s7_szl_originators_by_server_.size(), "s7_szl_originators_by_server_")) {
+                if (szlit == s7_szl_originators_by_server_.end()) {
+                    szlit = s7_szl_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{}).first;
                 }
-            }
-            if (!already_seen) {
-                if (!originators.empty()) {
-                    record_new_conduit_candidate(
-                        DetectionCategory::EngineeringStationActivity,
-                        mitre_t0888_remote_system_information_discovery(),
-                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "s7comm", dp.dst_port,
-                        "s7-szl-new-originator", DetectionSeverity::Informational);
+                std::vector<std::string>& originators = szlit->second;
+                bool already_seen = false;
+                for (const auto& o : originators) {
+                    if (o == dp.src_ip) {
+                        already_seen = true;
+                        break;
+                    }
                 }
-                originators.push_back(dp.src_ip);
+                if (!already_seen && admit_originator(originators, dp.src_ip, "s7_szl_originators_by_server_")) {
+                    if (!originators.empty()) {
+                        record_new_conduit_candidate(
+                            DetectionCategory::EngineeringStationActivity,
+                            mitre_t0888_remote_system_information_discovery(),
+                            /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "s7comm", dp.dst_port,
+                            "s7-szl-new-originator", DetectionSeverity::Informational);
+                    }
+                    originators.push_back(dp.src_ip);
+                }
             }
         }
     }
@@ -490,33 +549,50 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 // the signal is DIVERSITY of what's being read, so re-reading the same handful of
                 // object types repeatedly within the window must never trip this on repetition alone.
                 std::string ekey = dp.src_ip + "|" + dp.dst_ip;
-                Dnp3EnumerationSweepState& est = dnp3_enumeration_sweep_state_[ekey];
-                if (est.distinct_group_variations.empty() ||
-                    (dp.timestamp - est.window_start) > kDnp3EnumerationSweepWindowSeconds) {
-                    est.window_start = dp.timestamp;
-                    est.distinct_group_variations.clear();
-                }
-                for (const auto& obj : dr.dnp3_objects) {
-                    est.distinct_group_variations.emplace(obj.group, obj.variation);
-                }
-                if (est.distinct_group_variations.size() >= kDnp3EnumerationSweepThreshold) {
-                    record_always_notable(
-                        "dnp3-enumeration-sweep", DetectionCategory::EngineeringStationActivity,
-                        mitre_t0861_point_and_tag_identification(), dp.src_ip, dp.dst_ip, "dnp3",
-                        dp.dst_port,
-                        "DNP3 Read requests from this master spanned " +
-                            std::to_string(est.distinct_group_variations.size()) +
-                            " distinct object group/variation combinations against this outstation "
-                            "within " +
-                            std::to_string(static_cast<long>(kDnp3EnumerationSweepWindowSeconds)) +
-                            "s -- an engineering-tool-shaped enumeration sweep rather than routine "
-                            "periodic polling",
-                        DetectionSeverity::Moderate);
+                auto eit = dnp3_enumeration_sweep_state_.find(ekey);
+                if (admit_tracked_key(eit != dnp3_enumeration_sweep_state_.end(),
+                                       dnp3_enumeration_sweep_state_.size(), "dnp3_enumeration_sweep_state_")) {
+                    if (eit == dnp3_enumeration_sweep_state_.end()) {
+                        eit = dnp3_enumeration_sweep_state_.emplace(ekey, Dnp3EnumerationSweepState{}).first;
+                    }
+                    Dnp3EnumerationSweepState& est = eit->second;
+                    if (est.distinct_group_variations.empty() ||
+                        (dp.timestamp - est.window_start) > kDnp3EnumerationSweepWindowSeconds) {
+                        est.window_start = dp.timestamp;
+                        est.distinct_group_variations.clear();
+                    }
+                    for (const auto& obj : dr.dnp3_objects) {
+                        est.distinct_group_variations.emplace(obj.group, obj.variation);
+                    }
+                    if (est.distinct_group_variations.size() >= kDnp3EnumerationSweepThreshold) {
+                        record_always_notable(
+                            "dnp3-enumeration-sweep", DetectionCategory::EngineeringStationActivity,
+                            mitre_t0861_point_and_tag_identification(), dp.src_ip, dp.dst_ip, "dnp3",
+                            dp.dst_port,
+                            "DNP3 Read requests from this master spanned " +
+                                std::to_string(est.distinct_group_variations.size()) +
+                                " distinct object group/variation combinations against this outstation "
+                                "within " +
+                                std::to_string(static_cast<long>(kDnp3EnumerationSweepWindowSeconds)) +
+                                "s -- an engineering-tool-shaped enumeration sweep rather than routine "
+                                "periodic polling",
+                            DetectionSeverity::Moderate);
+                    }
                 }
             } else if (dr.dnp3_function_name == "Enable Unsolicited Responses") {
-                dnp3_unsolicited_enabled_[dp.src_ip + "|" + dp.dst_ip] = true;
+                std::string ukey = dp.src_ip + "|" + dp.dst_ip;
+                auto uit = dnp3_unsolicited_enabled_.find(ukey);
+                if (admit_tracked_key(uit != dnp3_unsolicited_enabled_.end(), dnp3_unsolicited_enabled_.size(),
+                                       "dnp3_unsolicited_enabled_")) {
+                    dnp3_unsolicited_enabled_[ukey] = true;
+                }
             } else if (dr.dnp3_function_name == "Disable Unsolicited Responses") {
-                dnp3_unsolicited_enabled_[dp.src_ip + "|" + dp.dst_ip] = false;
+                std::string ukey = dp.src_ip + "|" + dp.dst_ip;
+                auto uit = dnp3_unsolicited_enabled_.find(ukey);
+                if (admit_tracked_key(uit != dnp3_unsolicited_enabled_.end(), dnp3_unsolicited_enabled_.size(),
+                                       "dnp3_unsolicited_enabled_")) {
+                    dnp3_unsolicited_enabled_[ukey] = false;
+                }
             } else if (dr.dnp3_function_name == "Unsolicited Response") {
                 // Reverse roles: dp.src_ip is the outstation reporting unprompted, dp.dst_ip is the
                 // master. Only master IPs actually seen ENABLING unsolicited responses on this exact
@@ -535,7 +611,12 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                         DetectionSeverity::Moderate);
                 }
             } else if (dr.dnp3_function_name == "Select") {
-                dnp3_select_seen_[dp.src_ip + "|" + dp.dst_ip] = true;
+                std::string skey = dp.src_ip + "|" + dp.dst_ip;
+                auto seit = dnp3_select_seen_.find(skey);
+                if (admit_tracked_key(seit != dnp3_select_seen_.end(), dnp3_select_seen_.size(),
+                                       "dnp3_select_seen_")) {
+                    dnp3_select_seen_[skey] = true;
+                }
             } else if (dr.dnp3_function_name == "Operate") {
                 // Direct Operate (0x05) is deliberately NOT checked here at all -- see
                 // dnp3_select_seen_'s own comment (detect_engine.hpp) for why flagging it would be
@@ -598,43 +679,60 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             // Modbus writer and a DNP3 writer to the same IP address are never evidence about each
             // other.
             if (is_dnp3_write) {
-                auto& writers = dnp3_write_originators_by_server_[dp.dst_ip];
-                bool already_writer = false;
-                for (const auto& w : writers) {
-                    if (w == dp.src_ip) {
-                        already_writer = true;
-                        break;
+                auto dwit = dnp3_write_originators_by_server_.find(dp.dst_ip);
+                if (admit_tracked_key(dwit != dnp3_write_originators_by_server_.end(),
+                                       dnp3_write_originators_by_server_.size(),
+                                       "dnp3_write_originators_by_server_")) {
+                    if (dwit == dnp3_write_originators_by_server_.end()) {
+                        dwit = dnp3_write_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{})
+                                   .first;
                     }
-                }
-                if (!already_writer) {
-                    if (!writers.empty()) {
-                        record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
-                                                       mitre_t0848_rogue_master(),
-                                                       /*is_remote_access=*/false, dp.src_ip, dp.dst_ip,
-                                                       "dnp3", dp.dst_port, "dnp3-rogue-master",
-                                                       DetectionSeverity::Critical);
+                    std::vector<std::string>& writers = dwit->second;
+                    bool already_writer = false;
+                    for (const auto& w : writers) {
+                        if (w == dp.src_ip) {
+                            already_writer = true;
+                            break;
+                        }
                     }
-                    writers.push_back(dp.src_ip);
+                    if (!already_writer &&
+                        admit_originator(writers, dp.src_ip, "dnp3_write_originators_by_server_")) {
+                        if (!writers.empty()) {
+                            record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
+                                                           mitre_t0848_rogue_master(),
+                                                           /*is_remote_access=*/false, dp.src_ip, dp.dst_ip,
+                                                           "dnp3", dp.dst_port, "dnp3-rogue-master",
+                                                           DetectionSeverity::Critical);
+                        }
+                        writers.push_back(dp.src_ip);
+                    }
                 }
 
                 std::string wkey = "dnp3|" + dp.src_ip + "|" + dp.dst_ip;
-                WriteBurstState& wst = write_burst_state_[wkey];
-                if (wst.count == 0 || (dp.timestamp - wst.window_start) > kWriteBurstWindowSeconds) {
-                    wst.window_start = dp.timestamp;
-                    wst.count = 0;
-                }
-                ++wst.count;
-                if (wst.count >= kWriteBurstThreshold) {
-                    record_always_notable(
-                        "dnp3-write-burst", DetectionCategory::ProtocolMisuse,
-                        mitre_t0806_brute_force_io(), dp.src_ip, dp.dst_ip, "dnp3", dp.dst_port,
-                        "This master issued at least " + std::to_string(kWriteBurstThreshold) +
-                            " write-classified DNP3 requests to this outstation within " +
-                            std::to_string(static_cast<long>(kWriteBurstWindowSeconds)) +
-                            "s -- a repetitive I/O-point-value-change burst, though a legitimate "
-                            "fast-polling engineering tool doing rapid setpoint adjustment during "
-                            "commissioning can trigger this too",
-                        DetectionSeverity::Moderate);
+                auto wbit = write_burst_state_.find(wkey);
+                if (admit_tracked_key(wbit != write_burst_state_.end(), write_burst_state_.size(),
+                                       "write_burst_state_")) {
+                    if (wbit == write_burst_state_.end()) {
+                        wbit = write_burst_state_.emplace(wkey, WriteBurstState{}).first;
+                    }
+                    WriteBurstState& wst = wbit->second;
+                    if (wst.count == 0 || (dp.timestamp - wst.window_start) > kWriteBurstWindowSeconds) {
+                        wst.window_start = dp.timestamp;
+                        wst.count = 0;
+                    }
+                    ++wst.count;
+                    if (wst.count >= kWriteBurstThreshold) {
+                        record_always_notable(
+                            "dnp3-write-burst", DetectionCategory::ProtocolMisuse,
+                            mitre_t0806_brute_force_io(), dp.src_ip, dp.dst_ip, "dnp3", dp.dst_port,
+                            "This master issued at least " + std::to_string(kWriteBurstThreshold) +
+                                " write-classified DNP3 requests to this outstation within " +
+                                std::to_string(static_cast<long>(kWriteBurstWindowSeconds)) +
+                                "s -- a repetitive I/O-point-value-change burst, though a legitimate "
+                                "fast-polling engineering tool doing rapid setpoint adjustment during "
+                                "commissioning can trigger this too",
+                            DetectionSeverity::Moderate);
+                    }
                 }
             }
         }
@@ -783,7 +881,9 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         // dedup-by-key handles every count past the threshold as an ordinary last_seen/packet_count
         // update to that same finding, so nothing extra is needed here for that.
         if (bf.has_npdu && bf.npdu.has_apdu && bf.npdu.apdu.pdu_type_name == "Unconfirmed-Request" &&
-            bf.npdu.apdu.service_choice_name == "who-Is") {
+            bf.npdu.apdu.service_choice_name == "who-Is" &&
+            admit_tracked_key(bacnet_who_is_count_by_source_.count(dp.src_ip) != 0,
+                               bacnet_who_is_count_by_source_.size(), "bacnet_who_is_count_by_source_")) {
             size_t count = ++bacnet_who_is_count_by_source_[dp.src_ip];
             if (count >= kBacnetWhoIsFloodThreshold) {
                 // Batch 5 re-mapping: T0846.002 (Broadcast Discovery) fits this finding better than
@@ -817,45 +917,67 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             // to it from off its local subnet; a network-topology change, not a data read. Same
             // "second-plus originator to a given server is new, first is not" mechanism as the
             // pre-existing CIP/UMAS/S7/FINS engineering-tool sources.
-            auto& originators = bacnet_foreign_device_register_originators_by_server_[dp.dst_ip];
-            bool already_seen = false;
-            for (const auto& o : originators) {
-                if (o == dp.src_ip) {
-                    already_seen = true;
-                    break;
+            auto fdit = bacnet_foreign_device_register_originators_by_server_.find(dp.dst_ip);
+            if (admit_tracked_key(fdit != bacnet_foreign_device_register_originators_by_server_.end(),
+                                   bacnet_foreign_device_register_originators_by_server_.size(),
+                                   "bacnet_foreign_device_register_originators_by_server_")) {
+                if (fdit == bacnet_foreign_device_register_originators_by_server_.end()) {
+                    fdit = bacnet_foreign_device_register_originators_by_server_
+                               .emplace(dp.dst_ip, std::vector<std::string>{})
+                               .first;
                 }
-            }
-            if (!already_seen) {
-                if (!originators.empty()) {
-                    record_new_conduit_candidate(
-                        DetectionCategory::EngineeringStationActivity,
-                        mitre_t0888_remote_system_information_discovery(),
-                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "bacnet", dp.dst_port,
-                        "bacnet-foreign-device-register-new-originator", DetectionSeverity::Informational);
+                std::vector<std::string>& originators = fdit->second;
+                bool already_seen = false;
+                for (const auto& o : originators) {
+                    if (o == dp.src_ip) {
+                        already_seen = true;
+                        break;
+                    }
                 }
-                originators.push_back(dp.src_ip);
+                if (!already_seen && admit_originator(originators, dp.src_ip,
+                                                       "bacnet_foreign_device_register_originators_by_server_")) {
+                    if (!originators.empty()) {
+                        record_new_conduit_candidate(
+                            DetectionCategory::EngineeringStationActivity,
+                            mitre_t0888_remote_system_information_discovery(),
+                            /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "bacnet", dp.dst_port,
+                            "bacnet-foreign-device-register-new-originator", DetectionSeverity::Informational);
+                    }
+                    originators.push_back(dp.src_ip);
+                }
             }
         } else if (bf.bvlc_function == 0x06 || bf.bvlc_function == 0x02) {
             // (b) Read-Foreign-Device-Table or Read-Broadcast-Distribution-Table request --
             // reconnaissance against the BBMD's own routing configuration. Both functions folded
             // into one finding/one tracking map -- see this file's own header comment for why.
-            auto& originators = bacnet_bbmd_table_read_originators_by_server_[dp.dst_ip];
-            bool already_seen = false;
-            for (const auto& o : originators) {
-                if (o == dp.src_ip) {
-                    already_seen = true;
-                    break;
+            auto bbit = bacnet_bbmd_table_read_originators_by_server_.find(dp.dst_ip);
+            if (admit_tracked_key(bbit != bacnet_bbmd_table_read_originators_by_server_.end(),
+                                   bacnet_bbmd_table_read_originators_by_server_.size(),
+                                   "bacnet_bbmd_table_read_originators_by_server_")) {
+                if (bbit == bacnet_bbmd_table_read_originators_by_server_.end()) {
+                    bbit = bacnet_bbmd_table_read_originators_by_server_
+                               .emplace(dp.dst_ip, std::vector<std::string>{})
+                               .first;
                 }
-            }
-            if (!already_seen) {
-                if (!originators.empty()) {
-                    record_new_conduit_candidate(
-                        DetectionCategory::EngineeringStationActivity,
-                        mitre_t0888_remote_system_information_discovery(),
-                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "bacnet", dp.dst_port,
-                        "bacnet-bbmd-table-read-new-originator", DetectionSeverity::Informational);
+                std::vector<std::string>& originators = bbit->second;
+                bool already_seen = false;
+                for (const auto& o : originators) {
+                    if (o == dp.src_ip) {
+                        already_seen = true;
+                        break;
+                    }
                 }
-                originators.push_back(dp.src_ip);
+                if (!already_seen && admit_originator(originators, dp.src_ip,
+                                                       "bacnet_bbmd_table_read_originators_by_server_")) {
+                    if (!originators.empty()) {
+                        record_new_conduit_candidate(
+                            DetectionCategory::EngineeringStationActivity,
+                            mitre_t0888_remote_system_information_discovery(),
+                            /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "bacnet", dp.dst_port,
+                            "bacnet-bbmd-table-read-new-originator", DetectionSeverity::Informational);
+                    }
+                    originators.push_back(dp.src_ip);
+                }
             }
         } else if (bf.bvlc_function == 0x00 && bf.has_result_code &&
                    (bf.result_code == 0x0030 || bf.result_code == 0x0020 || bf.result_code == 0x0040)) {
@@ -892,23 +1014,30 @@ void DetectEngine::observe(const DecodedPacket& dp) {
     if (dp.protocol == "fins" && dp.result) {
         const FinsFrame& ff = dp.result->as<FinsFrame>();
         if (!ff.is_response && ff.command == 0x0501) {
-            auto& originators = fins_originators_by_server_[dp.dst_ip];
-            bool already_seen = false;
-            for (const auto& o : originators) {
-                if (o == dp.src_ip) {
-                    already_seen = true;
-                    break;
+            auto fit = fins_originators_by_server_.find(dp.dst_ip);
+            if (admit_tracked_key(fit != fins_originators_by_server_.end(), fins_originators_by_server_.size(),
+                                   "fins_originators_by_server_")) {
+                if (fit == fins_originators_by_server_.end()) {
+                    fit = fins_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{}).first;
                 }
-            }
-            if (!already_seen) {
-                if (!originators.empty()) {
-                    record_new_conduit_candidate(
-                        DetectionCategory::EngineeringStationActivity,
-                        mitre_t0888_remote_system_information_discovery(),
-                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "fins", dp.dst_port,
-                        "fins-new-originator-discovery", DetectionSeverity::Informational);
+                std::vector<std::string>& originators = fit->second;
+                bool already_seen = false;
+                for (const auto& o : originators) {
+                    if (o == dp.src_ip) {
+                        already_seen = true;
+                        break;
+                    }
                 }
-                originators.push_back(dp.src_ip);
+                if (!already_seen && admit_originator(originators, dp.src_ip, "fins_originators_by_server_")) {
+                    if (!originators.empty()) {
+                        record_new_conduit_candidate(
+                            DetectionCategory::EngineeringStationActivity,
+                            mitre_t0888_remote_system_information_discovery(),
+                            /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "fins", dp.dst_port,
+                            "fins-new-originator-discovery", DetectionSeverity::Informational);
+                    }
+                    originators.push_back(dp.src_ip);
+                }
             }
         }
     }
@@ -970,22 +1099,29 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         const EnipFrame& ef = dp.result->as<EnipResult>().first;
         if (ef.has_cip && !ef.cip.is_response &&
             (ef.cip.service_name == "Forward_Open" || ef.cip.service_name == "Large_Forward_Open")) {
-            auto& originators = cip_originators_by_server_[dp.dst_ip];
-            bool already_seen = false;
-            for (const auto& o : originators) {
-                if (o == dp.src_ip) {
-                    already_seen = true;
-                    break;
+            auto cipit = cip_originators_by_server_.find(dp.dst_ip);
+            if (admit_tracked_key(cipit != cip_originators_by_server_.end(), cip_originators_by_server_.size(),
+                                   "cip_originators_by_server_")) {
+                if (cipit == cip_originators_by_server_.end()) {
+                    cipit = cip_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{}).first;
                 }
-            }
-            if (!already_seen) {
-                if (!originators.empty()) {
-                    record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
-                                                  mitre_t0855_unauthorized_command_message(),
-                                                  /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "enip",
-                                                  dp.dst_port, "cip-new-originator");
+                std::vector<std::string>& originators = cipit->second;
+                bool already_seen = false;
+                for (const auto& o : originators) {
+                    if (o == dp.src_ip) {
+                        already_seen = true;
+                        break;
+                    }
                 }
-                originators.push_back(dp.src_ip);
+                if (!already_seen && admit_originator(originators, dp.src_ip, "cip_originators_by_server_")) {
+                    if (!originators.empty()) {
+                        record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
+                                                      mitre_t0855_unauthorized_command_message(),
+                                                      /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "enip",
+                                                      dp.dst_port, "cip-new-originator");
+                    }
+                    originators.push_back(dp.src_ip);
+                }
             }
         }
 
@@ -1051,23 +1187,33 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         // see this file's own header comment (detect_engine.hpp) and docs/USER_GUIDE.md's LIMITATIONS.
         if (ef.header.command_name == "ListServices" || ef.header.command_name == "ListIdentity" ||
             ef.header.command_name == "ListInterfaces") {
-            auto& originators = enip_list_discovery_originators_by_server_[dp.dst_ip];
-            bool already_seen = false;
-            for (const auto& o : originators) {
-                if (o == dp.src_ip) {
-                    already_seen = true;
-                    break;
+            auto elit = enip_list_discovery_originators_by_server_.find(dp.dst_ip);
+            if (admit_tracked_key(elit != enip_list_discovery_originators_by_server_.end(),
+                                   enip_list_discovery_originators_by_server_.size(),
+                                   "enip_list_discovery_originators_by_server_")) {
+                if (elit == enip_list_discovery_originators_by_server_.end()) {
+                    elit = enip_list_discovery_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{})
+                               .first;
                 }
-            }
-            if (!already_seen) {
-                if (!originators.empty()) {
-                    record_new_conduit_candidate(
-                        DetectionCategory::EngineeringStationActivity,
-                        mitre_t0888_remote_system_information_discovery(),
-                        /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "enip", dp.dst_port,
-                        "enip-new-originator-discovery", DetectionSeverity::Informational);
+                std::vector<std::string>& originators = elit->second;
+                bool already_seen = false;
+                for (const auto& o : originators) {
+                    if (o == dp.src_ip) {
+                        already_seen = true;
+                        break;
+                    }
                 }
-                originators.push_back(dp.src_ip);
+                if (!already_seen &&
+                    admit_originator(originators, dp.src_ip, "enip_list_discovery_originators_by_server_")) {
+                    if (!originators.empty()) {
+                        record_new_conduit_candidate(
+                            DetectionCategory::EngineeringStationActivity,
+                            mitre_t0888_remote_system_information_discovery(),
+                            /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "enip", dp.dst_port,
+                            "enip-new-originator-discovery", DetectionSeverity::Informational);
+                    }
+                    originators.push_back(dp.src_ip);
+                }
             }
         }
 
@@ -1256,34 +1402,45 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 // (umas_engineering_originators_by_server_) rather than one map per command -- see
                 // that member's own comment (detect_engine.hpp) for why a client already credited
                 // via one command isn't re-flagged for later issuing a different one.
-                auto& originators = umas_engineering_originators_by_server_[dp.dst_ip];
-                bool already_seen = false;
-                for (const auto& o : originators) {
-                    if (o == dp.src_ip) {
-                        already_seen = true;
-                        break;
+                auto umasit = umas_engineering_originators_by_server_.find(dp.dst_ip);
+                if (admit_tracked_key(umasit != umas_engineering_originators_by_server_.end(),
+                                       umas_engineering_originators_by_server_.size(),
+                                       "umas_engineering_originators_by_server_")) {
+                    if (umasit == umas_engineering_originators_by_server_.end()) {
+                        umasit = umas_engineering_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{})
+                                     .first;
                     }
-                }
-                if (!already_seen) {
-                    if (!originators.empty()) {
-                        bool is_reservation = (fc == UMAS_TAKE_PLC_RESERVATION);
-                        // TAKE_PLC_RESERVATION actually claims exclusive engineering access -- a real
-                        // (if not immediately destructive) control-plane event, so it keeps the
-                        // record_new_conduit_candidate default of Moderate severity. The three
-                        // READ_ID/READ_PROJECT_INFO/READ_PLC_INFO commands are read-only enumeration
-                        // with no control effect at all if genuine, so they're deliberately
-                        // Informational instead -- the same "evidence stays Confirmed, only severity
-                        // drops" posture as the Modbus write-without-read pattern above.
-                        record_new_conduit_candidate(
-                            is_reservation ? DetectionCategory::ProtocolMisuse
-                                           : DetectionCategory::EngineeringStationActivity,
-                            is_reservation ? mitre_t0855_unauthorized_command_message()
-                                           : mitre_t0888_remote_system_information_discovery(),
-                            /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
-                            is_reservation ? "umas-new-originator-reservation" : "umas-new-originator-discovery",
-                            is_reservation ? DetectionSeverity::Moderate : DetectionSeverity::Informational);
+                    std::vector<std::string>& originators = umasit->second;
+                    bool already_seen = false;
+                    for (const auto& o : originators) {
+                        if (o == dp.src_ip) {
+                            already_seen = true;
+                            break;
+                        }
                     }
-                    originators.push_back(dp.src_ip);
+                    if (!already_seen && admit_originator(originators, dp.src_ip,
+                                                           "umas_engineering_originators_by_server_")) {
+                        if (!originators.empty()) {
+                            bool is_reservation = (fc == UMAS_TAKE_PLC_RESERVATION);
+                            // TAKE_PLC_RESERVATION actually claims exclusive engineering access -- a real
+                            // (if not immediately destructive) control-plane event, so it keeps the
+                            // record_new_conduit_candidate default of Moderate severity. The three
+                            // READ_ID/READ_PROJECT_INFO/READ_PLC_INFO commands are read-only enumeration
+                            // with no control effect at all if genuine, so they're deliberately
+                            // Informational instead -- the same "evidence stays Confirmed, only severity
+                            // drops" posture as the Modbus write-without-read pattern above.
+                            record_new_conduit_candidate(
+                                is_reservation ? DetectionCategory::ProtocolMisuse
+                                               : DetectionCategory::EngineeringStationActivity,
+                                is_reservation ? mitre_t0855_unauthorized_command_message()
+                                               : mitre_t0888_remote_system_information_discovery(),
+                                /*is_remote_access=*/false, dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                                is_reservation ? "umas-new-originator-reservation"
+                                               : "umas-new-originator-discovery",
+                                is_reservation ? DetectionSeverity::Moderate : DetectionSeverity::Informational);
+                        }
+                        originators.push_back(dp.src_ip);
+                    }
                 }
             }
         }
@@ -1309,23 +1466,33 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 // modbus_write_originators_by_server_'s own comment (detect_engine.hpp) has the full
                 // reasoning for why this is its own tracker, distinct from every read-only
                 // new-originator finding elsewhere in this file.
-                auto& writers = modbus_write_originators_by_server_[dp.dst_ip];
-                bool already_writer = false;
-                for (const auto& w : writers) {
-                    if (w == dp.src_ip) {
-                        already_writer = true;
-                        break;
+                auto mwit = modbus_write_originators_by_server_.find(dp.dst_ip);
+                if (admit_tracked_key(mwit != modbus_write_originators_by_server_.end(),
+                                       modbus_write_originators_by_server_.size(),
+                                       "modbus_write_originators_by_server_")) {
+                    if (mwit == modbus_write_originators_by_server_.end()) {
+                        mwit = modbus_write_originators_by_server_.emplace(dp.dst_ip, std::vector<std::string>{})
+                                   .first;
                     }
-                }
-                if (!already_writer) {
-                    if (!writers.empty()) {
-                        record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
-                                                       mitre_t0848_rogue_master(),
-                                                       /*is_remote_access=*/false, dp.src_ip, dp.dst_ip,
-                                                       "modbus", dp.dst_port, "modbus-rogue-master",
-                                                       DetectionSeverity::Critical);
+                    std::vector<std::string>& writers = mwit->second;
+                    bool already_writer = false;
+                    for (const auto& w : writers) {
+                        if (w == dp.src_ip) {
+                            already_writer = true;
+                            break;
+                        }
                     }
-                    writers.push_back(dp.src_ip);
+                    if (!already_writer &&
+                        admit_originator(writers, dp.src_ip, "modbus_write_originators_by_server_")) {
+                        if (!writers.empty()) {
+                            record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
+                                                           mitre_t0848_rogue_master(),
+                                                           /*is_remote_access=*/false, dp.src_ip, dp.dst_ip,
+                                                           "modbus", dp.dst_port, "modbus-rogue-master",
+                                                           DetectionSeverity::Critical);
+                        }
+                        writers.push_back(dp.src_ip);
+                    }
                 }
 
                 // Brute Force I/O: a burst of write-classified requests against the same outstation
@@ -1333,23 +1500,30 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 // the full reasoning; same windowed-count shape as modbus_exception_burst_state_
                 // above (Batch 1 item 6), reused here for write volume instead of exception volume.
                 std::string wkey = "modbus|" + dp.src_ip + "|" + dp.dst_ip;
-                WriteBurstState& wst = write_burst_state_[wkey];
-                if (wst.count == 0 || (dp.timestamp - wst.window_start) > kWriteBurstWindowSeconds) {
-                    wst.window_start = dp.timestamp;
-                    wst.count = 0;
-                }
-                ++wst.count;
-                if (wst.count >= kWriteBurstThreshold) {
-                    record_always_notable(
-                        "modbus-write-burst", DetectionCategory::ProtocolMisuse,
-                        mitre_t0806_brute_force_io(), dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
-                        "This client issued at least " + std::to_string(kWriteBurstThreshold) +
-                            " write-classified Modbus requests to this server within " +
-                            std::to_string(static_cast<long>(kWriteBurstWindowSeconds)) +
-                            "s -- a repetitive I/O-point-value-change burst, though a legitimate "
-                            "fast-polling engineering tool doing rapid setpoint adjustment during "
-                            "commissioning can trigger this too",
-                        DetectionSeverity::Moderate);
+                auto mwbit = write_burst_state_.find(wkey);
+                if (admit_tracked_key(mwbit != write_burst_state_.end(), write_burst_state_.size(),
+                                       "write_burst_state_")) {
+                    if (mwbit == write_burst_state_.end()) {
+                        mwbit = write_burst_state_.emplace(wkey, WriteBurstState{}).first;
+                    }
+                    WriteBurstState& wst = mwbit->second;
+                    if (wst.count == 0 || (dp.timestamp - wst.window_start) > kWriteBurstWindowSeconds) {
+                        wst.window_start = dp.timestamp;
+                        wst.count = 0;
+                    }
+                    ++wst.count;
+                    if (wst.count >= kWriteBurstThreshold) {
+                        record_always_notable(
+                            "modbus-write-burst", DetectionCategory::ProtocolMisuse,
+                            mitre_t0806_brute_force_io(), dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                            "This client issued at least " + std::to_string(kWriteBurstThreshold) +
+                                " write-classified Modbus requests to this server within " +
+                                std::to_string(static_cast<long>(kWriteBurstWindowSeconds)) +
+                                "s -- a repetitive I/O-point-value-change burst, though a legitimate "
+                                "fast-polling engineering tool doing rapid setpoint adjustment during "
+                                "commissioning can trigger this too",
+                            DetectionSeverity::Moderate);
+                    }
                 }
             }
         }
@@ -1380,9 +1554,25 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             uint32_t start = *mb.start_address;
             uint32_t end = start + static_cast<uint32_t>(*mb.quantity);
             if (mb.function_name == "Read Coils" || mb.function_name == "Read Holding Registers") {
-                modbus_merge_range_into(modbus_read_ranges_by_conduit_table_[conduit_key], {start, end});
+                auto rit = modbus_read_ranges_by_conduit_table_.find(conduit_key);
+                if (admit_tracked_key(rit != modbus_read_ranges_by_conduit_table_.end(),
+                                       modbus_read_ranges_by_conduit_table_.size(),
+                                       "modbus_read_ranges_by_conduit_table_")) {
+                    if (rit == modbus_read_ranges_by_conduit_table_.end()) {
+                        rit = modbus_read_ranges_by_conduit_table_
+                                  .emplace(conduit_key, std::vector<std::pair<uint32_t, uint32_t>>{})
+                                  .first;
+                    }
+                    modbus_merge_range_into(rit->second, {start, end});
+                }
             } else {
-                const auto& read_ranges = modbus_read_ranges_by_conduit_table_[conduit_key];
+                // Read-only check -- deliberately uses find(), not operator[], so a conduit/table this
+                // engine has never seen a READ for is treated as "no prior read" (an empty ranges list)
+                // without inserting a spurious empty entry into the map on the write path alone.
+                auto rit = modbus_read_ranges_by_conduit_table_.find(conduit_key);
+                static const std::vector<std::pair<uint32_t, uint32_t>> kEmptyModbusReadRanges;
+                const std::vector<std::pair<uint32_t, uint32_t>>& read_ranges =
+                    (rit != modbus_read_ranges_by_conduit_table_.end()) ? rit->second : kEmptyModbusReadRanges;
                 if (!modbus_range_fully_read(read_ranges, start, end)) {
                     record_always_notable(
                         mb.function_name == "Write Multiple Coils" ? "modbus-write-without-read-coils"
@@ -1501,23 +1691,30 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         if (mb.is_exception) {
             std::string key =
                 dp.dst_ip + "|" + dp.src_ip + "|" + std::to_string(static_cast<unsigned>(mb.exception_code));
-            ModbusExceptionBurstState& st = modbus_exception_burst_state_[key];
-            if (st.count == 0 || (dp.timestamp - st.window_start) > kModbusExceptionBurstWindowSeconds) {
-                st.window_start = dp.timestamp;
-                st.count = 0;
-            }
-            ++st.count;
-            if (st.count >= kModbusExceptionBurstThreshold) {
-                std::ostringstream d;
-                d << "Modbus server returned exception code " << modbus_exception_name(mb.exception_code)
-                  << " to the same client at least " << kModbusExceptionBurstThreshold << " times within "
-                  << static_cast<long>(kModbusExceptionBurstWindowSeconds)
-                  << "s -- a real, if weak, probing/instability signal (an engineering tool or a "
-                     "scanner repeatedly hitting a function the device can't currently service), but "
-                     "legitimate retry/backoff logic can trigger this too";
-                record_always_notable("modbus-exception-burst", DetectionCategory::ProtocolMisuse,
-                                       mitre_t0855_unauthorized_command_message(), dp.dst_ip, dp.src_ip,
-                                       "modbus", dp.src_port, d.str(), DetectionSeverity::Moderate);
+            auto ebit = modbus_exception_burst_state_.find(key);
+            if (admit_tracked_key(ebit != modbus_exception_burst_state_.end(), modbus_exception_burst_state_.size(),
+                                   "modbus_exception_burst_state_")) {
+                if (ebit == modbus_exception_burst_state_.end()) {
+                    ebit = modbus_exception_burst_state_.emplace(key, ModbusExceptionBurstState{}).first;
+                }
+                ModbusExceptionBurstState& st = ebit->second;
+                if (st.count == 0 || (dp.timestamp - st.window_start) > kModbusExceptionBurstWindowSeconds) {
+                    st.window_start = dp.timestamp;
+                    st.count = 0;
+                }
+                ++st.count;
+                if (st.count >= kModbusExceptionBurstThreshold) {
+                    std::ostringstream d;
+                    d << "Modbus server returned exception code " << modbus_exception_name(mb.exception_code)
+                      << " to the same client at least " << kModbusExceptionBurstThreshold << " times within "
+                      << static_cast<long>(kModbusExceptionBurstWindowSeconds)
+                      << "s -- a real, if weak, probing/instability signal (an engineering tool or a "
+                         "scanner repeatedly hitting a function the device can't currently service), but "
+                         "legitimate retry/backoff logic can trigger this too";
+                    record_always_notable("modbus-exception-burst", DetectionCategory::ProtocolMisuse,
+                                           mitre_t0855_unauthorized_command_message(), dp.dst_ip, dp.src_ip,
+                                           "modbus", dp.src_port, d.str(), DetectionSeverity::Moderate);
+                }
             }
         }
 
@@ -1629,6 +1826,8 @@ void DetectEngine::observe(const DecodedPacket& dp) {
 DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* baseline) const {
     DetectionReport report;
     report.total_packets = total_packets_;
+    report.observation_truncated = truncated_;
+    report.truncation_reasons = truncation_reasons_;
 
     auto in_baseline = [&](const std::string& client_ip, const std::string& server_ip,
                             const std::string& protocol, uint16_t server_port) {
@@ -1950,6 +2149,20 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
     out << "note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT\n";
     out << "      section. That judgment belongs to the human analyst reading this report.\n";
 
+    // patch257 finding 3 fix: printed even when findings is empty -- an empty/short finding list here
+    // is only ever a partial view once this is true (see DetectEngineLimits' own comment,
+    // detect_engine.hpp), and the CLI layer already refuses to let this exit cleanly
+    // (kExitObservationIncomplete, cli_main.cpp), so the text report must say so plainly too.
+    if (report.observation_truncated) {
+        out << "\n*** OBSERVATION INCOMPLETE -- this capture hit at least one of DetectEngine's "
+               "internal limits, so the findings above reflect only PART of what the capture "
+               "actually contains. Any \"no findings\" result is NOT trustworthy until this is "
+               "resolved (raise the relevant --max-detect-* limit and re-run). ***\n";
+        for (const std::string& reason : report.truncation_reasons) {
+            out << "  - " << reason << "\n";
+        }
+    }
+
     if (report.findings.empty()) {
         out << "\nno findings\n";
         return;
@@ -1992,6 +2205,16 @@ void write_detection_report_json(std::ostream& out, const DetectionReport& repor
     out << "  },\n";
     out << "  \"note\": \"evidence/novelty/severity never assert malicious intent -- that judgment "
            "belongs to the human analyst reading this report\",\n";
+    // Same shape as BaselineCheckReport's own observation_truncated/truncation_reasons JSON fields
+    // (write_baseline_check_report_json, baseline.cpp) -- a caller parsing this JSON must check
+    // observation_truncated, not just an empty findings array, to know the report is complete.
+    out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    out << "  \"truncation_reasons\": [";
+    for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << json_escape(report.truncation_reasons[i]) << "\"";
+    }
+    out << "],\n";
 
     out << "  \"techniques_referenced\": [\n";
     auto techniques = all_mitre_attack_ics_techniques();

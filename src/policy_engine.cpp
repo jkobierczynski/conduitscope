@@ -174,12 +174,35 @@ std::string json_escape(const std::string& s) {
 
 }  // namespace
 
+// Identical dedup rule to BaselineEngine::mark_truncated (baseline.cpp).
+void PolicyEngine::mark_truncated(const std::string& reason) {
+    truncated_ = true;
+    for (const std::string& existing : truncation_reasons_) {
+        if (existing == reason) return;
+    }
+    truncation_reasons_.push_back(reason);
+}
+
+bool PolicyEngine::admit_tracked_key(bool already_present, size_t current_map_size, size_t ceiling,
+                                      const char* map_name, const char* flag_name) {
+    if (already_present) return true;
+    if (current_map_size < ceiling) return true;
+    mark_truncated(std::string("tracked-key limit (") + std::to_string(ceiling) + ") reached on " + map_name +
+                    " -- further new entries are not tracked (" + flag_name + ")");
+    return false;
+}
+
 void PolicyEngine::record_notable_protocol(const std::string& key, const std::string& protocol,
                                             const std::string& tier, bool has_ip, bool direction_known,
                                             const std::string& client_ip, const std::string& server_ip,
                                             const std::string& mac_a, const std::string& mac_b, bool has_port,
                                             bool is_tcp, uint16_t port) {
     auto it = notable_protocols_.find(key);
+    if (!admit_tracked_key(it != notable_protocols_.end(), notable_protocols_.size(),
+                            limits_.max_notable_protocols, "notable_protocols_",
+                            "--max-policy-notable-protocols")) {
+        return;
+    }
     if (it == notable_protocols_.end()) {
         NotableProtocolState st;
         st.protocol = protocol;
@@ -234,6 +257,11 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         // compatibility for every policy file written before this feature existed.
         std::string key = ethernet_flow_key(dp.protocol, dp.src_mac, dp.dst_mac);
         auto it = ethernet_flows_.find(key);
+        if (!admit_tracked_key(it != ethernet_flows_.end(), ethernet_flows_.size(), limits_.max_ethernet_flows,
+                                "ethernet_flows_", "--max-policy-ethernet-flows")) {
+            ++skipped_non_tcp_;
+            return;
+        }
         if (it == ethernet_flows_.end()) {
             EthernetFlowState es;
             es.protocol = dp.protocol;
@@ -280,6 +308,11 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         }
 
         auto it = udp_flows_.find(key);
+        if (!admit_tracked_key(it != udp_flows_.end(), udp_flows_.size(), limits_.max_udp_flows, "udp_flows_",
+                                "--max-policy-udp-flows")) {
+            ++skipped_non_tcp_;
+            return;
+        }
         if (it == udp_flows_.end()) {
             UdpFlowState st;
             st.protocol = dp.protocol;
@@ -365,6 +398,11 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
     bool is_syn_ack = dp.tcp_flags.rfind("SYN,ACK", 0) == 0;
 
     auto it = flows_.find(key);
+    if (!admit_tracked_key(it != flows_.end(), flows_.size(), limits_.max_tcp_flows, "flows_",
+                            "--max-policy-tcp-flows")) {
+        ++skipped_non_tcp_;
+        return;
+    }
     if (it == flows_.end()) {
         FlowState fs;
         bool src_is_client;
@@ -543,6 +581,8 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
     PolicyReport report;
     report.total_packets = total_packets_;
     report.skipped_non_tcp = skipped_non_tcp_;
+    report.observation_truncated = truncated_;
+    report.truncation_reasons = truncation_reasons_;
 
     std::unordered_set<std::string> exercised_conduits;
 
@@ -1478,6 +1518,20 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
     }
     out << "\n\n";
 
+    // patch257 finding 3 fix: printed even when compliant() is true -- same posture as
+    // BaselineCheckReport's own observation_truncated rendering (write_baseline_check_report_text,
+    // baseline.cpp): a "COMPLIANT" result here is only ever a partial view once this is true.
+    if (report.observation_truncated) {
+        out << "*** OBSERVATION INCOMPLETE -- this capture hit at least one of PolicyEngine's "
+               "internal limits, so the result above reflects only PART of what the capture "
+               "actually contains. Any \"COMPLIANT\" result is NOT trustworthy until this is "
+               "resolved (raise the relevant --max-policy-* limit and re-run). ***\n";
+        for (const std::string& reason : report.truncation_reasons) {
+            out << "  - " << reason << "\n";
+        }
+        out << "\n";
+    }
+
     size_t flow_allowed = static_cast<size_t>(
         std::count_if(report.flows.begin(), report.flows.end(), [](const FlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
     size_t flow_violation = static_cast<size_t>(std::count_if(
@@ -1658,6 +1712,17 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
     out << "  ],\n";
 
     out << "  \"compliant\": " << (report.compliant() ? "true" : "false") << ",\n";
+    // Same shape as BaselineCheckReport's own observation_truncated/truncation_reasons JSON fields
+    // (write_baseline_check_report_json, baseline.cpp) -- a caller parsing this JSON must check
+    // observation_truncated, not "compliant" alone, since "compliant": true alongside
+    // "observation_truncated": true means the capture was only PARTLY observed, not confirmed clean.
+    out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    out << "  \"truncation_reasons\": [";
+    for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << json_escape(report.truncation_reasons[i]) << "\"";
+    }
+    out << "],\n";
     out << "  \"total_packets\": " << report.total_packets << ",\n";
     out << "  \"skipped_non_tcp\": " << report.skipped_non_tcp << ",\n";
     out << "  \"allowed_count\": " << report.allowed_count() << ",\n";

@@ -490,6 +490,42 @@ struct AssetInventoryReport {
     // this never changes what `skipped_packets` counts, or anything else in `assets`/`edges`/`zones`/
     // `conduits`).
     std::vector<InventoryNotableProtocol> notable_protocols;
+
+    // patch257 security review finding 3 fix ("protocol state exhaustion remains a central
+    // threat") -- true iff this capture's own AssetInventoryEngine hit at least one of its four
+    // AssetInventoryEngineLimits growth ceilings, so `assets`/`edges`/`conduits`/`notable_protocols`
+    // above may be an incomplete view of what the capture actually contains. See
+    // AssetInventoryEngineLimits' own comment for the refuse-to-grow-further, never-evict admission
+    // policy behind this, mirroring BaselineEngine's own observation_truncated (baseline.hpp).
+    bool observation_truncated = false;
+    // One human-readable line per DISTINCT ceiling that was hit, each naming the CLI flag that
+    // raises it -- same dedup rule as BaselineEngine::mark_truncated. Empty iff observation_truncated
+    // is false.
+    std::vector<std::string> truncation_reasons;
+};
+
+// Item 64-style fix (patch257 finding 3, patch209 finding 1's own precedent for BaselineEngine) --
+// AssetInventoryEngine's four accumulating containers (assets_/edges_/tcp_sessions_/
+// notable_protocols_) had no growth ceiling at all before this: a spoofed-source flood or an
+// engineered capture with unbounded distinct addresses/protocol combinations could grow this
+// engine's own per-capture state without bound, exactly the "state allocation must not grow
+// without bound per unique address" invariant patch257's finding 3 names. Same refuse-to-grow-
+// further, never-evict, visibly-mark-truncated posture as BaselineEngineLimits (baseline.hpp) and
+// for the identical reason: every one of these containers feeds this engine's own report output,
+// so silently evicting an already-tracked entry to make room for a new one could make an
+// already-reported asset/edge's own future updates (last_seen/packet_count) silently stop.
+// Sized generously, same "one capture's worth of in-memory state, not a cumulative history" logic
+// as BaselineEngineLimits' own sizing comment.
+inline constexpr size_t kDefaultMaxInventoryAssets = 200000;
+inline constexpr size_t kDefaultMaxInventoryEdges = 200000;
+inline constexpr size_t kDefaultMaxInventoryTcpSessions = 50000;
+inline constexpr size_t kDefaultMaxInventoryNotableProtocols = 50000;
+
+struct AssetInventoryEngineLimits {
+    size_t max_assets = kDefaultMaxInventoryAssets;
+    size_t max_edges = kDefaultMaxInventoryEdges;
+    size_t max_tcp_sessions = kDefaultMaxInventoryTcpSessions;
+    size_t max_notable_protocols = kDefaultMaxInventoryNotableProtocols;
 };
 
 class AssetInventoryEngine {
@@ -498,7 +534,18 @@ public:
     // InventoryZone's own comment. Not validated here (cli_main.cpp's CLI11 ->check(CLI::Range(0,
     // 32)) enforces the range before this constructor ever runs, the same "CLI validates, the
     // engine trusts" division of responsibility PolicyEngine/Resolver already follow).
-    explicit AssetInventoryEngine(uint8_t zone_prefix_len = kDefaultInventoryZonePrefixLen);
+    explicit AssetInventoryEngine(uint8_t zone_prefix_len = kDefaultInventoryZonePrefixLen,
+                                   AssetInventoryEngineLimits limits = AssetInventoryEngineLimits{});
+
+    // True once at least one of limits_'s four growth ceilings refused to track something new at
+    // least once -- see AssetInventoryEngineLimits' own comment for why refusal, never eviction.
+    // Callers (cli_main.cpp) must surface this rather than let a truncated inventory run pass as an
+    // ordinary complete one -- mirrors DetectEngine::truncated()/BaselineEngine::truncated().
+    bool truncated() const { return truncated_; }
+
+    // One human-readable line per DISTINCT ceiling that was hit -- same dedup rule as
+    // BaselineEngine::mark_truncated. Empty iff truncated() is false.
+    const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
 
     // Folds one already-decoded packet into this engine's asset/edge state. Call once per packet,
     // in capture order (same discipline as Decoder::decode/PolicyEngine::observe). A packet whose
@@ -699,7 +746,26 @@ private:
                                   const std::string& mac_a, const std::string& mac_b, bool has_port, bool is_tcp,
                                   uint16_t port);
 
+    // Appends `reason` to truncation_reasons_ (and sets truncated_) the first time it's seen; a
+    // no-op on every later call with the same text -- identical dedup rule to
+    // BaselineEngine::mark_truncated (baseline.cpp).
+    void mark_truncated(const std::string& reason);
+
+    // Shared by every one of this engine's four growth-capped containers' own "have I seen this key
+    // before" check -- identical contract to DetectEngine::admit_tracked_key (detect_engine.hpp):
+    // call with `already_present` = whether the caller's own map already contains the key, and
+    // `current_map_size` = that same map's own .size(). Returns true when the key is either already
+    // tracked or there's room for a new one (admitting it is the CALLER's job right after this
+    // returns true); false when it's genuinely new and the map is already at its own ceiling (marks
+    // this capture truncated and the caller must skip tracking this key). `map_name` becomes part
+    // of the truncation reason text.
+    bool admit_tracked_key(bool already_present, size_t current_map_size, size_t ceiling, const char* map_name,
+                            const char* flag_name);
+
     uint8_t zone_prefix_len_;
+    AssetInventoryEngineLimits limits_;
+    bool truncated_ = false;
+    std::vector<std::string> truncation_reasons_;
     std::unordered_map<std::string, AssetState> assets_;
     std::vector<std::string> asset_order_;
     std::unordered_map<std::string, EdgeState> edges_;

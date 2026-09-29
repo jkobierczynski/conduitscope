@@ -13785,6 +13785,154 @@ it done as its own patch.
     [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)'s
     own "Cross-batch notes" section all updated in the same increment.
 
+97. **Prove end-to-end resource bounds across every stateful engine, not just
+    `BaselineEngine`
+    (`docs/reviews/2026-09-chatgpt-security-review-patch257.md`, finding 3).**
+    Finding 3 names five invariants a real OT capture's own state exhaustion
+    risk depends on, one of which -- "spoofed source addresses -- state
+    allocation must not grow without bound per unique address" -- is exactly
+    the shape item 64 already fixed for `BaselineEngine` alone, against a
+    different, earlier review (patch209, finding 1). This item is that same
+    fix, generalized to every other stateful engine this codebase runs over a
+    whole capture: `DetectEngine`, `AssetInventoryEngine`, and `PolicyEngine`.
+    Before this item, all three retained attacker/scale-controlled state with
+    no ceiling at all -- confirmed by reading each engine's own `observe()`
+    directly, the same way item 64's own investigation confirmed it for
+    `BaselineEngine`.
+
+    Same architecture as item 64 throughout, since the underlying risk and
+    the right fix shape are identical: a dedicated `<Engine>Limits` struct
+    (constructor-injected, default-constructed to compiled defaults), a
+    refuse-to-grow-further/never-evict admission policy (these containers ARE
+    each engine's own report output -- evicting an already-tracked entry
+    could silently corrupt or lose an already-reported finding, exactly item
+    64's own reasoning), a `mark_truncated(reason)` helper that dedups by
+    exact reason text, public `truncated()`/`truncation_reasons()` accessors
+    plus `observation_truncated`/`truncation_reasons` fields on each report
+    struct, and CLI flags named `--max-<engine>-<container>` with "0 = leave
+    it at its own compiled default" semantics.
+
+    - **`DetectEngine`** (`detect_engine.hpp`/`.cpp`) gets three ceilings,
+      generalized rather than one-per-container since it has roughly twenty
+      per-source/per-server tracking maps: `max_findings` (default 20,000 --
+      bounds `always_notable_`/`new_conduit_candidates_`), `max_tracked_keys_per_map`
+      (default 50,000 -- bounds each per-source/per-server map's own key
+      count, checked identically and independently per map), and
+      `max_originators_per_server` (default 2,000 -- bounds the per-server
+      originator/writer vector nested inside the nine of those maps that
+      track a "new engineering-station originator" shape, a second dimension
+      beyond plain key count). New flags: `--max-detect-findings`,
+      `--max-detect-tracked-keys-per-map`, `--max-detect-originators-per-server`.
+    - **`AssetInventoryEngine`** (`asset_inventory.hpp`/`.cpp`) and
+      **`PolicyEngine`** (`policy_engine.hpp`/`.cpp`) each get one dedicated
+      ceiling per named top-level container instead -- simpler than
+      `DetectEngine`'s generalized approach since each has exactly four:
+      `assets_`/`edges_`/`tcp_sessions_`/`notable_protocols_` (defaults
+      200,000/200,000/50,000/50,000; new flags `--max-inventory-assets`,
+      `--max-inventory-edges`, `--max-inventory-tcp-sessions`,
+      `--max-inventory-notable-protocols`) and `flows_`/`udp_flows_`/
+      `ethernet_flows_`/`notable_protocols_` (defaults
+      200,000/100,000/100,000/50,000; new flags `--max-policy-tcp-flows`,
+      `--max-policy-udp-flows`, `--max-policy-ethernet-flows`,
+      `--max-policy-notable-protocols`). `tcp_sessions_`' own refusal in
+      `AssetInventoryEngine` falls back to the known-port heuristic for that
+      one packet rather than dropping it, mirroring `BaselineEngine::observe`'s
+      own pre-existing `tcp_sessions_` fallback (item 64) -- `tcp_sessions_`
+      only feeds direction inference for `edges_`, not the report content
+      itself, so there's a sound partial-service option here that
+      `assets_`/`edges_`/`conduits_`-shaped containers don't have.
+
+    A genuine bug, not just a missing ceiling, was found and fixed while
+    wiring `AssetInventoryEngine`: because `assets_` and `edges_` used to grow
+    in lockstep and are now independently capped, an edge can now reference an
+    endpoint whose own asset record was refused once `--max-inventory-assets`
+    was hit first -- `AssetInventoryEngine::finish()`'s conduit-derivation
+    loop assumed the opposite (`zone_name_for_network.at(...)` on both
+    endpoints unconditionally) and threw `std::out_of_range` under exactly
+    that combination. Not caught by the existing test suite -- only found via
+    this item's own manual low-limit testing discipline (running the real CLI
+    with a deliberately tiny `--max-inventory-assets 1` and reading actual
+    output, not just adding the ceiling and assuming it was safe). Fixed with
+    a defensive `.find()`-with-skip in place of the two unconditional `.at()`
+    calls; the new `inventory_engine_limits_assets_cap_marks_inventory_incomplete`
+    CTest case (below) doubles as this bug's regression guard. The same
+    cross-container-independence risk was audited across every other `.at()`
+    call inside `AssetInventoryEngine::finish()` -- no other instance found.
+    `inventory_merge.cpp`'s multi-site merge logic also gained parsing plus
+    OR/dedup-union merge for the two new `AssetInventoryReport` fields, so a
+    truncated per-tap-point report stays visibly truncated after merging
+    rather than silently going quiet.
+
+    A new shared exit code, `kExitObservationIncomplete = 6` (the next
+    unclaimed value after `kExitBaselineAnomaly`'s 4 and item 64's own
+    `kExitBaselineIncomplete`'s 5), is returned by `detect`, `inventory`, and
+    `policy validate` whenever their own engine's `observation_truncated` is
+    true -- taking priority over each subcommand's own ordinary exit codes,
+    including a `policy validate` "COMPLIANT" verdict (`compliant: true`
+    alongside `observation_truncated: true` means the capture was only
+    PARTLY observed, not confirmed clean -- the same phrasing and reasoning
+    item 64 already established for `baseline check`'s own code 5).
+    Deliberately NOT reused for `baseline check`, which keeps its own
+    pre-existing `kExitBaselineIncomplete = 5` -- an already-shipped exit
+    code's value is never repurposed once released, to avoid breaking
+    scripted callers, the same rule item 64's own writeup already states for
+    `kExitPolicyNonCompliant`/`kExitBaselineAnomaly`.
+
+    Each report writer (`write_detection_report_text`/`_json`,
+    `write_inventory_report_text`/`_json`, `write_policy_report_text`/`_json`)
+    gained the same `*** OBSERVATION INCOMPLETE ***` banner (text) and
+    `observation_truncated`/`truncation_reasons` fields (JSON, rendered as a
+    single-line comma-separated array, matching `write_baseline_check_report_json`'s
+    own established convention) item 64 already established for `baseline
+    check` -- printed even when the report would otherwise show zero
+    findings/a clean compliance verdict, since a truncated observation can
+    only ever produce false negatives.
+
+    Fourteen new CTest cases in `CMakeLists.txt`, immediately after item 64's
+    own `baseline_engine_limits_*` tests and following their exact
+    established idiom (`bash -c "...; echo EXITCODE=$?"` combined with a
+    `PASS_REGULAR_EXPRESSION` checking both the truncation message and the
+    specific exit code, since CTest's own `WILL_FAIL`/pass-fail machinery
+    can't directly distinguish 6 from 0/3 on its own): one
+    incomplete-marking test per ceiling (`detect_engine_limits_tracked_keys_cap_marks_detect_incomplete`,
+    `_originators_cap_...`, `_findings_cap_...`; `inventory_engine_limits_assets_cap_...`,
+    `_edges_cap_...`, `_tcp_sessions_cap_...`, `_notable_protocols_cap_...`;
+    `policy_engine_limits_tcp_flows_cap_marks_validate_incomplete`, `_udp_flows_cap_...`,
+    `_ethernet_flows_cap_...`, `_notable_protocols_cap_...`) plus one
+    "compiled defaults never trip on this codebase's own small fixtures"
+    control test per engine, mirroring
+    `baseline_engine_limits_defaults_do_not_trip_on_a_normal_capture`'s own
+    role. Every regex was built from real captured CLI output against real
+    fixtures, never hand-written from assumption, per this project's own
+    standing testing discipline -- including discovering along the way that
+    `tests/sample_inventory.pcap` has zero notable-IT-protocol traffic at all
+    (so `--max-inventory-notable-protocols`/`--max-policy-notable-protocols`
+    needed a different fixture, `tests/sample_doh.pcap`, chosen because it
+    carries exactly two distinct notable-protocol entries -- enough for a
+    ceiling of 1 to bite without needing a new synthetic fixture) and that
+    `ethernet_flows_` is only ever populated once a policy declares at least
+    one VLAN zone (`tests/sample_vlan_zones.pcap` plus the pre-existing
+    `vlan_zone_single_segment.yaml` policy was reused for that ceiling's own
+    test rather than building a new fixture).
+
+    `docs/USER_GUIDE.md` gained a `--max-detect-*`/`--max-inventory-*`/
+    `--max-policy-*` options-table row plus a "Resource bounds and
+    OBSERVATION INCOMPLETE" subsection under each of the three affected
+    subcommands' own COMMANDS entries, and the EXIT STATUS table was
+    corrected and completed: it previously and incorrectly stated that
+    `detect` "always returns 0 on a successful run, regardless of how many
+    findings it reports," which this item's own new exit code 6 makes false;
+    codes 4/5 (`baseline check`'s own, from item 64) and the new code 6 were
+    also added to that table for the first time, since it had never listed
+    them despite the CLI already returning them.
+
+    Full CTest across all four standing build configurations (default GCC:
+    2240/2240; ASan/UBSan `build-fuzz`: 2240/2240 excluding the 77-test fuzz
+    corpus regression, all passing separately with zero sanitizer hits;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2226/2226;
+    MinGW-w64 cross-compile, build-only there) -- 100% pass, zero
+    regressions.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -374,6 +374,18 @@ AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& te
                 report.total_packets = static_cast<size_t>(c.parse_integer());
             } else if (key == "skipped_packets") {
                 report.skipped_packets = static_cast<size_t>(c.parse_integer());
+            } else if (key == "observation_truncated") {
+                report.observation_truncated = c.parse_bool();
+            } else if (key == "truncation_reasons") {
+                c.expect('[');
+                if (!c.consume_if(']')) {
+                    while (true) {
+                        report.truncation_reasons.push_back(c.parse_string());
+                        if (c.consume_if(',')) continue;
+                        c.expect(']');
+                        break;
+                    }
+                }
             } else if (key == "assets") {
                 c.expect('[');
                 if (!c.consume_if(']')) {
@@ -420,6 +432,23 @@ AssetInventoryReport merge_inventory_reports(const std::vector<AssetInventoryRep
     for (const auto& report : reports) {
         merged.total_packets += report.total_packets;
         merged.skipped_packets += report.skipped_packets;
+        // patch257 finding 3 fix: a site-level report truncated by AssetInventoryEngine's own
+        // growth ceilings stays truncated once merged -- merging can only ever combine partial
+        // views into a still-partial whole, never repair one, so this propagates rather than
+        // silently drops the signal. Reasons are unioned (deduplicated) across every input report.
+        if (report.observation_truncated) {
+            merged.observation_truncated = true;
+            for (const std::string& reason : report.truncation_reasons) {
+                bool already = false;
+                for (const std::string& existing : merged.truncation_reasons) {
+                    if (existing == reason) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already) merged.truncation_reasons.push_back(reason);
+            }
+        }
         for (const auto& a : report.assets) {
             auto it = asset_by_ip.find(a.ip);
             if (it == asset_by_ip.end()) {

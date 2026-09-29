@@ -493,8 +493,9 @@ Brute Force I/O findings \-\- which are \fBModerate\fR or
 finding's own technique is further resolved between T0886 (Remote
 Services) and T0822 (External Remote Services) depending on whether it
 crosses a declared zone boundary, independent of all three dimensions.
-\fBdetect\fR always exits 0 on a successful run, regardless of findings
-\-\- see \fBEXIT STATUS\fR. See \fBOPTIONS (detect)\fR below,
+\fBdetect\fR exits 0 on a successful, untruncated run regardless of findings
+\-\- see \fBEXIT STATUS\fR, including its code 6 for when \fBDetectEngine\fR's
+own internal resource bounds were hit. See \fBOPTIONS (detect)\fR below,
 \fBdocs/design/detection-engine.md\fR for the full design record, and
 \fBdocs/USER_GUIDE.md\fR's \fBdetect\fR section for a worked example.
 .TP
@@ -1567,6 +1568,32 @@ default.
 .B \-\-services \fIFILE\fR
 Unix /etc/services-style file to supplement/override the built-in
 port\->service-name table. Must exist.
+.TP
+.B \-\-max\-policy\-tcp\-flows \fIN\fR
+Cap the number of distinct TCP flows \fBPolicyEngine\fR tracks per
+capture. Default: 200,000 (0 = leave it at its own compiled default).
+Past this, further new flows are not evaluated and the result is marked
+incomplete \-\- see \fBEXIT STATUS\fR's code 6.
+.TP
+.B \-\-max\-policy\-udp\-flows \fIN\fR
+Cap the number of distinct UDP flows (BACnet/IP, CIP I/O) \fBPolicyEngine\fR
+tracks per capture \-\- only populated once the policy names \fBbacnet\fR/
+\fBenip\fR/\fBany\fR on a CIDR- or hostname-zone conduit. Default: 100,000
+(0 = leave it at its own compiled default). Past this, further new flows
+are not evaluated and the result is marked incomplete.
+.TP
+.B \-\-max\-policy\-ethernet\-flows \fIN\fR
+Cap the number of distinct raw-Ethernet L2 flows (PROFINET RT/GOOSE/SV/
+EtherCAT) \fBPolicyEngine\fR tracks per capture \-\- only populated once
+the policy declares at least one VLAN zone. Default: 100,000 (0 = leave
+it at its own compiled default). Past this, further new flows are not
+evaluated and the result is marked incomplete.
+.TP
+.B \-\-max\-policy\-notable\-protocols \fIN\fR
+Cap the number of distinct notable-IT-protocol observations
+\fBPolicyEngine\fR records per capture. Default: 50,000 (0 = leave it at
+its own compiled default). Past this, further new combinations are not
+recorded and the result is marked incomplete.
 .SH OPTIONS (inventory)
 .TP
 .BR \-r ", " \-\-read " " \fIFILE\fR
@@ -1681,6 +1708,33 @@ default.
 .B \-\-services \fIFILE\fR
 Unix /etc/services-style file to supplement/override the built-in
 port\->service-name table. Must exist.
+.TP
+.B \-\-max\-inventory\-assets \fIN\fR
+Cap the number of distinct IP addresses \fBAssetInventoryEngine\fR records
+as assets per capture. Default: 200,000 (0 = leave it at its own compiled
+default). Past this, further new assets are not recorded and the
+inventory is marked incomplete \-\- see \fBEXIT STATUS\fR's code 6.
+.TP
+.B \-\-max\-inventory\-edges \fIN\fR
+Cap the number of distinct (client, server, protocol, port) edges
+\fBAssetInventoryEngine\fR records per capture \-\- independent of
+\fB\-\-max\-inventory\-assets\fR, so an edge can be refused while its
+endpoints' own asset records are still tracked, or vice versa. Default:
+200,000 (0 = leave it at its own compiled default). Past this, further
+new edges are not recorded and the inventory is marked incomplete.
+.TP
+.B \-\-max\-inventory\-tcp\-sessions \fIN\fR
+Cap the number of distinct TCP sessions \fBAssetInventoryEngine\fR tracks
+per capture for client/server direction inference. Default: 50,000 (0 =
+leave it at its own compiled default). Past this, further new sessions
+fall back to the known-port heuristic instead of SYN/SYN-ACK tracking for
+that one packet, and the inventory is marked incomplete.
+.TP
+.B \-\-max\-inventory\-notable\-protocols \fIN\fR
+Cap the number of distinct notable-IT-protocol observations
+\fBAssetInventoryEngine\fR records per capture. Default: 50,000 (0 =
+leave it at its own compiled default). Past this, further new
+combinations are not recorded and the inventory is marked incomplete.
 .SH OPTIONS (detect)
 .TP
 .BR \-r ", " \-\-read " " \fIFILE\fR
@@ -1774,6 +1828,26 @@ Same five resource-exhaustion-limit overrides as \fBdecode\fR's own flags of
 the same name above; apply identically here since this command decodes the
 same traffic. Each defaults to 0 (leave every site at its own compile-time
 default).
+.TP
+.B \-\-max\-detect\-findings \fIN\fR
+Cap the number of distinct findings \fBDetectEngine\fR records per capture.
+Default: 20,000 (0 = leave it at its own compiled default). Past this,
+further genuinely new findings are not recorded and the report is marked
+incomplete \-\- see \fBEXIT STATUS\fR's code 6.
+.TP
+.B \-\-max\-detect\-tracked\-keys\-per\-map \fIN\fR
+Cap the number of distinct keys \fBDetectEngine\fR tracks in any one of its
+per-source/per-server novelty/burst-tracking maps, applied identically and
+independently to each map. Default: 50,000 (0 = leave it at its own
+compiled default). Past this, further new keys in that map are not tracked
+and the report is marked incomplete.
+.TP
+.B \-\-max\-detect\-originators\-per\-server \fIN\fR
+Cap the number of distinct originator IPs \fBDetectEngine\fR tracks per
+server key (the CIP/UMAS new-engineering-station-originator checks).
+Default: 2,000 (0 = leave it at its own compiled default). Past this,
+further new originators for that server are not tracked and the report is
+marked incomplete.
 .SH OPTIONS (baseline learn)
 .TP
 .B \-\-baseline\-file \fIFILE\fR
@@ -2176,15 +2250,17 @@ has, or not at all, rather than the intended hue.
 .SH EXIT STATUS
 .TP
 .B 0
-Success. For \fBpolicy validate\fR: the capture is COMPLIANT. For
-\fBinventory\fR: a report was produced \-\- it has no compliance concept, so
-this is returned on any successful run, even one that observed zero assets.
+Success. For \fBpolicy validate\fR: the capture is COMPLIANT AND the
+observation was not truncated (see code \fB6\fR below). For
+\fBinventory\fR: a report was produced and the observation was not
+truncated \-\- it has no compliance concept, so this is returned on any
+successful, untruncated run, even one that observed zero assets.
 For \fBbaseline learn\fR: the baseline file was successfully updated \-\-
 \fBlearn\fR never has a compliance concept either, and never returns
 anything else on success. For \fBbaseline check\fR: the capture is CLEAN
-(zero findings against the baseline). For \fBdetect\fR: a report was
-produced \-\- \fBdetect always returns 0 on a successful run, regardless of
-how many findings it reports\fR. Unlike \fBpolicy validate\fR/\fBbaseline
+(zero findings against the baseline) and the observation was not
+truncated. For \fBdetect\fR: a report was produced and the observation
+was not truncated. Unlike \fBpolicy validate\fR/\fBbaseline
 check\fR, \fBdetect\fR has no compliant/non\-compliant concept to report
 against; it's a reporting tool surfacing findings for a human or a SIEM to
 triage, not a pass/fail gate. A caller wanting a non\-zero result
@@ -2210,7 +2286,9 @@ for \fBpolicy validate\fR while it was still a documented stub.
 \fBpolicy validate\fR only: the capture and policy were both valid, but the
 capture is NON-COMPLIANT (at least one violation and/or unclassified flow),
 OR \fB\-\-strict\-it\-protocols\fR was given and the report's "notable
-protocols" finding is non\-empty. Never returned by \fBinventory\fR.
+protocols" finding is non\-empty. Never returned by \fBinventory\fR/
+\fBdetect\fR. Superseded by code \fB6\fR when the observation was also
+truncated (code \fB6\fR takes priority).
 .TP
 .B 4
 \fBbaseline check\fR only: the capture and baseline file were both valid,
@@ -2233,6 +2311,22 @@ again," not as clean and not as an ordinary anomaly. Never returned by
 \fBbaseline learn\fR, which always absorbs whatever it could observe and
 exits \fB0\fR regardless (printing a warning instead -- see \fBOPTIONS
 (baseline learn)\fR above).
+.TP
+.B 6
+\fBdetect\fR, \fBinventory\fR, and \fBpolicy validate\fR only: the
+equivalent of code \fB5\fR above for these three subcommands' own engines
+\-\- \fBDetectEngine\fR/\fBAssetInventoryEngine\fR/\fBPolicyEngine\fR hit at
+least one of their own internal \fB\-\-max\-detect\-*\fR/
+\fB\-\-max\-inventory\-*\fR/\fB\-\-max\-policy\-*\fR growth ceilings (see
+each subcommand's own OPTIONS section above), so the report reflects only
+PART of what the capture actually contains. Takes priority over every
+other exit code these three subcommands return, including \fB0\fR and
+\fB3\fR, and over a \fBpolicy validate\fR "COMPLIANT" verdict \-\- the same
+"truncation can only produce false negatives, so it must never be masked
+by a clean-looking result" reasoning as code \fB5\fR. Not returned by
+\fBbaseline check\fR, which keeps its own pre\-existing code \fB5\fR for
+this condition (an already-shipped exit code's value is never repurposed
+once released).
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets

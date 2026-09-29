@@ -499,10 +499,70 @@ struct DetectionReport {
     std::vector<DetectionFinding> findings;  // first-seen order
     DetectionSummary summary;
     size_t total_packets = 0;
+
+    // Mirrors BaselineCheckReport::observation_truncated (baseline.hpp) -- true iff this capture's
+    // own DetectEngine hit at least one of its three DetectEngineLimits ceilings, so `findings`
+    // above is a true but possibly INCOMPLETE subset of what the capture actually contained. See
+    // DetectEngine::truncated()'s own comment for why this can only ever produce false negatives
+    // (a real finding this engine never got the tracking-state room to notice), never a false one.
+    bool observation_truncated = false;
+    // One line per distinct ceiling that was hit -- see DetectEngine::truncation_reasons()' own
+    // comment. Empty iff observation_truncated is false.
+    std::vector<std::string> truncation_reasons;
+};
+
+// Growth ceilings on DetectEngine's own per-capture state -- patch257 security review, finding 3
+// ("protocol state exhaustion remains a central threat"), item 5 in its own table: "excessive
+// detection findings need bounded report memory and deterministic output truncation," generalized
+// here to every one of this engine's roughly twenty accumulating containers, not just the findings
+// list itself, since the same review's invariant 3 ("spoofed source addresses -- state allocation
+// must not grow without bound per unique address") applies just as much to the ~18 per-source/
+// per-server novelty/burst-tracking maps (cip_originators_by_server_, bacnet_who_is_count_by_source_,
+// port_scan_state_, and so on) `observe()` keys by attacker-influenced IP addresses.
+//
+// Deliberately THREE ceilings, not ~20 independently-tuned ones -- one per SHAPE of container, not
+// one per container:
+//   - max_findings bounds always_notable_/new_conduit_candidates_ (this engine's own OUTPUT --
+//     what finish() ultimately reports), mirroring how a real finding is the thing whose loss a
+//     caller most needs to know about.
+//   - max_tracked_keys_per_map bounds each of the ~18 per-source/per-server novelty/burst-tracking
+//     maps' own distinct-key count, applied identically and independently at each one (see
+//     admit_tracked_key's own comment for why ONE shared ceiling value, checked against each map's
+//     own .size() individually, rather than a single counter shared across all eighteen -- a
+//     counter shared across unrelated maps would let one hot feature silently starve every other
+//     map's own tracking budget).
+//   - max_originators_per_server bounds the per-server originator/writer vector nested inside each
+//     of the nine "*_originators_by_server_"/"*_writers_by_server_"-shaped maps specifically (a
+//     second dimension the plain per-map key-count ceiling above doesn't reach, since one server
+//     key's own originator list can keep growing even while the outer map's key count stays flat).
+//
+// Same refuse-to-grow-further, never-evict, visibly-mark-truncated posture BaselineEngineLimits
+// already established (see that struct's own comment, baseline.hpp) and for the identical reason:
+// every one of these containers feeds this engine's own OUTPUT (a finding, or the novelty judgment
+// behind one), so silently evicting an already-tracked entry to make room for a new one could make
+// an already-reported finding's own future updates (last_seen/packet_count) silently stop, or let
+// a genuinely-new originator go unflagged because its own tracking slot was never the one evicted.
+// Refusal-only means finish()'s output is always a true, if possibly incomplete, subset of what the
+// capture actually contained -- see truncated()/truncation_reasons() below for how that's surfaced.
+//
+// Sized generously, same "one capture's worth of in-memory state, not a cumulative history" logic
+// as BaselineEngineLimits' own sizing comment -- a real OT network, even a large multi-site one,
+// should stay far below every one of these; only a capture engineered (or corrupted) to contain far
+// more distinct findings/sources/originators than any real network has should ever hit one.
+inline constexpr size_t kDefaultMaxDetectFindings = 20000;
+inline constexpr size_t kDefaultMaxDetectTrackedKeysPerMap = 50000;
+inline constexpr size_t kDefaultMaxDetectOriginatorsPerServer = 2000;
+
+struct DetectEngineLimits {
+    size_t max_findings = kDefaultMaxDetectFindings;
+    size_t max_tracked_keys_per_map = kDefaultMaxDetectTrackedKeysPerMap;
+    size_t max_originators_per_server = kDefaultMaxDetectOriginatorsPerServer;
 };
 
 class DetectEngine {
 public:
+    explicit DetectEngine(DetectEngineLimits limits = DetectEngineLimits{}) : limits_(limits) {}
+
     // Folds one already-decoded packet into this engine's state. Call once per packet, in capture
     // order (same discipline as Decoder::decode/PolicyEngine::observe/AssetInventoryEngine::observe).
     //
@@ -525,6 +585,18 @@ public:
     // from a client not seen opening one before -- these do NOT become findings here; finish()
     // resolves them against an optional baseline.
     void observe(const DecodedPacket& packet);
+
+    // True once at least one of limits_'s three growth ceilings (DetectEngineLimits) refused to
+    // track something new at least once -- see DetectEngineLimits' own comment for why refusal,
+    // never eviction, so finish()'s own output is always a true (if possibly partial) subset of
+    // what this capture actually contained. Callers (cli_main.cpp) must surface this rather than
+    // let a truncated detect run pass as an ordinary clean/anomalous one.
+    bool truncated() const { return truncated_; }
+
+    // One human-readable line per DISTINCT ceiling that was hit (never one line per refused
+    // entry -- same dedup rule as BaselineEngine::mark_truncated), each naming the CLI flag that
+    // raises it. Empty iff truncated() is false.
+    const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
 
     // Produces the final report. `policy`: optional (nullptr when `detect --policy` wasn't given) --
     // used only to resolve a RemoteAccessChannel finding's technique between T0886 (Remote Services,
@@ -554,6 +626,48 @@ public:
     DetectionReport finish(const Policy* policy = nullptr, const BaselineStore* baseline = nullptr) const;
 
 private:
+    // Appends `reason` to truncation_reasons_ (and sets truncated_) the first time it's seen; a
+    // no-op on every later call with the same text -- identical dedup rule to
+    // BaselineEngine::mark_truncated (baseline.cpp), so a capture that keeps exceeding, say, the
+    // same map's own tracked-keys ceiling on many different packets still produces exactly one
+    // line for that ceiling, not one per packet.
+    void mark_truncated(const std::string& reason);
+
+    // Shared by every one of this engine's ~18 per-source/per-server novelty/burst-tracking maps'
+    // own "have I seen this key before" check: call with `already_present` = whether the caller's
+    // own map already contains the key, and `current_map_size` = that same map's own .size() --
+    // returns true when the key is either already tracked or there's room for a new one (admitting
+    // it is the CALLER's job right after this returns true, since only the caller knows its own
+    // map's value type), false when `already_present` is false and `current_map_size` is already
+    // at limits_.max_tracked_keys_per_map (marks this capture truncated and the caller must skip
+    // tracking this key -- see each call site's own comment for exactly what "skip" means for that
+    // one detection path). `map_name` becomes part of the truncation reason text, naming the exact
+    // field so a reader of the warning knows which detection path degraded.
+    bool admit_tracked_key(bool already_present, size_t current_map_size, const char* map_name);
+
+    // Shared by every one of this engine's nine "*_originators_by_server_"/"*_writers_by_server_"
+    // maps' own per-server originator-list growth: `originators` is that one server key's own
+    // vector, `originator` the ip this packet would add. Returns true (and does nothing else --
+    // the caller still does its own linear-scan-then-push_back, since that scan is also how the
+    // caller decides "is this originator NEW for this server", which is the actual finding-trigger
+    // logic, not this admission check's job) when `originator` is already present or there's room
+    // to add it; false (marks this capture truncated, caller must not push_back) when it's genuinely
+    // new and originators.size() is already at limits_.max_originators_per_server.
+    bool admit_originator(const std::vector<std::string>& originators, const std::string& originator,
+                           const char* map_name);
+
+    // Shared by always_notable_/new_conduit_candidates_' own "have room for one more finding slot"
+    // check, called only on the genuinely-new-key path (an update to an already-tracked finding
+    // never needs to ask) with that container's own current .size(). `what` becomes part of the
+    // truncation reason text ("findings" / "new-conduit candidates") -- the two containers are
+    // checked against the same limits_.max_findings ceiling independently, never a combined total,
+    // so an unusually large number of one kind can never crowd out room for the other.
+    bool admit_finding_slot(size_t current_size, const char* what);
+
+    DetectEngineLimits limits_;
+    bool truncated_ = false;
+    std::vector<std::string> truncation_reasons_;
+
     // Keyed by "<category>|<technique-id>|<client_ip>|<server_ip>|<protocol>|<server_port>" -- see
     // detect_engine.cpp's own always_notable_key(). Insertion order preserved via
     // always_notable_order_ so the final report is deterministic independent of an

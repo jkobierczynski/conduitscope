@@ -359,11 +359,35 @@ bool conduit_is_udp(const InventoryConduit& c) { return c.port == BACNET_UDP_POR
 
 }  // namespace
 
-AssetInventoryEngine::AssetInventoryEngine(uint8_t zone_prefix_len) : zone_prefix_len_(zone_prefix_len) {}
+AssetInventoryEngine::AssetInventoryEngine(uint8_t zone_prefix_len, AssetInventoryEngineLimits limits)
+    : zone_prefix_len_(zone_prefix_len), limits_(limits) {}
+
+// Identical dedup rule to BaselineEngine::mark_truncated (baseline.cpp) / DetectEngine::mark_truncated
+// (detect_engine.cpp).
+void AssetInventoryEngine::mark_truncated(const std::string& reason) {
+    truncated_ = true;
+    for (const std::string& existing : truncation_reasons_) {
+        if (existing == reason) return;
+    }
+    truncation_reasons_.push_back(reason);
+}
+
+bool AssetInventoryEngine::admit_tracked_key(bool already_present, size_t current_map_size, size_t ceiling,
+                                              const char* map_name, const char* flag_name) {
+    if (already_present) return true;
+    if (current_map_size < ceiling) return true;
+    mark_truncated(std::string("tracked-key limit (") + std::to_string(ceiling) + ") reached on " + map_name +
+                    " -- further new entries are not tracked (" + flag_name + ")");
+    return false;
+}
 
 void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPacket& dp, const std::string& protocol,
                                          bool is_client_role) {
     auto it = assets_.find(ip);
+    if (!admit_tracked_key(it != assets_.end(), assets_.size(), limits_.max_assets, "assets_",
+                            "--max-inventory-assets")) {
+        return;
+    }
     if (it == assets_.end()) {
         asset_order_.push_back(ip);
         it = assets_.emplace(ip, AssetState{}).first;
@@ -409,6 +433,10 @@ void AssetInventoryEngine::record_notable_protocol(const std::string& key, const
                                                      const std::string& mac_a, const std::string& mac_b,
                                                      bool has_port, bool is_tcp, uint16_t port) {
     auto it = notable_protocols_.find(key);
+    if (!admit_tracked_key(it != notable_protocols_.end(), notable_protocols_.size(),
+                            limits_.max_notable_protocols, "notable_protocols_", "--max-inventory-notable-protocols")) {
+        return;
+    }
     if (it == notable_protocols_.end()) {
         NotableProtocolState st;
         st.protocol = protocol;
@@ -542,37 +570,51 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         bool is_syn_ack = dp.tcp_flags.rfind("SYN,ACK", 0) == 0;
 
         auto it = tcp_sessions_.find(skey);
-        if (it == tcp_sessions_.end()) {
-            TcpSessionState st;
-            bool src_is_client;
-            if (is_syn) {
-                src_is_client = true;
-                st.initiator_known = true;
-                st.direction_source = DirectionSource::Handshake;
-            } else if (is_syn_ack) {
-                src_is_client = false;
-                st.initiator_known = true;
-                st.direction_source = DirectionSource::Handshake;
-            } else {
-                src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, /*is_tcp=*/true);
-                st.direction_source = DirectionSource::PortHeuristic;
+        if (it == tcp_sessions_.end() &&
+            !admit_tracked_key(false, tcp_sessions_.size(), limits_.max_tcp_sessions, "tcp_sessions_",
+                                "--max-inventory-tcp-sessions")) {
+            // Same refuse-to-track-new, fall-back-to-known-port-heuristic-for-THIS-packet-only
+            // posture as BaselineEngine::observe's own tcp_sessions_ ceiling (baseline.cpp) -- this
+            // can misattribute client/server for a session this engine never gets to track
+            // individually, which is why it marks the whole capture truncated.
+            bool src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, /*is_tcp=*/true);
+            client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+            server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+            server_port = src_is_client ? dp.dst_port : dp.src_port;
+            direction_source = DirectionSource::PortHeuristic;
+        } else {
+            if (it == tcp_sessions_.end()) {
+                TcpSessionState st;
+                bool src_is_client;
+                if (is_syn) {
+                    src_is_client = true;
+                    st.initiator_known = true;
+                    st.direction_source = DirectionSource::Handshake;
+                } else if (is_syn_ack) {
+                    src_is_client = false;
+                    st.initiator_known = true;
+                    st.direction_source = DirectionSource::Handshake;
+                } else {
+                    src_is_client = src_is_client_by_port(dp.src_port, dp.dst_port, /*is_tcp=*/true);
+                    st.direction_source = DirectionSource::PortHeuristic;
+                }
+                st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+                st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+                st.server_port = src_is_client ? dp.dst_port : dp.src_port;
+                it = tcp_sessions_.emplace(skey, std::move(st)).first;
+            } else if (!it->second.initiator_known && (is_syn || is_syn_ack)) {
+                bool src_is_client = is_syn;
+                it->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
+                it->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
+                it->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
+                it->second.initiator_known = true;
+                it->second.direction_source = DirectionSource::Handshake;
             }
-            st.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
-            st.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
-            st.server_port = src_is_client ? dp.dst_port : dp.src_port;
-            it = tcp_sessions_.emplace(skey, std::move(st)).first;
-        } else if (!it->second.initiator_known && (is_syn || is_syn_ack)) {
-            bool src_is_client = is_syn;
-            it->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
-            it->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
-            it->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
-            it->second.initiator_known = true;
-            it->second.direction_source = DirectionSource::Handshake;
+            client_ip = it->second.client_ip;
+            server_ip = it->second.server_ip;
+            server_port = it->second.server_port;
+            direction_source = it->second.direction_source;
         }
-        client_ip = it->second.client_ip;
-        server_ip = it->second.server_ip;
-        server_port = it->second.server_port;
-        direction_source = it->second.direction_source;
     } else {
         // UDP: no session, no handshake -- see observe()'s own doc comment (asset_inventory.hpp)
         // for the full per-protocol reasoning.
@@ -795,6 +837,10 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
 
     std::string ekey = edge_key(protocol, client_ip, server_ip, server_port);
     auto eit = edges_.find(ekey);
+    if (!admit_tracked_key(eit != edges_.end(), edges_.size(), limits_.max_edges, "edges_",
+                            "--max-inventory-edges")) {
+        return;
+    }
     if (eit == edges_.end()) {
         EdgeState es;
         es.client_ip = client_ip;
@@ -899,6 +945,8 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
     report.total_packets = total_packets_;
     report.skipped_packets = skipped_packets_;
     report.zone_prefix_len = zone_prefix_len_;
+    report.observation_truncated = truncated_;
+    report.truncation_reasons = truncation_reasons_;
 
     // Assets, sorted numerically by address (not first-seen order, not lexicographically -- a
     // lexicographic sort would put "192.168.1.100" before "192.168.1.50") for a report that's
@@ -1030,8 +1078,16 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         auto cip = parse_ipv4_string(ie.client_ip);
         auto sip = parse_ipv4_string(ie.server_ip);
         if (!cip || !sip) continue;  // same "can't actually happen" reasoning as the zone loop above
-        ConduitKey key{zone_name_for_network.at(*cip & mask), zone_name_for_network.at(*sip & mask), ie.protocol,
-                       ie.server_port};
+        // patch257 finding 3 fix: assets_ and edges_ are now independently capped
+        // (AssetInventoryEngineLimits), so an edge can reference an endpoint whose OWN asset entry
+        // was refused (assets_ hit its own ceiling first) and therefore has no zone at all -- this
+        // is exactly the kind of partial view observation_truncated already warns about, so this
+        // conduit contribution is skipped defensively rather than crashing on a lookup that can no
+        // longer be assumed to always succeed.
+        auto cz = zone_name_for_network.find(*cip & mask);
+        auto sz = zone_name_for_network.find(*sip & mask);
+        if (cz == zone_name_for_network.end() || sz == zone_name_for_network.end()) continue;
+        ConduitKey key{cz->second, sz->second, ie.protocol, ie.server_port};
         ConduitAgg& agg = conduit_agg[key];
         ++agg.edge_count;
         agg.packet_count += ie.packet_count;
@@ -1144,6 +1200,20 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         << " skipped (not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE "
            "seen over UDP)\n\n";
 
+    // patch257 finding 3 fix: see BaselineCheckReport's own observation_truncated rendering
+    // (write_baseline_check_report_text, baseline.cpp) for the identical posture -- printed even
+    // when the report otherwise looks complete, since a truncated observation is never trustworthy
+    // as an unqualified full inventory until this is resolved.
+    if (report.observation_truncated) {
+        out << "*** OBSERVATION INCOMPLETE -- this capture hit at least one of AssetInventoryEngine's "
+               "internal limits, so the inventory above reflects only PART of what the capture "
+               "actually contains. (raise the relevant --max-inventory-* limit and re-run). ***\n";
+        for (const std::string& reason : report.truncation_reasons) {
+            out << "  - " << reason << "\n";
+        }
+        out << "\n";
+    }
+
     out << "ASSETS (" << report.assets.size() << "):\n";
     if (report.assets.empty()) {
         out << "  (none)\n";
@@ -1247,6 +1317,15 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
     out << "  \"capture\": \"" << json_escape(capture_path) << "\",\n";
     out << "  \"total_packets\": " << report.total_packets << ",\n";
     out << "  \"skipped_packets\": " << report.skipped_packets << ",\n";
+    // Same shape as BaselineCheckReport's own observation_truncated/truncation_reasons JSON fields
+    // (write_baseline_check_report_json, baseline.cpp).
+    out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    out << "  \"truncation_reasons\": [";
+    for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << json_escape(report.truncation_reasons[i]) << "\"";
+    }
+    out << "],\n";
 
     out << "  \"assets\": [\n";
     for (size_t i = 0; i < report.assets.size(); ++i) {
