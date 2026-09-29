@@ -9051,6 +9051,41 @@ set_tests_properties(color_attack_pattern_head_line_red_ipv6 PROPERTIES
   # needed here.
   PASS_REGULAR_EXPRESSION "\\[1;31m#3  [^\n]*\\[0m.\\[2m\\[icmpv6\\].\\[0m  .\\[1;31m")
 
+# A detect-only finding (--detect-highlight, no severe/attack -- see DecodedPacket::has_detect_finding's
+# own comment, decoder.hpp) is deliberately NOT treated the same as an attack-pattern packet above:
+# reported directly against a real capture (a port scan decoded on Windows) where the WHOLE line,
+# IP endpoints included, was turning red on every scanned-port packet and burying the actual
+# decode. Fixed in TextWriter::write_packet (output.cpp) so red_line covers only severe/attack;
+# the "[detect: ...]" tag gets its own separate, narrowly-scoped kBoldRed/kReset pair instead. This
+# pins the exact shape for packet #1 of sample_s7comm_pi_control.pcap (an S7 PLC Stop, detect-only,
+# no attack signature): NO bold-red escape appears before "#1" (unlike the attack-pattern tests
+# above, which start "\x1b[1;31m#<n>"), the "[s7comm]" tag keeps its own plain
+# protocol_tag_color(38;2;0;153;153) as always, the summary "Job: PLC Stop (...)" is plain/unstyled,
+# and bold red starts only at the two literal spaces immediately before "[detect:" and ends right
+# after the tag's own closing "]". See color_attack_pattern_head_line_red's own comment above for
+# why a lone "." stands in for the raw ESC byte between two escapes with no literal text between
+# them; verified against this exact command's real output before being written, matching this
+# project's own "never write a CTest assertion you haven't confirmed against real output"
+# discipline.
+add_test(NAME color_detect_only_finding_tag_scoped_not_whole_line
+  COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap")
+set_tests_properties(color_detect_only_finding_tag_scoped_not_whole_line PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  192\\.168\\.1\\.50:49210 -> 192\\.168\\.1\\.10:102 \\(mms\\)  .\\[38;2;0;153;153m\\[s7comm\\].\\[0m  Job: PLC Stop \\(\"PLC_STOP\"\\).\\[1;31m  \\[detect: s7-plc-stop\\].\\[0m"
+  # The bold-red escape must not appear anywhere before the tag itself -- specifically, not right
+  # after "#1  " (where the attack-pattern tests above DO put one) and not right after the
+  # "[s7comm]" tag's own reset plus its trailing two spaces (where the previous, buggy version of
+  # this same feature DID put one, coloring the summary text red too -- confirmed against this
+  # exact fixture's real pre-fix output before being written).
+  FAIL_REGULAR_EXPRESSION "\\[1;31m#1|\\[0m  \\.\\[1;31mJob")
+
+# Packet #2 of the same capture (an S7 PLC Control command -- also a detect-only finding, different
+# kind) gets the identical narrow-tag-only treatment, not a fluke of packet #1's specific fields.
+add_test(NAME color_detect_only_finding_tag_scoped_second_packet
+  COMMAND conduitscope --color decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap")
+set_tests_properties(color_detect_only_finding_tag_scoped_second_packet PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2  1\\.001000  192\\.168\\.1\\.50:49211 -> 192\\.168\\.1\\.10:102 \\(mms\\)  .\\[38;2;0;153;153m\\[s7comm\\].\\[0m  Job: PLC Control \\(_INSE - Activates a PLC module, 2 block\\(s\\): DB100 \\(Passive\\), FC5 \\(Active\\)\\).\\[1;31m  \\[detect: s7-plc-control\\].\\[0m"
+  FAIL_REGULAR_EXPRESSION "\\[1;31m#2")
+
 
 # ---------------------------------------------------------------------------------------------
 # `policy validate` -- zone/conduit policy engine (policy.hpp/policy_engine.hpp). Fixtures live

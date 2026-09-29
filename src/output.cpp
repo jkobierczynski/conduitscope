@@ -540,16 +540,21 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // than being overridden by this.
     bool attack = p.has_attack_signature;
     // `decode`'s own "always-notable highlighting" (--detect-highlight, on by default -- see
-    // DecodedPacket::has_detect_finding's own comment, decoder.hpp). Folded into the SAME red_line
-    // emphasis attack-pattern packets already get -- both mean "an OT/ICS incident-response analyst
-    // should look at this packet specifically" -- rather than inventing a second color, matching
-    // this file's own established "spend an unused hue only when two things genuinely need to stay
-    // visually distinct" discipline; the "[detect: ...]" tag appended below is what actually
-    // disambiguates a detect finding from a flood/scan attack signature in practice, the same way
-    // the "[protocol]" tag text (not color) disambiguates protocols that share a color elsewhere in
-    // this file.
-    bool detect_finding = p.has_detect_finding;
-    bool red_line = severe || attack || detect_finding;
+    // DecodedPacket::has_detect_finding's own comment, decoder.hpp) is deliberately NOT folded into
+    // red_line below. A detect-only finding (no severe/attack) is the common case on a busy
+    // capture -- an outbound port-scan probe fires this on every single scanned-port packet, per
+    // this feature's own "fire on every matching packet" design (detect_engine.cpp's
+    // record_always_notable) -- and turning every such line's own IP-decode-plus-summary fully red
+    // buried the actual "IP -> IP  [protocol]  summary" decode underneath a wall of red instead of
+    // drawing the eye to one thing. Reported directly against a real capture (a 4SICS port scan,
+    // decode --detect-highlight's own default output): the IP endpoints and summary should stay in
+    // the terminal's normal color, the "[protocol]" tag keeps its own established color as always,
+    // and only the "[detect: <kind>]" tag itself (appended below) gets a narrowly-scoped red wrap --
+    // so a scan reads as a normal decode line with one precise red flag at the end, not a solid red
+    // line. `severe`/`attack` are unaffected by this and keep their own existing, wider red_line
+    // treatment below (a parse failure or an attack-pattern packet is rare enough on a normal
+    // capture that a fully red line is still the right amount of emphasis for those).
+    bool red_line = severe || attack;
 
     std::ostringstream head;
     if (color_ && attack) head << kBoldRed;
@@ -565,14 +570,20 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // protocols (DNS names, MQTT strings, ...) and, unlike JsonWriter/CsvWriter, this writer puts
     // it straight on the terminal with nothing else in between.
     head << terminal_escape(p.summary);
+    if (color_ && red_line) head << kReset;
     // Always printed as plain text when set, --color/--no-color alike -- "nothing here is
     // color-only information", the same principle the direction-source suffix below already
     // documents for itself. A flagged packet piped to a file or a non-terminal without --color
-    // still shows the tag; only the extra red emphasis is color-gated.
+    // still shows the tag; only the extra red emphasis is color-gated. Colored independently of
+    // red_line above -- see this function's own opening comment for why: a detect-only finding
+    // leaves the IP decode and summary in the terminal's normal color and puts just this tag in
+    // bold red. On a severe/attack line the summary above is already red; this tag simply stays
+    // red too in that case (both kBoldRed, so no visible seam), not a conflict.
     if (p.has_detect_finding) {
+        if (color_) head << kBoldRed;
         head << "  [detect: " << terminal_escape(p.detect_finding_kind) << "]";
+        if (color_) head << kReset;
     }
-    if (color_ && red_line) head << kReset;
     // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
     // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Folded into the head line itself
     // (appended after the summary, purely additive -- notes/eth/etc. below are unaffected) rather

@@ -3797,7 +3797,19 @@ hard, permanent scope boundary, not a "not yet" -- see `detect`'s own
 
 **Output.** In every case, nothing here is color-only: the same
 `[detect: <kind>]` tag is added inline whether or not `--color` is active,
-and survives `--no-color`/non-terminal output unchanged.
+and survives `--no-color`/non-terminal output unchanged. Under `--color`,
+the red emphasis is deliberately narrow -- only the `[detect: <kind>]` tag
+itself is colored, not the IP-address decode or the summary text ahead of
+it (those keep their own normal/protocol-tag colors exactly as they would
+on any other packet). A detect-only finding is common enough on a busy
+capture -- a port scan flags every scanned-port packet, for instance -- that
+turning the whole line red the way an `attack`-pattern or malformed-parse
+packet's own summary already does would bury the actual decode underneath
+a wall of red; a single, precisely-placed red tag reads better at a glance
+across many lines. (`attack`-pattern and parse-failure packets keep their
+own existing, wider red treatment -- see LIMITATIONS/OUTPUT FORMATS above
+for those -- since they're rare enough on a normal capture that the wider
+emphasis is still the right amount for them.)
 
 ```
 $ conduitscope decode -r s7_pi_control.pcap -T text

@@ -14235,6 +14235,62 @@ it done as its own patch.
     regressions -- plus a clean-room extract-rebuild-test cycle (2249/2249)
     before delivery.
 
+    **Follow-up fix, same day: the red emphasis covered the whole head line,
+    not just the tag.** Jurgen's own direct report, with a screenshot of a
+    real Windows build (`build\Release\conduitscope.exe`) decoding a port
+    scan from a real 4SICS GeekLounge capture: every scanned-port packet's
+    ENTIRE line -- IP addresses, `[protocol]` tag, and summary text alike --
+    was rendered in bold red under `--color`, not just the `[detect: ...]`
+    tag, because `TextWriter::write_packet`'s own `red_line` flag (the
+    `severe`/`attack`/`detect_finding` OR-ed together, output.cpp) wrapped
+    the summary text in `kBoldRed` for a detect-only finding exactly the
+    same way it already does for `attack`. That's the right amount of
+    emphasis for `attack`/`severe` (rare on a normal capture), but a
+    detect-only finding is common -- a port scan flags every single
+    scanned-port packet, per this feature's own "fire on every match, not
+    just first-ever" design -- so a busy capture read as a solid wall of
+    red with the actual decode buried underneath, exactly the opposite of
+    what highlighting is for. Jurgen's own request: "I would like to keep
+    the white IP decode, then the colored protocol label, then the red
+    warning from the detect."
+
+    Fixed by narrowing `red_line` to `severe || attack` only (dropping
+    `detect_finding`), and giving the `[detect: ...]` tag its own
+    independent `kBoldRed`/`kReset` pair, printed right where the tag
+    itself is appended rather than sharing the summary's own wrap. A
+    detect-only finding now prints the IP endpoints in the terminal's
+    normal color, the `[protocol]` tag in its own established
+    `protocol_tag_color`, the summary text unstyled, and only the
+    `[detect: <kind>]` tag itself in bold red -- `attack`/`severe` lines are
+    untouched, keeping their existing wider treatment. `docs/USER_GUIDE.md`'s
+    "Always-notable highlighting" subsection gained a paragraph stating this
+    scoping explicitly.
+
+    Two new CTest entries in the existing "Colorized text output" section
+    (alongside `color_attack_pattern_head_line_red` and its own siblings,
+    following that section's own "verify the exact byte sequence against
+    real `--color` output before writing the regex, using a lone `.` as a
+    stand-in for the raw ESC byte" convention):
+    `color_detect_only_finding_tag_scoped_not_whole_line` (packet #1 of
+    `sample_s7comm_pi_control.pcap`, an S7 PLC Stop -- pins the exact
+    byte-for-byte shape: no bold-red before `#1`, the `[s7comm]` tag's own
+    plain color untouched, the summary unstyled, bold red starting only at
+    the two spaces immediately before `[detect:` and ending right after the
+    tag's own closing `]`) and
+    `color_detect_only_finding_tag_scoped_second_packet` (packet #2, a
+    different finding kind, proving it's not a fluke of packet #1's own
+    fields). Each carries a `FAIL_REGULAR_EXPRESSION` confirmed, by
+    reconstructing the old buggy output and checking the pattern against it
+    directly, to actually catch a regression back to the old whole-summary
+    coloring -- not just a pattern that happens to currently not match.
+
+    Full CTest again across all four standing build configurations (default
+    GCC: 2251/2251; ASan/UBSan `build-fuzz`: 2328/2328, zero sanitizer hits;
+    `build_nolive`: 2236/2236; MinGW-w64, build-only there -- the same
+    platform this bug was originally reported from) -- 100% pass, zero
+    regressions -- plus a clean-room extract-rebuild-test cycle (2251/2251)
+    before delivery.
+
     **Two-pass full-detect coloring -- researched and scoped, deliberately
     NOT implemented this round, per Jurgen's own explicit "as a separate,
     offline-only addition" framing.** Researched directly against
