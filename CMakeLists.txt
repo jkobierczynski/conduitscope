@@ -9096,6 +9096,29 @@ add_test(NAME policy_wrong_port_syslog_format
 set_tests_properties(policy_wrong_port_syslog_format PROPERTIES
   PASS_REGULAR_EXPRESSION "^<107>1 - - conduitscope - policy - CEF:0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|Zone/Conduit Policy Violation\\|8\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3\n$")
 
+# Regression coverage for the patch257 security review's finding 1 ("LEEF export: unescaped tab
+# characters can corrupt event boundaries") -- tab_in_zone_name.yaml's own header comment has the
+# full vulnerability/fixture rationale. The client zone's own name contains a literal embedded tab
+# byte (not a "\t" escape -- yaml_mini doesn't interpret one); CEF/syslog (space-delimited
+# extensions, per spec) pass the raw tab through unchanged, exactly like every other unlisted
+# character cef_extension_escape doesn't touch, while LEEF (tab-delimited extensions) must render
+# it as the literal two-character "\t" via leef_extension_escape -- a raw tab there would silently
+# split this one finding into extra, bogus LEEF fields for a downstream SIEM.
+add_test(NAME policy_tab_zone_name_cef_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/tab_in_zone_name.yaml" --format cef)
+set_tests_properties(policy_tab_zone_name_cef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^CEF:0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|Zone/Conduit Policy Violation\\|8\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi\tzone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi\tzone cs2Label=Server Zone cs2=plc_zone cnt=3\n$")
+
+add_test(NAME policy_tab_zone_name_leef_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/tab_in_zone_name.yaml" --format leef)
+set_tests_properties(policy_tab_zone_name_leef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^LEEF:2\\.0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|src=192\\.168\\.1\\.50\tdst=192\\.168\\.1\\.10\tdpt=502\tproto=modbus\tcat=policy-violation\tmsg=a conduit exists between zone 'hmi\\\\tzone' and zone 'plc_zone', but none permits modbus traffic on port 502\tcs1Label=Client Zone\tcs1=hmi\\\\tzone\tcs2Label=Server Zone\tcs2=plc_zone\tcnt=3\tsev=8\n$")
+
+add_test(NAME policy_tab_zone_name_syslog_format
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/tab_in_zone_name.yaml" --format syslog)
+set_tests_properties(policy_tab_zone_name_syslog_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^<107>1 - - conduitscope - policy - CEF:0\\|conduitscope\\|conduitscope-policy\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|policy-violation\\|Zone/Conduit Policy Violation\\|8\\|src=192\\.168\\.1\\.50 dst=192\\.168\\.1\\.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi\tzone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi\tzone cs2Label=Server Zone cs2=plc_zone cnt=3\n$")
+
 # An Allowed/Unclassified-only report (no Violation anywhere) produces zero lines in every one of
 # the three curated-export formats -- see write_policy_report_cef's own doc comment (policy_engine.hpp)
 # for why: an Unclassified flow is "no conduit declared an opinion," not a policy breach.

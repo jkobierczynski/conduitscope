@@ -1,0 +1,28 @@
+# Regression fixture for the patch257 (ChatGPT) security review's finding 1: "LEEF export:
+# unescaped tab characters can corrupt event boundaries." Same two zones/one-conduit shape as
+# wrong_port.yaml, except the client zone's own name contains a literal embedded horizontal tab
+# (0x09) byte between "hmi" and "zone" below -- not a "\t" escape sequence (yaml_mini's
+# unquote_scalar doesn't interpret one; see src/yaml_mini.cpp), a genuine raw tab byte, the same
+# as this project's policy-file parser already tolerates outside leading indentation (see
+# build_lines' own comment, src/yaml_mini.cpp).
+#
+# This is a realistic vector, not a synthetic worst-case: PolicyEngine::client_zone/server_zone
+# are operator-authored zone names taken straight from this file with no sanitization beyond a
+# per-file uniqueness check (src/policy.cpp), and they flow unchanged into every curated export
+# format's cs1/cs2/msg extension fields (flow_violation_extension_fields, src/policy_engine.cpp).
+# Before this fix, render_leef_line's field-separator tab and an embedded-value tab were
+# indistinguishable to a downstream SIEM parser -- this fixture proves leef_extension_escape now
+# renders the embedded tab as the literal two-character "\t" instead, while CEF/syslog (whose own
+# extension delimiter is a space, never a tab) keep the byte as-is, matching their own spec.
+zones:
+  hmi	zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI to PLC on the wrong port"
+    from: hmi	zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [503]

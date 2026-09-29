@@ -32,6 +32,22 @@ std::string cef_extension_escape(const std::string& s) {
     return out;
 }
 
+std::string leef_extension_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '=': out += "\\="; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
 int cef_severity_to_rfc5424_severity(int cef_severity_0_10) {
     if (cef_severity_0_10 >= 9) return 2;  // Very-High -> Critical
     if (cef_severity_0_10 >= 7) return 3;  // High -> Error
@@ -64,7 +80,7 @@ std::string render_leef_line(const std::string& device_product, const std::strin
     for (const auto& field : extension_fields) {
         if (!first) out << "\t";
         first = false;
-        out << field.first << "=" << cef_extension_escape(field.second);
+        out << field.first << "=" << leef_extension_escape(field.second);
     }
     return out.str();
 }

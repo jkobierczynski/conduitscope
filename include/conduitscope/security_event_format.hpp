@@ -67,11 +67,34 @@ std::string cef_header_escape(const std::string& s);
 
 // Escapes a CEF EXTENSION value: backslash and equals sign are each escaped with a backslash,
 // and embedded newlines/carriage returns become the literal "\n"/"\r" -- per the CEF spec's
-// extension-escaping table (pipes need no escaping here, unlike in header fields). LEEF's own
-// extension values reuse this function too: its guide documents no escaping rules of its own
-// beyond "the delimiter must not appear unescaped," and this renderer's tab delimiter never
-// collides with any value this project produces.
+// extension-escaping table (pipes need no escaping here, unlike in header fields). CEF's own
+// extension delimiter is a space, which this function deliberately leaves unescaped (CEF's spec
+// doesn't require it); use leef_extension_escape below for LEEF's tab-delimited extension values
+// instead of this function -- see that function's own comment for why they're no longer the same
+// escaper.
 std::string cef_extension_escape(const std::string& s);
+
+// Escapes a LEEF 2.0 EXTENSION value: same four cases as cef_extension_escape (backslash, equals,
+// newline, carriage return) plus a fifth this function adds -- an embedded horizontal tab becomes
+// the literal "\t" -- because LEEF's default extension delimiter (render_leef_line's own field
+// separator) IS a literal tab, unlike CEF's space. An unescaped tab inside a value would corrupt
+// a downstream SIEM's field boundaries (patch257 security review, finding 1 -- confirmed against
+// this project's own source: cef_extension_escape had no tab case at all, and
+// PolicyEngine::client_zone/server_zone -- operator-authored zone names straight from the policy
+// YAML, unsanitized beyond a uniqueness check -- are exactly the kind of free-text value LEEF's
+// "msg"/cs1/cs2 extension fields carry through unchanged).
+//
+// LEEF's own guide documents no escaping convention of its own for a delimiter appearing inside a
+// value -- verified this session against IBM's LEEF Version 2 guide, NXLog's LEEF integration
+// guide ("the documentation does not address what should happen if a delimiter character appears
+// within a value itself"), and IBM's own QRadar app framework "Generating LEEF events" tutorial
+// (documents a header-level DelimiterCharacter override, i.e. picking a delimiter unlikely to
+// collide, but no value-escaping rule). Absent a citable spec convention, this function extends
+// this project's own already-established CEF-style backslash-letter escaping with one more case,
+// rather than inventing an unrelated scheme -- CEF itself is intentionally left untouched
+// (cef_extension_escape keeps exactly matching its own spec) since CEF's space delimiter was never
+// the vulnerable part.
+std::string leef_extension_escape(const std::string& s);
 
 // Maps a CEF/LEEF 0-10 severity onto an RFC 5424 0-7 syslog severity, per CEF's own band
 // boundaries (0-3=Low, 4-6=Medium, 7-8=High, 9-10=Very-High). Derived from the same severity
@@ -94,7 +117,8 @@ std::string render_cef_line(const std::string& device_product, const std::string
 // <version>|<event_id>|<tab-separated key=value extension pairs>" -- LEEF 2.0's default tab
 // delimiter, no explicit sixth delimiter field. `event_id` is escaped with cef_header_escape
 // (LEEF documents no header-escaping rules of its own); extension values with
-// cef_extension_escape.
+// leef_extension_escape (not cef_extension_escape -- see that function's own comment for why an
+// embedded tab needs LEEF-specific handling CEF's own escaper doesn't provide).
 std::string render_leef_line(const std::string& device_product, const std::string& event_id,
                               const std::vector<std::pair<std::string, std::string>>& extension_fields);
 

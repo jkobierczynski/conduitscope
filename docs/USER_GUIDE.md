@@ -5295,6 +5295,32 @@ their real timing in the CEF payload's own `start`/`end` extension keys.
 `baseline`), matching RFC 5424's own stated purpose for that field
 ("filtering of messages on a relay or collector").
 
+### Extension value escaping
+
+Extension values (`msg`, `cs1`/`cs2`, and every other `key=value` pair) can
+carry operator-authored free text -- most commonly a policy file's own zone
+names, which reach `cs1`/`cs2`/`msg` unchanged beyond a per-file uniqueness
+check (`src/policy.cpp`). Both formats escape a backslash as `\\` and an
+equals sign as `\=`, and turn an embedded newline/carriage return into the
+literal two-character `\n`/`\r` -- CEF's own extension-escaping table.
+**LEEF additionally escapes an embedded horizontal tab as the literal `\t`,
+which CEF does not.** The reason is the two formats' own delimiters: CEF's
+extension pairs are space-separated, so an embedded tab is just an ordinary
+character to CEF and is left as-is; LEEF 2.0's own default extension
+delimiter (used here, see the LEEF primer above) *is* a literal tab, so an
+unescaped one inside a value would be indistinguishable from a real field
+boundary to a downstream SIEM parser -- exactly the corruption the
+patch257 external security review's finding 1 identified
+(`docs/reviews/2026-09-chatgpt-security-review-patch257.md`). LEEF's own
+guide documents no escaping convention of its own for this case (verified
+against IBM's LEEF Version 2 guide and IBM's QRadar app-framework "LEEF
+events" tutorial, which documents a header-level `DelimiterCharacter`
+override -- picking a delimiter unlikely to collide -- but no value-escaping
+rule); `leef_extension_escape` (`security_event_format.hpp`) extends this
+project's own CEF-style backslash-letter escaping with that one additional
+case rather than inventing an unrelated scheme, and CEF's own escaper is
+left untouched since its space delimiter was never the vulnerable part.
+
 ### Severity mapping
 
 Each subcommand computes exactly one severity judgment per finding and
@@ -5422,7 +5448,11 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   hostname to report for an offline capture-file analysis, and two of the
   three report shapes carry no per-finding timestamp at all) -- see
   "SECURITY EVENT EXPORT (CEF/LEEF/syslog)" above for the full design
-  record.
+  record. An embedded horizontal tab in an operator-authored zone name (or
+  any other extension-value text) is escaped as the literal `\t` in LEEF
+  output only, fixed after the patch257 external security review's finding
+  1 -- see "Extension value escaping" above for why CEF and syslog
+  deliberately leave the byte as-is instead.
 - **`decode -w` against a multi-interface pcapng source writes every packet
   under one link type.** pcapng (unlike classic pcap) allows a single file
   to declare more than one Interface Description Block with different link

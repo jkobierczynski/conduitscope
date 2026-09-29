@@ -2244,6 +2244,34 @@ through its ten points in order, starting with items 1-3, one at a time:
   `write_..._report_cef/_leef/_syslog` functions reuses; see `docs/USER_GUIDE.md`'s own "SECURITY
   EVENT EXPORT (CEF/LEEF/syslog)" section for the exact field-by-field scope and severity mapping.
   `schema_version` on policy/inventory JSON output remains the one open item on this bullet.
+  **Follow-up, patch257 external security review, finding 1: "LEEF export: unescaped tab
+  characters can corrupt event boundaries"
+  (`docs/reviews/2026-09-chatgpt-security-review-patch257.md`). Confirmed accurate and fixed.**
+  `cef_extension_escape` (reused for both formats at the time) escaped backslash/equals/newline/CR
+  but had no case for a literal tab -- and `render_leef_line` uses a literal tab as its own
+  extension-field delimiter, so an embedded tab in any extension value would have been
+  indistinguishable from a real field boundary to a downstream SIEM parser. A realistic vector was
+  confirmed, not just a theoretical one: `PolicyEngine::client_zone`/`server_zone` are
+  operator-authored zone names taken straight from a policy YAML file with no sanitization beyond
+  a per-file uniqueness check (`src/policy.cpp`), and flow unchanged into `cs1`/`cs2`/`msg` in
+  every curated export format. Fix: a new `leef_extension_escape` (`security_event_format.hpp`/
+  `.cpp`) extends the same backslash-letter escaping with one more case (`\t`) and is now what
+  `render_leef_line` calls; `cef_extension_escape` itself is untouched and CEF/syslog output keeps
+  passing a raw tab through unchanged, since CEF's own extension delimiter is a space, never a
+  tab, so an embedded tab was never CEF's vulnerability to begin with. No citable LEEF-native
+  escaping convention exists to follow instead -- checked this session against IBM's own LEEF
+  Version 2 guide, NXLog's LEEF integration guide, and IBM's QRadar app-framework "Generating LEEF
+  events" tutorial (documents a header-level `DelimiterCharacter` override, not a value-escaping
+  rule) -- so the fix extends this project's own established CEF-style convention rather than
+  inventing an unrelated one. New regression fixture `tests/policies/tab_in_zone_name.yaml` (a
+  zone name containing a literal embedded tab byte) backs three new CTest entries
+  (`policy_tab_zone_name_cef/leef/syslog_format`), confirmed to actually fail against the
+  pre-fix code (a raw tab split the LEEF line into a bogus extra field) before being confirmed to
+  pass against the fix. Verified across all four standing build configs plus a clean-room
+  rebuild: default GCC 2226/2226, ASan/UBSan `build-fuzz` (CEF/LEEF/syslog-relevant subset run
+  directly rather than the full slow corpus-regression suite), `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+  `build_nolive` 2226/2226 (both +3 over the prior 2223), MinGW-w64 cross-compile build-only, and a
+  from-scratch clean-room extract-rebuild-test cycle at 2226/2226 -- zero regressions elsewhere.
 - **Items 7, 9, 10** (a 62443/NIS2 evidence pack, parser trustworthiness, and product packaging)
   are not yet scheduled. The response document notes that item 9 (parser trustworthiness: ASan/
   UBSan in CI, fuzzing on the high-value parsers) is already substantially standing practice, not
