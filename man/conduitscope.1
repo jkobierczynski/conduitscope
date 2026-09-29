@@ -1400,6 +1400,25 @@ triage/incident response where the analyst is already trusted with the
 capture itself). Usernames are never redacted, only passwords/
 authentication data.
 .TP
+.BR \-\-detect\-highlight ", " \-\-no\-detect\-highlight
+Flag, inline, any packet that would also show up in \fBdetect\fR's own
+report as an "always-notable" finding (traffic whose shape alone is
+notable, decided live/per-packet, with no "new vs. known" judgment
+involved \-\- e.g. an S7 PLC Stop, a DNP3 unsolicited-response misuse, a
+port scan once its threshold is crossed). Reuses \fBdetect\fR's own
+\fBDetectEngine\fR live, packet-by-packet, as a read-only hook \-\- no
+separate detection logic. On by default. Deliberately excludes every
+finding that can only be resolved once the whole capture is read (novelty/
+"new vs. known" findings evaluated against a baseline, and two
+capture-wide-only patterns) \-\- those remain \fBdetect\fR-only, since
+\fBdecode\fR (including \fB\-i\fR live capture) never has a whole-capture
+view to judge them against. \fB\-\-no\-detect\-highlight\fR disables the
+feature outright: no text tag, no verbose detail line, and the four
+JSON/CSV fields (\fBhas_detect_finding\fR, \fBdetect_finding_kind\fR,
+\fBdetect_finding_technique\fR, \fBdetect_finding_description\fR) omitted
+entirely. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS "Always-notable
+highlighting" subsection.
+.TP
 .B \-\-no\-vlan
 Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. On by
 default. See \fBdocs/USER_GUIDE.md\fR's OUTPUT FORMATS section.

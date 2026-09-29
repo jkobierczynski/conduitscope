@@ -911,7 +911,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag, bool show_direction, bool show_mac,
                 const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump,
-                bool verbose, bool redact) {
+                bool verbose, bool redact, bool detect_highlight) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -1174,6 +1174,28 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         // strict capture order, the same discipline `decoder` itself follows.
         FlowDirectionTracker direction_tracker;
 
+        // `--detect-highlight`'s own live "always-notable highlighting" (see docs/USER_GUIDE.md's
+        // own subsection under `decode`, and DetectEngine::AlwaysNotableHit's own comment,
+        // detect_engine.hpp). `pending_hit` is a scratch slot the callback writes into and this
+        // loop reads back immediately after each observe() call, right before the packet reaches
+        // any writer -- observe() calls the callback synchronously and at most once per packet (see
+        // that lambda's own admission logic, detect_engine.cpp), so there is never more than one
+        // pending hit outstanding at a time. Constructed with DetectEngine's own compiled-default
+        // DetectEngineLimits (kDefaultMaxDetect*, detect_engine.hpp) -- the exact same growth
+        // ceilings `detect` itself uses -- so a long-running `decode -i` can't accumulate unbounded
+        // internal tracking state any more than a long-running `detect -i` already can't (patch257
+        // finding 3); decode exposes no --max-detect-* flags of its own to keep this feature's own
+        // CLI surface small, since decode's own report (the printed packets) never grows unbounded
+        // the way detect's own findings list does regardless. Only constructed at all when
+        // detect_highlight is true -- --no-detect-highlight skips DetectEngine entirely, for zero
+        // overhead when the feature isn't wanted.
+        std::optional<AlwaysNotableHit> pending_hit;
+        std::unique_ptr<DetectEngine> detect_engine;
+        if (detect_highlight) {
+            detect_engine = std::make_unique<DetectEngine>(
+                DetectEngineLimits{}, [&pending_hit](const AlwaysNotableHit& hit) { pending_hit = hit; });
+        }
+
         PcapPacket pkt;
         size_t decoded_count = 0, warnings = 0;
         try {
@@ -1186,6 +1208,17 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 if (pcap_writer) pcap_writer->write_packet(pkt);
                 DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
                 direction_tracker.observe(dp);
+                if (detect_engine) {
+                    pending_hit.reset();
+                    detect_engine->observe(dp);
+                    if (pending_hit) {
+                        dp.has_detect_finding = true;
+                        dp.detect_finding_kind = pending_hit->finding_kind ? pending_hit->finding_kind : "";
+                        dp.detect_finding_technique =
+                            pending_hit->technique.id + " (" + pending_hit->technique.name + ")";
+                        dp.detect_finding_description = pending_hit->description;
+                    }
+                }
                 if (dp.protocol == "parse-error") {
                     ++warnings;
                     if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
@@ -2267,6 +2300,7 @@ int main(int argc, char** argv) {
     bool decode_show_mac = false;
     bool decode_verbose = false;
     bool decode_redact = true;
+    bool decode_detect_highlight = true;
     std::string decode_time_format = "r", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
     std::vector<std::string> decode_fields;
@@ -2671,6 +2705,21 @@ int main(int argc, char** argv) {
         "--no-redact to see the real cleartext values (useful for local triage/incident "
         "response where the analyst is already trusted with the capture itself). Usernames "
         "are never redacted, only passwords/authentication data -- see docs/MANUAL.md");
+    decode_cmd->add_flag(
+        "--detect-highlight,!--no-detect-highlight", decode_detect_highlight,
+        "Highlight (bold red in text output; a detect_finding/detect_finding_technique/"
+        "detect_finding_description field in json/csv/fields output) any packet that matches one "
+        "of the 'detect' subcommand's own always-notable findings (a PLC/controller mode change, a "
+        "firmware/logic download, a device restart, an unsolicited/unexpected protocol message, a "
+        "known scanner-tool fingerprint, ...) -- live, one packet at a time, including under -i "
+        "live capture. On by default; pass --no-detect-highlight to skip running DetectEngine "
+        "against every packet entirely (e.g. for maximum decode throughput, or when the highlight "
+        "isn't wanted). Deliberately does NOT cover 'new vs. known' findings (a new remote-access "
+        "channel, a new CIP originator) or the two whole-capture-only patterns (S7 Setup "
+        "Communication probing, the download-then-restart composite) -- those need the complete "
+        "capture (or a baseline) to resolve and cannot be decided live, one packet at a time; use "
+        "the 'detect' subcommand itself for those. See docs/MANUAL.md's own \"Always-notable "
+        "highlighting\" subsection under decode");
     decode_cmd->add_option(
         "-e,--field", decode_fields,
         "With -T fields, print this field's value (repeatable, printed in the order given, "
@@ -3480,7 +3529,7 @@ int main(int argc, char** argv) {
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac, decode_fields, decode_write, decode_hex,
-                           decode_verbose, decode_redact);
+                           decode_verbose, decode_redact, decode_detect_highlight);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

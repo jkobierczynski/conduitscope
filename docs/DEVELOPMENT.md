@@ -14095,6 +14095,181 @@ it done as its own patch.
     ("don't silently look like a clean stop when something actually failed")
     as everything else this item fixed, and worth a dedicated follow-up.
 
+99. **`decode` always-notable highlighting, plus a researched, deliberately
+    deferred design for a future offline-only two-pass full-detect coloring
+    mode.** Jurgen's own direct follow-up after being told `decode` shows a
+    PLC Stop or a DNP3 unsolicited-response misuse exactly like ordinary
+    protocol traffic today, by design (no detection logic runs inside
+    `decode` at all -- that's `detect`'s job): "Yes, that would be great,
+    add the always-notable highlighting first. Then check the two-pass
+    full-detect coloring as a separate, offline-only addition. Check what
+    tshark, wireshark is using for 2-pass check for option, and how for it
+    goes with them."
+
+    **Taxonomy first.** `detect`'s 39 always-notable finding kinds (every
+    kind whose traffic shape alone is notable, `DetectionNovelty::NotApplicable`,
+    no "new vs. known" judgment involved -- see `detect_engine.hpp`'s own
+    header comment and `docs/design/detection-engine.md`) split into four
+    groups by what state they need: STATELESS-IMMEDIATE (29 kinds, decided
+    purely from the current packet's own decoded fields -- `s7-plc-stop`,
+    `dnp3-restart`, `bacnet-reinitialize`, `umas-start-plc`/`umas-stop-plc`,
+    `modbus-force-listen-only`, `modbus-scanner-metasploit`, and 23 more),
+    STATEFUL-IMMEDIATE (4 kinds across 3 call sites -- needs memory of one
+    earlier packet in the same flow but resolves instantly with no
+    threshold: `dnp3-unsolicited-misuse`, `dnp3-operate-without-select`,
+    `modbus-write-without-read-coils`/`-registers`), WINDOWED-THRESHOLD (6
+    kinds -- needs a running count/time window, fires once a threshold is
+    crossed: `port-scan`, `dnp3-enumeration-sweep`, `dnp3-write-burst`/
+    `modbus-write-burst`, `modbus-exception-burst`, `bacnet-who-is-flood`),
+    and FINISH-ONLY (2 kinds -- genuinely cannot be decided until the whole
+    capture is read: S7comm Setup Communication probing, "no other function
+    ever seen," and a composite program-download-then-restart pattern that
+    post-processes `finish()`'s own already-produced findings list). The
+    first three groups are all forward-only/backward-looking -- no
+    lookahead needed, so they work identically under `-i` live capture.
+    Only the FINISH-ONLY pair, and every NEW-VS-KNOWN/novelty finding
+    (resolved in `finish()` against an optional `--baseline-file` or
+    first-occurrence-within-capture), are structurally incompatible with
+    live, streaming decode. Critically, all 39 always-notable kinds are
+    produced through exactly one shared lambda, `record_always_notable`,
+    inside `DetectEngine::observe()` -- a single hook point covers the
+    entire live-eligible set with zero duplication of any of the 39 rules.
+
+    **Always-notable highlighting (shipped).** A new
+    `AlwaysNotableHit` struct (`detect_engine.hpp`) plus an optional
+    `std::function<void(const AlwaysNotableHit&)> on_always_notable_hit`
+    constructor parameter on `DetectEngine` (defaulting to `nullptr`,
+    mirroring `RotatingPcapWriter`'s own pre-existing `on_warning` callback
+    convention from item 98 -- `detect` itself still passes `nullptr`,
+    completely unaffected). `record_always_notable` now invokes the hook,
+    when set, on every matching packet -- not just first-ever for a given
+    key, and regardless of the report-facing `admit_finding_slot` ceiling,
+    since this is a live signal, not an entry in a bounded report.
+
+    `decoder.hpp`'s `DecodedPacket` gained four new fields --
+    `has_detect_finding`, `detect_finding_kind`, `detect_finding_technique`,
+    `detect_finding_description` -- populated from `cli_main.cpp`'s own
+    `run_decode()`, *after* `decoder.decode(...)` returns, the same
+    "enrich from the CLI layer, not from `Decoder::decode` itself" pattern
+    `FlowDirectionTracker::observe(dp)` already established (deliberately
+    not wired into `decoder.cpp`, which would be a backwards architectural
+    dependency -- `detect_engine.hpp` depends on `decoder.hpp`, not the
+    other way around). `run_decode()` owns a `DetectEngine` instance
+    (default-constructed limits, live for the whole run) only when the new
+    `--detect-highlight` flag (on by default; `--no-detect-highlight` to
+    disable) is set, feeding it every decoded packet right after
+    `direction_tracker.observe(dp)`.
+
+    Output follows this codebase's "nothing is color-only" discipline: a
+    `[detect: <kind>]` text tag is added unconditionally next to the
+    summary (reusing the existing `kBoldRed` emphasis already used for
+    severe/attack lines, rather than inventing a new color), a full
+    `detect: <kind> -- <technique> -- <description>` detail line is added
+    under `-v`, and `json`/`csv` output gain four trailing fields
+    (`has_detect_finding`, `detect_finding_kind`, `detect_finding_technique`,
+    `detect_finding_description`) appended at the very end of the object/row
+    per this codebase's standing "new fields always append at the end"
+    convention -- never inserted next to a conceptually related field, since
+    several pre-existing tests match fields by exact adjacency.
+    `FieldsWriter` needed zero code changes: it re-derives its available
+    field set by re-parsing `JsonWriter`'s own output rather than
+    hardcoding a field list, so the four new fields became selectable via
+    `-e` automatically.
+
+    Appending the four new trailing fields broke five pre-existing CTest
+    regexes that hard-matched exact field/column adjacency
+    (`hartip_cmd1_request_and_response_decoded`,
+    `hartip_cmd38_request_and_response_decoded`,
+    `hartip_cmd48_minimal_and_extended_decoded`,
+    `no_vlan_suppresses_display_csv`, `decode_direction_columns_shown_in_csv`)
+    -- fixed by widening each regex to account for the new trailing fields,
+    verified against real observed output before writing each fix, per this
+    project's standing "never hand-write a CTest regex from assumption"
+    rule.
+
+    Eight new CTest entries
+    (`decode_detect_highlight_text_tag_default`,
+    `decode_detect_highlight_verbose_detail_line`,
+    `decode_detect_highlight_json_fields`, `decode_detect_highlight_csv_columns`,
+    `decode_detect_highlight_fields_selectable`,
+    `decode_no_detect_highlight_disables_it_text`,
+    `decode_no_detect_highlight_disables_it_json`, and the key correctness
+    test, `decode_detect_highlight_stateful_and_windowed_live`, which walks
+    a real multi-packet capture confirming a STATEFUL-IMMEDIATE finding
+    fires on every individual repeat occurrence and a WINDOWED-THRESHOLD
+    finding fires only on the packet that actually crosses the threshold,
+    never the build-up packets before it), plus confirming directly against
+    a real fixture that neither FINISH-ONLY nor NEW-VS-KNOWN/novelty
+    findings ever leak into `decode`'s output. Two CMake/CTest regex
+    gotchas were hit and fixed while writing these, worth recording here
+    since both are dialect surprises rather than logic bugs: `^`/`$`
+    anchors apply to the
+    *whole* multi-line captured output string in this CMake regex dialect,
+    not per line, so `PASS_REGULAR_EXPRESSION "^1\ttrue\ts7-plc-stop$"`
+    never matched (fixed by dropping the anchors); and a bare `.*` in a
+    `FAIL_REGULAR_EXPRESSION` matches across newlines here (confirmed
+    against several pre-existing tests that deliberately rely on exactly
+    that to span multiple output lines), so a pattern meant to assert "this
+    one packet's line has no `[detect:` tag" instead matched by spanning
+    forward to a different, legitimately-flagged packet several lines
+    later -- fixed by switching to `[^\n]*` (the same line-scoping
+    technique the pre-existing `direction_client_ip` anchors already use
+    elsewhere in this file) and writing out each checked packet number as
+    its own explicit alternative rather than trying to express "packets 7
+    through 15" as one pattern.
+
+    `docs/USER_GUIDE.md` gained the `--detect-highlight`/
+    `--no-detect-highlight` option-table row, a new "Always-notable
+    highlighting" subsection under `decode`'s own OUTPUT FORMATS section
+    (the full scope boundary, output shape, and a worked example), and a
+    paragraph in the `json` section documenting the four new trailing
+    fields; `man/conduitscope.1` gained the matching
+    `OPTIONS (decode)` entry.
+
+    Full CTest across all four standing build configurations (default GCC:
+    2249/2249; ASan/UBSan `build-fuzz`: 2326/2326 including the fuzz corpus
+    regression tests, zero sanitizer hits; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`: 2234/2234 -- the new tests all use `-r` file input, not
+    `-i`, so they run and pass unchanged with no live capture support built
+    in; MinGW-w64 cross-compile, build-only there) -- 100% pass, zero
+    regressions -- plus a clean-room extract-rebuild-test cycle (2249/2249)
+    before delivery.
+
+    **Two-pass full-detect coloring -- researched and scoped, deliberately
+    NOT implemented this round, per Jurgen's own explicit "as a separate,
+    offline-only addition" framing.** Researched directly against
+    wireshark.org's own tshark(1) man page and an osqa-ask.wireshark.org
+    Q&A on `-2`. tshark's `-2` buffers the *entire* first pass's output
+    before producing any final output, specifically so it can "fill in
+    fields that require future knowledge" (e.g. a "response in frame #"
+    back-reference, TCP reassembly frame dependencies): pass 1 reads and
+    dissects the whole file (applying a read filter `-R`, if given, and
+    stopping at a `-c` packet count measured among *filtered* packets),
+    pass 2 re-walks only the packets that survived pass 1, applying the
+    display filter `-Y`, with frame numbers recalculated on the second
+    pass. The man page states the hard constraint verbatim: "This requires
+    the ability to seek backwards on the input, and as such cannot be used
+    with live captures or when reading from a pipe or FIFO."
+
+    That constraint maps directly onto this project's own FINISH-ONLY/
+    novelty findings above, and validates the shape of a future
+    conduitscope two-pass mode: pass 1 runs the full `DetectEngine` to
+    completion, producing the finished `DetectionReport` (exactly what
+    `detect` itself already does); pass 2 re-decodes/re-prints with that
+    finished report available, so the two currently-excluded finding
+    families (FINISH-ONLY and NEW-VS-KNOWN/novelty) can finally be
+    resolved and colored the same way the always-notable ones are today.
+    Restricted to `-r` (file) input only, exactly matching tshark's own
+    `-2` restriction and this project's own pre-existing `--range` flag
+    precedent (`--range` is documented as excluded from `-i` at the option
+    level, since "select packet #N" presupposes a finished, numbered file
+    -- the identical reasoning applies here). Deliberately not built this
+    round -- Jurgen's own instruction scoped this as a future, separate
+    addition, and the always-notable highlighting work above already
+    covers every live-eligible finding kind, so there's no user-facing gap
+    left for `-i`/streaming use; this is scoped now so a future session can
+    build directly from this design record rather than re-researching it.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -216,6 +216,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 | `-v, --verbose` | off | Show per-packet notes (longer-form contextual/security observations) and the trailing `(client X -- tier)` direction-source suffix; both are suppressed by default to keep default output readable, since on a busy capture the notes in particular can swamp the per-packet lines. Text output only (`-T text`, the default) -- JSON/CSV always include notes/direction fields unconditionally. `--no-direction` still suppresses the direction suffix even under `-v`. See OUTPUT FORMATS below. |
 | `--redact` / `--no-redact` | on (i.e. cleartext secrets redacted by default) | Mask cleartext authentication secrets found while decoding (HSRP/VRRP authentication data, OPC UA `ActivateSessionRequest` passwords, MQTT `CONNECT` passwords) with `[REDACTED]` wherever they would otherwise appear -- summary/notes text and JSON value fields alike -- so output can be shared safely by default. `--no-redact` shows the real cleartext values. Usernames are never redacted, only passwords/authentication data. See OUTPUT FORMATS below. |
+| `--detect-highlight` / `--no-detect-highlight` | on (i.e. always-notable highlighting on by default) | Flag, inline, any packet that would also show up in `detect`'s own report as an "always-notable" finding (traffic whose shape alone is notable, decided live/per-packet -- see `detect`'s own ALWAYS-NOTABLE-vs-NEW-VS-KNOWN split above) -- so a capture containing e.g. an S7 PLC Stop or a DNP3 unsolicited-response misuse doesn't scroll by looking like ordinary protocol traffic. Reuses `detect`'s own `DetectEngine` live, packet-by-packet, as a read-only hook -- no separate detection logic, no separate pass. Deliberately excludes any finding that can only be resolved once the whole capture is read (novelty/"new vs. known" findings against a baseline, and the two capture-wide S7comm-probing/program-download-then-restart patterns) -- those remain `detect`-only, since `decode` (including `-i` live capture) has no opportunity to look ahead or back. See OUTPUT FORMATS' "Always-notable highlighting" subsection below. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
 | `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--mac-vendor` don't affect it either). See OUTPUT FORMATS below. |
 | `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | For a packet with an IP layer, show its Ethernet header (source/destination MAC address, VLAN tag) below the packet line in **text** output -- mirrors tcpdump's own `-e` (long-form only in this codebase -- `-e` itself is reserved for `--field` below, tshark's own convention). Implied by `--mac-vendor` (there'd be nothing to attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's MAC address pair is already shown on its own head line unconditionally, `--ether` or not. Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
@@ -3754,6 +3755,96 @@ secret at all (most either have no authentication field on the wire, or
 carry only a hash/digest that isn't itself the credential), so `--redact`/
 `--no-redact` has no effect on their output.
 
+#### Always-notable highlighting (`--detect-highlight`/`--no-detect-highlight`)
+
+On by default. Without it, `decode` shows a PLC Stop command or a DNP3
+unsolicited-response misuse exactly like any other ordinary protocol
+traffic -- same color, no annotation -- purely because `decode`'s job is to
+print what's on the wire, not to judge it. That's fine for someone already
+running `detect` alongside it, but looks wrong on its own: an analyst
+scanning a `decode` transcript for something notable has no way to tell a
+PLC Stop apart from a routine read. This closes that gap by reusing
+`detect`'s own `DetectEngine`, live and per-packet, as a read-only
+highlighting hook -- not a second detector, not a reimplementation of any
+of its rules.
+
+**Scope.** Of `detect`'s two finding families (see the `detect` section
+above), only ALWAYS-NOTABLE findings -- ones whose traffic shape alone is
+notable, decided from the current packet plus at most some earlier state
+in the same capture, with no "new vs. known" judgment involved -- are
+eligible here. Concretely: every stateless, purely-current-packet finding
+(S7 PLC Stop, DNP3 Cold/Warm Restart, BACnet ReinitializeDevice, UMAS
+START_PLC/STOP_PLC, a Modbus scanner/force-listen-only pattern, and
+similar); every finding that needs memory of one earlier packet in the same
+flow but no threshold (DNP3 unsolicited-response misuse, an Operate without
+a prior Select, a Modbus write without a prior read); and every
+running-count/time-window finding once its threshold is actually crossed
+(a port scan, a DNP3 enumeration sweep, a write burst, an exception burst,
+a BACnet Who-Is flood) -- all light up here, on the exact packet `detect`
+itself would cite.
+
+Left out, always: any NEW-VS-KNOWN finding (a new remote-access channel, a
+new CIP/UMAS engineering-station originator) and the two findings that can
+only be resolved once the whole capture has been read (S7comm Setup
+Communication probing, and the composite program-download-then-restart
+pattern). Both require either a baseline file or a completed, whole-capture
+view neither `decode` nor a live `-i` capture can ever have -- `decode`
+never rewinds or looks ahead, even reading from a file -- so these remain
+`detect`-only, including under `detect`'s own `--baseline-file`. This is a
+hard, permanent scope boundary, not a "not yet" -- see `detect`'s own
+`--baseline-file` option above for where they're covered instead.
+`--policy`/`--baseline-file` have no equivalent here for the same reason.
+
+**Output.** In every case, nothing here is color-only: the same
+`[detect: <kind>]` tag is added inline whether or not `--color` is active,
+and survives `--no-color`/non-terminal output unchanged.
+
+```
+$ conduitscope decode -r s7_pi_control.pcap -T text
+#1  0.000000  192.168.1.50:49210 -> 192.168.1.10:102 (mms)  [s7comm]  Job: PLC Stop ("PLC_STOP")  [detect: s7-plc-stop]
+#2  1.001000  192.168.1.50:49211 -> 192.168.1.10:102 (mms)  [s7comm]  Job: PLC Control (...)  [detect: s7-plc-control]
+```
+
+Under `-v`/`--verbose`, a full detail line follows, giving the finding kind,
+its MITRE ATT&CK for ICS technique, and a human-readable description --
+same three pieces of information `detect`'s own report carries for this
+finding, just surfaced inline instead of in a separate report:
+
+```
+$ conduitscope decode -r s7_pi_control.pcap -T text -v
+#1  0.000000  192.168.1.50:49210 -> 192.168.1.10:102 (mms)  [s7comm]  Job: PLC Stop ("PLC_STOP")  [detect: s7-plc-stop]  (client 192.168.1.50 -- port-heuristic)
+        detect: s7-plc-stop -- T0858 (Change Operating Mode) -- S7comm PLC Stop command -- CPU commanded to STOP from the process network
+```
+
+`json`/`csv`/`fields` output carries this unconditionally, the same way
+`direction_source`/`direction_client_ip` do -- four trailing fields per
+packet, appended after every other field this codebase's "new fields
+always append at the end" convention already establishes:
+`has_detect_finding` (bool), `detect_finding_kind` (the same short kind
+name as the text tag, e.g. `"s7-plc-stop"`, `null` when
+`has_detect_finding` is `false`), `detect_finding_technique` (`"<ATT&CK ID>
+(<name>)"`, e.g. `"T0858 (Change Operating Mode)"`), and
+`detect_finding_description` (the same human-readable text as the verbose
+detail line). All four are available to `-e`/`--field` under `-T fields`
+like any other JSON field, with no `FieldsWriter`-specific code needed.
+
+`--no-detect-highlight` disables the feature outright -- no tag, no detail
+line, no JSON/CSV fields at all (the four JSON/CSV fields are simply
+omitted, following the same "omit outright, don't just null it out"
+convention `--no-vlan`/`--no-direction` already use). Nothing about
+`detect`'s own always-notable detection logic changes either way; this flag
+only controls whether `decode` surfaces it.
+
+Because this reuses `DetectEngine` itself, live, per packet, it costs
+exactly what running `detect` alongside `decode` would cost -- negligible
+against normal decode overhead, and identical for `-i` live capture, where
+it's the only way to see this information in real time at all (`detect`
+itself supports `-i`, but as a separate process producing its own
+separate, whole-run report). See `docs/DEVELOPMENT.md`'s ROADMAP for the
+full design record, including why the excluded findings above are left for
+a future, deliberately separate, offline-only two-pass mode instead of
+being force-fit in here.
+
 ### json
 
 A JSON array, one object per packet, with fields `index`, `timestamp`,
@@ -3790,6 +3881,15 @@ and the industry precedent researched before adding this (`"content"`, the
 third tier, never appears here -- it only applies to BACnet, which is
 UDP-only and stays out of `decode`'s own per-packet direction tracking, see
 the `inventory` section below for where it does appear).
+
+After the direction fields, every object also carries `has_detect_finding`
+(bool), `detect_finding_kind`, `detect_finding_technique`, and
+`detect_finding_description` -- see OUTPUT FORMATS' "Always-notable
+highlighting" subsection below for exactly what these mean and which
+`detect` finding kinds are eligible to set them. The last three are `null`
+(never omitted) when `has_detect_finding` is `false`. `--no-detect-highlight`
+omits all four fields entirely (never just `null`/`false`), the same
+"omit outright" convention `--no-direction`/`--no-vlan` already use above.
 
 Over a hundred fields are only present (omitted entirely, not `null`) on
 packets where they apply:

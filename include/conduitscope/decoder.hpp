@@ -879,6 +879,33 @@ struct DecodedPacket {
     // broader.
     bool has_attack_signature = false;
 
+    // `decode`'s own "always-notable highlighting" feature (see docs/USER_GUIDE.md's own subsection
+    // under `decode`, and DetectEngine::AlwaysNotableHit's own comment, detect_engine.hpp). Set by
+    // cli_main.cpp's run_decode AFTER Decoder::decode already produced this packet -- NOT by
+    // Decoder::decode itself, deliberately: unlike has_attack_signature above (attack_detect.hpp/
+    // ipv6_attack_detect.hpp, wired directly into decoder.cpp), this reuses DetectEngine
+    // (detect_engine.hpp), an analysis-layer engine that itself depends on Decoder's OWN output --
+    // wiring it the other way around (into decoder.cpp) would be a backwards dependency. The same
+    // "enrich an already-decoded packet from cli_main.cpp, not from Decoder::decode itself" pattern
+    // FlowDirectionTracker::observe already established for `direction`/`direction_source` below.
+    // Distinct from has_attack_signature: that field means "one of attack_detect.hpp's/
+    // ipv6_attack_detect.hpp's own classic DoS/reconnaissance signatures fired" (flood thresholds,
+    // LAND, Teardrop, ...); this one means "this packet matches one of DetectEngine's own ~39
+    // always-notable OT/ICS findings" (a PLC mode change, a firmware/logic download, an unsolicited/
+    // unexpected protocol message, a known scanner-tool fingerprint, ...) -- a completely different,
+    // OT-specific curated source, and a packet can in principle set both. `--no-detect-highlight`
+    // (decode's own flag) leaves both this field false and detect_finding_* below empty without
+    // running DetectEngine at all, for zero overhead when the feature isn't wanted.
+    bool has_detect_finding = false;
+    std::string detect_finding_kind;         // e.g. "s7-plc-stop" -- empty iff !has_detect_finding
+    std::string detect_finding_technique;    // "T0858 (Change Operating Mode)", matching this
+                                              // codebase's own established "ID (Name)" citation
+                                              // format (MitreAttackTechnique's own comment,
+                                              // mitre_attack_ics.hpp) -- empty iff !has_detect_finding
+    std::string detect_finding_description;  // human-readable, same text DetectEngine's own
+                                              // DetectionFinding::description would carry -- empty
+                                              // iff !has_detect_finding
+
     // registration-model decoder refactor (see protocol_decoder.hpp): set only by a protocol built
     // on the new ProtocolDecoder interface that chooses to carry its own structured result forward
     // for a renderer to read (TwinCAT, BGP, Slow Protocols, Kerberos, LDAP, SMB, MELSEC, FINS,

@@ -3664,10 +3664,11 @@ set_tests_properties(hartip_cmd1_request_and_response_decoded PROPERTIES
   # "notes": [] followed by the closing "}," anchors this as the end of the *first* packet object
   # (Command 1 request) so the greedy .* that follows can't jump ahead into some later packet's
   # own "hartip_values" instead -- since -t/--time-format's own `time` field (time_format.hpp) now
-  # renders directly after "notes", followed in turn by direction_source/direction_client_ip (see
-  # output.cpp's JsonWriter and docs/MANUAL.md's ROADMAP item 19), that anchor has to match
-  # through all three.
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
+  # renders directly after "notes", followed in turn by direction_source/direction_client_ip and
+  # decode's own --detect-highlight fields (has_detect_finding/detect_finding_kind/
+  # detect_finding_technique/detect_finding_description -- see output.cpp's JsonWriter and
+  # docs/MANUAL.md's ROADMAP item 19), that anchor has to match through all seven.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 1,.*\"hartip_command_name\": \"Read Primary Variable\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\"has_detect_finding\":[^\n]*\n *\"detect_finding_kind\":[^\n]*\n *\"detect_finding_technique\":[^\n]*\n *\"detect_finding_description\":[^\n]*\n *\\},.*\"hartip_values\": \\[\"pv-units=1\", \"pv=72.500000\"\\]")
 
 add_test(NAME hartip_cmd2_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -3773,15 +3774,17 @@ add_test(NAME hartip_cmd38_request_and_response_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd38_request_and_response_decoded PROPERTIES
   # Same "notes"+closing-brace anchor as hartip_cmd1_request_and_response_decoded above, updated
-  # the same way for the trailing `time`/direction_source/direction_client_ip fields.
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
+  # the same way for the trailing `time`/direction_source/direction_client_ip/--detect-highlight
+  # fields.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\"has_detect_finding\":[^\n]*\n *\"detect_finding_kind\":[^\n]*\n *\"detect_finding_technique\":[^\n]*\n *\"detect_finding_description\":[^\n]*\n *\\},.*\"hartip_command\": 38,.*\"hartip_command_name\": \"Reset Configuration Changed Flag\",.*\"hartip_response_code\": 0,.*\"hartip_values\": \\[\"configuration-change-counter=42\"\\]")
 
 add_test(NAME hartip_cmd48_minimal_and_extended_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_cmd48_minimal_and_extended_decoded PROPERTIES
   # Same "notes"+closing-brace anchor as hartip_cmd1_request_and_response_decoded above, updated
-  # the same way for the trailing `time`/direction_source/direction_client_ip fields.
-  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
+  # the same way for the trailing `time`/direction_source/direction_client_ip/--detect-highlight
+  # fields.
+  PASS_REGULAR_EXPRESSION "\"hartip_command\": 48,.*\"hartip_command_name\": \"Read Additional Device Status\",.*\"hartip_values\": \\[\"device-specific-status=000000000000\"\\],.*\"notes\": \\[\\],\n *\"time\": \"[^\"]*\",\n *\"direction_source\":[^\n]*\n *\"direction_client_ip\":[^\n]*\n *\"has_detect_finding\":[^\n]*\n *\"detect_finding_kind\":[^\n]*\n *\"detect_finding_technique\":[^\n]*\n *\"detect_finding_description\":[^\n]*\n *\\},.*\"device-specific-status=000000000000\", \"extended-device-status=0x00\", \"device-operating-mode=0x01\", \"standardized-status-0=0x00\", \"standardized-status-1=0x00\", \"standardized-status-2=0x00\", \"standardized-status-3=0x00\", \"analog-channel-saturated=0x00\", \"analog-channel-fixed=0x00\"\\]")
 
 add_test(NAME hartip_cmd77_response_short_address_embedded_command_decoded
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
@@ -8866,9 +8869,11 @@ set_tests_properties(no_vlan_suppresses_display_csv PROPERTIES
   # 0.000000 here, same "hardcode this sample's known value" style vlan_id_shown_by_default_csv
   # above already uses for its own trailing column. `time` is no longer the row's last column --
   # direction_source/direction_client_ip (empty here: this is a raw PROFINET RT frame, not TCP, so
-  # FlowDirectionTracker never touches it -- see CsvWriter::write_packet) now follow it, hence the
-  # two trailing empty fields before the newline.
-  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,0\\.000000,,\n"
+  # FlowDirectionTracker never touches it -- see CsvWriter::write_packet) now follow it, then
+  # decode's own --detect-highlight columns (has_detect_finding=false plus three empty fields --
+  # this frame matches none of DetectEngine's always-notable findings), hence the six trailing
+  # fields (two empty, "false", three more empty) before the newline.
+  PASS_REGULAR_EXPRESSION "profinet,\"Cyclic RT IO data \\(RT_CLASS_1, unicast\\): 8 byte\\(s\\) IO data, cycle_counter=4660 data_status=\\[Primary,Valid,Run,Ok\\] transfer_status=OK\",,,0\\.000000,,,false,,,\n"
   FAIL_REGULAR_EXPRESSION "transfer_status=OK\",,100")
 
 # --mac-vendor and --no-vlan are independent toggles -- suppressing VLAN display must not affect the
@@ -11300,7 +11305,99 @@ set_tests_properties(decode_direction_line_shown_in_text PROPERTIES
 add_test(NAME decode_direction_columns_shown_in_csv
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --format csv)
 set_tests_properties(decode_direction_columns_shown_in_csv PROPERTIES
-  PASS_REGULAR_EXPRESSION "direction_source,direction_client_ip\n.*,handshake,192\\.168\\.1\\.50\n")
+  # has_detect_finding/detect_finding_kind/detect_finding_technique/detect_finding_description
+  # (decode's own --detect-highlight columns) now follow direction_client_ip -- this capture's own
+  # bare TCP handshake segments match none of DetectEngine's always-notable findings, so
+  # has_detect_finding is "false" and the three text columns are empty.
+  PASS_REGULAR_EXPRESSION "direction_source,direction_client_ip,has_detect_finding,detect_finding_kind,detect_finding_technique,detect_finding_description\n.*,handshake,192\\.168\\.1\\.50,false,,,\n")
+
+# ---------------------------------------------------------------------------------------------
+# `decode --detect-highlight` -- live, per-packet "always-notable" highlighting reusing
+# DetectEngine's own AlwaysNotableHit hook (detect_engine.hpp) so a packet that would show up as a
+# `detect` finding doesn't look like ordinary decode text. On by default; --no-detect-highlight
+# disables it outright. See docs/USER_GUIDE.md's own subsection under `decode`.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME decode_detect_highlight_text_tag_default
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text)
+set_tests_properties(decode_detect_highlight_text_tag_default PROPERTIES
+  # On by default, with no -v needed -- the "[detect: ...]" tag is folded straight into the
+  # existing one-line-per-packet head line, not a verbose-only note.
+  PASS_REGULAR_EXPRESSION "#1  0\\.000000  192\\.168\\.1\\.50:49210 -> 192\\.168\\.1\\.10:102 \\(mms\\)  \\[s7comm\\]  Job: PLC Stop \\(\"PLC_STOP\"\\)  \\[detect: s7-plc-stop\\]")
+
+add_test(NAME decode_detect_highlight_verbose_detail_line
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text --verbose)
+set_tests_properties(decode_detect_highlight_verbose_detail_line PROPERTIES
+  # The full MITRE ATT&CK citation + description behind the head-line tag is -v/--verbose-only,
+  # same posture as this writer's own "note:" lines -- see TextWriter::write_packet, output.cpp.
+  PASS_REGULAR_EXPRESSION "detect: s7-plc-stop -- T0858 \\(Change Operating Mode\\) -- S7comm PLC Stop command -- CPU commanded to STOP from the process network")
+
+add_test(NAME decode_detect_highlight_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json)
+set_tests_properties(decode_detect_highlight_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"has_detect_finding\": true,\n *\"detect_finding_kind\": \"s7-plc-stop\",\n *\"detect_finding_technique\": \"T0858 \\(Change Operating Mode\\)\",\n *\"detect_finding_description\": \"S7comm PLC Stop command -- CPU commanded to STOP from the process network\"")
+
+add_test(NAME decode_detect_highlight_csv_columns
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format csv)
+set_tests_properties(decode_detect_highlight_csv_columns PROPERTIES
+  PASS_REGULAR_EXPRESSION "true,s7-plc-stop,T0858 \\(Change Operating Mode\\),S7comm PLC Stop command -- CPU commanded to STOP from the process network\n")
+
+add_test(NAME decode_detect_highlight_fields_selectable
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format fields
+          -e index -e has_detect_finding -e detect_finding_kind)
+set_tests_properties(decode_detect_highlight_fields_selectable PROPERTIES
+  # Confirms -e/--field can select these new fields at all -- FieldsWriter re-parses JsonWriter's
+  # own output rather than hardcoding a field list (see FieldsWriter::write_packet's own comment,
+  # output.cpp), so this also doubles as proof that path picked up the three new JSON fields with
+  # no FieldsWriter-specific code change needed.
+  PASS_REGULAR_EXPRESSION "1\ttrue\ts7-plc-stop\n")
+
+add_test(NAME decode_no_detect_highlight_disables_it_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format text --no-detect-highlight)
+set_tests_properties(decode_no_detect_highlight_disables_it_text PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\\[detect:")
+
+add_test(NAME decode_no_detect_highlight_disables_it_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format json --no-detect-highlight)
+set_tests_properties(decode_no_detect_highlight_disables_it_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"has_detect_finding\": false,\n *\"detect_finding_kind\": null,\n *\"detect_finding_technique\": null,\n *\"detect_finding_description\": null"
+  FAIL_REGULAR_EXPRESSION "\"has_detect_finding\": true")
+
+# Proves the STATEFUL-IMMEDIATE and WINDOWED-THRESHOLD always-notable categories highlight live
+# through `decode` too, not just the trivial STATELESS-IMMEDIATE case the tests just above cover --
+# reusing detect_snort_patterns_batch5_all_findings's own fixture (see that test's own comment for
+# the full first-seen-order finding list this pcap produces via `detect` itself).
+#
+# modbus-write-without-read-registers (STATEFUL-IMMEDIATE: needs to remember whether a prior read
+# ever covered this address range, but resolves the instant the write itself is seen -- no
+# threshold/window) fires on packet #30 (the FIRST write on the .170/.172 conduit) AND again on
+# packets #34/#35/#36 (three separate writes on the .176/.177 conduit, each its own occurrence) --
+# proving every individual occurrence is flagged live, not just a first-ever-seen one the way
+# DetectEngine's own report-facing dedup works (see AlwaysNotableHit's own comment,
+# detect_engine.hpp).
+#
+# port-scan (WINDOWED-THRESHOLD: a running count within a time window) fires ONLY on packet #16 --
+# the 10th distinct destination port that crosses this engine's own threshold -- never on packets
+# #7-#15, the nine SYNs leading up to it that are real traffic on the same (src,dst) pair but don't
+# yet cross the threshold; the FAIL_REGULAR_EXPRESSION below confirms none of those nine packets
+# were also tagged (a bug here would tag every packet in the window, not just the triggering one).
+#
+# modbus-rogue-master/dnp3-rogue-master (NEW-VS-KNOWN, resolved only in finish() against a baseline
+# or whole-capture first-occurrence -- see this file's own header comment) never appear via `decode`
+# at all -- confirmed by the same FAIL_REGULAR_EXPRESSION, since novelty-shaped findings are
+# structurally out of AlwaysNotableHit's scope (see that struct's own comment) and `decode` has no
+# way to resolve them live regardless.
+add_test(NAME decode_detect_highlight_stateful_and_windowed_live
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch5.pcap" --format text)
+set_tests_properties(decode_detect_highlight_stateful_and_windowed_live PROPERTIES
+  PASS_REGULAR_EXPRESSION "#16  -0\\.100000  192\\.168\\.1\\.164:49016 -> 192\\.168\\.1\\.165:23 \\(telnet\\)[^\n]*\\[detect: port-scan\\].*#30  [^\n]*192\\.168\\.1\\.170:49900 -> 192\\.168\\.1\\.172:502 \\(modbus\\)[^\n]*\\[detect: modbus-write-without-read-registers\\].*#34  [^\n]*192\\.168\\.1\\.176:49910 -> 192\\.168\\.1\\.177:502 \\(modbus\\)[^\n]*\\[detect: modbus-write-without-read-registers\\].*#35  [^\n]*192\\.168\\.1\\.176:49910 -> 192\\.168\\.1\\.177:502 \\(modbus\\)[^\n]*\\[detect: modbus-write-without-read-registers\\].*#36  [^\n]*192\\.168\\.1\\.176:49910 -> 192\\.168\\.1\\.177:502 \\(modbus\\)[^\n]*\\[detect: modbus-write-without-read-registers\\]"
+  # Each of packets #7-#15 (the nine SYNs leading up to the port-scan threshold, real traffic on
+  # the same (src,dst) pair) must NOT be individually tagged -- only #16, the 10th distinct port,
+  # crosses the threshold. [^\n]* keeps each alternative scoped to its own line (this file's own
+  # regex dialect lets a bare .* span newlines, matching the whole multi-line output -- see e.g.
+  # this file's own "direction_client_ip":[^\n]*\n anchors elsewhere -- so an unscoped #7 .*port-scan
+  # would wrongly match all the way forward into #16's own real, correct tag).
+  FAIL_REGULAR_EXPRESSION "rogue-master|#7  [^\n]*\\[detect:|#8  [^\n]*\\[detect:|#9  [^\n]*\\[detect:|#10  [^\n]*\\[detect:|#11  [^\n]*\\[detect:|#12  [^\n]*\\[detect:|#13  [^\n]*\\[detect:|#14  [^\n]*\\[detect:|#15  [^\n]*\\[detect:")
 
 add_test(NAME policy_validate_direction_source_handshake_json
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap" --policy "${POLICY_DIR}/policy_engine_sample.yaml" --format json)

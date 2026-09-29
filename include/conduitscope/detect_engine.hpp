@@ -391,6 +391,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <set>
 #include <string>
@@ -559,9 +560,51 @@ struct DetectEngineLimits {
     size_t max_originators_per_server = kDefaultMaxDetectOriginatorsPerServer;
 };
 
+// One ALWAYS-NOTABLE match, reported synchronously the instant observe() decides the CURRENT packet
+// matches one of this engine's ~39 always-notable finding sources (see this file's own header
+// comment) -- added for `decode`'s own live "always-notable highlighting" feature (see
+// DetectEngine::DetectEngine's own `on_always_notable_hit` parameter below), never used by `detect`
+// itself, which reads everything it needs from finish()'s own DetectionReport instead.
+//
+// Deliberately a much smaller, throwaway struct than DetectionFinding -- it describes THIS ONE
+// PACKET's own match, not an accumulating report entry, so it has no first_seen/last_seen/
+// packet_count (every field of those would just be this packet's own single timestamp/count of 1)
+// and no novelty (always NotApplicable for anything reaching this hook -- see this file's header
+// comment; the two whole-capture-only always-notable sources, S7 Setup Communication probing and the
+// download-then-restart composite, are resolved in finish() and so structurally CANNOT populate this
+// hook -- see finish()'s own comment).
+struct AlwaysNotableHit {
+    const char* finding_kind = nullptr;   // e.g. "s7-plc-stop" -- see detect_engine.cpp's own
+                                           // always_notable_key() and each call site's own literal
+    DetectionCategory category = DetectionCategory::ProtocolMisuse;
+    MitreAttackTechnique technique;
+    DetectionSeverity severity = DetectionSeverity::Critical;
+    DetectionEvidence evidence = DetectionEvidence::Confirmed;
+    std::string client_ip, server_ip;
+    std::string protocol;
+    uint16_t server_port = 0;
+    std::string description;
+    double timestamp = 0.0;  // the triggering packet's own dp.timestamp, not first_seen/last_seen
+};
+
 class DetectEngine {
 public:
-    explicit DetectEngine(DetectEngineLimits limits = DetectEngineLimits{}) : limits_(limits) {}
+    // `on_always_notable_hit`, when set, is invoked synchronously from inside observe() every single
+    // time the packet just passed to observe() matches an always-notable finding source -- on EVERY
+    // matching packet, not just the first one for a given (category, technique, client_ip, server_ip,
+    // protocol, server_port) combination the way always_notable_'s own report-facing dedup works (see
+    // observe()'s own comment) -- and regardless of whether this engine's own admit_finding_slot()
+    // ceiling had room to track it in always_notable_ for the eventual report. `detect` itself never
+    // needs this (it only reads finish()'s own DetectionReport, produced once at the end) and passes
+    // nullptr (the default) -- this exists purely for `decode`'s own opt-in, real-time, per-packet
+    // "highlight this packet now" use, including under live capture (`-i`), where there's no report to
+    // wait for and no chance to go back and re-print an earlier line. See docs/USER_GUIDE.md's own
+    // "Always-notable highlighting" subsection under `decode` for the feature this exists to support,
+    // and this file's own AlwaysNotableHit comment for why the hook's own payload type is deliberately
+    // NOT DetectionFinding.
+    explicit DetectEngine(DetectEngineLimits limits = DetectEngineLimits{},
+                           std::function<void(const AlwaysNotableHit&)> on_always_notable_hit = nullptr)
+        : limits_(limits), on_always_notable_hit_(std::move(on_always_notable_hit)) {}
 
     // Folds one already-decoded packet into this engine's state. Call once per packet, in capture
     // order (same discipline as Decoder::decode/PolicyEngine::observe/AssetInventoryEngine::observe).
@@ -665,6 +708,7 @@ private:
     bool admit_finding_slot(size_t current_size, const char* what);
 
     DetectEngineLimits limits_;
+    std::function<void(const AlwaysNotableHit&)> on_always_notable_hit_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;
 

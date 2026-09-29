@@ -293,6 +293,29 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                       uint16_t server_port, const std::string& description,
                                       DetectionSeverity severity = DetectionSeverity::Critical,
                                       DetectionEvidence evidence = DetectionEvidence::Confirmed) {
+        // `decode`'s own live "always-notable highlighting" hook (AlwaysNotableHit, detect_engine.hpp)
+        // -- fired unconditionally, on EVERY packet that reaches this lambda, before either of the two
+        // branches below (which govern only always_notable_'s own report-facing dedup/ceiling
+        // admission). A caller that wants to know about every individual occurrence live -- not just
+        // the first one ever seen for this (category, technique, client/server, protocol, port)
+        // combination, and not gated on whether this engine's own max_findings ceiling still had room
+        // -- gets exactly that: this packet genuinely matched, on the wire, right now, independent of
+        // what this engine's own report will eventually contain.
+        if (on_always_notable_hit_) {
+            AlwaysNotableHit hit;
+            hit.finding_kind = finding_kind;
+            hit.category = category;
+            hit.technique = technique;
+            hit.severity = severity;
+            hit.evidence = evidence;
+            hit.client_ip = client_ip;
+            hit.server_ip = server_ip;
+            hit.protocol = protocol;
+            hit.server_port = server_port;
+            hit.description = description;
+            hit.timestamp = dp.timestamp;
+            on_always_notable_hit_(hit);
+        }
         std::string key = always_notable_key(finding_kind, client_ip, server_ip, protocol, server_port);
         auto it = always_notable_.find(key);
         if (it == always_notable_.end()) {

@@ -539,7 +539,17 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // (that color already carries a distinct, unrelated meaning -- see its own comment) rather
     // than being overridden by this.
     bool attack = p.has_attack_signature;
-    bool red_line = severe || attack;
+    // `decode`'s own "always-notable highlighting" (--detect-highlight, on by default -- see
+    // DecodedPacket::has_detect_finding's own comment, decoder.hpp). Folded into the SAME red_line
+    // emphasis attack-pattern packets already get -- both mean "an OT/ICS incident-response analyst
+    // should look at this packet specifically" -- rather than inventing a second color, matching
+    // this file's own established "spend an unused hue only when two things genuinely need to stay
+    // visually distinct" discipline; the "[detect: ...]" tag appended below is what actually
+    // disambiguates a detect finding from a flood/scan attack signature in practice, the same way
+    // the "[protocol]" tag text (not color) disambiguates protocols that share a color elsewhere in
+    // this file.
+    bool detect_finding = p.has_detect_finding;
+    bool red_line = severe || attack || detect_finding;
 
     std::ostringstream head;
     if (color_ && attack) head << kBoldRed;
@@ -555,6 +565,13 @@ void TextWriter::write_packet(const DecodedPacket& p) {
     // protocols (DNS names, MQTT strings, ...) and, unlike JsonWriter/CsvWriter, this writer puts
     // it straight on the terminal with nothing else in between.
     head << terminal_escape(p.summary);
+    // Always printed as plain text when set, --color/--no-color alike -- "nothing here is
+    // color-only information", the same principle the direction-source suffix below already
+    // documents for itself. A flagged packet piped to a file or a non-terminal without --color
+    // still shows the tag; only the extra red emphasis is color-gated.
+    if (p.has_detect_finding) {
+        head << "  [detect: " << terminal_escape(p.detect_finding_kind) << "]";
+    }
     if (color_ && red_line) head << kReset;
     // How this TCP flow's client (initiator) side was determined -- see DirectionSource's own
     // comment (decoder.hpp) and docs/MANUAL.md's ROADMAP item 19. Folded into the head line itself
@@ -593,6 +610,19 @@ void TextWriter::write_packet(const DecodedPacket& p) {
             out_ << "        ";
             if (color_) out_ << kDim;
             out_ << "note: " << terminal_escape(note);  // finding 4 -- same rationale as p.summary above
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
+        // The full technique citation + human-readable description behind the "[detect: ...]" tag
+        // already folded into the head line above (unconditionally, --no-color/non-verbose alike) --
+        // this longer form is -v/--verbose-only, same posture as the notes loop just above, so a
+        // busy capture's default view stays one line per packet.
+        if (p.has_detect_finding) {
+            out_ << "        ";
+            if (color_) out_ << kBoldRed;
+            out_ << "detect: " << terminal_escape(p.detect_finding_kind) << " -- "
+                 << terminal_escape(p.detect_finding_technique) << " -- "
+                 << terminal_escape(p.detect_finding_description);
             if (color_) out_ << kReset;
             out_ << "\n";
         }
@@ -5272,11 +5302,23 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         out_ << ",\n    \"direction_source\": "
              << (p.has_direction ? ("\"" + std::string(direction_source_name(p.direction_source)) + "\"") : "null")
              << ",\n    \"direction_client_ip\": "
-             << (p.has_direction ? ("\"" + json_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) + "\"") : "null")
-             << "\n";
-    } else {
-        out_ << "\n";
+             << (p.has_direction ? ("\"" + json_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip) + "\"") : "null");
     }
+    // `decode`'s own "always-notable highlighting" (--detect-highlight, decoder.hpp's own
+    // DecodedPacket::has_detect_finding comment) -- appended last, after direction_source/
+    // direction_client_ip, for the same append-only reason every field above follows. Always
+    // present regardless of --detect-highlight/--no-detect-highlight -- the same "row/object shape
+    // never changes based on the flag" convention vlan_id/direction_source already follow -- with
+    // --no-detect-highlight simply leaving has_detect_finding false and the other three null,
+    // since DetectEngine was never run against this packet at all in that case.
+    out_ << ",\n    \"has_detect_finding\": " << (p.has_detect_finding ? "true" : "false")
+         << ",\n    \"detect_finding_kind\": "
+         << (p.has_detect_finding ? ("\"" + json_escape(p.detect_finding_kind) + "\"") : "null")
+         << ",\n    \"detect_finding_technique\": "
+         << (p.has_detect_finding ? ("\"" + json_escape(p.detect_finding_technique) + "\"") : "null")
+         << ",\n    \"detect_finding_description\": "
+         << (p.has_detect_finding ? ("\"" + json_escape(p.detect_finding_description) + "\"") : "null")
+         << "\n";
     out_ << "  }";
 }
 
@@ -5304,9 +5346,18 @@ void CsvWriter::begin() {
     // see flow_direction.hpp) and, same as vlan_id above, also empty outright when --no-direction
     // suppresses display (show_direction_) regardless of has_direction -- this column's header
     // always exists either way, so the row shape never changes based on the flag.
+    // has_detect_finding/detect_finding_kind/detect_finding_technique/detect_finding_description
+    // are appended after direction_client_ip, now the new last four columns, for the same
+    // append-only reason as direction_source/direction_client_ip's own comment just above -- see
+    // DecodedPacket::has_detect_finding's own comment (decoder.hpp). Always present regardless of
+    // --detect-highlight/--no-detect-highlight -- the same "row shape never changes based on the
+    // flag" convention vlan_id/direction_source already follow -- with --no-detect-highlight simply
+    // leaving all four columns empty/false, since DetectEngine was never run against this packet at
+    // all in that case.
     out_ << "index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,"
             "src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,"
-            "summary,notes,vlan_id,time,direction_source,direction_client_ip\n";
+            "summary,notes,vlan_id,time,direction_source,direction_client_ip,has_detect_finding,"
+            "detect_finding_kind,detect_finding_technique,detect_finding_description\n";
 }
 
 void CsvWriter::write_packet(const DecodedPacket& p) {
@@ -5351,6 +5402,10 @@ void CsvWriter::write_packet(const DecodedPacket& p) {
          << ((show_direction_ && p.has_direction) ? direction_source_name(p.direction_source) : "") << ','
          << ((show_direction_ && p.has_direction) ? csv_escape(p.direction_client_is_src ? p.src_ip : p.dst_ip)
                                                     : "")
+         << ',' << (p.has_detect_finding ? "true" : "false") << ','
+         << (p.has_detect_finding ? csv_escape(p.detect_finding_kind) : "") << ','
+         << (p.has_detect_finding ? csv_escape(p.detect_finding_technique) : "") << ','
+         << (p.has_detect_finding ? csv_escape(p.detect_finding_description) : "")
          << "\n";
 }
 
