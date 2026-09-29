@@ -2148,6 +2148,89 @@ Building section) lets it open interfaces -- including loopback -- as an
 ordinary user from then on; this is also what lets the `live_capture_*`
 tests in this project's own CTest suite pass without `sudo`.
 
+## PASSIVE-MODE GUARANTEE: VERIFYING NO DATA IS EVER TRANSMITTED
+
+For an OT/ICS tool, "passive" is a security property, not a marketing word --
+a decoder that can put a single bit onto the process network is a decoder
+that can be turned into an attack tool. conduitscope's own claim, checked
+directly against the source rather than assumed: **no code path anywhere in
+this codebase can transmit data over a live network connection.** No
+`send`/`sendto`/`sendmsg`/`connect`/`socket()`/`pcap_inject`/
+`pcap_sendpacket` call exists in `src/` or `include/`. Every `pcap_*` call
+that does exist is receive-only setup/read (`pcap_findalldevs`,
+`pcap_create`, `pcap_set_*`, `pcap_activate`, `pcap_setnonblock`,
+`pcap_compile`, `pcap_setfilter`, `pcap_next_ex`, `pcap_close` in
+`live_capture.cpp`; `pcap_open_dead` against a fake, unopened handle for
+offline BPF-filter compilation in `bpf_filter.cpp`). `--resolve` is
+file-only (see LIMITATIONS) and never performs live DNS resolution under any
+flag combination. This holds tool-wide, not just for the `capture`
+subcommand's own stated guarantee above.
+
+That claim shouldn't have to be taken on faith. `tools/verify_network_calls.py`
+is a small, dependency-free, standalone auditor that checks it directly and
+is meant to be re-run by anyone who checks out the repository, not just
+trusted once:
+
+```
+$ python3 tools/verify_network_calls.py --root .
+Scanned 322 file(s) under .
+71 total match(es) across all categories.
+  LIVE_REVIEW  32
+  ALLOWLISTED  0
+  LIVE_SAFE    11
+  INERT        28
+RESULT: FAIL -- 32 live call(s) need review.
+```
+
+It works lexically: a per-line context tokenizer (understanding `//`/`/* */`
+comments and string literals for C++, `#` comments and triple-quoted strings
+for Python) classifies every regex match for a curated set of
+transmit/name-resolution/HTTP-client function names as `INERT` (inside a
+comment, string, or citation), `LIVE_SAFE` (a known receive-only pcap setup
+call or a bare header include), `ALLOWLISTED` (marked with a
+`# network-audit: allow` comment after manual review), or `LIVE_REVIEW`
+(everything else -- needs a human look). Run against this repository as-is,
+every single `LIVE_REVIEW` finding is in one file, `tools/make_sample_pcap.py`
+(a dev-only synthetic-fixture generator, never built into the shipped
+binary), and each one is a locally-defined Python helper function that
+happens to be named `send` -- it appends bytes to an in-memory list to build
+a `.pcap` test fixture, not a socket call. `src/` and `include/` report
+zero findings. `--show-inert`/`--show-live-safe` print the rest for
+transparency; `--json` gives machine-readable output.
+
+**Don't just trust a clean run -- prove the tool would catch a real one.**
+A lexical checker that never flags anything could simply be broken or
+blind, so verify it with a positive control before relying on a `PASS`:
+
+```
+$ cat > src/__audit_positive_control_scratch.cpp <<'EOF'
+#include <sys/socket.h>
+void positive_control(int fd, const char* buf, size_t len) {
+    send(fd, buf, len, 0);
+}
+EOF
+$ python3 tools/verify_network_calls.py --root .        # expect exit 1, 33 LIVE_REVIEW,
+                                                           # one pointing at the file above
+$ rm src/__audit_positive_control_scratch.cpp
+$ python3 tools/verify_network_calls.py --root .        # back to exit 1, 32 LIVE_REVIEW (baseline)
+```
+
+That round trip -- clean baseline, planted transmit call gets caught with a
+precise file/line, removal restores the baseline -- is reproducible by
+anyone from a fresh checkout in under a minute; nobody has to take a prior
+run's word for it.
+
+The script is deliberately conservative rather than clever: it has no C++
+raw-string-literal (`R"(...)"`) awareness and doesn't evaluate preprocessor
+conditionals (`#if 0`-guarded dead code still counts as live), both of which
+bias toward over-flagging, never under-flagging -- the right failure mode
+for a security check. It exits `0` on a clean run and `1` if any
+`LIVE_REVIEW` finding exists (unaffected by `LIVE_SAFE`/`INERT`/
+`ALLOWLISTED` counts), so it's usable as a CI gate; doing so cleanly would
+mean allowlisting the two known `make_sample_pcap.py` helpers with a
+`# network-audit: allow` comment on each, which hasn't been done as of this
+writing so that a stock run stays maximally conservative by default.
+
 ## POLICY FILE FORMAT
 
 A policy file is YAML-*compatible* but not general YAML: it's parsed by a

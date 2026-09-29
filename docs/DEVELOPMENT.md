@@ -14541,6 +14541,62 @@ it done as its own patch.
     inference cheaply) needs no code change and is recorded here as
     guidance for a future test capture, not as an open item.
 
+    **Standalone passive-mode network-call auditor: `tools/verify_network_calls.py`,
+    plus a documented self-verification recipe.** Jurgen's instruction, after
+    scoping away from a conduitgate-focused follow-up entirely: "Forget
+    conduitgate, to enforce that no data is send you must check every
+    network call in conduitscope and verify no data can be send." Answered
+    first with a manual audit (grep every transmit-capable/name-resolution/
+    HTTP-client symbol across `src/`/`include/`, read every hit): confirmed
+    no `send`/`sendto`/`sendmsg`/`connect`/`socket()`/`pcap_inject`/
+    `pcap_sendpacket` call exists anywhere in production code; every
+    `pcap_*` call is receive-only setup/read (`live_capture.cpp`,
+    `bpf_filter.cpp`'s `pcap_open_dead` against a fake handle); `--resolve`
+    is file-only, never live DNS. Then, on Jurgen's explicit follow-up
+    request ("write a python script that checks every network call in the
+    source and see if it is inert"), turned that one-off manual pass into a
+    reusable, standalone, dependency-free `tools/verify_network_calls.py`:
+    a per-line context tokenizer (comment/string-aware for both C++ and
+    Python, without a full AST) classifies every match for a curated
+    TRANSMIT/RECEIVE_SETUP/NAME_RESOLUTION/HTTP_CLIENT/HEADER_INCLUDE
+    pattern set as `INERT`, `LIVE_SAFE`, `ALLOWLISTED` (an explicit
+    `# network-audit: allow` marker comment), or `LIVE_REVIEW`; exits `0`/`1`
+    so it doubles as a CI gate. Deliberately conservative rather than
+    clever -- no raw-string-literal or preprocessor-conditional awareness,
+    both biasing toward over-flagging, the right failure mode for a
+    security check.
+
+    Run against the real repository: `src/`/`include/` report zero
+    findings; all 32 `LIVE_REVIEW` hits are in `tools/make_sample_pcap.py`
+    (two locally-defined Python helper functions, both named `send`, that
+    append synthetic frame bytes to an in-memory list for `.pcap` fixture
+    generation -- confirmed by direct read, not assumed, at both
+    definition sites, lines 16931 and 17121). This is expected, correct
+    behavior of a lexical-only tool: it cannot distinguish a local function
+    that happens to share a name with a socket call from a real one without
+    scope-aware parsing, so it surfaces the ambiguity for a human rather
+    than silently resolving it either way. Verified the tool isn't just
+    quietly broken with a positive control: planted a genuine
+    `send(fd, buf, len, 0)` call in a throwaway scratch file under `src/`
+    (`__audit_positive_control_scratch.cpp`, created and deleted within the
+    same session, never committed or delivered), confirmed it was flagged
+    as the very first `LIVE_REVIEW` finding with exit code flipping to `1`,
+    removed it, confirmed the repo returned to the same 32/0/11/28 baseline.
+
+    Delivered as its own small zip (`tools/verify_network_calls.py` only,
+    same "one new/touched file" convention as every other delivery this
+    project uses) rather than folded into a larger patch, since it's an
+    independent dev tool with no dependency on any other change. Per
+    Jurgen's follow-up "yes," also added a new top-level `docs/USER_GUIDE.md`
+    section ("PASSIVE-MODE GUARANTEE: VERIFYING NO DATA IS EVER
+    TRANSMITTED", after LIVE CAPTURE, before POLICY FILE FORMAT) writing
+    down the same clean-run-plus-positive-control recipe as a standing,
+    repeatable procedure -- so a future auditor (or Jurgen himself) doesn't
+    have to reconstruct it from a chat transcript. The existing
+    `capture`-subcommand-scoped "never transmits" sentence earlier in that
+    same doc was left as-is (broadening it to explicitly cross-reference
+    the new tool-wide section was offered, not yet requested).
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
