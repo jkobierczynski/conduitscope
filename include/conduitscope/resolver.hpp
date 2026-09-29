@@ -4,46 +4,44 @@
 // alongside the raw value it explains -- never a replacement for it. This is a security/OT
 // auditing tool: a raw MAC/IP/port is ground truth (what was actually observed on the wire) and
 // must always stay visible in the output exactly as decoded; a resolved name is convenience
-// context that can be wrong, stale, or simply absent, and the three output writers
-// (TextWriter/JsonWriter/CsvWriter -- see output.cpp) are written to reflect that: a resolved name
-// is always shown IN ADDITION TO the raw value, never instead of it, and a lookup MISS renders as
-// nothing extra (no "(unknown)" placeholder, no null/empty-string clutter) -- consistent with this
+// context that can be wrong, stale, or absent, and the three output writers
+// (TextWriter/JsonWriter/CsvWriter -- see output.cpp) reflect that: a resolved name is always
+// shown IN ADDITION TO the raw value, never instead of it, and a lookup MISS renders as nothing
+// extra (no "(unknown)" placeholder, no null/empty-string clutter) -- consistent with this
 // codebase's existing convention of omitting a field entirely rather than noting every negative
 // result (see e.g. DecodedPacket's own "only set when" fields).
 //
 // Three independent, independently-toggled lookups, each with its own default posture chosen
 // deliberately:
 //
-//   1. OUI (MAC vendor) resolution -- OFF by default, `--oui` enables it. Uses a large,
-//      built-in, generated table (oui_table.gen.hpp -- see its own file header for provenance;
-//      it's public IEEE registry data, not creative content, the same "facts extracted, re-
-//      expressed in this codebase's own structures" sourcing convention as bacnet.hpp's/
-//      ffhse.hpp's own transcribed Wireshark tables). This lookup needs no external input at all
-//      and carries no network-touching or privacy concern -- an OUI is a manufacturer identity
-//      baked into the MAC itself, not a network's own configuration -- but defaults to off anyway,
-//      alongside the others below, to keep output compact by default: the vendor name adds real
-//      value on demand (identifying unknown OT gear on a segment) but doubles the width of every
-//      MAC-bearing line/field when left on unconditionally, which is exactly what `--oui` opts
-//      into rather than requires.
+//   1. OUI (MAC vendor) resolution -- OFF by default, `--oui` enables it. Uses a large, built-in,
+//      generated table (oui_table.gen.hpp -- see its own file header for provenance; it's public
+//      IEEE registry data, not creative content, the same "facts extracted, re-expressed in this
+//      codebase's own structures" sourcing convention as bacnet.hpp's/ffhse.hpp's own transcribed
+//      Wireshark tables). This lookup needs no external input and carries no network-touching or
+//      privacy concern -- an OUI is a manufacturer identity baked into the MAC itself, not a
+//      network's own configuration -- but defaults to off anyway, alongside the others below, to
+//      keep output compact by default: the vendor name adds real value on demand (identifying
+//      unknown OT gear on a segment) but doubles the width of every MAC-bearing line/field when
+//      left on unconditionally, which is exactly what `--oui` opts into rather than requires.
 //
 //   2. Hostname resolution -- OFF by default, `--resolve` enables it. FILE-ONLY: this deliberately
-//      NEVER performs live DNS resolution of any kind, under any flag combination -- not a missing
-//      feature, a considered decision (confirmed design choice, not open for reconsideration by a
-//      future change to this file). A DNS lookup would (a) actively touch the network while
-//      auditing traffic that was very often captured specifically because the network shouldn't be
-//      touched carelessly (an unsolicited DNS query from the analysis workstation, reaching an OT
-//      segment's own resolver or leaking out to the internet, is exactly the kind of side effect
-//      an offline forensic/audit tool must not have), (b) make `decode`'s own output non-
-//      reproducible run-to-run as DNS records change or a resolver becomes unreachable, and (c)
-//      require this project to grow a DNS client of its own or a live network dependency, directly
-//      against the zero-external-dependency, "decode from an offline pcap file" design this whole
-//      project is built on (see README.md). The only hostname source is an explicitly-supplied
-//      Unix `/etc/hosts`-style file (`--hosts FILE`) -- a static snapshot the operator controls and
-//      can audit themselves, never a live lookup. `--resolve` given with no `--hosts` file is a
-//      harmless no-op: hostname resolution is "on" in the sense that the machinery runs, but there
-//      is nothing to resolve against, so no hostname annotation is ever produced -- a one-line
-//      advisory note is printed once (respecting `--quiet`) rather than treating this as an error,
-//      since it's a genuinely harmless, if probably unintended, combination.
+//      NEVER performs live DNS resolution of any kind, under any flag combination -- a considered
+//      decision, not open for reconsideration by a future change to this file. A DNS lookup would
+//      (a) actively touch the network while auditing traffic that was very often captured
+//      specifically because the network shouldn't be touched carelessly (an unsolicited DNS query
+//      from the analysis workstation, reaching an OT segment's own resolver or leaking out to the
+//      internet, is exactly the kind of side effect an offline forensic/audit tool must not have),
+//      (b) make `decode`'s output non-reproducible run-to-run as DNS records change or a resolver
+//      becomes unreachable, and (c) require this project to grow a DNS client of its own or a live
+//      network dependency, directly against the zero-external-dependency, "decode from an offline
+//      pcap file" design this whole project is built on (see README.md). The only hostname source
+//      is an explicitly-supplied Unix `/etc/hosts`-style file (`--hosts FILE`) -- a static snapshot
+//      the operator controls and can audit themselves, never a live lookup. `--resolve` given with
+//      no `--hosts` file is a harmless no-op: hostname resolution is "on" in the sense that the
+//      machinery runs, but there is nothing to resolve against, so no hostname annotation is ever
+//      produced -- a one-line advisory note is printed once (respecting `--quiet`) rather than
+//      treating this as an error, since it's a harmless, if probably unintended, combination.
 //
 //   3. Service name resolution (port -> name, e.g. 502 -> "modbus") -- ON by default (a small,
 //      hand-curated built-in table -- see resolver.cpp's own file header for exactly what it
@@ -70,15 +68,15 @@
 // --oui/--resolve/--hosts/--nn/--services flags. That report has its own IP/zone-centric
 // conventions (see policy_engine.hpp's own comments on FlowReport/EthernetFlowReport), but the
 // same three lookups and the same "annotation, never a replacement; a miss adds nothing" rule
-// from this file apply there unchanged -- see write_policy_report_text/write_policy_report_json's
-// own doc comments in policy_engine.hpp for exactly how each report field is annotated.
+// apply there unchanged -- see write_policy_report_text/write_policy_report_json's own doc
+// comments in policy_engine.hpp for exactly how each report field is annotated.
 //
 // What this deliberately does NOT do, beyond "no live DNS" above:
 //   - No IPv6 anywhere, matching this entire codebase's IPv4-only convention (see ipv4.hpp's own
 //     scope note and policy.hpp's `parse_cidr`) -- a hosts-file line whose address isn't a valid
 //     IPv4 dotted-quad is silently skipped, not an error.
 //   - No reverse OUI/service/hostname search (name -> address/port); only the direction `decode`'s
-//     output actually needs.
+//     output needs.
 //   - No caching/persistence across runs, no writing back to either file, no live reload if a
 //     watched file changes mid-run -- both files are read once, at `decode` startup.
 //   - No fuzzy/partial MAC matching beyond the IEEE MA-L/MA-M/MA-S hierarchy itself (see
@@ -104,8 +102,8 @@ namespace conduitscope {
 // "fatal, load-time, clearly reported" treatment this codebase already gives a bad policy file
 // (see policy.hpp's PolicyError). Deliberately NOT thrown for anything a malformed hosts/services
 // file's own CONTENTS might contain -- an unparseable line there is silently skipped (see
-// resolver.cpp), matching how a real /etc/hosts or /etc/services parser tolerates stray lines,
-// and matching this codebase's general "tolerant parsing degrades gracefully" convention for
+// resolver.cpp), matching both how a real /etc/hosts or /etc/services parser tolerates stray
+// lines and this codebase's general "tolerant parsing degrades gracefully" convention for
 // anything short of "the file itself couldn't be read at all".
 class ResolverError : public std::runtime_error {
 public:

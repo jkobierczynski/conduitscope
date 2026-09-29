@@ -7,7 +7,7 @@
 // reassembly buffering caps, recursive-decode depth caps, per-message decoded-object/list-entry
 // caps, and "N application messages coalesced into one payload" caps -- none of them tunable
 // without a rebuild. Item 7 asked for a way to tighten these for a more paranoid audit of
-// untrusted captures, or loosen them for a capture that legitimately needs more headroom, the
+// untrusted captures, or loosen them for a capture that legitimately needs more headroom -- the
 // same "documented default, explicit override" posture --modbus-port and its siblings already
 // give port lists. Exposing all ~60 individually would add 60+ CLI options; this instead groups
 // them into categories, one flag per category (see cli_main.cpp's `--max-*` options), each
@@ -16,9 +16,9 @@
 // deliberately left compile-time (protocol-native field-width bounds and the pcap-file-format
 // plausibility checks, a different trust boundary from in-flight payload reassembly). Two more
 // fields (max_active_flows/max_flow_state_entries) were added later, for a DIFFERENT category of
-// problem than the original five -- bounding the NUMBER of distinct flows/sessions tracked at
-// once, not the cost of any single one -- see each field's own comment below and
-// docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 1.
+// problem -- bounding the NUMBER of distinct flows/sessions tracked at once, not the cost of any
+// single one -- see each field's own comment below and docs/reviews/2026-09-chatgpt-security-
+// review-patch160.md's finding 1.
 //
 // WHY A GLOBAL ACCESSOR, NOT A PARAMETER THREADED THROUGH DecodeContext/ProtocolDecoder: many
 // in-scope constants live in places with no DecodeContext at all -- most of the "50-entry list
@@ -27,15 +27,15 @@
 // and the recursion-depth helpers (mms.cpp/s7commplus.cpp/goose.cpp/enip.cpp/mpls.hpp) recurse
 // many levels deep carrying only a local depth counter. Retrofitting a parameter through every one
 // of those call chains would be far more invasive than this feature justifies. Unlike
-// FlowStateMap/DecodeContext (genuinely per-packet/per-flow state that must never leak across
+// FlowStateMap/DecodeContext (per-packet/per-flow state that must never leak across
 // packets), a ResourceLimits value is process-run CONFIGURATION -- parsed once from CLI arguments,
 // then read-only for the rest of the process's life -- so a plain, explicitly-named "set once,
-// read anywhere" accessor is the right shape for it, not per-call parameter threading.
+// read anywhere" accessor is the right shape, not per-call parameter threading.
 //
 // THREAD-LOCAL, AND SCOPED PER decode() CALL (docs/reviews/2026-09-chatgpt-security-review-
 // patch160.md, finding 5): the accessor below is backed by a `thread_local`, not a plain process-
 // wide `static`, and Decoder::decode() (decoder.hpp/decoder.cpp) wraps its own body in a
-// ScopedResourceLimits guard that re-asserts THIS Decoder instance's own options_.limits into that
+// ScopedResourceLimits guard that re-asserts THIS Decoder instance's options_.limits into that
 // thread-local storage for the call's duration, restoring whatever was active before on return
 // (including on an exception, via RAII) -- see ScopedResourceLimits below. This closes both
 // failure modes the review's finding names: two differently-configured Decoder instances used on
@@ -43,13 +43,12 @@
 // normal_decoder(options_b);` example -- each decode() call now sees only its own instance's
 // limits, regardless of construction or interleaving order) and genuinely concurrent decoding on
 // separate threads (thread_local gives each thread its own storage, so one thread's
-// set_resource_limits/decode() call can never be seen by, or race with, another thread's). The
-// Decoder constructor still calls set_resource_limits(options_.limits) too, for backward
-// compatibility with anything that reads resource_limits() outside of a decode() call on the
-// constructing thread (none of this codebase's own call sites do, but this keeps the accessor's
-// documented "set once, read anywhere" contract intact for a constructed-but-not-yet-decoding
-// Decoder) -- decode()'s own guard is what actually matters for correctness under either failure
-// mode above.
+// set_resource_limits/decode() call can never be seen by, or race with, another's). The Decoder
+// constructor still calls set_resource_limits(options_.limits) too, for backward compatibility
+// with anything that reads resource_limits() outside a decode() call on the constructing thread
+// (no call site in this codebase does that yet, but this keeps the accessor's documented "set
+// once, read anywhere" contract intact for a constructed-but-not-yet-decoding Decoder) --
+// decode()'s own guard is what actually matters for correctness under either failure mode above.
 #pragma once
 
 #include <cstddef>
@@ -103,12 +102,12 @@ struct ResourceLimits {
     // Bounds Decoder::tcp_reassembly_'s size -- the general cross-TCP-segment PDU/frame reassembly
     // map every one of Modbus/TCP, IEC 104, EtherNet/IP, TPKT/S7comm/S7comm-Plus/MMS, HART-IP,
     // OPC UA, MQTT, and FF-HSE shares. Checked only when a flow that doesn't already have an entry
-    // is about to get one; an existing flow's own entry being updated never counts against this.
+    // is about to get one; an existing flow's entry being updated never counts against this.
     // std::nullopt (the default) does NOT mean unbounded -- see kDefaultMaxActiveFlows below and
     // docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2 (item 65,
     // docs/DEVELOPMENT.md): an ordinary invocation that never configures this at all still gets a
     // real ceiling, applied via `.value_or(kDefaultMaxActiveFlows)` at the one enforcement site
-    // (decoder.cpp), the same way every one of the five original resource_limits() fields already
+    // (decoder.cpp), the same way each of the five original resource_limits() fields already
     // applies its own site-specific default when unset. The "don't retain empty entries" half of
     // the underlying fix applies unconditionally regardless, cap configured or not (see decoder.
     // cpp's own comment).
@@ -116,13 +115,13 @@ struct ResourceLimits {
     // A value of exactly 0 is normalized to std::nullopt by set_resource_limits() before it is
     // ever stored -- see that function's own comment (resource_limits.cpp) for why: this field and
     // max_flow_state_entries below are enforced by evicting an EXISTING entry to make room for a
-    // new one, which is meaningless -- and, for this field's own enforcement in Decoder::
+    // new one, which is meaningless -- and, for this field's enforcement in Decoder::
     // reassemble_tcp_payload, was undefined behavior (erasing tcp_reassembly_.begin() from an
-    // already-empty map) -- when literally zero entries may ever exist (docs/reviews/2026-09-
-    // chatgpt-security-review-patch209.md, finding 3). Since std::nullopt now maps to
-    // kDefaultMaxActiveFlows rather than to "no cap", passing 0 (or leaving this unset) both
-    // resolve to that same real, finite ceiling -- neither one means literally unbounded any more.
-    // A caller that genuinely wants as close to zero active flows as possible should pass 1.
+    // already-empty map) when zero entries may ever exist (docs/reviews/2026-09-chatgpt-security-
+    // review-patch209.md, finding 3). Since std::nullopt now maps to kDefaultMaxActiveFlows rather
+    // than to "no cap", passing 0 (or leaving this unset) both resolve to that same real, finite
+    // ceiling -- neither means unbounded any more. A caller that wants as close to zero active
+    // flows as possible should pass 1.
     std::optional<size_t> max_active_flows;
 
     // Bounds the TOTAL entry count summed across every protocol's own map inside
@@ -132,43 +131,40 @@ struct ResourceLimits {
     // Modbus/TwinCAT/MELSEC/MQTT sessions, DNP3/COTP reassembly, and every future protocol built
     // on this interface) own per-session/per-flow state, which -- unlike tcp_reassembly_ -- has no
     // natural "fully consumed, safe to drop" moment for most of these protocols (a Kerberos or
-    // LDAP session's own state is meant to persist for the connection's whole life), so this is a
-    // pure ceiling rather than a "don't create it in the first place" fix. std::nullopt (the
-    // default) does NOT mean unbounded here either -- see kDefaultMaxFlowStateEntries below, the
-    // same finding-2/item-65 fix as max_active_flows above, applied via
+    // LDAP session's state is meant to persist for the connection's whole life), so this is a pure
+    // ceiling rather than a "don't create it in the first place" fix. std::nullopt (the default)
+    // does NOT mean unbounded here either -- see kDefaultMaxFlowStateEntries below, the same
+    // finding-2/item-65 fix as max_active_flows above, applied via
     // `.value_or(kDefaultMaxFlowStateEntries)` at protocol_decoder.hpp's own enforcement site.
     //
     // Same 0-means-nullopt normalization as max_active_flows above, and for the identical reason:
-    // DecodeContext::flow_state<T>()'s own enforcement (protocol_decoder.hpp) has no undefined
+    // DecodeContext::flow_state<T>()'s enforcement (protocol_decoder.hpp) has no undefined
     // behavior at cap==0 (its eviction loop is guarded by `if (!inner.empty())` per bucket), but
     // it silently inserted a new entry past a configured zero cap anyway -- a real correctness bug
     // fixed the same way as max_active_flows's UB, by never letting either enforcement path
-    // observe a cap of exactly 0 in the first place (finding 3, same review as above). As with
-    // max_active_flows, 0 and "left unset" now both resolve to kDefaultMaxFlowStateEntries rather
-    // than to unbounded.
+    // observe a cap of exactly 0 (finding 3, same review as above). As with max_active_flows, 0
+    // and "left unset" now both resolve to kDefaultMaxFlowStateEntries rather than to unbounded.
     std::optional<size_t> max_flow_state_entries;
 };
 
 // Compiled-in defaults applied via .value_or() at max_active_flows's/max_flow_state_entries's own
 // enforcement sites (decoder.cpp's Decoder::reassemble_tcp_payload; protocol_decoder.hpp's
-// DecodeContext::flow_state<T>()) whenever the corresponding field above is std::nullopt -- i.e.
-// whenever nothing (CLI flag, or a direct ResourceLimits{} from library/API use) ever configured
-// it explicitly. Fixes docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2 (item
-// 65, docs/DEVELOPMENT.md): before this, unset meant genuinely unbounded, so an ordinary
-// invocation that never passed --max-active-flows/--max-flow-state-entries had no ceiling at all.
-// Sized generously enough that no legitimate deployment (many thousands of devices, many
-// concurrent sessions) should ever observe an eviction caused by the default alone -- only a
-// capture engineered to hold many more distinct flows/sessions than that should ever reach it.
-// Both are plain runtime ceilings, not stored per-entry costs -- see max_active_flows's own
-// comment above for how its actual worst-case memory interacts with --max-reassembly-bytes.
+// DecodeContext::flow_state<T>()) whenever the corresponding field above is std::nullopt -- see
+// each field's own comment above for why std::nullopt still means a real ceiling
+// (docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2, item 65,
+// docs/DEVELOPMENT.md). Sized generously enough that no legitimate deployment (many thousands of
+// devices, many concurrent sessions) should ever observe an eviction caused by the default alone
+// -- only a capture engineered to hold many more distinct flows/sessions than that should reach
+// it. Both are plain runtime ceilings, not stored per-entry costs -- see max_active_flows's own
+// comment above for how its worst-case memory interacts with --max-reassembly-bytes.
 inline constexpr size_t kDefaultMaxActiveFlows = 100000;
 inline constexpr size_t kDefaultMaxFlowStateEntries = 250000;
 
 // Returns the currently active limits for THIS THREAD (default-constructed, i.e. every field
 // std::nullopt, until set_resource_limits has been called at least once on this thread). Callable
 // from anywhere -- every in-scope constant site reads this directly rather than receiving it as a
-// parameter; see this file's header comment for why. Backed by thread_local storage (see this
-// file's header comment) -- a value set on one thread is never visible to another.
+// parameter, backed by thread_local storage so a value set on one thread is never visible to
+// another -- see this file's header comment for why.
 const ResourceLimits& resource_limits();
 
 // Sets the active limits for THIS THREAD, replacing whatever was set before on it. Called once by
@@ -182,9 +178,8 @@ void set_resource_limits(const ResourceLimits& limits);
 // their place for the guard's lifetime, and restores the saved value on destruction (including via
 // an exception unwinding through it) -- ordinary scope-guard semantics, nothing decoder-specific.
 // Decoder::decode() (decoder.hpp/decoder.cpp) constructs one of these at the very top of its body
-// with its own options_.limits, which is what actually makes two differently-configured Decoder
-// instances -- interleaved on one thread, or run concurrently on separate threads -- each see only
-// their own limits during their own decode() call; see this file's header comment for the full
+// with its own options_.limits -- what actually makes two differently-configured Decoder instances
+// each see only their own limits during decode(); see this file's header comment for the full
 // rationale (docs/reviews/2026-09-chatgpt-security-review-patch160.md, finding 5). Nestable, like
 // any save/restore guard: an inner guard's destructor restores the outer guard's value, not the
 // pre-outer-guard value, the same as a stack.
