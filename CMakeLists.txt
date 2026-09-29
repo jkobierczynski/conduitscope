@@ -10336,7 +10336,7 @@ set_tests_properties(inventory_role_json_unknown_rendered_not_omitted PROPERTIES
 add_test(NAME inventory_touch_modbus_basic_key_formats_and_sort_text
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
 set_tests_properties(inventory_touch_modbus_basic_key_formats_and_sort_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.240 -> 192\\.168\\.1\\.241.*top touched addresses \\(5 distinct address\\(es\\) touched\\):\n *hreg:00201-00202  \\(2 touch\\(es\\)\\)\n *coil:00006-00008  \\(1 touch\\(es\\)\\)\n *discrete:00001  \\(1 touch\\(es\\)\\)\n *hreg:00001-00010  \\(1 touch\\(es\\)\\)\n *ireg:00100  \\(1 touch\\(es\\)\\)")
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.240 -> 192\\.168\\.1\\.241.*top touched addresses \\(1-based Modicon-style addressing\\) \\(5 distinct address\\(es\\) touched\\):\n *hreg:00201-00202  \\(2 touch\\(es\\)\\)\n *coil:00006-00008  \\(1 touch\\(es\\)\\)\n *discrete:00001  \\(1 touch\\(es\\)\\)\n *hreg:00001-00010  \\(1 touch\\(es\\)\\)\n *ireg:00100  \\(1 touch\\(es\\)\\)")
 
 # modbus, truncation + deterministic sort: 35 distinct single-register reads, every count tied at
 # 1 -- the top 32 SHOWN are exactly the 32 lexically/numerically smallest addresses (hreg:00001
@@ -10346,7 +10346,7 @@ set_tests_properties(inventory_touch_modbus_basic_key_formats_and_sort_text PROP
 add_test(NAME inventory_touch_modbus_truncated_to_top_32_text
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
 set_tests_properties(inventory_touch_modbus_truncated_to_top_32_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.242 -> 192\\.168\\.1\\.243.*top touched addresses \\(top 32 of 35 distinct addresses touched, by touch count\\):\n *hreg:00001  \\(1 touch\\(es\\)\\).*hreg:00032  \\(1 touch\\(es\\)\\)\n")
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.242 -> 192\\.168\\.1\\.243.*top touched addresses \\(1-based Modicon-style addressing\\) \\(top 32 of 35 distinct addresses touched, by touch count\\):\n *hreg:00001  \\(1 touch\\(es\\)\\).*hreg:00032  \\(1 touch\\(es\\)\\)\n")
 
 add_test(NAME inventory_touch_modbus_truncated_excludes_beyond_top_32_text
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
@@ -10357,6 +10357,75 @@ add_test(NAME inventory_touch_modbus_truncated_json_fields
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_touch_summarization.pcap")
 set_tests_properties(inventory_touch_modbus_truncated_json_fields PROPERTIES
   PASS_REGULAR_EXPRESSION "\"client_ip\": \"192\\.168\\.1\\.242\",.*\"touched_addresses_total_distinct\": 35,\n *\"touched_addresses_truncated\": true")
+
+# ---------------------------------------------------------------------------------------------
+# Loopback self-talk (AssetInventoryEngine::update_asset's own doc comment, asset_inventory.hpp)
+# and the TCP-control-segment skip breakdown (AssetInventoryReport::skipped_tcp_control_packets'
+# own comment). tests/sample_inventory_loopback_self_talk.pcap is Jurgen's own real capture,
+# cross-validating conduitgate (his separate read-only Modbus proxy) against conduitscope: a
+# single client script talking Modbus/TCP to 127.0.0.1:5020 (the real device) AND 127.0.0.1:5502
+# (conduitgate's own listener, which decodes and re-issues UMAS/diagnostics operations against the
+# real device) -- 103 packets total, 56 Modbus PDUs, 47 bare TCP segments (46 of them genuinely
+# no-payload handshake/ACK/teardown; the 47th -- packet #73 -- is a TCP segment carrying the FIRST
+# 7 of a 12-byte Modbus/TCP PDU split across segments, so it's non-empty and dp.tcp_no_payload
+# correctly stays false for it, proving the fix reads the structured field rather than just
+# checking dp.protocol == "tcp", which is also "tcp" here -- see decoder.cpp's own "buffering a ..."
+# branch. The one packet that keeps skipped_tcp_control_packets from equaling skipped_packets
+# exactly).
+#
+# Both bugs were invisible on every pre-existing two-host fixture (client_ip != server_ip there,
+# so each update_asset call always landed on a DIFFERENT asset) and only surfaced on a real
+# loopback capture -- see update_asset's own doc comment for why this dedicated fixture, not a
+# synthetic two-host one, is what's needed to actually exercise the fix.
+# ---------------------------------------------------------------------------------------------
+
+# The headline bug: 26 + 30 = 56 packets recognized as modbus for 127.0.0.1, not 112 (the old
+# "count once as client, once as server, even when they're the same asset" double-count). Anchored
+# on the full ASSETS-section line so a regression back to 112 -- or any other drift -- fails this
+# even if some other field on the same line also changed.
+add_test(NAME inventory_loopback_self_talk_packet_count_not_doubled_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory_loopback_self_talk.pcap")
+set_tests_properties(inventory_loopback_self_talk_packet_count_not_doubled_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "127\\.0\\.0\\.1  00:00:00:00:00:00  \\[client\\+server\\]  modbus  \\(56 packet\\(s\\)\\)"
+  FAIL_REGULAR_EXPRESSION "112 packet")
+
+add_test(NAME inventory_loopback_self_talk_packet_count_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory_loopback_self_talk.pcap")
+set_tests_properties(inventory_loopback_self_talk_packet_count_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip\": \"127\\.0\\.0\\.1\",.*\"packet_count\": 56,"
+  FAIL_REGULAR_EXPRESSION "\"packet_count\": 112")
+
+# The report header's own top-line total: 103 total, 47 skipped -- never exceeding total_packets
+# (the exact "impossible number" shape Jurgen's report flagged), regardless of the breakdown below.
+add_test(NAME inventory_loopback_self_talk_total_and_skipped_not_impossible_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory_loopback_self_talk.pcap")
+set_tests_properties(inventory_loopback_self_talk_total_and_skipped_not_impossible_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "1 asset\\(s\\) observed, 103 total packet\\(s\\) in capture, 47 skipped")
+
+# The skipped-packet breakdown: 46 bare TCP control segments (SYN/ACK/FIN, no application payload)
+# broken out from the 1 remaining packet that's genuinely unrecognized -- see
+# AssetInventoryReport::skipped_tcp_control_packets' own comment for why folding all 47 into
+# "not one of the eleven recognized protocols" (the pre-existing wording, still used verbatim for
+# the 1 that actually is that) overstated how much of this capture was genuinely opaque.
+add_test(NAME inventory_skipped_tcp_control_breakdown_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory_loopback_self_talk.pcap")
+set_tests_properties(inventory_skipped_tcp_control_breakdown_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "47 skipped \\(46 TCP control segment\\(s\\) with no application payload -- SYN/ACK/FIN traffic, not itself evidence of an unrecognized protocol; 1 not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen over UDP\\)")
+
+add_test(NAME inventory_skipped_tcp_control_breakdown_json
+  COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory_loopback_self_talk.pcap")
+set_tests_properties(inventory_skipped_tcp_control_breakdown_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"skipped_packets\": 47,.*\"skipped_tcp_control_packets\": 46")
+
+# Regression guard: a capture with ZERO bare-TCP-control skips (every packet is either recognized
+# or a genuinely unrecognized payload) must read EXACTLY as it did before this feature existed --
+# no "0 TCP control segment(s)..." noise, same pre-existing wording verbatim. sample_modbus.pcap is
+# a normal two-host, fully-recognized, zero-skip capture -- confirms the omit-when-zero branch.
+add_test(NAME inventory_skipped_tcp_control_omitted_when_zero_text
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(inventory_skipped_tcp_control_omitted_when_zero_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "0 skipped \\(not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen over UDP\\)"
+  FAIL_REGULAR_EXPRESSION "TCP control segment")
 
 # s7comm: three well-established S7ANY tags (S7Item::tag verbatim) plus one EXPERIMENTAL 0xB2 item
 # -- the "experimental:" prefix is applied ONLY to the 0xB2-decoded item (S7Item::is_experimental),

@@ -484,6 +484,22 @@ struct AssetInventoryReport {
     // traffic yet -- see docs/MANUAL.md's LIMITATIONS).
     size_t skipped_packets = 0;
 
+    // A subset of skipped_packets above (never counted twice, never exceeds it): packets that were
+    // skipped ONLY because they were a bare TCP control segment (SYN/SYN-ACK handshake, pure ACK, or
+    // FIN/RST teardown) carrying zero application payload bytes -- see DecodedPacket::tcp_no_payload's
+    // own comment (decoder.hpp) for the structured field this is read from. These are a fundamentally
+    // different case from a packet whose payload genuinely didn't match any of the eleven recognized
+    // protocols: on a normal two-host conduit, most of them belong to the very same TCP session as a
+    // recognized Modbus/DNP3/S7comm/... flow, they simply carry no PDU of their own. Folding them into
+    // the same "unrecognized protocol" count as skipped_packets' own text overstates how much of the
+    // capture is genuinely opaque -- see this field's own history: Jurgen's report, cross-validating a
+    // real conduitgate<->plcsim capture, where 47 of 103 packets were reported "skipped (not one of
+    // the eleven recognized protocols...)" and most were ordinary TCP handshake/ACK/FIN packets on an
+    // otherwise fully-decoded Modbus/TCP conduit. write_inventory_report_text/_json break this out as
+    // its own named figure alongside skipped_packets rather than replacing it, so a `jq`/grep pipeline
+    // already reading `skipped_packets` keeps working unchanged.
+    size_t skipped_tcp_control_packets = 0;
+
     // "IT protocols an OT auditor flags" (ROADMAP item 18), one entry per distinct (protocol,
     // client/server or MAC pair, port) combination observed, in first-seen order -- ALWAYS
     // populated, independent of everything above (see InventoryNotableProtocol's own comment for why
@@ -711,8 +727,19 @@ private:
         DirectionSource direction_source = DirectionSource::PortHeuristic;
     };
 
+    // is_client_role/is_server_role are independent, not mutually exclusive: on loopback or any
+    // other self-talking-to-itself capture, `ip` can be BOTH this packet's client and its server
+    // (client_ip == server_ip), and the caller passes both flags true in a single call so
+    // packet_count -- documented as "total packets (either direction) this IP appeared in"
+    // (InventoryAsset::packet_count's own comment) -- increments exactly once per packet no matter
+    // how many roles `ip` played in it. Calling this twice for the same (ip, packet) pair, once per
+    // role, is the bug this comment exists to prevent a future caller from reintroducing: it double-
+    // counts every self-talking packet, which is invisible on a normal two-host capture (the two
+    // IPs differ, so each call lands on a different asset) but silently inflates packet_count past
+    // the capture's own total_packets on loopback -- exactly the kind of number a reviewer stops
+    // trusting the whole report over.
     void update_asset(const std::string& ip, const DecodedPacket& dp, const std::string& protocol,
-                       bool is_client_role);
+                       bool is_client_role, bool is_server_role);
 
     // Populates an already-existing asset's identity fields (vendor/product/firmware_revision/
     // serial_number/security_posture) -- first-identity-seen wins, mirroring has_mac/mac's own
@@ -775,6 +802,8 @@ private:
     std::vector<std::string> notable_protocol_order_;
     size_t total_packets_ = 0;
     size_t skipped_packets_ = 0;
+    size_t skipped_tcp_control_packets_ = 0;  // see AssetInventoryReport::skipped_tcp_control_packets'
+                                               // own comment -- a subset of skipped_packets_ above
 };
 
 // Renders `report` as a human-readable text report to `out`: the asset list, the communication

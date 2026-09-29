@@ -382,7 +382,7 @@ bool AssetInventoryEngine::admit_tracked_key(bool already_present, size_t curren
 }
 
 void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPacket& dp, const std::string& protocol,
-                                         bool is_client_role) {
+                                         bool is_client_role, bool is_server_role) {
     auto it = assets_.find(ip);
     if (!admit_tracked_key(it != assets_.end(), assets_.size(), limits_.max_assets, "assets_",
                             "--max-inventory-assets")) {
@@ -395,8 +395,12 @@ void AssetInventoryEngine::update_asset(const std::string& ip, const DecodedPack
     AssetState& a = it->second;
     ++a.packet_count;
     a.protocols.insert(protocol);
+    // is_client_role/is_server_role are independent, not mutually exclusive -- see this method's
+    // own doc comment (asset_inventory.hpp) for why the caller passes both true in a single call on
+    // self-talk (client_ip == server_ip) rather than calling this twice, which is what used to
+    // double-count packet_count on loopback.
     if (is_client_role) a.ever_client = true;
-    else a.ever_server = true;
+    if (is_server_role) a.ever_server = true;
     if (!a.has_mac && dp.has_ethernet) {
         a.has_mac = true;
         a.mac = (ip == dp.src_ip) ? dp.src_mac : dp.dst_mac;
@@ -556,6 +560,11 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
             record_notable_protocol(key, dp.protocol, *notable_tier, /*has_ip=*/true, client_ip, server_ip, "", "",
                                      /*has_port=*/true, dp.has_tcp, server_port);
         }
+        // See AssetInventoryReport::skipped_tcp_control_packets' own comment for why a bare TCP
+        // control segment (dp.tcp_no_payload -- a structured fact, not a dp.protocol == "tcp" text
+        // check, since "tcp" is also used for two unrelated fallbacks that DO carry payload bytes)
+        // is broken out of the generic "unrecognized protocol" bucket it still also counts toward.
+        if (dp.tcp_no_payload) ++skipped_tcp_control_packets_;
         ++skipped_packets_;
         return;
     }
@@ -746,8 +755,18 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     // edge -- its non-broadcast counterpart (if any) still is.
     bool client_is_bcast = looks_like_broadcast_or_multicast(client_ip);
     bool server_is_bcast = looks_like_broadcast_or_multicast(server_ip);
-    if (!client_is_bcast) update_asset(client_ip, dp, protocol, /*is_client_role=*/true);
-    if (!server_is_bcast) update_asset(server_ip, dp, protocol, /*is_client_role=*/false);
+    if (client_ip == server_ip && !client_is_bcast) {
+        // Self-talk (loopback, or any other capture where the same IP is both sides of a session):
+        // exactly ONE call, both role flags true, so packet_count -- "total packets (either
+        // direction) this IP appeared in" -- increments exactly once for this packet. See
+        // update_asset's own doc comment (asset_inventory.hpp) for the double-counting bug this
+        // guards against; server_is_bcast is necessarily identical to client_is_bcast here since
+        // it's the same address, so checking client_is_bcast alone is sufficient.
+        update_asset(client_ip, dp, protocol, /*is_client_role=*/true, /*is_server_role=*/true);
+    } else {
+        if (!client_is_bcast) update_asset(client_ip, dp, protocol, /*is_client_role=*/true, /*is_server_role=*/false);
+        if (!server_is_bcast) update_asset(server_ip, dp, protocol, /*is_client_role=*/false, /*is_server_role=*/true);
+    }
 
     // Passively-inferred device identity (Grok gap #2) -- EtherNet/IP CIP Identity, the only
     // protocol wired up so far (see observe()'s own doc comment in asset_inventory.hpp for the
@@ -944,6 +963,7 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
     AssetInventoryReport report;
     report.total_packets = total_packets_;
     report.skipped_packets = skipped_packets_;
+    report.skipped_tcp_control_packets = skipped_tcp_control_packets_;
     report.zone_prefix_len = zone_prefix_len_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
@@ -1196,9 +1216,25 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
     out << "           docs/MANUAL.md's ROADMAP item 17\n\n";
 
     out << report.assets.size() << " asset(s) observed, " << report.total_packets
-        << " total packet(s) in capture, " << report.skipped_packets
-        << " skipped (not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE "
-           "seen over UDP)\n\n";
+        << " total packet(s) in capture, " << report.skipped_packets << " skipped";
+    // See AssetInventoryReport::skipped_tcp_control_packets' own comment for why this sub-count is
+    // broken out rather than left folded into the generic "unrecognized protocol" wording below --
+    // on a normal capture it's usually most of skipped_packets, and lumping it in there overstates
+    // how much of the capture is genuinely opaque. Omitted (falls back to the original, pre-existing
+    // wording verbatim) when it's zero, so a capture with no bare TCP control traffic at all -- e.g.
+    // one that's exclusively UDP, or genuinely all unrecognized application payload -- reads exactly
+    // as it always has.
+    if (report.skipped_tcp_control_packets > 0) {
+        size_t other_skipped = report.skipped_packets - report.skipped_tcp_control_packets;
+        out << " (" << report.skipped_tcp_control_packets
+            << " TCP control segment(s) with no application payload -- SYN/ACK/FIN traffic, not "
+               "itself evidence of an unrecognized protocol; " << other_skipped
+            << " not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE seen "
+               "over UDP)\n\n";
+    } else {
+        out << " (not one of the eleven recognized protocols, no IPv4 layer, or HART-IP/FF-HSE "
+               "seen over UDP)\n\n";
+    }
 
     // patch257 finding 3 fix: see BaselineCheckReport's own observation_truncated rendering
     // (write_baseline_check_report_text, baseline.cpp) for the identical posture -- printed even
@@ -1269,6 +1305,16 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         // security/plant-identification lines above.
         if (!e.top_touched_addresses.empty()) {
             out << "      top touched addresses";
+            // Modbus coil/discrete/hreg/ireg addresses in this list are 1-based (the conventional
+            // Modicon reference-numbering convention -- see modbus_touch_key's own comment) over a
+            // 0-based wire field; every other protocol's addresses here (s7comm tags, dnp3 g/v,
+            // iec104 ioa, ...) are shown exactly as decoded, with no such offset to flag. Stated here
+            // rather than left to modbus_touch_key's own source comment, since a reader of this
+            // report has no reason to have read the source -- see this note's own history: Jurgen's
+            // report that "hreg:00011" for wire address 10 is a defensible convention but the report
+            // itself never says which one it is, "the single most common source of address confusion
+            // in Modbus work."
+            if (e.protocol == "modbus") out << " (1-based Modicon-style addressing)";
             if (e.touched_addresses_truncated) {
                 out << " (top " << e.top_touched_addresses.size() << " of "
                     << e.touched_addresses_total_distinct << " distinct addresses touched, by touch count)";
@@ -1505,7 +1551,12 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         out << "      \"packet_count\": " << f.packet_count << "\n";
         out << "    }" << (i + 1 < report.notable_protocols.size() ? "," : "") << "\n";
     }
-    out << "  ]\n";
+    out << "  ],\n";
+    // See AssetInventoryReport::skipped_tcp_control_packets' own comment. Appended last, after every
+    // pre-existing field (notable_protocols was the prior last field), same "no established
+    // JSON-shape test anchored on an earlier field needs to change" convention as every other
+    // addition to this object above.
+    out << "  \"skipped_tcp_control_packets\": " << report.skipped_tcp_control_packets << "\n";
     out << "}\n";
 }
 

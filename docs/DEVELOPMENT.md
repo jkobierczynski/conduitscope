@@ -14426,6 +14426,121 @@ it done as its own patch.
     dedicated JSON field. Worth revisiting if Jurgen wants JSON/CSV parity
     for it later.
 
+    **`inventory` fixes: cross-validation against conduitgate, Jurgen's
+    separate read-only Modbus proxy.** Jurgen relayed a report from a
+    different chat about conduitgate: he ran `inventory` against a real
+    capture of a conduitgate integration test (a client script talking
+    Modbus/TCP to the real device on 127.0.0.1:5020 AND to conduitgate's own
+    listener on 127.0.0.1:5502, which itself re-issues the allowed subset of
+    operations against the real device) and found the report's own numbers
+    didn't add up. Three distinct, real issues, all in `asset_inventory.hpp`/
+    `.cpp` -- the pcap itself is now `tests/sample_inventory_loopback_self_
+    talk.pcap`, a permanent fixture, since none of this was visible on any
+    pre-existing two-host test capture.
+
+    Issue 1, the headline one: **the asset packet count exceeded the
+    capture's own total_packets.** 112 packets attributed to 127.0.0.1 in a
+    103-packet capture -- impossible on its face, and, as Jurgen's own
+    analysis worked out correctly before this even reached conduitscope's
+    own repo, exactly 2x the 56 actually-Modbus packets (26+30, matching the
+    two edges' own packet counts). Root cause: `AssetInventoryEngine::
+    observe` called `update_asset` once for the client role and once for
+    the server role, each unconditionally incrementing `AssetState::
+    packet_count`. On a normal two-host capture this is invisible -- client_
+    ip and server_ip differ, so the two calls land on two different assets'
+    state, each incremented exactly once for that packet. On loopback (or
+    any other capture where the same IP legitimately plays both roles),
+    both calls hit the SAME asset's state, double-counting every single
+    packet. `InventoryAsset::packet_count`'s own doc comment had always said
+    "total packets (either direction) this IP appeared in" -- the
+    implementation just didn't actually deliver that.
+
+    Fixed by widening `update_asset` to take independent `is_client_role`/
+    `is_server_role` bools (previously just one `is_client_role`, with the
+    server-role call passing `false`) and calling it exactly ONCE per
+    packet when `client_ip == server_ip` (both flags true, `packet_count`
+    incremented exactly once), falling back to the original two-separate-
+    calls shape otherwise. `ever_client`/`ever_server` are now set
+    independently (`if (is_client_role) ...; if (is_server_role) ...;`
+    rather than `if (...) ... else ...`), so a self-talking asset still
+    correctly shows `[client+server]` in the report, same as before.
+
+    Issue 2: **the `skipped_packets` bucket conflated two structurally
+    different things under one label.** 47 of 103 packets were reported
+    "skipped (not one of the eleven recognized protocols, no IPv4 layer, or
+    HART-IP/FF-HSE seen over UDP)" -- but Jurgen correctly worked out, from
+    first principles, that most of those 47 were almost certainly bare TCP
+    handshake/ACK/FIN packets belonging to the SAME sessions as the 56
+    already-recognized Modbus packets, not genuinely unrecognized traffic.
+    Confirmed directly: 46 of the 47 are `decode`'s own "TCP segment ...
+    with no payload (handshake/ACK/teardown)" case; the 47th (packet #73) is
+    a DIFFERENT, unrelated `protocol == "tcp"` case -- a Modbus/TCP PDU
+    still buffering across segments (7 of 12 declared bytes seen so far) --
+    proving a naive `dp.protocol == "tcp"` check couldn't have told these
+    apart correctly even if it had been tried.
+
+    Fixed with a new structured field, `DecodedPacket::tcp_no_payload`
+    (decoder.hpp/.cpp), set exactly where the "TCP segment ... with no
+    payload" branch already lived in `decode_ip_payload` -- the same
+    "structured at the source, not text-sniffed" discipline
+    `attack_signature_kind`/`detect_finding_kind` already established twice
+    over in this file. `AssetInventoryReport` gained
+    `skipped_tcp_control_packets`, a subset of `skipped_packets` (never
+    exceeding it, never double-counted), populated in `AssetInventoryEngine::
+    observe`'s own catch-all "unrecognized protocol" branch when `dp.
+    tcp_no_payload` is true. `write_inventory_report_text`/`_json` surface it
+    as a breakdown of the existing header line -- `47 skipped (46 TCP
+    control segment(s) with no application payload -- SYN/ACK/FIN traffic,
+    not itself evidence of an unrecognized protocol; 1 not one of the eleven
+    recognized protocols, ...)` -- falling back to the ORIGINAL wording,
+    verbatim, whenever `skipped_tcp_control_packets` is zero, so a capture
+    with no bare-TCP-control traffic at all reads exactly as it always did
+    (confirmed against `tests/sample_modbus.pcap`, a normal two-host,
+    zero-skip fixture). JSON gets `skipped_tcp_control_packets` appended as
+    the new true-last field of the report object (after `notable_protocols`,
+    the prior last field), same append-only convention as every other
+    addition to this object. CSV is untouched -- both `--format csv` and
+    `--edges-csv`/`--conduits-csv` are row-based with no header-level
+    packet-count concept for this to attach to.
+
+    Issue 3: **`hreg:00011` (and every other Modbus touched-address key) is
+    1-based, but the report never says so.** `modbus_touch_key`'s own source
+    comment has always documented this clearly (`start_address + 1`, "the
+    conventional Modicon reference numbering"), but Jurgen pointed out --
+    correctly -- that a reader of the REPORT, not the source, has no way to
+    know that, and address-numbering-base confusion is, in his own words,
+    "the single most common source of address confusion in Modbus work."
+    Fixed with a one-line addition to the existing "top touched addresses"
+    header, gated on `e.protocol == "modbus"` (DNP3's g/v shorthand,
+    S7comm's tag names, and IEC 104's `ioa=N` shown in this same list carry
+    no equivalent 1-based/0-based ambiguity, so the note is scoped to where
+    it actually applies): `top touched addresses (1-based Modicon-style
+    addressing) (N distinct address(es) touched):`.
+
+    Six new CTest entries against the new fixture (`inventory_loopback_
+    self_talk_packet_count_not_doubled_text`/`_json`, `inventory_loopback_
+    self_talk_total_and_skipped_not_impossible_text`,
+    `inventory_skipped_tcp_control_breakdown_text`/`_json`, and
+    `inventory_skipped_tcp_control_omitted_when_zero_text` against the
+    pre-existing `sample_modbus.pcap` as the zero-breakdown regression
+    guard), plus two pre-existing "top touched addresses" CTest regexes
+    (`inventory_touch_modbus_basic_key_formats_and_sort_text`,
+    `inventory_touch_modbus_truncated_to_top_32_text`) updated for the new
+    1-based note's text. Full CTest across all four standing build
+    configurations (default GCC: 2257/2257; ASan/UBSan `build-fuzz`:
+    2334/2334, zero sanitizer hits; `build_nolive`: 2242/2242; MinGW-w64,
+    build-only there) -- 100% pass, zero regressions -- plus a clean-room
+    extract-rebuild-test cycle before delivery.
+
+    A fourth item in Jurgen's own report -- the inferred zone collapsing to
+    a single self-loop (`zone_127_0_0_0_24 -> zone_127_0_0_0_24`) -- is
+    correct behavior, not a bug: with both sides of every conduit on
+    127.0.0.1, there is genuinely only one `/24` to group by. Jurgen's own
+    suggestion (bind the simulated PLC to a second loopback address in a
+    different `/24`, e.g. 127.0.1.1, to exercise real cross-zone conduit
+    inference cheaply) needs no code change and is recorded here as
+    guidance for a future test capture, not as an open item.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

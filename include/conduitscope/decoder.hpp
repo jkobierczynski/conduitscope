@@ -775,6 +775,24 @@ struct DecodedPacket {
     uint16_t src_port = 0, dst_port = 0;
     std::string tcp_flags;
 
+    // True iff this is a has_tcp packet whose TCP segment carried zero payload bytes -- a bare
+    // handshake (SYN/SYN-ACK), pure ACK, or teardown (FIN/RST) segment, structurally distinct from
+    // a packet whose payload just didn't match any recognized protocol. Set by Decoder::decode
+    // (decoder.cpp) at the exact point it takes the "TCP segment ... with no payload (handshake/
+    // ACK/teardown)" early-return branch (out.protocol == "tcp" there, but "tcp" is also used for
+    // two unrelated fallbacks -- a fully-overlapping retransmitted segment and a still-buffering
+    // partial PDU -- that DO carry payload bytes, so checking dp.protocol == "tcp" alone can't
+    // distinguish this case; this field can). Always false when !has_tcp. Structured at the source,
+    // matching this file's own has_attack_signature/has_detect_finding precedent, not a substring
+    // match against summary text at display time. Added specifically so AssetInventoryEngine
+    // (asset_inventory.cpp) can break "skipped_packets" out into a distinct "TCP control segment,
+    // no application payload" sub-count instead of folding every bare TCP handshake/ACK/FIN packet
+    // into the same bucket as a genuinely unrecognized application protocol -- Jurgen's own report,
+    // cross-validating a real conduitgate<->plcsim capture: 47 of 103 packets were "skipped" and
+    // all described identically as "not one of the eleven recognized protocols", when most were
+    // ordinary TCP control traffic on an otherwise fully-recognized Modbus/TCP conduit.
+    bool tcp_no_payload = false;
+
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "stp",
     // "devicenet" (LINKTYPE_CAN_SOCKETCAN captures only -- see can_socketcan.hpp/devicenet.hpp),
     // "bacnet", "hartip", "opcua", "mms", "mqtt", "s7comm-plus", "cotp"

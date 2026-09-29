@@ -480,6 +480,28 @@ folding into `skipped_packets` like any other unrecognized packet. In
 practice this means FF-HSE will rarely, if ever, show up in an inventory
 report at all, since real FF-HSE traffic is UDP.
 
+A bare TCP control segment -- a SYN/SYN-ACK handshake, a pure ACK, or a
+FIN/RST teardown, carrying zero application payload bytes -- also folds
+into `skipped_packets`, but is additionally broken out into its own
+`skipped_tcp_control_packets` sub-count (never exceeding `skipped_packets`,
+never counted twice): on a real conduit this is usually MOST of what
+`skipped_packets` counts, and it's a fundamentally different case from a
+packet whose payload genuinely didn't match any of the eleven recognized
+protocols -- most of it belongs to the very same TCP session as an already-
+recognized flow, it simply carries no PDU of its own. The report header
+states both figures together when `skipped_tcp_control_packets` is nonzero
+(e.g. `47 skipped (46 TCP control segment(s) with no application payload
+-- SYN/ACK/FIN traffic, not itself evidence of an unrecognized protocol; 1
+not one of the eleven recognized protocols, ...)`); when it's zero the
+header reads exactly as it always has, with no breakdown at all. Added
+directly from Jurgen's own report, cross-validating a real conduitgate
+(his separate, independently-written read-only Modbus proxy) capture
+against `inventory`: 47 of 103 packets in a real loopback capture were
+"skipped," all described identically as "not one of the eleven recognized
+protocols," when 46 of the 47 were ordinary TCP handshake/ACK/FIN packets
+on an otherwise fully-recognized Modbus/TCP conduit -- folding them
+together made a fully-decoded capture look far more opaque than it was.
+
 For each recognized packet, `inventory` determines which side is the
 client (initiator) and which is the server, exactly as `PolicyEngine::
 observe` does for every TCP-based protocol here (SYN/SYN-ACK, falling back

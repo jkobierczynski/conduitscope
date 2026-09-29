@@ -2924,6 +2924,8 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
 
         if (tcp.payload.empty()) {
             out.protocol = "tcp";
+            out.tcp_no_payload = true;  // see this field's own comment (decoder.hpp) -- structured,
+                                         // not text-sniffed from the summary just below
             out.summary = "TCP segment " + std::to_string(tcp.src_port) + " -> " +
                            std::to_string(tcp.dst_port) + " with no payload (handshake/ACK/teardown)";
             return out;
