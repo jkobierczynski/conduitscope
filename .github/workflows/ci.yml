@@ -200,7 +200,7 @@ jobs:
       # Fix: don't rely on setcap + an environment override reaching a non-dumpable process at all
       # for this narrow slice. Everything that doesn't need CAP_NET_RAW runs first, as the normal
       # unprivileged user, with full leak detection genuinely intact (confirmed reachable this
-      # time, since nothing here is non-dumpable). Only the 4 tests that genuinely need it (see
+      # time, since nothing here is non-dumpable). Only the 7 tests that genuinely need it (see
       # CMakeLists.txt's own comment for exactly which "actually open lo") run afterward under
       # `sudo --preserve-env`, not setcap -- root can always read its own /proc/self/environ
       # (root bypasses the same DAC check that blocks everyone else), so ASAN_OPTIONS reliably
@@ -218,11 +218,18 @@ jobs:
       # need this after the split above was written, and were originally missed here -- confirmed by
       # a real CI run failing them with "Operation not permitted" while running unprivileged in this
       # step, exactly the failure mode this comment exists to prevent happening again.
+      # `capture_rotation_failure_reports_incomplete_with_real_traffic` (patch257 security review
+      # finding 2 -- capture_rotation_failure_smoke.sh, added after the two `capture` tests above)
+      # hit the exact same miss a second time: it also opens a real interface on `lo`
+      # (`capture --interface lo ...` inside the smoke script) but was never added to either regex
+      # below, so it ran unprivileged and failed with the identical "You don't have permission to
+      # perform this capture on that device (socket: Operation not permitted)" pcap_activate error.
+      # Added here as the 7th test in both lists; nothing else about the split changed.
       - name: Test everything that doesn't need CAP_NET_RAW (full leak detection)
         working-directory: build
         run: >
           ctest -j"$(nproc)" --output-on-failure
-          -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic)$"
+          -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic|capture_rotation_failure_reports_incomplete_with_real_traffic)$"
 
       - name: Test the CAP_NET_RAW-needing live-capture tests (under sudo -- see above)
         working-directory: build
@@ -231,7 +238,7 @@ jobs:
         run: >
           sudo --preserve-env=ASAN_OPTIONS
           ctest -j"$(nproc)" --output-on-failure
-          -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic)$"
+          -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic|capture_rotation_failure_reports_incomplete_with_real_traffic)$"
 
   release-windows:
     # Windows counterpart to build-and-test/build-without-libpcap above, but scoped to tag pushes
