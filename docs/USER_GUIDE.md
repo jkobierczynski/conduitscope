@@ -1849,6 +1849,34 @@ regardless of how small the configured cap is, to avoid an infinite-rotation loo
 `--max-files 2`, only the 2 most recently closed/active files of the 4 opened are still on disk once
 this exits; the rest were evicted as retention allows.)
 
+**Disk and rotation failure reporting (patch257 security review finding 2).** `capture` is built to
+run unattended for weeks, so a storage problem partway through a run -- the disk filling up, a
+permission changing, the target directory disappearing out from under it -- must never look like a
+clean, intentional stop. If the write side fails after `capture` has already captured at least one
+packet, it stops immediately, prints a prominent `*** CAPTURE INCOMPLETE ***` banner to stderr
+naming the underlying problem, how many packets/files were captured before the failure, and whether
+the file being written at the time may be truncated, and exits `kExitCaptureIncomplete` (7) -- see
+EXIT STATUS below. This is distinct from exit code 1, which still means the run never produced any
+evidence at all (bad arguments, the interface couldn't be opened, the initial `--directory` didn't
+exist). Every already-rotated file up to the point of failure is left exactly as it was -- untouched,
+not corrupted, not re-opened -- and is safe to analyze with `decode`/`inventory`/`detect`/`baseline`
+as-is. If the underlying problem is transient (for example, disk space is freed, or the directory
+reappears) a *new* `capture` invocation started afterward will simply pick up capturing again; this
+process itself does not retry on its own, and does not need to -- see `rotate()`'s own exception
+guarantee below.
+
+A **rotation** attempt (as opposed to the very first file, opened at startup) that fails to open its
+replacement file leaves the writer's state completely untouched: the file already being written stays
+open and continues accepting packets normally, and the failure is reported (and, at the CLI level,
+ends the run per the previous paragraph) without corrupting any bookkeeping. `--max-total-bytes`/
+`--max-files` retention eviction can independently fail to delete an already-rotated file it has
+decided to evict (for example, if that file was itself removed by something else, or a permission
+changed); `capture` does not treat this as fatal -- eviction failures are reported individually via
+the same warning channel as any other non-fatal condition, and a cumulative running total (files and
+bytes this run has failed to evict, which may therefore be using more disk than the configured cap
+accounts for) is included in each such warning, so an operator or log-watcher can notice actual
+on-disk usage silently drifting above what was configured over a long unattended run.
+
 **Validated on loopback traffic only.** Grok's own review text specifically asks to "validate on
 real mirrored OT switches, not loopback" -- this project has no access to a real mirrored OT switch
 to test against, so that validation is still outstanding. See LIMITATIONS below.
@@ -6993,6 +7021,7 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
 | 4 | `baseline check` only: the capture and baseline file were both readable and valid, but `BaselineCheckReport::compliant()` is false (at least one finding -- a control-plane operation, a new conduit, or a new/out-of-range operation not covered by the baseline). Deliberately its own value rather than reusing code 3 -- a caller scripting against both subcommands needs to tell which one flagged something without also parsing output. Superseded by code 5 when the observation was also truncated. |
 | 5 | `baseline check` only: `BaselineCheckReport::observation_truncated` is true -- this run's own `BaselineEngine` hit at least one of its four internal growth ceilings (`--max-baseline-tcp-sessions`/`--max-baseline-conduits`/`--max-baseline-operations-per-conduit`/`--max-baseline-ranges-per-operation`), so the capture was only PARTLY observed. Takes priority over both 0 and 4: a truncated observation can only ever produce false negatives, so a plain 0/4 here would risk reading a truncated capture as a clean or fully-characterized one. Treat this as "re-run with a higher `--max-baseline-*` limit," not as clean and not as an ordinary anomaly (code 4). `baseline learn` itself always exits 0 on success (it writes a best-effort, possibly-partial baseline rather than failing outright) but still prints a `warning: ... is INCOMPLETE` line to stderr under the same truncation condition -- check stderr, not the exit code, for `learn`. |
 | 6 | `detect`, `inventory`, and `policy validate` only: the equivalent of code 5 above for these three subcommands' own engines (patch257 security review finding 3) -- `DetectEngine`/`AssetInventoryEngine`/`PolicyEngine` hit at least one of their own internal growth ceilings (`--max-detect-*`/`--max-inventory-*`/`--max-policy-*` respectively -- see each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection above), so the report reflects only PART of what the capture actually contains. Takes priority over every other exit code these three subcommands return, including 0, 3, and (implicitly) a `policy validate` "COMPLIANT" verdict -- the same "truncation can only produce false negatives, so it must never be masked by a clean-looking result" reasoning as code 5. Not returned by `baseline check`, which keeps its own pre-existing code 5 for this condition (an already-shipped exit code's value is never repurposed once released, to avoid breaking scripted callers). |
+| 7 | `capture` only (patch257 security review finding 2): the run stopped because the write side failed mid-capture -- `RotatingPcapWriter::write_packet` threw, e.g. the disk filled up, a permission changed, or the target directory disappeared out from under an unattended run -- rather than because the requested stop condition (Ctrl+C, `--duration`, `--max-packets`) was reached. A prominent `*** CAPTURE INCOMPLETE ***` banner on stderr names the underlying problem; every already-rotated file up to that point is intact. Distinct from code 1: code 1 means this run never produced any evidence at all (bad arguments, the interface couldn't be opened, the initial `--directory` didn't exist), while code 7 means real capture happened first and then coverage was lost partway through. See `capture`'s own "Disk and rotation failure reporting" subsection above. |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
 status; they are reported as warnings (to stderr, or `--log-file`) and as

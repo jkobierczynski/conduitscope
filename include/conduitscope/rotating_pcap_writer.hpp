@@ -123,14 +123,30 @@ public:
     //   as PcapWriter's own constructor parameters.
     // policy: see RotationPolicy above.
     // on_warning: called (never thrown) for a NON-fatal problem this writer encounters after
-    //   startup -- currently only a failed eviction (e.g. another process holds the file open, or a
-    //   permission problem). A `capture` run is meant to survive unattended for weeks; a single
-    //   eviction failure should be reported, not crash a sensor that is otherwise working fine and
-    //   will likely succeed at evicting that same file (or a later one) on its next attempt. Never
-    //   called from within write_packet() for anything ELSE -- a failure to open/write the ACTIVE
-    //   file (disk full, active file's own directory disappeared) still throws ParseError, the same
-    //   as PcapWriter's own write_packet() does, since there is nothing this writer could usefully
-    //   do instead of surfacing that to its caller. May be nullptr (the default) to discard
+    //   startup -- currently only a failed eviction (e.g. another process holds the file open, a
+    //   permission problem, or the file was already removed some other way). A `capture` run is
+    //   meant to survive unattended for weeks; a single eviction failure should be reported, not
+    //   crash a sensor that is otherwise working fine and will likely succeed at evicting that same
+    //   file (or a later one) on its next attempt. Each call's own message includes this writer's
+    //   RUNNING total of failed-eviction bytes/files so far (also readable directly via
+    //   uneviction_failed_bytes()/uneviction_failed_files() below) -- a single failure is often
+    //   transient and harmless, but a caller/log watcher needs the cumulative picture to notice
+    //   when retention has been silently losing ground for a while: this writer's own bookkeeping
+    //   stops counting a file it failed to delete against the configured cap (see evict_as_needed's
+    //   own comment for why it must, to stay bounded itself -- see uneviction_failed_bytes()'s own
+    //   comment below), so real on-disk usage can exceed the configured cap by roughly this many
+    //   bytes even though this writer is otherwise behaving correctly (patch257 security review
+    //   finding 2: "whether disk usage remains bounded when the process repeatedly fails to ...
+    //   close a rotated file" -- the answer for THIS writer's own accounting is yes, bounded by
+    //   design, but actual disk usage is a different question this counter exists to surface).
+    //   Never called from within write_packet() for anything ELSE -- a failure to write the ACTIVE
+    //   file (disk full, mid-file) still throws ParseError, the same as PcapWriter's own
+    //   write_packet() does, since there is nothing this writer could usefully do instead of
+    //   surfacing that to its caller; a failure to open a REPLACEMENT file during rotation (disk
+    //   full, or the directory itself disappearing mid-run) also throws ParseError, but -- unlike
+    //   before this writer's own patch257 finding-2 hardening pass -- leaves this writer object
+    //   fully intact and still usable against the file it was already writing (see write_packet()'s
+    //   own comment below for the exact guarantee). May be nullptr (the default) to discard
     //   warnings silently -- unusual for `capture` itself, which always supplies one, but harmless
     //   for e.g. tools/rotating_pcap_writer_selftest.cpp's own simpler checks.
     RotatingPcapWriter(const std::string& directory, const std::string& prefix, uint32_t linktype,
@@ -151,7 +167,23 @@ public:
     // place on disk when the delete itself failed).
     //
     // Throws ParseError if the active file can no longer be written to (see this class's own
-    // on_warning comment for why that is NOT reported via on_warning instead).
+    // on_warning comment for why that is NOT reported via on_warning instead), or if `pkt` crosses
+    // a rotation trigger but the REPLACEMENT file can't be opened (disk full, the directory itself
+    // disappearing mid-run, a permission change, ...). EXCEPTION SAFETY on that second case
+    // (patch257 security review finding 2 -- a rotation failure used to leave this object in a
+    // broken, inconsistent state: the just-closed file already pushed into files() while also still
+    // being current_path()'s own value, and the internal writer left null, so a caller that caught
+    // the exception and simply tried again on the next packet would crash on a null-pointer
+    // dereference rather than getting a second clean ParseError): a failed rotation attempt is fully
+    // rolled back before the exception is thrown -- the file being written when rotation was
+    // attempted is NEVER closed or pushed into files() unless the replacement file was actually
+    // opened successfully first, so this object is left exactly as it was before this call, still
+    // writing into the same still-open file. `pkt` itself is not written on this path (the same as
+    // any other write_packet() failure), but every packet already durably written to the still-
+    // active file remains intact and this writer remains fully usable -- a caller may retry
+    // write_packet() with the next packet (e.g. once whatever blocked the new file's creation is
+    // resolved) and it will behave exactly as if this failed attempt never happened, including
+    // retrying rotation on the next packet that crosses a trigger.
     void write_packet(const PcapPacket& pkt);
 
     // Introspection, e.g. for `capture --stats`/end-of-run summaries.
@@ -164,7 +196,19 @@ public:
     // file current_path() names.
     const std::vector<RotatingPcapWriterFile>& files() const { return closed_files_; }
 
+    // Running totals across every eviction failure this writer has ever had (see on_warning's own
+    // comment above for the full rationale) -- both stay 0 for the entire life of a writer that
+    // never has an eviction fail, including one with no retention cap configured at all. Not the
+    // same as "current excess disk usage" (a file that failed to delete once might still get
+    // deleted later some other way, e.g. by an operator/cleanup script), but a reasonable
+    // upper-bound estimate a caller can log/expose as a metric alongside on_warning's own
+    // per-failure messages.
+    uint64_t uneviction_failed_bytes() const { return uneviction_failed_bytes_; }
+    size_t uneviction_failed_files() const { return uneviction_failed_files_; }
+
 private:
+    std::string build_new_path();
+    std::unique_ptr<PcapWriter> open_writer(const std::string& path) const;
     void open_new_file();
     bool needs_rotation(const PcapPacket& pkt) const;
     void rotate();
@@ -185,6 +229,10 @@ private:
     size_t files_opened_ = 0;
 
     std::vector<RotatingPcapWriterFile> closed_files_;  // oldest first
+
+    // See uneviction_failed_bytes()/uneviction_failed_files() above.
+    uint64_t uneviction_failed_bytes_ = 0;
+    size_t uneviction_failed_files_ = 0;
 };
 
 }  // namespace conduitscope

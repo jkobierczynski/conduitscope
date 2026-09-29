@@ -25,19 +25,30 @@
 // current_path()/files() accessors) with a plain std::ifstream, to confirm a file that should still
 // be on disk opens, and a file that should have been evicted no longer does.
 //
-// Deliberately does NOT attempt to exercise a genuine eviction FAILURE (on_warning actually firing)
-// -- reliably constructing an undeletable-but-still-writable file is OS/privilege-dependent (e.g.
-// unlink() on POSIX only checks the containing directory's write permission, not the file's own,
-// so this often can't be forced at all when running as root, which this sandbox does). Every
-// success-path check below still asserts on_warning is NEVER called, which is itself a real check
-// (a spurious warning during ordinary, correctly-configured operation would be a bug), just not a
-// direct test of the failure branch itself -- flagged here rather than silently absent.
+// Every success-path check below also asserts on_warning is NEVER called on that path, which is
+// itself a real check (a spurious warning during ordinary, correctly-configured operation would be
+// a bug). Checks 12-14 (patch257 security review finding 2, "continuous capture: disk exhaustion
+// and rotation-boundary behavior") go further and force GENUINE failures deterministically, without
+// needing an actually-full disk or a non-root privilege level this sandbox doesn't have (see e.g.
+// unlink()'s own "only checks the containing directory's write permission, not the file's own"
+// behavior, which defeats a chmod-based approach when running as root, as this sandbox does):
+// check 13 deletes a rotated file out from under the writer BEFORE retention eviction runs, so
+// std::remove() on it genuinely fails with ENOENT regardless of privilege; check 14 renames the
+// writer's own target directory away between packets (POSIX-only -- see that check's own comment
+// for why), so opening a REPLACEMENT file during rotation genuinely fails with ENOENT the same way
+// a disk-full or permission-revoked condition would from this class's own point of view, without
+// needing to actually exhaust real disk space.
 //
 // Prints one PASS/FAIL line per check to stdout and exits 0 only if every check passed, same
 // contract as resource_limits_selftest/protocol_result_selftest/crypto_selftest.
 #include <cstdio>
 #include <fstream>
 #include <string>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 #include <vector>
 
 #include "conduitscope/rotating_pcap_writer.hpp"
@@ -342,6 +353,164 @@ int main(int argc, char** argv) {
         }
         check_bool("construction against a nonexistent directory throws immediately", threw);
     }
+
+    // 12. patch257 security review finding 2's own recommendation: "define and test the maximum
+    // overshoot explicitly." Checks 2/3 above already demonstrate an oversized packet is written
+    // rather than dropped/looped; this quantifies exactly how far over rotate_bytes a file's real
+    // size can go -- never more than the one packet that pushed it over, whatever that packet's own
+    // size is.
+    {
+        constexpr uint64_t kPcapRecordHeaderBytes = 16;  // matches pcap_writer.cpp's own constant
+
+        RotationPolicy policy;
+        policy.rotate_bytes = 50;  // deliberately much smaller than one ordinary record
+        RotatingPcapWriter writer(scratch_dir, "test12", kLinkType, 65535, policy);
+        writer.write_packet(make_packet(8000, kPayloadLen));  // first packet, always written
+        uint64_t overshoot = writer.current_bytes() - policy.rotate_bytes;
+        check_bool("overshoot bound: an ordinary-sized packet's file never exceeds rotate_bytes by "
+                   "more than exactly that one packet's own record size",
+                   overshoot == kHeaderBytes + kRecordBytes - policy.rotate_bytes);
+
+        // A second, much larger packet on a fresh file: the overshoot scales with THAT packet's own
+        // size, still by exactly one packet's worth, never more -- proving the bound isn't a
+        // coincidence of the specific small size chosen above.
+        RotatingPcapWriter writer2(scratch_dir, "test12b", kLinkType, 65535, policy);
+        constexpr size_t kHugePayload = 9000;
+        writer2.write_packet(make_packet(8000, kHugePayload));
+        uint64_t overshoot2 = writer2.current_bytes() - policy.rotate_bytes;
+        check_bool("overshoot bound: scales with one oversized packet's own size, never more than "
+                   "exactly that packet's own record size, however large",
+                   overshoot2 == kHeaderBytes + kPcapRecordHeaderBytes + kHugePayload - policy.rotate_bytes);
+    }
+
+    // 13. A genuine eviction failure, forced deterministically and portably: rather than a
+    // chmod-based permission trick (unlink() on POSIX only checks the containing directory's write
+    // permission, not the file's own, and root -- which this sandbox runs as -- bypasses permission
+    // checks outright, so that approach can't be forced at all here, see this tool's own file
+    // header), this deletes a rotated file's bytes out from under the writer BEFORE retention
+    // eviction ever gets to it, so std::remove() on it genuinely fails with ENOENT regardless of
+    // privilege -- exactly the same failure shape as another process/tool having already removed
+    // it, or a permission change on a lower-privilege deployment.
+    {
+        RotationPolicy policy;
+        policy.rotate_bytes = kHeaderBytes + kRecordBytes;  // one packet per file
+        policy.max_files = 2;                                // 1 closed + 1 active
+        int warnings = 0;
+        std::string last_warning;
+        RotatingPcapWriter writer(scratch_dir, "test13", kLinkType, 65535, policy,
+                                   [&](const std::string& msg) {
+                                       ++warnings;
+                                       last_warning = msg;
+                                   });
+        writer.write_packet(make_packet(9000, kPayloadLen));  // file 1
+        std::string file1_path = writer.current_path();
+        writer.write_packet(make_packet(9001, kPayloadLen));  // rotates: file 1 closes, file 2 active
+        check_bool("eviction-failure setup: file 1 closed and tracked, not yet evicted (max_files=2 "
+                   "allows 1 closed + 1 active)",
+                   writer.files().size() == 1 && writer.files()[0].path == file1_path);
+        check_bool("eviction-failure setup: no warning yet -- nothing has failed so far",
+                   warnings == 0);
+
+        // Delete file 1 ourselves, out from under the writer, before it ever tries to evict it.
+        check_bool("eviction-failure setup: file 1 actually removed out from under the writer",
+                   std::remove(file1_path.c_str()) == 0);
+
+        // Rotates again: file 2 closes, file 3 becomes active -- retention now tries to evict file
+        // 1 (already gone) to stay at max_files=2.
+        writer.write_packet(make_packet(9002, kPayloadLen));
+
+        check_bool("eviction failure: on_warning fires exactly once for the missing file",
+                   warnings == 1);
+        check_bool("eviction failure: the warning names the missing file and reports a running "
+                   "total of 1 file failed so far",
+                   last_warning.find(file1_path) != std::string::npos &&
+                       last_warning.find("1 file(s)") != std::string::npos);
+        check_bool("eviction failure: uneviction_failed_files()/uneviction_failed_bytes() reflect "
+                   "that same running total directly, not just in the warning text",
+                   writer.uneviction_failed_files() == 1 &&
+                       writer.uneviction_failed_bytes() == kHeaderBytes + kRecordBytes);
+        check_bool("eviction failure: the writer's own bookkeeping still drops the file from "
+                   "files() either way, so it is never retried on every subsequent packet forever",
+                   writer.files().size() == 1 && writer.files()[0].path != file1_path);
+    }
+
+#ifndef _WIN32
+    // 14. Rotation failure is exception-safe (patch257 finding 2's own core fix). If opening the
+    // REPLACEMENT file fails mid-rotation -- here, because this writer's own target directory has
+    // been renamed away, simulating a disk-full/permission-revoked/directory-disappeared condition
+    // without needing an actually-full disk or a non-root privilege level -- the writer must be
+    // left fully intact and still usable against the file it was already writing: not null, not
+    // double-tracked in files(), not crashed on the very next call. POSIX-only: renaming a
+    // directory containing an open file handle behaves differently on Windows (share-mode
+    // restrictions can block the rename outright), so this specific reproduction technique isn't
+    // portable there -- the underlying fix itself (rotating_pcap_writer.cpp's own rotate()) is
+    // platform-independent and applies everywhere regardless.
+    {
+        std::string dir_a = scratch_dir + "/test14_dir";
+        std::string dir_moved = scratch_dir + "/test14_dir_moved";
+        ::mkdir(dir_a.c_str(), 0755);
+
+        RotationPolicy policy;
+        policy.rotate_bytes = kHeaderBytes + kRecordBytes;  // one packet per file
+        int warnings = 0;
+        RotatingPcapWriter writer(dir_a, "test14", kLinkType, 65535, policy,
+                                   [&](const std::string&) { ++warnings; });
+        writer.write_packet(make_packet(10000, kPayloadLen));  // file 1, still open
+        std::string file1_path = writer.current_path();
+
+        check_bool("rotation-failure setup: renaming the directory away succeeds even with an open "
+                   "file inside it (POSIX)",
+                   std::rename(dir_a.c_str(), dir_moved.c_str()) == 0);
+
+        bool threw = false;
+        std::string message;
+        try {
+            writer.write_packet(make_packet(10001, kPayloadLen));  // triggers rotation -> fails
+        } catch (const ParseError& e) {
+            threw = true;
+            message = e.what();
+        }
+        check_bool("rotation failure: attempting to rotate into a now-missing directory throws",
+                   threw);
+        check_bool("rotation failure: the exception names both the failed rotation and the still-"
+                   "usable old file",
+                   message.find("rotation failed") != std::string::npos &&
+                       message.find(file1_path) != std::string::npos);
+        check_bool("rotation failure: the writer's own state is untouched -- still on file 1, not "
+                   "double-tracked as also already closed",
+                   writer.current_path() == file1_path && writer.files().empty() &&
+                       writer.rotation_count() == 0);
+        check_bool("rotation failure: current_bytes() still reflects only the one packet that was "
+                   "actually written -- the failed packet was never counted",
+                   writer.current_bytes() == kHeaderBytes + kRecordBytes);
+
+        // Move the directory back -- the underlying problem is "resolved" -- and prove the writer
+        // recovers completely rather than staying wedged in whatever partial state the failure left
+        // it in.
+        check_bool("rotation-failure recovery setup: moving the directory back succeeds",
+                   std::rename(dir_moved.c_str(), dir_a.c_str()) == 0);
+
+        threw = false;
+        try {
+            writer.write_packet(make_packet(10002, kPayloadLen));  // rotation retried, now succeeds
+        } catch (const ParseError&) {
+            threw = true;
+        }
+        check_bool("rotation-failure recovery: retrying once the directory is back succeeds cleanly",
+                   !threw);
+        check_bool("rotation-failure recovery: file 1 is now properly closed and tracked, exactly "
+                   "once -- no duplicate entry left over from the failed attempt",
+                   writer.files().size() == 1 && writer.files()[0].path == file1_path &&
+                       writer.rotation_count() == 1);
+        check_bool("rotation-failure recovery: file 1 is still readable on disk with its one "
+                   "packet intact",
+                   file_exists(file1_path));
+        check_bool("rotation failure: on_warning is never called for a rotation failure -- that's a "
+                   "fatal-to-this-attempt ParseError the caller must see directly, not a background "
+                   "warning",
+                   warnings == 0);
+    }
+#endif  // !_WIN32
 
     std::printf("\n%d check(s) failed\n", g_failures);
     return g_failures == 0 ? 0 : 1;

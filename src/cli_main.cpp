@@ -1362,12 +1362,28 @@ constexpr int kExitPolicyNonCompliant = 3;
 // engine hit at least one of its internal growth ceilings and therefore only PARTLY observed the
 // capture -- same "never silently produce a clean result from a truncated observation" reasoning
 // as kExitBaselineIncomplete's own comment, generalized across commands instead of duplicated per
-// command. Currently used by `detect`; `inventory` and `policy validate` are still open work
-// (docs/DEVELOPMENT.md) and will return this too once their own engines gain resource bounds. A
+// command. Used by `detect`, `inventory`, and `policy validate` (each report's own
+// `observation_truncated` field is checked right before that subcommand's own ordinary exit
+// codes, in each of their own run_* functions below -- see item 97, docs/DEVELOPMENT.md). A
 // caller scripting against this exit code should treat 6 as "re-run with a higher
 // --max-<subcommand>-* limit and try again," the same posture kExitBaselineIncomplete's own
 // comment already establishes for `baseline check`.
 constexpr int kExitObservationIncomplete = 6;
+
+// patch257 security review finding 2 fix ("continuous capture: disk exhaustion and rotation-
+// boundary behavior"): `capture` only, returned when the run stopped because the write side
+// failed mid-capture -- RotatingPcapWriter::write_packet threw ParseError, e.g. the disk filled
+// up, a permission changed, or the target directory disappeared out from under an unattended run
+// -- rather than because the requested stop condition (Ctrl+C, --duration, --max-packets) was
+// reached. Deliberately its own value, never 1: exit 1 already means "this run never produced any
+// evidence at all" (bad arguments, the interface couldn't be opened, the initial directory didn't
+// exist) elsewhere in this same subcommand, and a caller/monitoring script needs to tell that
+// apart from "this run captured real evidence for a while and then lost coverage partway
+// through" -- the same reasoning kExitBaselineIncomplete/kExitObservationIncomplete's own comments
+// already establish for their respective subcommands. See run_capture's own inner try/catch below
+// for exactly what gets reported alongside this exit code (how many packets/files were captured
+// before the failure, and that every already-rotated file up to that point is still intact).
+constexpr int kExitCaptureIncomplete = 7;
 
 int run_policy_validate(const std::string& input, const std::string& interface_name,
                          const std::string& filter, int duration_seconds, int snaplen, bool promiscuous,
@@ -2069,10 +2085,33 @@ int run_capture(const std::string& interface_name, const std::string& filter, in
 
         PcapPacket pkt;
         size_t captured_count = 0;
-        while (!g_stop_requested.load(std::memory_order_acquire) && capture.next(pkt)) {
-            writer.write_packet(pkt);
-            ++captured_count;
-            if (max_packets != 0 && captured_count >= max_packets) break;
+        // patch257 security review finding 2 fix: this inner try/catch is deliberately separate
+        // from the outer one below. A ParseError here means the write side failed AFTER capture
+        // was already under way (RotatingPcapWriter::write_packet -- disk full, a permission
+        // change, the target directory disappearing out from under an unattended run) and real
+        // evidence up to this point exists on disk; a ParseError/CaptureError from the OUTER catch
+        // means this run never got that far at all (bad arguments, the interface couldn't be
+        // opened, the initial --directory didn't exist). Those are different failure shapes a
+        // caller/monitoring script needs to tell apart -- see kExitCaptureIncomplete's own comment
+        // above -- so they get different exit codes and different, purpose-specific messages
+        // rather than sharing the same generic "error: <what>" this file uses for a setup failure.
+        try {
+            while (!g_stop_requested.load(std::memory_order_acquire) && capture.next(pkt)) {
+                writer.write_packet(pkt);
+                ++captured_count;
+                if (max_packets != 0 && captured_count >= max_packets) break;
+            }
+        } catch (const ParseError& e) {
+            std::cerr << "*** CAPTURE INCOMPLETE -- " << e.what() << " -- stopped after "
+                       << captured_count << " packet(s) across " << (writer.rotation_count() + 1)
+                       << " file(s) in '" << directory << "'. Every already-rotated file up to this "
+                       << "point is intact; '" << writer.current_path() << "' (the file being "
+                       << "written when this happened) may be truncated for its final record, and "
+                       << "no traffic past this point was captured. This is NOT the requested stop "
+                       << "condition (Ctrl+C/--duration/--max-packets) -- treat this run's coverage "
+                       << "as incomplete and investigate the underlying storage problem before "
+                       << "relying on it. ***\n";
+            return kExitCaptureIncomplete;
         }
 
         if (!quiet) {

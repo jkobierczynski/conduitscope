@@ -11644,6 +11644,15 @@ else()
       COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/capture_rotation_smoke.sh" "$<TARGET_FILE:conduitscope>")
     set_tests_properties(capture_rotation_and_retention_with_real_traffic PROPERTIES
       TIMEOUT 20)
+
+    # See tests/capture_rotation_failure_smoke.sh's own file header for exactly what this proves
+    # (patch257 security review finding 2: a real, running, unattended `capture` process reports
+    # capture loss prominently and returns kExitCaptureIncomplete=7, rather than silently looking
+    # like a normal Ctrl+C/--duration stop, when the target directory disappears out from under it).
+    add_test(NAME capture_rotation_failure_reports_incomplete_with_real_traffic
+      COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/capture_rotation_failure_smoke.sh" "$<TARGET_FILE:conduitscope>")
+    set_tests_properties(capture_rotation_failure_reports_incomplete_with_real_traffic PROPERTIES
+      TIMEOUT 20)
   endif()
 endif()
 

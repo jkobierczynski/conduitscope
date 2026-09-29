@@ -78,10 +78,24 @@ RotatingPcapWriter::RotatingPcapWriter(const std::string& directory, const std::
 
 RotatingPcapWriter::~RotatingPcapWriter() = default;
 
+std::string RotatingPcapWriter::build_new_path() {
+    return directory_ + "/" + prefix_ + "_" + wall_clock_filename_timestamp() + "_" +
+           zero_pad(files_opened_, 6) + ".pcap";
+}
+
+// Purely constructs a PcapWriter at `path` -- touches no member state at all, so a caller can
+// freely try this and handle failure before committing to anything. Split out of open_new_file()
+// (which still does the constructor's own "open the very first file, then adopt it" job) so
+// rotate() below can use the identical open logic while keeping the whole "close the old file /
+// adopt the new one" transition atomic from an external observer's point of view -- see
+// write_packet()'s own doc comment (rotating_pcap_writer.hpp) for the exact guarantee this buys.
+std::unique_ptr<PcapWriter> RotatingPcapWriter::open_writer(const std::string& path) const {
+    return std::make_unique<PcapWriter>(path, linktype_, snaplen_);
+}
+
 void RotatingPcapWriter::open_new_file() {
-    std::string path = directory_ + "/" + prefix_ + "_" + wall_clock_filename_timestamp() + "_" +
-                        zero_pad(files_opened_, 6) + ".pcap";
-    writer_ = std::make_unique<PcapWriter>(path, linktype_, snaplen_);
+    std::string path = build_new_path();
+    writer_ = open_writer(path);  // throws ParseError on failure; nothing below has run yet
     current_path_ = path;
     current_bytes_ = kPcapGlobalHeaderBytes;
     current_packet_count_ = 0;
@@ -111,24 +125,66 @@ bool RotatingPcapWriter::needs_rotation(const PcapPacket& pkt) const {
 }
 
 void RotatingPcapWriter::rotate() {
-    // The file being closed becomes eligible for eviction (evict_as_needed(), called from
-    // write_packet() right after this) -- but never itself: this push happens BEFORE open_new_file()
-    // makes a different path the active one, so closed_files_ never contains the currently-active
-    // file's own path.
+    // patch257 security review finding 2's own exception-safety fix: open the REPLACEMENT file
+    // FIRST, before touching any of this object's own state. Before this fix, the old file was
+    // closed and pushed into closed_files_ unconditionally, THEN a new one was opened -- so a
+    // failure to open the new file (disk full, the directory itself disappearing mid-run, a
+    // permission change) left `writer_` null while current_path_/current_bytes_/etc. still
+    // described the file that had JUST been pushed into closed_files_, violating this class's own
+    // "closed_files_ never contains the currently-active file's own path" invariant and leaving the
+    // next write_packet() call to dereference a null writer_ -- a crash, not a second clean
+    // ParseError, the first time any caller tried to recover from a transient rotation failure
+    // (e.g. retrying once whatever blocked the new file resolves itself). Opening first instead
+    // means a failure here throws with the OLD file/state completely untouched: still open, still
+    // active, still fully usable on the next call. See write_packet()'s own doc comment
+    // (rotating_pcap_writer.hpp) for the exact guarantee this buys callers.
+    std::string new_path = build_new_path();
+    std::unique_ptr<PcapWriter> new_writer;
+    try {
+        new_writer = open_writer(new_path);
+    } catch (const ParseError& e) {
+        throw ParseError(
+            "RotatingPcapWriter: rotation failed -- could not open a new capture file ('" +
+            new_path +
+            "'): " + e.what() +
+            " -- the file already being written ('" + current_path_ +
+            "') is untouched and this writer is still writing into it; capture coverage from this "
+            "point on may be incomplete until the underlying problem (disk space, permissions, the "
+            "directory itself) is resolved");
+    }
+
+    // The new file opened successfully -- now it's safe to commit: the file being closed becomes
+    // eligible for eviction (evict_as_needed(), called from write_packet() right after this), but
+    // never itself, since this push only ever happens once a DIFFERENT path is about to become the
+    // active one.
     closed_files_.push_back(RotatingPcapWriterFile{current_path_, current_bytes_});
-    writer_.reset();  // close the old file's handle before opening the new one
-    open_new_file();
+    writer_ = std::move(new_writer);
+    current_path_ = new_path;
+    current_bytes_ = kPcapGlobalHeaderBytes;
+    current_packet_count_ = 0;
+    current_file_first_ts_sec_ = 0;
+    ++files_opened_;
 }
 
 void RotatingPcapWriter::evict_as_needed() {
     auto evict_oldest = [this]() {
         const RotatingPcapWriterFile& victim = closed_files_.front();
         if (std::remove(victim.path.c_str()) != 0) {
+            // See uneviction_failed_bytes()/uneviction_failed_files()'s own comment
+            // (rotating_pcap_writer.hpp) for why this writer stops counting the file against its
+            // OWN retention accounting (bounded by design) while still tracking the running total
+            // separately, for a caller/log watcher to notice actual on-disk usage silently drifting
+            // above the configured cap over an unattended, weeks-long run.
+            uneviction_failed_bytes_ += victim.bytes;
+            ++uneviction_failed_files_;
             if (on_warning_) {
                 on_warning_("failed to delete rotated capture file '" + victim.path +
                             "' while enforcing the configured retention cap -- it was left on disk "
                             "and will no longer count toward that cap, so actual disk use may exceed "
-                            "what was configured until it is removed some other way");
+                            "what was configured until it is removed some other way (running total "
+                            "this writer has failed to evict: " +
+                            std::to_string(uneviction_failed_files_) + " file(s), " +
+                            std::to_string(uneviction_failed_bytes_) + " byte(s))");
             }
         }
         closed_files_.erase(closed_files_.begin());

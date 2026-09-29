@@ -2082,6 +2082,24 @@ many files on disk in total, counting the file currently being written.
 Same \fB\-\-rotate\-bytes\fR/\fB\-\-rotate\-seconds\fR requirement as
 \fB\-\-max\-total\-bytes\fR above. Default: 0 (no count\-based retention
 cap).
+.PP
+\fBDisk and rotation failure reporting\fR (patch257 security review
+finding 2): if the write side fails after \fBcapture\fR has already
+captured at least one packet \-\- disk exhaustion, a permission change,
+the target directory disappearing \-\- the process stops immediately,
+prints a prominent \fB*** CAPTURE INCOMPLETE ***\fR banner to stderr, and
+exits with the dedicated \fBkExitCaptureIncomplete\fR code \fB7\fR (see
+\fBEXIT STATUS\fR below) rather than the generic fatal\-error code
+\fB1\fR. Every already\-rotated file up to that point is left untouched
+and safe to analyze. A rotation attempt that fails to open its
+replacement file leaves the writer's own state completely untouched \-\-
+the file already being written stays open and keeps accepting packets. A
+retention\-eviction failure (\fB\-\-max\-total\-bytes\fR/\fB\-\-max\-files\fR
+failing to delete an already\-rotated file) is not fatal; it is reported
+via the same warning channel as any other non\-fatal condition, including
+a running cumulative total of files/bytes this run has failed to evict,
+so actual on\-disk usage drifting above the configured cap can be
+noticed over a long unattended run.
 .SH OPTIONS (merge inventory)
 .TP
 .B \fIreports\fR (positional, one or more)
@@ -2327,6 +2345,23 @@ by a clean-looking result" reasoning as code \fB5\fR. Not returned by
 \fBbaseline check\fR, which keeps its own pre\-existing code \fB5\fR for
 this condition (an already-shipped exit code's value is never repurposed
 once released).
+.TP
+.B 7
+\fBcapture\fR only (patch257 security review finding 2): the run stopped
+because the write side failed mid\-capture \-\- \fBRotatingPcapWriter::
+write_packet\fR threw, e.g. the disk filled up, a permission changed, or
+the target directory disappeared out from under an unattended run \-\-
+rather than because the requested stop condition (Ctrl+C,
+\fB\-\-duration\fR, \fB\-\-max\-packets\fR) was reached. A prominent
+\fB*** CAPTURE INCOMPLETE ***\fR banner is printed to stderr naming the
+underlying problem, how many packets/files were captured before the
+failure, and whether the file being written at the time may be truncated.
+Every already\-rotated file up to that point is left intact. Distinct from
+code \fB1\fR: code \fB1\fR means this run never produced any evidence at
+all (bad arguments, the interface couldn't be opened, the initial
+\fB\-\-directory\fR didn't exist), while code \fB7\fR means real capture
+happened first and coverage was lost partway through. See \fBOPTIONS
+(capture)\fR above.
 .SH LIMITATIONS
 A handful of rare/obsolete pcapng block types (the pre-2000s "Packet Block",
 Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets

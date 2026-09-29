@@ -13933,6 +13933,168 @@ it done as its own patch.
     MinGW-w64 cross-compile, build-only there) -- 100% pass, zero
     regressions.
 
+98. **Harden continuous capture against disk and rotation failure modes**
+    (`docs/reviews/2026-09-chatgpt-security-review-patch257.md`, finding 2,
+    scoped by the review's own "Files:" line to `rotating_pcap_writer.cpp`/
+    `.hpp`). Finding 2 asks to explicitly verify/test five behaviors of
+    `capture`'s write side under disk and rotation-boundary failure and
+    recommends the sensor "report capture loss and storage failures
+    prominently rather than silently continuing as if the evidence stream
+    were complete."
+
+    A genuine bug was found while working through the first of those five
+    behaviors (whether retention/disk/permission failures stop safely): the
+    old `RotatingPcapWriter::rotate()` closed and committed the old file
+    (`closed_files_.push_back(...)`, `writer_.reset()`) *before* attempting
+    to open the replacement file. A failure to open the new file (disk
+    full, the directory disappearing mid-run, a permission change) left the
+    object in a broken, self-contradictory state -- `writer_` null while
+    `current_path_` still named a file *also* now duplicately present in
+    `closed_files_`, violating this class's own documented invariant that
+    `closed_files_` never contains the currently-active file's own path --
+    so the very next `write_packet()` call by any caller that caught and
+    retried would dereference a null `writer_` and crash, rather than
+    seeing a second clean, recoverable error. Fixed by reordering: a new
+    side-effect-free `open_writer(path)` helper opens the replacement file
+    *first*, and only once that succeeds does `rotate()` commit the
+    close-old/adopt-new state transition; on failure, it throws
+    `ParseError` with the OLD file/state completely untouched -- still
+    open, still active, still fully usable on the next call, coverage loss
+    limited to exactly the one packet that triggered the failed rotation
+    attempt. `write_packet()`'s own doc comment
+    (`rotating_pcap_writer.hpp`) now states this exception-safety guarantee
+    explicitly, since it's the contract every caller (the CLI below, or any
+    future embedder) depends on to retry safely.
+
+    Retention eviction (`--max-total-bytes`/`--max-files`) failing to
+    delete an already-rotated file was already non-fatal (an `on_warning`
+    call, the file just stays on disk), but the fifth of Finding 2's five
+    behaviors -- "whether disk usage remains bounded when the process
+    repeatedly fails to evict" -- had no way for an operator to actually
+    notice cumulative drift between the writer's own (still-correctly-
+    bounded) internal accounting and real on-disk reality. New
+    `uneviction_failed_bytes()`/`uneviction_failed_files()` accessors on
+    `RotatingPcapWriter` track a running total, incremented whenever
+    `evict_as_needed()`'s `std::remove()` call fails, and that running
+    total is now folded into each `on_warning` message's own text too, so
+    a log-watcher sees the cumulative picture, not just one failure at a
+    time in isolation.
+
+    At the CLI level (`cli_main.cpp`), `run_capture()`'s packet-reading
+    loop is now wrapped in its own `try`/`catch (const ParseError&)`. On a
+    write-side failure it stops immediately, prints a prominent
+    `*** CAPTURE INCOMPLETE ***` banner to stderr naming the underlying
+    problem, the packet/file counts captured before the failure, and
+    whether the file being written at the time may be truncated for its
+    final record, and returns a new dedicated exit code,
+    `kExitCaptureIncomplete = 7` (the next unclaimed value after item 97's
+    `kExitObservationIncomplete = 6`) -- deliberately distinct from the
+    pre-existing generic exit code 1, which still means the run never
+    produced any evidence at all (bad arguments, the interface couldn't be
+    opened, the initial `--directory` didn't exist), matching this
+    project's established "never let a partial-coverage run look identical
+    to a never-started one" posture from items 64/97's own exit codes 5/6.
+
+    Verified against Finding 2's own remaining four behaviors, all
+    already-correct with no code change needed, now made explicit/tested
+    rather than merely asserted: the oversized-packet overshoot bound (now
+    quantified exactly, both for a small packet and a 9000-byte payload,
+    in a new selftest check rather than left implicit); simultaneous
+    rotation triggers (already safe -- a single OR'd `needs_rotation()`
+    check feeding exactly one `rotate()` call per `write_packet()`, with
+    filenames already made unique per rotation via the existing
+    `files_opened_` counter, so no duplicate-naming/corruption risk was
+    ever possible); backward/discontinuous timestamps (already correctly
+    excluded from triggering time-based rotation, per
+    `RotationPolicy::rotate_seconds`'s own pre-existing documented
+    behavior and an already-existing selftest check).
+
+    This sandbox runs as root (`whoami`/`id` both confirm it), so
+    `chmod`-based permission-failure simulation doesn't work here --
+    documented directly in `tools/rotating_pcap_writer_selftest.cpp`'s own
+    header comment, the same "root can't test what root can always
+    override" constraint this project has hit before. Two portable,
+    root-proof failure-injection techniques were used instead, verified
+    experimentally before being relied on: (1) **directory-rename trick**
+    -- renaming a directory containing an already-open file succeeds on
+    POSIX even with the file open, and the open file descriptor keeps
+    working afterward, but a *new* `ofstream::open()` at the old
+    (now-missing) path fails cleanly -- used to simulate "rotation's
+    new-file-open fails" deterministically without needing an actually
+    full disk. Guarded `#ifndef _WIN32` (Windows share-mode semantics
+    differ; not run on the MinGW build regardless, which is build-only per
+    established convention). (2) **delete-the-file-first trick** --
+    `std::remove()` on an already-nonexistent path reliably fails (ENOENT)
+    for any privilege level including root, fully portable, no `#ifdef`
+    needed -- used to force a genuine, deterministic eviction failure. (A
+    `tmpfs`-quota mount, `mount -t tmpfs -o size=64k`, was also confirmed
+    working in this sandbox as a way to force real `ENOSPC`, but the two
+    techniques above were simpler and more portable, so the tmpfs approach
+    wasn't used in the final implementation.)
+
+    Three new checks in `tools/rotating_pcap_writer_selftest.cpp` (checks
+    12-14, following the existing 11): the overshoot-bound quantification;
+    an eviction-failure check (delete-the-file-first trick) asserting the
+    warning fires exactly once with the right path/count and the new
+    accessors reflect the same running total; and a rotation-failure
+    exception-safety-and-recovery check (directory-rename trick) asserting
+    the thrown message names both the failed rotation and the still-usable
+    old file, the writer's own state is provably untouched (`current_path`,
+    `files()`, `rotation_count()`, `current_bytes()` all unchanged), and
+    that renaming the directory back and retrying succeeds cleanly with no
+    duplicate bookkeeping and no spurious `on_warning` call. New
+    `tests/capture_rotation_failure_smoke.sh` (modeled directly on the
+    existing `tests/capture_rotation_smoke.sh`) proves the same rotation
+    failure end to end against a real running `capture` process and real
+    loopback traffic -- `--rotate-bytes 1` forces every packet after the
+    first to attempt a rotation, the scratch directory is renamed away
+    after the first file is already open (same trick as above, applied at
+    the CLI level), and the script asserts exit code 7, both banner strings
+    on stderr, and that the first (pre-existing) file survived intact and
+    still decodes correctly. New
+    `capture_rotation_failure_reports_incomplete_with_real_traffic` CTest
+    entry. One `set -e`/`wait` interaction bug was caught and fixed while
+    first running this script under CTest: `set -e` treats a background
+    process's nonzero exit status, surfaced through a bare `wait`, as
+    script failure and aborts immediately -- before the script's own
+    `STATUS=$?` line could even run -- so the wait is now wrapped in
+    `set +e`/`set -e` around just that one call, the standard idiom for
+    capturing an expected-nonzero exit status under `set -e`. Confirmed
+    non-flaky by running the script five times in direct succession before
+    trusting it in CTest.
+
+    Full CTest across all four standing build configurations (default GCC:
+    2241/2241; ASan/UBSan `build-fuzz`: 2318/2318 including the fuzz corpus
+    regression tests, zero sanitizer hits; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`: 2226/2226 -- the new capture-failure test is correctly
+    gated out along with every other `capture` test, since there's no live
+    capture to run; MinGW-w64 cross-compile, build-only there) -- 100%
+    pass, zero regressions -- plus a clean-room extract-rebuild-test cycle
+    (2241/2241) before delivery.
+
+    `docs/USER_GUIDE.md` gained a new "Disk and rotation failure reporting"
+    subsection under `capture`'s own COMMANDS entry and a new exit-code-7
+    row in the EXIT STATUS table; `man/conduitscope.1` gained the matching
+    `OPTIONS (capture)` paragraph and `EXIT STATUS` entry.
+
+    **Confirmed but deliberately left unaddressed, flagged here rather than
+    silently omitted** (this project's established documentation
+    discipline -- see item 64/97's own precedent of naming a
+    researched-but-out-of-scope finding rather than staying quiet about
+    it): `LiveCapture::next()` (`src/live_capture.cpp`, the
+    `pcap_next_ex` return value handling) never throws `CaptureError` on a
+    mid-capture interface failure (`pcap_next_ex` returning `-1`) -- it
+    returns `false`, identical to a normal EOF/stop condition, so a NIC
+    failure mid-capture would currently look like a clean, intentional
+    stop (exit 0) rather than a reported failure. This is a genuinely
+    separate issue from Finding 2's literal scope, which the review's own
+    "Files:" line restricts to the write/rotation side
+    (`rotating_pcap_writer.cpp`/`.hpp`) rather than the capture-source side
+    -- fixing it was deliberately not folded into this item to keep this
+    fix scoped to what was asked, but it's a real gap in the same spirit
+    ("don't silently look like a clean stop when something actually failed")
+    as everything else this item fixed, and worth a dedicated follow-up.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
