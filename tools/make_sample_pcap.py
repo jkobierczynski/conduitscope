@@ -19188,6 +19188,207 @@ def build_detect_snort_patterns_batch4_sample():
     (TESTS_DIR / "sample_detect_snort_patterns_batch4.pcap").write_bytes(data)
 
 
+def build_detect_snort_patterns_batch5_sample():
+    """Batch 5 -- four more pattern extensions to `detect`, sourced from the live MITRE ATT&CK for
+    ICS matrix itself rather than a Snort/Suricata ruleset (docs/research/2026-09-detect-pattern-
+    candidates-batch2.md's own Batch 5 section has the full research record). Covers Program Upload
+    (S7 + UMAS, always-notable), Port Scan (the first DetectEngine finding not gated on any specific
+    ICS protocol -- raw TCP SYN sweep, windowed SET-of-distinct-ports), and Rogue Master + Brute
+    Force I/O (Modbus + DNP3, reusing modbus_write_function_names()/dnp3_write_function_names()'s own
+    already-existing write classification).
+
+    Scenarios:
+      1-3) S7comm Start Upload (0x1D) / Upload (0x1E) / End Upload (0x1F) against the same PLC --
+           all three collapse into ONE s7-upload finding (FirmwareLogicChange/T0845), packet_count 3
+           (the exact mirror of the pre-existing s7-download finding's own trio-collapsing shape).
+      4-6) UMAS INITIALIZE_UPLOAD (0x30) / UPLOAD_BLOCK (0x31) / END_STRATEGY_UPLOAD (0x32) against
+           the same PLC -- ONE umas-upload finding, packet_count 3.
+      7-16) Ten pure-SYN packets from one source to ten DISTINCT destination ports on one target, all
+           within a couple of seconds -- fires port-scan (ProtocolMisuse/T0846.001) the moment the
+           10th distinct port is reached (kPortScanDistinctPortThreshold).
+      17-19) Three pure-SYN packets from a different source to three well-known ports (102/502/47808)
+           against a different target -- under threshold, must NOT fire (an ordinary engineering
+           client opening a small handful of well-known ports).
+      20-29) Ten pure-SYN packets to ten distinct ports from a third source, but split across the
+           window boundary: nine within the first couple of seconds, the tenth 65s later (past
+           kPortScanWindowSeconds) -- the window resets there and the running distinct-port count
+           never reaches 10 within any ONE window -- must NOT fire, proving this pattern is genuinely
+           windowed (the same discipline Batch 1/2's own reset scenarios already established for
+           their own windowed detectors).
+      30-31) Modbus Write Multiple Registers from a FIRST client against an outstation -- no finding;
+           then from a SECOND, different client against the SAME outstation -- fires
+           modbus-rogue-master (ProtocolMisuse/T0848, Critical).
+      32-33) DNP3 Direct Operate (0x05, Write-classified) from a FIRST master against an outstation --
+           no finding; then from a SECOND, different master against the SAME outstation -- fires
+           dnp3-rogue-master (ProtocolMisuse/T0848, Critical).
+      34-36) Three Modbus Write Multiple Registers requests from one client to one outstation within a
+           couple of seconds -- fires modbus-write-burst (ProtocolMisuse/T0806, Moderate) on the
+           third. (The windowed-reset behavior itself is NOT re-proven here -- write_burst_state_
+           reuses modbus_exception_burst_state_'s own exact count+window_start shape, already proven
+           windowed by Batch 1's own reset scenario.)
+      37-38) Two Modbus Write Multiple Registers requests (under kWriteBurstThreshold) -- must NOT fire.
+      39-41) Three DNP3 Direct Operate requests from one master to one outstation within a couple of
+           seconds -- fires dnp3-write-burst.
+      42-43) Two DNP3 Direct Operate requests (under threshold) -- must NOT fire.
+    """
+    S7U_ENG_IP, S7U_ENG_MAC = "192.168.1.160", mac("00:0c:29:cd:20:60")
+    S7U_PLC_IP, S7U_PLC_MAC = "192.168.1.161", mac("00:0c:29:cd:20:61")
+
+    UMASU_ENG_IP, UMASU_ENG_MAC = "192.168.1.162", mac("00:0c:29:cd:20:62")
+    UMASU_PLC_IP, UMASU_PLC_MAC = "192.168.1.163", mac("00:0c:29:cd:20:63")
+
+    SCAN_IP, SCAN_MAC = "192.168.1.164", mac("00:0c:29:cd:20:64")
+    SCAN_TARGET_IP, SCAN_TARGET_MAC = "192.168.1.165", mac("00:0c:29:cd:20:65")
+
+    NORMAL_IP, NORMAL_MAC = "192.168.1.166", mac("00:0c:29:cd:20:66")
+    NORMAL_TARGET_IP, NORMAL_TARGET_MAC = "192.168.1.167", mac("00:0c:29:cd:20:67")
+
+    SCAN_RESET_IP, SCAN_RESET_MAC = "192.168.1.168", mac("00:0c:29:cd:20:68")
+    SCAN_RESET_TARGET_IP, SCAN_RESET_TARGET_MAC = "192.168.1.169", mac("00:0c:29:cd:20:69")
+
+    MB_WRITER_A_IP, MB_WRITER_A_MAC = "192.168.1.170", mac("00:0c:29:cd:20:6a")
+    MB_WRITER_B_IP, MB_WRITER_B_MAC = "192.168.1.171", mac("00:0c:29:cd:20:6b")
+    MB_ROGUE_SERVER_IP, MB_ROGUE_SERVER_MAC = "192.168.1.172", mac("00:0c:29:cd:20:6c")
+
+    DNP3_WRITER_A_IP, DNP3_WRITER_A_MAC = "192.168.1.173", mac("00:0c:29:cd:20:6d")
+    DNP3_WRITER_B_IP, DNP3_WRITER_B_MAC = "192.168.1.174", mac("00:0c:29:cd:20:6e")
+    DNP3_ROGUE_SERVER_IP, DNP3_ROGUE_SERVER_MAC = "192.168.1.175", mac("00:0c:29:cd:20:6f")
+
+    MB_BURST_IP, MB_BURST_MAC = "192.168.1.176", mac("00:0c:29:cd:20:70")
+    MB_BURST_SERVER_IP, MB_BURST_SERVER_MAC = "192.168.1.177", mac("00:0c:29:cd:20:71")
+    MB_BURST_NEG_IP, MB_BURST_NEG_MAC = "192.168.1.178", mac("00:0c:29:cd:20:72")
+    MB_BURST_NEG_SERVER_IP, MB_BURST_NEG_SERVER_MAC = "192.168.1.179", mac("00:0c:29:cd:20:73")
+
+    DNP3_BURST_IP, DNP3_BURST_MAC = "192.168.1.180", mac("00:0c:29:cd:20:74")
+    DNP3_BURST_SERVER_IP, DNP3_BURST_SERVER_MAC = "192.168.1.181", mac("00:0c:29:cd:20:75")
+    DNP3_BURST_NEG_IP, DNP3_BURST_NEG_MAC = "192.168.1.182", mac("00:0c:29:cd:20:76")
+    DNP3_BURST_NEG_SERVER_IP, DNP3_BURST_NEG_SERVER_MAC = "192.168.1.183", mac("00:0c:29:cd:20:77")
+
+    packets = []  # list of (payload_bytes, offset_seconds) -- same convention Batch 2's own
+                  # windowed scenarios use.
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident, flags=TCP_PSH | TCP_ACK,
+                offset_seconds=None):
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, flags, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4900 + ident) + tcp
+        pkt = eth_header(dst_mac, src_mac, 0x0800) + ip
+        packets.append((pkt, ident if offset_seconds is None else offset_seconds))
+
+    def add_syn(src_ip, src_mac, dst_ip, dst_mac, dst_port, ident, offset_seconds=None):
+        add_tcp(src_ip, src_mac, dst_ip, dst_mac, 49000 + ident, dst_port, b"", ident, flags=TCP_SYN,
+                offset_seconds=offset_seconds)
+
+    def modbus_write_multiple_registers(transaction_id, unit_id=1):
+        # Write Multiple Registers (0x10) REQUEST shape: address(2BE) + quantity(2BE) + byte_count(1)
+        # + data(byte_count bytes) -- decode_write_multiple (modbus.cpp) only sets is_request=true for
+        # THIS shape (data.size() >= 5); Write Single Register's request/response share an identical
+        # 4-byte wire shape with no is_request signal at all (ModbusFrame::is_request's own comment,
+        # modbus.hpp), so it can't be used here -- confirmed the hard way when this fixture's first
+        # draft (Write Single Register) produced zero modbus-rogue-master/modbus-write-burst findings.
+        values = struct.pack("!HH", 0x1234, 0x5678)  # two registers' worth of data
+        pdu = struct.pack("!BHHB", 0x10, 10, 2, len(values)) + values
+        return struct.pack("!HHHB", transaction_id, 0, 1 + len(pdu), unit_id) + pdu
+
+    ident = 1
+
+    # --- 1-3) S7 Upload trio -- Start Upload (0x1D) / Upload (0x1E) / End Upload (0x1F), all against
+    # --- the same PLC -- collapse into ONE s7-upload finding (packet_count 3). ---------------------
+    for func in (0x1D, 0x1E, 0x1F):
+        param = bytes([func])
+        req = s7_header(0x01, ident, len(param), 0) + param
+        cotp = tpkt_frame(COTP_DT_HEADER, req)
+        add_tcp(S7U_ENG_IP, S7U_ENG_MAC, S7U_PLC_IP, S7U_PLC_MAC, 49700 + ident, 102, cotp, ident)
+        ident += 1
+
+    # --- 4-6) UMAS Upload trio -- INITIALIZE_UPLOAD (0x30) / UPLOAD_BLOCK (0x31) / END_STRATEGY_UPLOAD
+    # --- (0x32), all against the same PLC -- collapse into ONE umas-upload finding (packet_count 3).
+    for i, func in enumerate((0x30, 0x31, 0x32)):
+        umas_payload = bytes([0x10 + i, func])
+        pdu = bytes([0x5A]) + umas_payload
+        mbap = struct.pack("!HHH", ident, 0, 1 + len(pdu)) + bytes([1]) + pdu
+        add_tcp(UMASU_ENG_IP, UMASU_ENG_MAC, UMASU_PLC_IP, UMASU_PLC_MAC, 49800 + ident, 502, mbap, ident)
+        ident += 1
+
+    # --- 7-16) Port scan: ten distinct destination ports via pure-SYN packets, all within a couple of
+    # --- seconds -- fires port-scan the moment the 10th distinct port is reached. --------------------
+    scan_ports = [102, 502, 20000, 44818, 47808, 9600, 8080, 443, 21, 23]
+    for i, port in enumerate(scan_ports):
+        add_syn(SCAN_IP, SCAN_MAC, SCAN_TARGET_IP, SCAN_TARGET_MAC, port, ident, offset_seconds=i * 0.1)
+        ident += 1
+
+    # --- 17-19) Three pure-SYN packets to three well-known ports -- under threshold, must NOT fire.
+    for i, port in enumerate((102, 502, 47808)):
+        add_syn(NORMAL_IP, NORMAL_MAC, NORMAL_TARGET_IP, NORMAL_TARGET_MAC, port, ident, offset_seconds=i * 0.1)
+        ident += 1
+
+    # --- 20-29) Port scan, windowed reset: nine distinct ports within the first couple of seconds,
+    # --- then a tenth 65s later (past kPortScanWindowSeconds=60) -- the window resets there and the
+    # --- running distinct-port count never reaches 10 within any ONE window -- must NOT fire.
+    reset_ports = [1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033]
+    for i, port in enumerate(reset_ports):
+        add_syn(SCAN_RESET_IP, SCAN_RESET_MAC, SCAN_RESET_TARGET_IP, SCAN_RESET_TARGET_MAC, port, ident,
+                offset_seconds=i * 0.1)
+        ident += 1
+    add_syn(SCAN_RESET_IP, SCAN_RESET_MAC, SCAN_RESET_TARGET_IP, SCAN_RESET_TARGET_MAC, 1034, ident,
+            offset_seconds=65.0)
+    ident += 1
+
+    # --- 30-31) Modbus Rogue Master: a first writer (no finding), then a second, different writer
+    # --- against the same outstation (fires modbus-rogue-master). ------------------------------------
+    add_tcp(MB_WRITER_A_IP, MB_WRITER_A_MAC, MB_ROGUE_SERVER_IP, MB_ROGUE_SERVER_MAC, 49900, 502,
+            modbus_write_multiple_registers(ident), ident)
+    ident += 1
+    add_tcp(MB_WRITER_B_IP, MB_WRITER_B_MAC, MB_ROGUE_SERVER_IP, MB_ROGUE_SERVER_MAC, 49901, 502,
+            modbus_write_multiple_registers(ident), ident)
+    ident += 1
+
+    # --- 32-33) DNP3 Rogue Master: a first master (no finding), then a second, different master
+    # --- against the same outstation (fires dnp3-rogue-master). Direct Operate (0x05) is
+    # --- Write-classified (dnp3.cpp's own kDnp3Functions table). ------------------------------------
+    direct_operate = dnp3_link_frame(source=1, destination=2000, user_data=bytes([0xC0, 0xC0, 0x05]))
+    add_tcp(DNP3_WRITER_A_IP, DNP3_WRITER_A_MAC, DNP3_ROGUE_SERVER_IP, DNP3_ROGUE_SERVER_MAC, 51900, 20000,
+            direct_operate, ident)
+    ident += 1
+    add_tcp(DNP3_WRITER_B_IP, DNP3_WRITER_B_MAC, DNP3_ROGUE_SERVER_IP, DNP3_ROGUE_SERVER_MAC, 51901, 20000,
+            direct_operate, ident)
+    ident += 1
+
+    # --- 34-36) Modbus write-burst: three Write Multiple Registers requests from one client within a
+    # --- couple of seconds -- fires modbus-write-burst on the third. --------------------------------
+    for i in range(3):
+        add_tcp(MB_BURST_IP, MB_BURST_MAC, MB_BURST_SERVER_IP, MB_BURST_SERVER_MAC, 49910, 502,
+                modbus_write_multiple_registers(ident), ident, offset_seconds=None)
+        ident += 1
+
+    # --- 37-38) Two Modbus Write Multiple Registers requests -- under kWriteBurstThreshold, must NOT fire.
+    for i in range(2):
+        add_tcp(MB_BURST_NEG_IP, MB_BURST_NEG_MAC, MB_BURST_NEG_SERVER_IP, MB_BURST_NEG_SERVER_MAC, 49920, 502,
+                modbus_write_multiple_registers(ident), ident, offset_seconds=None)
+        ident += 1
+
+    # --- 39-41) DNP3 write-burst: three Direct Operate requests from one master within a couple of
+    # --- seconds -- fires dnp3-write-burst on the third. ---------------------------------------------
+    for i in range(3):
+        add_tcp(DNP3_BURST_IP, DNP3_BURST_MAC, DNP3_BURST_SERVER_IP, DNP3_BURST_SERVER_MAC, 51910, 20000,
+                direct_operate, ident, offset_seconds=None)
+        ident += 1
+
+    # --- 42-43) Two DNP3 Direct Operate requests -- under threshold, must NOT fire.
+    for i in range(2):
+        add_tcp(DNP3_BURST_NEG_IP, DNP3_BURST_NEG_MAC, DNP3_BURST_NEG_SERVER_IP, DNP3_BURST_NEG_SERVER_MAC,
+                51920, 20000, direct_operate, ident, offset_seconds=None)
+        ident += 1
+
+    data = pcap_global_header()
+    base_ts = 1_700_090_000.0
+    for i, (pkt, offset) in enumerate(packets):
+        ts = base_ts + float(offset)
+        sec = int(ts)
+        usec = int(round((ts - sec) * 1_000_000))
+        data += pcap_record(pkt, sec, usec)
+    (TESTS_DIR / "sample_detect_snort_patterns_batch5.pcap").write_bytes(data)
+
+
 def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
     """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
     umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
@@ -21227,6 +21428,7 @@ if __name__ == "__main__":
     build_detect_snort_patterns_batch2_sample()
     build_detect_snort_patterns_batch3_sample()
     build_detect_snort_patterns_batch4_sample()
+    build_detect_snort_patterns_batch5_sample()
     build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()

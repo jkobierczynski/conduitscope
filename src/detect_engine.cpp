@@ -198,6 +198,26 @@ constexpr double kModbusExceptionBurstWindowSeconds = 60.0;
 constexpr size_t kDnp3EnumerationSweepThreshold = 5;
 constexpr double kDnp3EnumerationSweepWindowSeconds = 60.0;
 
+// Port scan threshold/window (Batch 5 item 24, docs/research/2026-09-detect-pattern-candidates-
+// batch2.md's own Batch 5 section) -- a small, documented judgment-call default, not vendor-sourced
+// (unlike every prior batch, this pattern has no single Snort/Suricata rule to transplant a count/
+// window from -- MITRE's own T0846.001 description names nmap/netcat/Advanced Port Scanner generically
+// without a specific threshold). 10 distinct destination ports reached via pure-SYN packets within 60
+// seconds is picked as "clearly a sweep" -- high enough that an ordinary engineering client opening a
+// small handful of well-known ports against one device (S7/102, Modbus/502, an HTTP management UI)
+// doesn't trip it, low enough that a real port scan against a modest/synthetic capture still does. Same
+// 60s window as this file's other windowed detectors, for consistency.
+constexpr size_t kPortScanDistinctPortThreshold = 10;
+constexpr double kPortScanWindowSeconds = 60.0;
+
+// Write-burst threshold/window (Batch 5 item 26, "Brute Force I/O"/T0806) -- reuses
+// kModbusExceptionBurstThreshold/kModbusExceptionBurstWindowSeconds's own values and reasoning
+// (a small, documented judgment-call default: 3 WRITE-classified requests to the same outstation
+// within 60 seconds), the same low end of Quickdraw's own count-3-to-5 range Batch 1 item 6 already
+// picked, applied here to write volume instead of exception-response volume.
+constexpr size_t kWriteBurstThreshold = 3;
+constexpr double kWriteBurstWindowSeconds = 60.0;
+
 // Byte-exact match against a fixed expected sequence -- used by the Batch 2 Modbus scanner-tool
 // fingerprints (items 10/11, detect_engine.cpp's own DNP3-block-sibling Modbus block below). Every
 // byte these fingerprints check is already available as an individually-decoded ModbusFrame field
@@ -301,6 +321,36 @@ void DetectEngine::observe(const DecodedPacket& dp) {
         }
     };
 
+    // --- Port Scan (Batch 5 item 24, T0846.001) -- no protocol decode at all, the first DetectEngine
+    // finding not gated on any specific ICS protocol. Pure-SYN (no-ACK) packets from one source to one
+    // destination, sweeping across an unusually wide spread of distinct destination ports within a
+    // short window -- the same windowed-SET-of-distinct-values shape dnp3_enumeration_sweep_state_
+    // uses below, applied to raw TCP ports instead of DNP3 object group/variations. dp.tcp_flags ==
+    // "SYN" is the exact same pure-SYN check asset_inventory.cpp/baseline.cpp/flow_direction.cpp
+    // already use for handshake tracking -- a SYN,ACK (a response, not a scan attempt) never matches.
+    // Deliberately TCP-only: see this file's own header comment for why a UDP equivalent is left for a
+    // future pass rather than guessed at now.
+    if (dp.has_tcp && dp.tcp_flags == "SYN") {
+        std::string pkey = dp.src_ip + "|" + dp.dst_ip;
+        PortScanState& pst = port_scan_state_[pkey];
+        if (pst.distinct_ports.empty() || (dp.timestamp - pst.window_start) > kPortScanWindowSeconds) {
+            pst.window_start = dp.timestamp;
+            pst.distinct_ports.clear();
+        }
+        pst.distinct_ports.insert(dp.dst_port);
+        if (pst.distinct_ports.size() >= kPortScanDistinctPortThreshold) {
+            record_always_notable(
+                "port-scan", DetectionCategory::ProtocolMisuse, mitre_t0846_001_port_scan(), dp.src_ip,
+                dp.dst_ip, "tcp", dp.dst_port,
+                "This source reached " + std::to_string(pst.distinct_ports.size()) +
+                    " distinct destination ports on this host via pure-SYN packets within " +
+                    std::to_string(static_cast<long>(kPortScanWindowSeconds)) +
+                    "s -- a port-scan-shaped sweep rather than an ordinary engineering client opening "
+                    "a small handful of well-known ports",
+                DetectionSeverity::Moderate);
+        }
+    }
+
     // --- S7comm: PLC Control/PLC Stop (mode change), block download (firmware/logic change) -------
     // NOT gated on has_function alone: unlike has_pi_service/plc_stop_message (Job-side only, per
     // baseline.cpp's own extract_s7comm_operations comment), S7CommResult::has_function/
@@ -338,6 +388,20 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        dp.dst_port,
                                        "S7comm block download (" + sr.function_name +
                                            ") -- a program/logic block is being written TO the CPU from an "
+                                           "engineering station");
+            } else if (sr.function_name == "Start Upload" || sr.function_name == "Upload" ||
+                       sr.function_name == "End Upload") {
+                // Batch 5 item 23 (T0845, Program Upload) -- the mirror of s7-download above: pulling
+                // logic OFF the CPU rather than pushing it on. The request that STARTS the sequence
+                // (Start Upload) is still sent by the engineering station TO the PLC (function access
+                // is classified Read because the data itself flows PLC->station once underway, per
+                // s7comm.cpp's own comment on this trio -- see this block's own dp.dst_port == 102
+                // gate, which already only matches Job-side requests addressed to the PLC).
+                record_always_notable("s7-upload", DetectionCategory::FirmwareLogicChange,
+                                       mitre_t0845_program_upload(), dp.src_ip, dp.dst_ip, "s7comm",
+                                       dp.dst_port,
+                                       "S7comm block upload (" + sr.function_name +
+                                           ") -- a program/logic block is being read FROM the CPU by an "
                                            "engineering station");
             }
 
@@ -524,6 +588,55 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip,
                                        "dnp3", dp.dst_port, d.str());
             }
+
+            // Batch 5 items 25/26 (T0848 Rogue Master, T0806 Brute Force I/O) -- the DNP3 analog of
+            // the Modbus block above, reusing the same is_dnp3_write classification already computed
+            // for the broadcast check above. See modbus_write_originators_by_server_/
+            // write_burst_state_'s own comments (detect_engine.hpp) for the full reasoning; both
+            // trackers are per-protocol (a separate dnp3_write_originators_by_server_ map, and the
+            // same write_burst_state_ map keyed with a "dnp3|" prefix instead of "modbus|"), so a
+            // Modbus writer and a DNP3 writer to the same IP address are never evidence about each
+            // other.
+            if (is_dnp3_write) {
+                auto& writers = dnp3_write_originators_by_server_[dp.dst_ip];
+                bool already_writer = false;
+                for (const auto& w : writers) {
+                    if (w == dp.src_ip) {
+                        already_writer = true;
+                        break;
+                    }
+                }
+                if (!already_writer) {
+                    if (!writers.empty()) {
+                        record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
+                                                       mitre_t0848_rogue_master(),
+                                                       /*is_remote_access=*/false, dp.src_ip, dp.dst_ip,
+                                                       "dnp3", dp.dst_port, "dnp3-rogue-master",
+                                                       DetectionSeverity::Critical);
+                    }
+                    writers.push_back(dp.src_ip);
+                }
+
+                std::string wkey = "dnp3|" + dp.src_ip + "|" + dp.dst_ip;
+                WriteBurstState& wst = write_burst_state_[wkey];
+                if (wst.count == 0 || (dp.timestamp - wst.window_start) > kWriteBurstWindowSeconds) {
+                    wst.window_start = dp.timestamp;
+                    wst.count = 0;
+                }
+                ++wst.count;
+                if (wst.count >= kWriteBurstThreshold) {
+                    record_always_notable(
+                        "dnp3-write-burst", DetectionCategory::ProtocolMisuse,
+                        mitre_t0806_brute_force_io(), dp.src_ip, dp.dst_ip, "dnp3", dp.dst_port,
+                        "This master issued at least " + std::to_string(kWriteBurstThreshold) +
+                            " write-classified DNP3 requests to this outstation within " +
+                            std::to_string(static_cast<long>(kWriteBurstWindowSeconds)) +
+                            "s -- a repetitive I/O-point-value-change burst, though a legitimate "
+                            "fast-polling engineering tool doing rapid setpoint adjustment during "
+                            "commissioning can trigger this too",
+                        DetectionSeverity::Moderate);
+                }
+            }
         }
     }
 
@@ -673,9 +786,14 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             bf.npdu.apdu.service_choice_name == "who-Is") {
             size_t count = ++bacnet_who_is_count_by_source_[dp.src_ip];
             if (count >= kBacnetWhoIsFloodThreshold) {
+                // Batch 5 re-mapping: T0846.002 (Broadcast Discovery) fits this finding better than
+                // the T0888 (Remote System Information Discovery) it cited before Batch 5 -- MITRE's
+                // own T0846.002 description names "Building Automation and Control Network (BACnet)
+                // Who-Is requests" as a canonical example BY NAME, not an inference. Zero behavior
+                // change otherwise -- same threshold, same severity, same everything else.
                 record_always_notable(
                     "bacnet-who-is-flood", DetectionCategory::ProtocolMisuse,
-                    mitre_t0888_remote_system_information_discovery(), dp.src_ip, dp.dst_ip, "bacnet",
+                    mitre_t0846_002_broadcast_discovery(), dp.src_ip, dp.dst_ip, "bacnet",
                     dp.dst_port,
                     "BACnet Who-Is flood/device-enumeration sweep from this source -- at least " +
                         std::to_string(kBacnetWhoIsFloodThreshold) +
@@ -1119,6 +1237,17 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                                        "UMAS " + mb.umas->function_name +
                                            " -- a program/logic block is being transferred to/from the "
                                            "PLC from an engineering station");
+            } else if (fc == UMAS_INITIALIZE_UPLOAD || fc == UMAS_UPLOAD_BLOCK ||
+                       fc == UMAS_END_STRATEGY_UPLOAD) {
+                // Batch 5 item 23 (T0845, Program Upload) -- the mirror of umas-download above, one
+                // function-code trio over in UMAS's own table (0x30/0x31/0x32 vs. the already-wired
+                // 0x33/0x34/0x35). Pulling logic OFF the PLC rather than pushing it on.
+                record_always_notable("umas-upload", DetectionCategory::FirmwareLogicChange,
+                                       mitre_t0845_program_upload(), dp.src_ip, dp.dst_ip, "modbus",
+                                       dp.dst_port,
+                                       "UMAS " + mb.umas->function_name +
+                                           " -- a program/logic block is being read FROM the PLC by an "
+                                           "engineering station");
             } else if (fc == UMAS_TAKE_PLC_RESERVATION || fc == UMAS_READ_ID ||
                        fc == UMAS_READ_PROJECT_INFO || fc == UMAS_READ_PLC_INFO) {
                 // Same "second-plus originator to a given server is new, first is not" mechanism as
@@ -1155,6 +1284,72 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                             is_reservation ? DetectionSeverity::Moderate : DetectionSeverity::Informational);
                     }
                     originators.push_back(dp.src_ip);
+                }
+            }
+        }
+
+        // --- Modbus: Rogue Master (Batch 5 item 25, T0848) + Brute Force I/O (Batch 5 item 26, T0806)
+        // Both reuse the same WRITE classification: mb.function_name matched against
+        // modbus_write_function_names() (modbus.hpp), the exact same read/write classification
+        // Policy::parse_policy_text's own 'functions: [write]' keyword expansion already uses.
+        // UMAS traffic is naturally excluded here with no extra guard needed: modbus_function_name()
+        // (modbus.cpp) special-cases function code 0x5A to return the literal string "UMAS" rather
+        // than pulling a name from kModbusFunctions' own table, so mb.function_name == "UMAS" never
+        // matches anything modbus_write_function_names() returns -- confirmed by reading modbus.cpp
+        // this session, not assumed. See this file's own header comment for why UMAS write traffic is
+        // deliberately scoped out of both patterns below (its own write-shaped functions already fire
+        // their own always-notable finding on every occurrence).
+        if (mb.is_request) {
+            static const std::vector<std::string> kModbusWriteFunctionNames = modbus_write_function_names();
+            bool is_modbus_write = std::find(kModbusWriteFunctionNames.begin(), kModbusWriteFunctionNames.end(),
+                                              mb.function_name) != kModbusWriteFunctionNames.end();
+            if (is_modbus_write) {
+                // Rogue Master: a second, different client issuing a write-classified request against
+                // an outstation that already has an established write-capable master --
+                // modbus_write_originators_by_server_'s own comment (detect_engine.hpp) has the full
+                // reasoning for why this is its own tracker, distinct from every read-only
+                // new-originator finding elsewhere in this file.
+                auto& writers = modbus_write_originators_by_server_[dp.dst_ip];
+                bool already_writer = false;
+                for (const auto& w : writers) {
+                    if (w == dp.src_ip) {
+                        already_writer = true;
+                        break;
+                    }
+                }
+                if (!already_writer) {
+                    if (!writers.empty()) {
+                        record_new_conduit_candidate(DetectionCategory::ProtocolMisuse,
+                                                       mitre_t0848_rogue_master(),
+                                                       /*is_remote_access=*/false, dp.src_ip, dp.dst_ip,
+                                                       "modbus", dp.dst_port, "modbus-rogue-master",
+                                                       DetectionSeverity::Critical);
+                    }
+                    writers.push_back(dp.src_ip);
+                }
+
+                // Brute Force I/O: a burst of write-classified requests against the same outstation
+                // within a short window -- write_burst_state_'s own comment (detect_engine.hpp) has
+                // the full reasoning; same windowed-count shape as modbus_exception_burst_state_
+                // above (Batch 1 item 6), reused here for write volume instead of exception volume.
+                std::string wkey = "modbus|" + dp.src_ip + "|" + dp.dst_ip;
+                WriteBurstState& wst = write_burst_state_[wkey];
+                if (wst.count == 0 || (dp.timestamp - wst.window_start) > kWriteBurstWindowSeconds) {
+                    wst.window_start = dp.timestamp;
+                    wst.count = 0;
+                }
+                ++wst.count;
+                if (wst.count >= kWriteBurstThreshold) {
+                    record_always_notable(
+                        "modbus-write-burst", DetectionCategory::ProtocolMisuse,
+                        mitre_t0806_brute_force_io(), dp.src_ip, dp.dst_ip, "modbus", dp.dst_port,
+                        "This client issued at least " + std::to_string(kWriteBurstThreshold) +
+                            " write-classified Modbus requests to this server within " +
+                            std::to_string(static_cast<long>(kWriteBurstWindowSeconds)) +
+                            "s -- a repetitive I/O-point-value-change burst, though a legitimate "
+                            "fast-polling engineering tool doing rapid setpoint adjustment during "
+                            "commissioning can trigger this too",
+                        DetectionSeverity::Moderate);
                 }
             }
         }
@@ -1566,6 +1761,21 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
                   << c.client_ip << " to " << c.server_ip
                   << " -- a different client than the one(s) already seen reading this BBMD's own "
                      "routing configuration in this capture";
+            } else if (c.source_tag == "modbus-rogue-master") {
+                // Batch 5 item 25 -- a second, different client issuing a write-classified Modbus
+                // request against an outstation that already has an established write-capable master
+                // (modbus_write_originators_by_server_, detect_engine.hpp).
+                d << "Modbus write-classified request from a second write-capable master " << c.client_ip
+                  << " to " << c.server_ip
+                  << " -- a different client than the one(s) already seen issuing write-classified "
+                     "requests to this outstation in this capture";
+            } else if (c.source_tag == "dnp3-rogue-master") {
+                // Batch 5 item 25 -- the DNP3 analog of modbus-rogue-master above
+                // (dnp3_write_originators_by_server_, detect_engine.hpp).
+                d << "DNP3 write-classified request from a second write-capable master " << c.client_ip
+                  << " to " << c.server_ip
+                  << " -- a different master than the one(s) already seen issuing write-classified "
+                     "requests to this outstation in this capture";
             } else {
                 // "cip-new-originator" -- the remaining, original non-remote-access source (the
                 // fallback here, not because it's the only other one, but because it was this

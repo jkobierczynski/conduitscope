@@ -1093,6 +1093,132 @@ IPs, plus the BVLC-Result Successful-Completion pair) produced a finding of thei
 `real_enip_detect_list_identity_redpoint_fingerprint` covers item 20 against the real capture described
 above.
 
+## Batch 5: sourced from the live MITRE ATT&CK for ICS matrix itself
+
+A departure from Batches 1-4's own research method. Jurgen asked "Are there other techniques related
+with ICS / OT in the MITRE ATT&CK framework?" -- rather than mining another Snort/Suricata ruleset (the
+source for every prior batch), this pass started from the ATT&CK-for-ICS matrix itself
+(`attack.mitre.org`), read techniques not yet cited anywhere in this codebase, and asked for each one
+whether a decoded field genuinely supports it before proposing it. Written up as items 23-26 in
+`docs/research/2026-09-detect-pattern-candidates-batch2.md`'s own new "Batch 5" section (plus a
+re-mapping opportunity, one deferred item, and two honest negatives), confirmed with a plain "yes" once
+presented.
+
+| # | Pattern (as implemented) | Category / technique | Evidence | Severity | Novelty |
+|---|---|---|---|---|---|
+| 23a | S7comm block upload (Start/Upload/End Upload) -- logic read FROM the CPU | FirmwareLogicChange / T0845 | Confirmed (always-notable) | Critical | N/A |
+| 23b | UMAS block upload (INITIALIZE_UPLOAD/UPLOAD_BLOCK/END_STRATEGY_UPLOAD) -- logic read FROM the PLC | FirmwareLogicChange / T0845 | Confirmed (always-notable) | Critical | N/A |
+| 24 | A source reaching >=10 distinct destination ports on one host via pure-SYN packets within 60s | ProtocolMisuse / T0846.001 | Confirmed (always-notable) | Moderate | N/A |
+| 25a | A second, different write-capable Modbus master issuing a write-classified request to a server already seen with one | ProtocolMisuse / T0848 | Confirmed (new-vs-known) | Critical | First Occurrence / Confirmed New |
+| 25b | A second, different write-capable DNP3 master issuing a write-classified request to an outstation already seen with one | ProtocolMisuse / T0848 | Confirmed (new-vs-known) | Critical | First Occurrence / Confirmed New |
+| 26a | >=3 write-classified Modbus requests from one client to one server within 60s | ProtocolMisuse / T0806 | Confirmed (always-notable) | Moderate | N/A |
+| 26b | >=3 write-classified DNP3 requests from one master to one outstation within 60s | ProtocolMisuse / T0806 | Confirmed (always-notable) | Moderate | N/A |
+| -- | (re-map) `bacnet-who-is-flood`'s own citation, T0888 -> T0846.002 | ProtocolMisuse / T0846.002 | Confirmed (always-notable) | Moderate | N/A |
+
+Implementation notes, by pattern:
+
+- **Pattern 23 needed zero new decode work in the S7comm case, and reused the existing `modbus_write_function_names()`/`umas` machinery's sibling UMAS function names in the UMAS case.** T0845 "Program Upload" is
+  the download findings' own mirror image: MITRE's own text distinguishes "download" (logic pushed TO
+  the device) from "upload" (logic pulled OFF it), and this codebase already decoded both directions'
+  function names for S7comm (`Start Upload`/`Upload`/`End Upload`, right alongside the pre-existing
+  `Start Download`/`Download Block`/`End Download` that already backed `s7-download`) and UMAS
+  (`UMAS_INITIALIZE_UPLOAD`/`UMAS_UPLOAD_BLOCK`/`UMAS_END_STRATEGY_UPLOAD`, alongside
+  `UMAS_INITIALIZE_DOWNLOAD`/`UMAS_DOWNLOAD_BLOCK`/`UMAS_END_STRATEGY_DOWNLOAD`) -- this batch just
+  wired the already-decoded upload-side names into two new `record_always_notable` calls placed right
+  after their own download-side siblings, same category (`FirmwareLogicChange`) and severity
+  (`Critical`) as the download findings, different technique (T0845 instead of T0843).
+- **Pattern 24 is this engine's first protocol-agnostic finding.** Every prior pattern in this codebase
+  (Batches 1-4, and 23/25/26 above) reads a decoded protocol field; a port scan is defined purely by TCP
+  SYN packets across many destination ports, with no ICS-protocol content at all -- `record_always_notable`
+  is called with `"tcp"` as the literal protocol string rather than any decoder's own field. Gated on
+  `dp.has_tcp && dp.tcp_flags == "SYN"` (pure SYN, no ACK -- the same handshake-initiation signal
+  `asset_inventory.cpp`/`baseline.cpp`/`flow_direction.cpp` already use), keyed per `(src_ip, dst_ip)`
+  pair with a windowed `PortScanState {window_start, distinct_ports}` mirroring the
+  `ModbusExceptionBurstState`/`Dnp3EnumerationSweepState` precedent from Batches 1-2 -- 10 distinct ports
+  within 60 seconds resets the window if the gap since `window_start` exceeds it, exactly like those two
+  earlier windowed patterns. A deliberately conservative threshold: 10 distinct ports is well above what
+  an ordinary engineering client touches (one or two well-known service ports), so this pattern is meant
+  to catch a genuine reconnaissance-shaped sweep rather than flag normal multi-service polling.
+- **Pattern 25 (a/b) is the first "new originator" finding gated on a *write-classified* request rather
+  than any request at all.** `modbus_write_function_names()`/`dnp3_write_function_names()` (both
+  pre-existing helpers already backing `Policy::parse_policy_text`'s own `functions: [write]` keyword)
+  are called once each into a static local vector, then every write-classified request's originator is
+  tracked per-server in a new `modbus_write_originators_by_server_`/`dnp3_write_originators_by_server_`
+  map -- a second, different IP appearing in that map for a server already holding one is T0848 "Rogue
+  Master": a second write-capable master is a materially different (and more alarming) claim than a
+  second read-only enumeration originator, so this reuses the "second occurrence is new" *mechanism*
+  from the Batch 3/4 engineering-station findings but deliberately does NOT share their maps or their
+  Informational severity -- Critical, since an unplanned second write-capable master is close to the
+  textbook definition of a rogue master regardless of confidence level. Modbus function 0x5A (UMAS) is
+  automatically excluded from `modbus_write_function_names()`'s own result with no extra guard needed:
+  `modbus_function_name()` returns the literal string `"UMAS"` for that function code rather than a name
+  from `kModbusFunctions`' own table (`modbus.cpp`), so `"UMAS"` never appears in the returned vector --
+  confirmed by reading the source rather than assumed, since a false inclusion here would have meant
+  every ordinary engineering download/upload sequence also tripping a rogue-master finding.
+- **Pattern 25 exposed a real fixture bug, caught by testing against real CLI output rather than assumed
+  correct.** The first fixture draft used Modbus Write Single Register (function 0x06) for the
+  Modbus-side Rogue-Master/Write-Burst scenarios. `ModbusFrame::is_request`'s own doc comment
+  (`modbus.hpp`) says plainly that Write Single Coil/Register (0x05/0x06) never set `is_request=true`,
+  because request and response share an identical 4-byte wire shape with no shape-based signal to tell
+  them apart -- a deliberate, documented scope boundary, not a bug in the decoder. Since both new
+  patterns gate on `mb.is_request`, function 0x06 could never trigger either one; running the CLI against
+  the first fixture draft produced only 5 of the expected 7 new findings, both Modbus ones silently
+  missing. Fixed by switching the fixture to Write Multiple Registers (function 0x10), which has a
+  genuine shape-based `is_request` signal (`decode_write_multiple`'s request shape carries a byte-count
+  field, `data.size() >= 5`, vs. exactly `4` for the response) -- re-verified against real output after
+  the fix, matching this project's own "verify every assertion against real CLI output before writing
+  it" discipline.
+- **Pattern 26 (a/b) reuses pattern 25's own write-classification and adds one more windowed-state map.**
+  A `WriteBurstState {count, window_start}` (same shape as Batch 1's `ModbusExceptionBurstState`) keyed
+  per `(protocol-prefixed) client|server` pair counts write-classified requests within a 60-second
+  window; 3 or more resets the "already reported" gate is unnecessary here since this is an
+  always-notable finding (`record_always_notable` itself dedups by its own `(finding_kind, client_ip,
+  server_ip, protocol, server_port)` key, so a burst that keeps growing past the threshold doesn't
+  re-fire). Kept deliberately separate from pattern 25's rogue-master maps -- a single master issuing a
+  rapid burst of writes to a server it's the only writer for is still notable (T0806, "Brute Force I/O"),
+  a different claim than a second master appearing at all (T0848).
+- **The `bacnet-who-is-flood` re-map was a pure citation correction, zero behavior change.** ATT&CK v19
+  added T0846.002 "Broadcast Discovery" as a genuine sub-technique of T0846 "Remote System Discovery",
+  and its own official description at `attack.mitre.org/techniques/T0846/002/` names BACnet Who-Is
+  requests as a canonical example BY TEXT -- not an inference from this project's own read of the
+  technique, a direct citation match closer to this finding's actual behavior than the pre-existing
+  T0888 "Remote System Information Discovery" citation was (Who-Is is a broadcast discovery sweep, not
+  an information-gathering read against a known target). One-line technique-constant swap in
+  `detect_engine.cpp`; the only CTest fallout was `detect_bacnet_who_is_flood`'s own hardcoded citation
+  regex, fixed the same way (verified against real, re-run CLI output before the regex was edited).
+- **Two items were researched and deliberately NOT implemented, with the negative documented rather than
+  silently skipped.** T0800 "Activate Firmware Update Mode" was checked against `s7comm.cpp`'s own
+  decode of `Request Download` (0x1A): confirmed it has zero field-level decode beyond the function name
+  itself, so there is no update-mode-specific signal to key a finding on. T0892 "Change Credential" was
+  checked against UMAS's own 24-entry function table (`umas.hpp`): confirmed no credential- or
+  password-related function code exists in the reverse-engineered set this decoder is built from (the
+  Application Password mechanism Kaspersky ICS-CERT documents is not itself represented as a distinct
+  UMAS function code). Both negatives are sourced directly from the decoder's own code, not guessed.
+- **T0868 "Detect Operating Mode" was researched and deliberately deferred, not implemented and not
+  rejected.** Three candidate decoded fields were checked -- S7 Read SZL's own recognized SZL-ID set,
+  UMAS's unwired `MONITOR_PLC` function (0x50, named but never dispatched into a finding), EtherNet/IP's
+  own un-bit-interpreted `identity_status` field -- and none cleanly fits this technique without further
+  primary-source research to confirm which specific decoded value(s) actually correspond to a mode-query
+  operation as opposed to a general identity/status read. Left out of the numbered item list (not item
+  27) rather than force-fit onto whichever field looked closest.
+
+Fixtures: `tests/sample_detect_snort_patterns_batch5.pcap`
+(`build_detect_snort_patterns_batch5_sample()`, 43 packets, fresh IP range `192.168.1.160`-`.183`) covers
+all four items plus their negative/reset scenarios: a port-scan negative (3 ports, under the 10-port
+threshold) and a windowed-reset case (9 ports, then 1 more after the 60s window rolls over) both
+correctly produce no port-scan finding; the Modbus and DNP3 write-burst negatives (2 requests each,
+under the 3-request threshold) both correctly produce no burst finding. One accepted collateral: every
+one of the fixture's 4 distinct Modbus Write Multiple Registers conduits also trips the pre-existing,
+correctly-firing T0831 "write outside every range ever read" pattern (`ProtocolMisuse`), since none of
+them is preceded by a matching read in this fixture -- following Batch 4 scenario 5's own established
+precedent, this collateral is accepted and documented rather than suppressed by adding artificial
+covering reads. `detect_snort_patterns_batch5_all_findings` (`CMakeLists.txt`) pins the real 11-finding
+report end to end (43 packets in, findings: 11 (Critical 4, Moderate 3, Informational 4), Firmware/Logic
+Change: 2, Protocol Misuse: 9) via `.*`-chained anchors over the 7 new-pattern findings (s7-upload,
+umas-upload, port-scan, modbus-write-burst, dnp3-write-burst, modbus-rogue-master, dnp3-rogue-master --
+deliberately not asserting on the 4 T0831 collaterals in between), and asserts via
+`FAIL_REGULAR_EXPRESSION` that none of the six negative-only conduit IPs produced a finding of their own.
+
 ## Explicitly out of scope
 
 - **Evidence/novelty/severity retrofit onto pre-existing engines.** See "Four-axis model" above.

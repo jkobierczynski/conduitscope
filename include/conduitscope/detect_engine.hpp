@@ -336,6 +336,58 @@
 //     the yanissec/umas-wireshark-dissector source this codebase's own UMAS decoder is built from names
 //     it CHECK_PLC, a genuine unresolved naming disagreement between two independent reverse-engineering
 //     sources -- flagged for one more research pass rather than guessed at.
+//
+// Five more patterns ("Batch 5"), sourced differently from every batch above: Jurgen asked directly
+// whether other ICS ATT&CK techniques existed beyond the ones already cited, so this batch's own
+// "source" is the live attack.mitre.org matrix itself (fetched fresh, 2026-09-29), not a Snort/
+// Suricata ruleset -- each candidate then had to answer a question the ruleset-sourced batches didn't
+// need to: does any already-decoded field actually carry the signal this MITRE technique describes?
+// (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 5 section has the full
+// research record, including two techniques checked and found NOT currently implementable -- T0800
+// Activate Firmware Update Mode, T0892 Change Credential -- documented as honest negatives rather than
+// silently skipped, and one flagged as needing one more primary-source check -- T0868 Detect Operating
+// Mode, UMAS's MONITOR_PLC is a promising unwired lead but its exact semantics were never confirmed):
+//   - Program Upload (S7 Start Upload/Upload/End Upload, function codes 0x1D/0x1E/0x1F; UMAS
+//     INITIALIZE_UPLOAD/UPLOAD_BLOCK/END_STRATEGY_UPLOAD, 0x30/0x31/0x32) -- ALWAYS-NOTABLE,
+//     FirmwareLogicChange/T0845, the exact mirror of the pre-existing s7-download/umas-download
+//     findings (T0843) one function-code trio over in each protocol's own table. Both trios were
+//     already fully decoded and named before this batch, sitting right next to their already-wired
+//     Download counterparts -- zero new decode work, pure `detect_engine.cpp` wiring.
+//   - Port Scan (T0846.001) -- a genuinely new KIND of finding: no protocol decode at all, only the
+//     raw TCP layer (DecodedPacket::tcp_flags == "SYN", the same pure-SYN check three other files in
+//     this codebase already use for handshake tracking, plus dst_port/has_tcp). One source sweeping an
+//     unusually wide spread of distinct destination ports on one destination IP via pure-SYN packets
+//     within a short window -- ALWAYS-NOTABLE, ProtocolMisuse/T0846.001, Moderate severity. Windowed
+//     SET-of-distinct-values tracking, the same shape Batch 2's DNP3 enumeration sweep established,
+//     applied at the TCP-port layer instead of a protocol-semantic one. Deliberately TCP-only this
+//     pass -- UDP has no SYN-equivalent unambiguous connection-attempt marker in what this codebase
+//     decodes; a UDP sweep heuristic is left for a future pass rather than guessed at now. The first
+//     `DetectEngine` finding not gated on any specific ICS protocol at all.
+//   - Rogue Master (T0848) -- a second distinct source starts issuing WRITE-classified commands
+//     against an outstation that already has an established write-capable master -- NEW-VS-KNOWN,
+//     ProtocolMisuse/T0848, Critical severity (a displacing/second write-capable master is a
+//     materially more serious signal than mere read-only reconnaissance). Distinct from every existing
+//     new-originator finding: those track "any second originator" (mostly read-only enumeration, or
+//     one specific control operation); this tracks specifically "a second originator that starts
+//     WRITING" as its own signal, reusing modbus_write_function_names()/dnp3_write_function_names()
+//     (both already existed, backing Policy::parse_policy_text's own read/write keyword expansion) --
+//     zero new decode work, one new write-capable-master-per-outstation tracker per protocol
+//     (modbus_write_originators_by_server_/dnp3_write_originators_by_server_). Scoped to Modbus and
+//     DNP3 only: Modbus had NO originator-tracking of any kind before this batch (confirmed by grep),
+//     and UMAS's own write-shaped functions (START_PLC/STOP_PLC/the Download trio) already produce
+//     their own always-notable finding on every occurrence regardless of originator, so a redundant
+//     "second writer" layer on top would add noise, not signal, there.
+//   - Brute Force I/O (T0806) -- a burst of WRITE-classified requests (the same classification #25
+//     reuses) against the same outstation within a short window -- ALWAYS-NOTABLE, ProtocolMisuse/
+//     T0806, Moderate severity (deliberately weaker, matching the existing Modbus exception-burst
+//     pattern's own posture -- legitimate fast-polling engineering tools doing rapid setpoint
+//     adjustment during commissioning can trigger this too). Reuses the exact windowed-count-per-key
+//     machinery Batch 1's modbus-exception-burst and Batch 2's dnp3-enumeration-sweep already
+//     established, applied to write volume instead of exception responses or object-group diversity.
+//   - Also re-mapped, not new: the pre-existing bacnet-who-is-flood finding now cites T0846.002
+//     (Broadcast Discovery) instead of T0888 -- MITRE's own T0846.002 description names "BACnet Who-Is
+//     requests" as a canonical example BY NAME, not an inference. Zero behavior change, one technique
+//     constant swapped at one call site.
 #pragma once
 
 #include <cstdint>
@@ -536,10 +588,10 @@ private:
         // "umas-new-originator-discovery", "modbus-new-originator-read-device-id",
         // "modbus-new-originator-report-server-id", "enip-new-originator-discovery" (Batch 3
         // item 17), "s7-szl-new-originator" (Batch 4 item 19), "fins-new-originator-discovery"
-        // (Batch 4 item 22), "bacnet-foreign-device-register-new-originator" (Batch 4 item 21a), or
-        // "bacnet-bbmd-table-read-new-originator" (Batch 4 item 21b) each read differently even
-        // though they share the same category/technique shape in some cases. Remote-access
-        // candidates render from
+        // (Batch 4 item 22), "bacnet-foreign-device-register-new-originator" (Batch 4 item 21a),
+        // "bacnet-bbmd-table-read-new-originator" (Batch 4 item 21b), "modbus-rogue-master", or
+        // "dnp3-rogue-master" (Batch 5 item 25) each read differently even though they share the
+        // same category/technique shape in some cases. Remote-access candidates render from
         // is_remote_access instead (their own source_tag is always "remote-access", never checked).
         std::string source_tag;
     };
@@ -708,6 +760,51 @@ private:
     // configuration, the same "distinct capability, one map" reasoning that keeps
     // enip_list_discovery_originators_by_server_ a single map across its own three commands.
     std::unordered_map<std::string, std::vector<std::string>> bacnet_bbmd_table_read_originators_by_server_;
+
+    // Modbus/DNP3 write-capable-master tracking (Batch 5 item 25, "Rogue Master"/T0848) -- every
+    // client_ip this engine has seen issue a WRITE-classified request (modbus_write_function_names()/
+    // dnp3_write_function_names(), modbus.hpp/dnp3.hpp) to a given server_ip, so a SECOND write-capable
+    // master to the SAME outstation is the one that's actually new -- same "first is not itself
+    // flagged" asymmetry as cip_originators_by_server_ above, but deliberately its own pair of maps
+    // (not folded into any existing originator map): those all track "any second originator"
+    // (read-only enumeration in most cases), while this tracks specifically "a second originator that
+    // starts WRITING" as its own, more serious signal -- a client already known as a read-only
+    // originator elsewhere isn't implicitly credited here, and vice versa. Two separate maps (not one
+    // shared across both protocols) since a Modbus writer and a DNP3 writer to the same IP address are
+    // not evidence about each other. Scoped to Modbus and DNP3 only -- see this file's own header
+    // comment for why UMAS is deliberately excluded (its write-shaped functions already fire their own
+    // always-notable finding on every occurrence, so a redundant "second writer" layer would add noise,
+    // not signal).
+    std::unordered_map<std::string, std::vector<std::string>> modbus_write_originators_by_server_;
+    std::unordered_map<std::string, std::vector<std::string>> dnp3_write_originators_by_server_;
+
+    // Port scan state (Batch 5 item 24, T0846.001) -- per "<src_ip>|<dst_ip>" key, a WINDOWED set of
+    // distinct destination ports seen reached via a pure-SYN (no-ACK) packet from that source to that
+    // destination. Reset (both the window start and the set) whenever a new SYN's gap since
+    // window_start exceeds kPortScanWindowSeconds (detect_engine.cpp) -- the same windowed-SET shape
+    // dnp3_enumeration_sweep_state_ above already established, just measuring port diversity instead
+    // of object-group/variation diversity. A SET, not a count, for the same reason: the signal is
+    // DIVERSITY of ports touched, so re-touching the same handful of ports repeatedly within the
+    // window must never trip this on repetition alone.
+    struct PortScanState {
+        double window_start = 0.0;
+        std::set<uint16_t> distinct_ports;
+    };
+    std::unordered_map<std::string, PortScanState> port_scan_state_;
+
+    // Write-burst state (Batch 5 item 26, "Brute Force I/O"/T0806) -- per
+    // "<protocol>|<client_ip>|<server_ip>" key, `count` is the number of WRITE-classified requests
+    // seen since `window_start`, reset to 1/dp.timestamp whenever a new occurrence's gap since
+    // window_start exceeds kWriteBurstWindowSeconds (detect_engine.cpp) -- the exact same shape
+    // ModbusExceptionBurstState above already established (Batch 1 item 6), reused here for write
+    // volume instead of exception-response volume. Keyed by protocol too (unlike
+    // modbus_exception_burst_state_, which only ever sees Modbus) since this same tracker backs both
+    // the Modbus and DNP3 write-burst checks.
+    struct WriteBurstState {
+        size_t count = 0;
+        double window_start = 0.0;
+    };
+    std::unordered_map<std::string, WriteBurstState> write_burst_state_;
 
     size_t total_packets_ = 0;
 };

@@ -13645,6 +13645,81 @@ it done as its own patch.
     [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)'s
     own "Cross-batch notes" section all updated in the same increment.
 
+96. **Batch 5: four more `detect` pattern extensions, plus a citation re-map -- sourced directly from
+    the live MITRE ATT&CK for ICS matrix, not a Snort/Suricata ruleset.** A second departure from items
+    92-94's confirm-a-pre-scoped-list pattern, and a different research method than item 95's own
+    open-ended-but-still-ruleset-sourced one: Jurgen asked "Are there other techniques related with ICS
+    / OT in the MITRE ATT&CK framework?", answered by reading `attack.mitre.org/matrices/ics/` itself
+    (a new "Batch 5" section appended to
+    [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)),
+    presented as candidate-only, and confirmed with a plain "yes" before any implementation began. Full
+    record in [docs/design/detection-engine.md](design/detection-engine.md)'s own "Batch 5" section.
+
+    The four: S7comm and UMAS block upload (`Start Upload`/`Upload`/`End Upload` and
+    `INITIALIZE_UPLOAD`/`UPLOAD_BLOCK`/`END_STRATEGY_UPLOAD`, both already decoded alongside their
+    existing download-side siblings, needing zero new decode work) -- logic read OFF a PLC by an
+    engineering station (`FirmwareLogicChange`/T0845, always-notable, Critical); a source reaching 10 or
+    more distinct destination ports on one host via pure-SYN packets within 60 seconds -- this engine's
+    first protocol-agnostic finding, reading only `DecodedPacket::tcp_flags`/`has_tcp`/`dst_port` with
+    no ICS-protocol content at all, windowed the same way Batch 1/2's own burst/sweep patterns already
+    are (`ProtocolMisuse`/T0846.001, always-notable, Moderate); a second, different write-capable Modbus
+    or DNP3 master issuing a write-classified request to a server/outstation already seen with a
+    different one -- reusing the pre-existing `modbus_write_function_names()`/`dnp3_write_function_names()`
+    classification helpers (already backing `policy check`'s own `functions: [write]` keyword), with
+    UMAS traffic automatically excluded since `modbus_function_name()` already returns the literal
+    string `"UMAS"` for function code 0x5A rather than a name from the write-classified table
+    (`ProtocolMisuse`/T0848, new-vs-known, Critical -- a materially more serious claim than the existing
+    read-only new-originator findings, so a dedicated map and severity rather than reusing theirs); and
+    3 or more write-classified Modbus or DNP3 requests from one client to one server within 60 seconds,
+    the same windowed-burst shape as item 92's own repeated-exception-code pattern applied to write
+    volume instead (`ProtocolMisuse`/T0806, always-notable, Moderate, deliberately honest that a
+    legitimate fast-polling engineering tool doing rapid setpoint adjustment during commissioning can
+    trigger this too). Alongside the four new patterns, the pre-existing `bacnet-who-is-flood`
+    finding's own MITRE citation was re-mapped from T0888 (Remote System Information Discovery) to the
+    more precise **T0846.002 (Broadcast Discovery)**, an ATT&CK v19 sub-technique whose own official
+    description names BACnet Who-Is requests as a canonical example by text -- a pure citation
+    correction verified directly against `attack.mitre.org/techniques/T0846/002/`, zero behavior change.
+
+    Two techniques were researched and deliberately left unimplemented, sourced negatives rather than
+    silent gaps: T0800 (Activate Firmware Update Mode) -- confirmed by reading `s7comm.cpp` that
+    `Request Download` has no field-level decode beyond its bare function name, so there is no
+    update-mode-specific signal to key a finding on; T0892 (Change Credential) -- confirmed by reading
+    UMAS's own 24-entry function table that no credential- or password-related function code exists.
+    T0868 (Detect Operating Mode) was researched and deferred rather than rejected: three candidate
+    fields (S7 Read SZL's own recognized SZL-ID set, UMAS's unwired `MONITOR_PLC` function, EtherNet/IP's
+    own un-bit-interpreted `identity_status` field) were checked and none cleanly fits without further
+    primary-source research to confirm which value(s) actually correspond to a mode-query operation.
+
+    One genuine implementation-pass bug was found and fixed, caught only by running the real CLI and
+    reading actual output: the first fixture draft used Modbus Write Single Register (function 0x06) for
+    the Rogue-Master/Brute-Force-I/O scenarios, which silently produced zero findings for either new
+    pattern since `ModbusFrame::is_request` (`modbus.hpp`'s own documented scope boundary) never sets
+    true for that function code -- request and response share an identical 4-byte wire shape with no
+    shape-based signal to distinguish them. Fixed by switching to Write Multiple Registers (function
+    0x10), which has a genuine shape-based `is_request` signal; re-verified against real output after
+    the fix. One accepted collateral, following item 95's own precedent for a correctly-firing
+    pre-existing pattern incidentally tripped by a new batch's own fixture: every one of the new
+    fixture's 4 distinct Modbus Write Multiple Registers conduits also trips the pre-existing T0831
+    "write outside every range ever read" pattern, since none is preceded by a matching read in this
+    fixture -- documented and accepted rather than suppressed with artificial covering reads.
+
+    New synthetic fixture `tests/sample_detect_snort_patterns_batch5.pcap`
+    (`build_detect_snort_patterns_batch5_sample`, 43 packets, fresh IP range `192.168.1.160`-`.183`, 11
+    findings) covers all four items plus their own negative/reset scenarios: a port-scan negative (3
+    ports, under threshold) and a windowed-reset case (9 ports, then 1 more after the 60s window rolls
+    over); Modbus and DNP3 write-burst negatives (2 requests each, under the 3-request threshold).
+
+    Full CTest across all four standing build configurations (default GCC: 2192/2192; ASan/UBSan
+    `build-fuzz`: 2269/2269, including the 77-test fuzz corpus regression, 491.79s wall time;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2178/2178; MinGW-w64 cross-compile,
+    build-only there) -- 100% pass, zero regressions. `docs/design/detection-engine.md` (new "Batch 5"
+    section), `docs/USER_GUIDE.md` (new "Batch 5" subsection with a worked example, `techniques_referenced`
+    count language updated from "eleven" to "sixteen"), `man/conduitscope.1` (`detect` COMMANDS entry
+    updated to describe all five batches' patterns by name, batch-count language "four batches" ->
+    "five batches"), and
+    [docs/research/2026-09-detect-pattern-candidates-batch2.md](research/2026-09-detect-pattern-candidates-batch2.md)'s
+    own "Cross-batch notes" section all updated in the same increment.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

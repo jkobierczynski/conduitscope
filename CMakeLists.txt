@@ -16003,7 +16003,7 @@ set_tests_properties(detect_snort_patterns_json_shape PROPERTIES
 add_test(NAME detect_bacnet_who_is_flood
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_bacnet_who_is_flood.pcap")
 set_tests_properties(detect_bacnet_who_is_flood PROPERTIES
-  PASS_REGULAR_EXPRESSION "total packets: 105.*findings: 1 \\(Critical 0, Moderate 0, Informational 1\\).*  Protocol Misuse: 1.*\\[Protocol Misuse\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: N/A  severity: Informational.*192\\.168\\.1\\.79 -> 255\\.255\\.255\\.255:47808 \\(bacnet\\).*BACnet Who-Is flood/device-enumeration sweep from this source -- at least 100 Who-Is requests observed in this capture \\(destination shown is only the most recent one -- Who-Is is routinely broadcast, so this source may have targeted several destinations\\)"
+  PASS_REGULAR_EXPRESSION "total packets: 105.*findings: 1 \\(Critical 0, Moderate 0, Informational 1\\).*  Protocol Misuse: 1.*\\[Protocol Misuse\\] T0846\\.002 \\(Broadcast Discovery\\).*evidence: Confirmed  novelty: N/A  severity: Informational.*192\\.168\\.1\\.79 -> 255\\.255\\.255\\.255:47808 \\(bacnet\\).*BACnet Who-Is flood/device-enumeration sweep from this source -- at least 100 Who-Is requests observed in this capture \\(destination shown is only the most recent one -- Who-Is is routinely broadcast, so this source may have targeted several destinations\\)"
   FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.80")
 
 
@@ -16154,6 +16154,28 @@ add_test(NAME real_enip_detect_list_identity_redpoint_fingerprint
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/enip/enip_list_identity.pcap")
 set_tests_properties(real_enip_detect_list_identity_redpoint_fingerprint PROPERTIES
   PASS_REGULAR_EXPRESSION "findings: 1 \\(Critical 0, Moderate 0, Informational 1\\).*\\[Protocol Misuse\\] T0888 \\(Remote System Information Discovery\\).*evidence: Confirmed  novelty: N/A  severity: Informational.*10\\.1\\.1\\.167 -> 10\\.1\\.1\\.164:44818 \\(enip\\).*EtherNet/IP ListIdentity request byte-exact matches the Redpoint Nmap NSE script's own fixed Sender Context fingerprint \\(Quickdraw-Snort enip\\.rules SID 1111517\\)")
+
+# Batch 5 -- four more `detect` patterns sourced from the live MITRE ATT&CK for ICS matrix itself
+# (docs/research/2026-09-detect-pattern-candidates-batch2.md's own Batch 5 section). All 11 findings
+# this fixture produces, first-seen order: s7-upload, umas-upload, port-scan, THEN four collateral,
+# correctly-fired pre-existing "write outside every range ever read" (T0831) findings -- every one of
+# this fixture's four distinct Modbus Write Multiple Registers conduits triggers this pre-existing
+# pattern once each, since none of them is ever preceded by a matching read; accepted and documented
+# here rather than suppressed, the same "generic pattern plus a specific tool fingerprint" collateral
+# acceptance Batch 4 scenario 5's own enip-new-originator-discovery collateral already established --
+# THEN modbus-write-burst, modbus-rogue-master, dnp3-write-burst, dnp3-rogue-master. The regex below
+# only anchors the eight NEW-pattern findings (skipping over the four T0831 collateral findings via
+# its own "." wildcards, the same technique used throughout this file), plus a FAIL_REGULAR_EXPRESSION
+# proving none of the three negative-only conduits (.166/.167 three well-known ports under threshold,
+# .168/.169 the windowed port-scan reset, .182/.183 two DNP3 writes under the burst threshold)
+# produced any finding at all. (.178/.179, the Modbus write-burst UNDER-threshold negative, is
+# deliberately NOT in this list -- it correctly still produces its own T0831 collateral finding, just
+# never a modbus-write-burst one, which this test doesn't assert against.)
+add_test(NAME detect_snort_patterns_batch5_all_findings
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns_batch5.pcap")
+set_tests_properties(detect_snort_patterns_batch5_all_findings PROPERTIES
+  PASS_REGULAR_EXPRESSION "total packets: 43.*findings: 11 \\(Critical 4, Moderate 3, Informational 4\\).*Firmware/Logic Change: 2.*Protocol Misuse: 9.*\\[Firmware/Logic Change\\] T0845 \\(Program Upload\\).*192\\.168\\.1\\.160 -> 192\\.168\\.1\\.161:102 \\(s7comm\\).*S7comm block upload \\(Start Upload\\) -- a program/logic block is being read FROM the CPU by an engineering station.*\\[Firmware/Logic Change\\] T0845 \\(Program Upload\\).*192\\.168\\.1\\.162 -> 192\\.168\\.1\\.163:502 \\(modbus\\).*UMAS INITIALIZE_UPLOAD -- a program/logic block is being read FROM the PLC by an engineering station.*\\[Protocol Misuse\\] T0846\\.001 \\(Port Scan\\).*192\\.168\\.1\\.164 -> 192\\.168\\.1\\.165:23 \\(tcp\\).*This source reached 10 distinct destination ports on this host via pure-SYN packets within 60s -- a port-scan-shaped sweep rather than an ordinary engineering client opening a small handful of well-known ports.*\\[Protocol Misuse\\] T0806 \\(Brute Force I/O\\).*192\\.168\\.1\\.176 -> 192\\.168\\.1\\.177:502 \\(modbus\\).*This client issued at least 3 write-classified Modbus requests to this server within 60s -- a repetitive I/O-point-value-change burst, though a legitimate fast-polling engineering tool doing rapid setpoint adjustment during commissioning can trigger this too.*\\[Protocol Misuse\\] T0806 \\(Brute Force I/O\\).*192\\.168\\.1\\.180 -> 192\\.168\\.1\\.181:20000 \\(dnp3\\).*This master issued at least 3 write-classified DNP3 requests to this outstation within 60s -- a repetitive I/O-point-value-change burst, though a legitimate fast-polling engineering tool doing rapid setpoint adjustment during commissioning can trigger this too.*\\[Protocol Misuse\\] T0848 \\(Rogue Master\\).*192\\.168\\.1\\.171 -> 192\\.168\\.1\\.172:502 \\(modbus\\).*Modbus write-classified request from a second write-capable master 192\\.168\\.1\\.171 to 192\\.168\\.1\\.172 -- a different client than the one\\(s\\) already seen issuing write-classified requests to this outstation in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\).*\\[Protocol Misuse\\] T0848 \\(Rogue Master\\).*192\\.168\\.1\\.174 -> 192\\.168\\.1\\.175:20000 \\(dnp3\\).*DNP3 write-classified request from a second write-capable master 192\\.168\\.1\\.174 to 192\\.168\\.1\\.175 -- a different master than the one\\(s\\) already seen issuing write-classified requests to this outstation in this capture \\(first occurrence within this capture; no --baseline-file was supplied\\)"
+  FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.166|192\\.168\\.1\\.167|192\\.168\\.1\\.168|192\\.168\\.1\\.169|192\\.168\\.1\\.182|192\\.168\\.1\\.183")
 
 
 # ---------------------------------------------------------------------------------------------

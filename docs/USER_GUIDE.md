@@ -1546,6 +1546,81 @@ deliberately left unimplemented -- Digital Bond's own rule message and the disse
 codebase's UMAS decoder is built from disagree on what that function code actually does, and UMAS has
 no official specification to settle it, so this was flagged for further research rather than guessed.
 
+#### Batch 5: sourced from the live MITRE ATT&CK for ICS matrix itself
+
+A departure from Batches 1-4's own research method (each mined a Snort/Suricata ruleset). Jurgen asked
+whether other ATT&CK-for-ICS techniques were worth covering; this pass read the matrix itself
+(`attack.mitre.org`) and checked each candidate technique against this codebase's own already-decoded
+fields before proposing it (`docs/research/2026-09-detect-pattern-candidates-batch2.md`'s own "Batch 5"
+section has the full research record, `docs/design/detection-engine.md`'s own "Batch 5" section has the
+full implementation record):
+
+- **S7comm and UMAS block upload** -- logic/program data read OFF a PLC by an engineering station
+  (T0845, "Program Upload"), the mirror image of the pre-existing S7/UMAS download findings (T0843).
+  Zero new decode work: both protocols' own upload-side function names were already decoded alongside
+  their download-side siblings.
+- **Port scan** -- a source reaching 10 or more distinct destination ports on one host via pure-SYN
+  packets within 60 seconds (T0846.001, "Port Scan"). The first `detect` finding with no ICS-protocol
+  content at all -- pure TCP-flag/port-count reasoning, independent of anything this tool decodes.
+- **Rogue master** -- a second, different write-capable Modbus or DNP3 master issuing a write-classified
+  request to a server/outstation already seen with a different one (T0848, "Rogue Master"). Reuses the
+  pre-existing `modbus_write_function_names()`/`dnp3_write_function_names()` helpers (already backing
+  `policy check`'s own `functions: [write]` keyword) to decide which requests count.
+- **Brute-force I/O** -- 3 or more write-classified Modbus or DNP3 requests from one client to one
+  server within 60 seconds (T0806, "Brute Force I/O") -- a repetitive point-value-change burst, though
+  the report text is honest that a legitimate fast-polling engineering tool doing rapid setpoint
+  adjustment during commissioning can trigger this too.
+- **BACnet Who-Is flood re-citation** -- the pre-existing who-Is-flood finding's own MITRE citation was
+  re-mapped from T0888 (Remote System Information Discovery) to the more precise **T0846.002 (Broadcast
+  Discovery)**, a sub-technique added in ATT&CK v19 whose own official description names BACnet Who-Is
+  requests as a canonical example by text. Pure citation correction -- the finding's trigger condition,
+  severity, and description text are unchanged.
+
+Two techniques were researched and deliberately left unimplemented, sourced negatives rather than silent
+gaps: **T0800 (Activate Firmware Update Mode)** -- S7comm's own `Request Download` function has no
+field-level decode beyond its name, so there is no update-mode-specific signal to key a finding on;
+**T0892 (Change Credential)** -- UMAS's own 24-entry function table has no credential- or
+password-related function code. **T0868 (Detect Operating Mode)** was researched and deferred rather
+than rejected -- three candidate fields (S7 Read SZL's SZL-ID set, UMAS's unwired `MONITOR_PLC`
+function, EtherNet/IP's own `identity_status` field) were checked and none cleanly fits without further
+primary-source research to confirm.
+
+```
+$ conduitscope detect -r tests/sample_detect_snort_patterns_batch5.pcap
+=== conduitscope detect report ===
+capture: tests/sample_detect_snort_patterns_batch5.pcap
+total packets: 43
+findings: 11 (Critical 4, Moderate 3, Informational 4)
+  Firmware/Logic Change: 2
+  Protocol Misuse: 9
+
+[Firmware/Logic Change] T0845 (Program Upload)
+  192.168.1.160 -> 192.168.1.161:102 (s7comm)
+  S7comm block upload (Start Upload) -- a program/logic block is being read FROM the CPU by an engineering station
+
+[Firmware/Logic Change] T0845 (Program Upload)
+  192.168.1.162 -> 192.168.1.163:502 (modbus)
+  UMAS INITIALIZE_UPLOAD -- a program/logic block is being read FROM the PLC by an engineering station
+
+[Protocol Misuse] T0846.001 (Port Scan)
+  192.168.1.164 -> 192.168.1.165:23 (tcp)
+  This source reached 10 distinct destination ports on this host via pure-SYN packets within 60s -- a port-scan-shaped sweep rather than an ordinary engineering client opening a small handful of well-known ports
+
+[Protocol Misuse] T0848 (Rogue Master)
+  192.168.1.171 -> 192.168.1.172:502 (modbus)
+  Modbus write-classified request from a second write-capable master 192.168.1.171 to 192.168.1.172 -- a different client than the one(s) already seen issuing write-classified requests to this outstation in this capture (first occurrence within this capture; no --baseline-file was supplied)
+
+[Protocol Misuse] T0806 (Brute Force I/O)
+  192.168.1.176 -> 192.168.1.177:502 (modbus)
+  This client issued at least 3 write-classified Modbus requests to this server within 60s -- a repetitive I/O-point-value-change burst, though a legitimate fast-polling engineering tool doing rapid setpoint adjustment during commissioning can trigger this too
+```
+
+(Matching DNP3 Rogue Master and Brute Force I/O findings, plus 4 collateral `T0831 (Manipulation of
+Control)` findings from the pre-existing "write outside every range ever read" pattern -- every one of
+this fixture's Modbus write conduits lacks a preceding matching read -- are omitted above for brevity;
+the full 11-finding report is exercised end to end by this project's own CTest suite,
+`detect_snort_patterns_batch5_all_findings`.)
+
 #### Worked example
 
 ```
@@ -1599,7 +1674,7 @@ zones upgrades that same finding's technique from T0886 to **T0822 (External Rem
 `technique_name`, `evidence`, `novelty`, `severity`, `client_ip`, `server_ip`, `protocol`,
 `server_port`, `description`, `first_seen`/`first_seen_text`, `last_seen`/`last_seen_text`,
 `packet_count`) plus a `summary` object (the same counts the text report's header shows) and a
-`techniques_referenced` array -- always the full eleven-technique table from
+`techniques_referenced` array -- always the full sixteen-technique table from
 `docs/design/detection-engine.md`'s own MITRE mapping, not just the ones this particular report
 cites, so a consumer always has the full citation text on hand without a second lookup.
 

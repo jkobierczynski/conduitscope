@@ -410,8 +410,9 @@ section for a worked example.
 .TP
 .B detect (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Detection findings OT incident\-response teams recognize (Grok review item
-4, plus twenty\-two Snort\-style pattern extensions added as direct
-follow\-ups in four batches (six, six, six, then four)):
+4, plus twenty\-six Snort\-style/MITRE\-ATT&CK\-sourced pattern extensions
+added as direct follow\-ups in five batches (six, six, six, four, then
+four)):
 engineering\-station mode changes, firmware/logic downloads and device
 restarts, protocol misuse (unsolicited/unexpected commands, a new
 engineering\-station originator, a CIP Identity Object write, a DNP3
@@ -451,7 +452,20 @@ Redpoint Nmap NSE script's own Sender Context fingerprint (TCP only \-\- see
 device, a BACnet Read\-Foreign\-Device\-Table/Read\-Broadcast\-Distribution\-
 Table request from a new originator, a BACnet BVLC\-Result NAK for one of
 those three request shapes, and a FINS Controller Data Read from a new
-originator. Every finding
+originator, and (Batch 5, sourced directly from the live MITRE ATT&CK for
+ICS matrix rather than a Snort/Suricata ruleset) an S7comm or UMAS block
+upload (a program/logic block being read OFF a PLC by an engineering
+station), a source reaching ten or more distinct destination ports on one
+host via pure\-SYN packets within sixty seconds (protocol\-agnostic \-\-
+this engine's first finding with no ICS\-protocol content at all), a
+second, different write\-capable Modbus or DNP3 master appearing against
+a server/outstation already seen with one (Rogue Master), three or more
+write\-classified Modbus or DNP3 requests from one client to one server
+within sixty seconds (Brute Force I/O), and the pre\-existing BACnet
+Who\-Is\-flood finding's own MITRE citation re\-mapped from T0888 to the
+more precise T0846.002 (Broadcast Discovery), a sub\-technique added in
+ATT&CK v19 whose own official description names BACnet Who\-Is requests
+by text. Every finding
 cites exactly one MITRE ATT&CK for ICS technique and carries three
 independent, labeled dimensions \-\-
 never a single conflated "confidence" field, and never a claim about
@@ -473,7 +487,8 @@ weak SecureChannel/anonymous\-session finding, a new\-originator
 EtherNet/IP List Identity/Services/Interfaces, a BACnet BVLC\-Result NAK, and
 every Batch 4 new\-originator finding (S7 Read SZL, the EtherNet/IP
 ListIdentity fingerprint, BACnet Register\-Foreign\-Device, BACnet BBMD
-table\-read, FINS Controller Data Read) \-\- which are \fBModerate\fR or
+table\-read, FINS Controller Data Read), and the Batch 5 Port Scan and
+Brute Force I/O findings \-\- which are \fBModerate\fR or
 \fBInformational\fR instead). With \fB\-\-policy\fR, a new remote\-access
 finding's own technique is further resolved between T0886 (Remote
 Services) and T0822 (External Remote Services) depending on whether it

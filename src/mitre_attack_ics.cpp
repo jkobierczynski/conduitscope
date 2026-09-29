@@ -43,16 +43,36 @@ MitreAttackTechnique mitre_t0831_manipulation_of_control() {
 MitreAttackTechnique mitre_t0872_indicator_removal_on_host() {
     return {"T0872", "Indicator Removal on Host"};
 }
+MitreAttackTechnique mitre_t0845_program_upload() {
+    return {"T0845", "Program Upload"};
+}
+MitreAttackTechnique mitre_t0846_001_port_scan() {
+    return {"T0846.001", "Port Scan"};
+}
+MitreAttackTechnique mitre_t0846_002_broadcast_discovery() {
+    return {"T0846.002", "Broadcast Discovery"};
+}
+MitreAttackTechnique mitre_t0848_rogue_master() {
+    return {"T0848", "Rogue Master"};
+}
+MitreAttackTechnique mitre_t0806_brute_force_io() {
+    return {"T0806", "Brute Force I/O"};
+}
 
 std::vector<MitreAttackTechnique> all_mitre_attack_ics_techniques() {
     // Deliberately id-sorted (not declaration order) so this list -- and anything rendered from it
     // -- stays stable if the header's own declaration order ever changes for readability.
     return {
+        mitre_t0806_brute_force_io(),
         mitre_t0816_device_restart_shutdown(),
         mitre_t0821_modify_controller_tasking(),
         mitre_t0822_external_remote_services(),
         mitre_t0831_manipulation_of_control(),
         mitre_t0843_program_download(),
+        mitre_t0845_program_upload(),
+        mitre_t0846_001_port_scan(),
+        mitre_t0846_002_broadcast_discovery(),
+        mitre_t0848_rogue_master(),
         mitre_t0855_unauthorized_command_message(),
         mitre_t0858_change_operating_mode(),
         mitre_t0861_point_and_tag_identification(),
