@@ -189,6 +189,7 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
 | `-i, --interface NAME` | *(required unless `-r` given)* | Capture live from this network interface instead of reading a file -- see LIVE CAPTURE below and `conduitscope interfaces`. Requires libpcap/Npcap support to have been built in. Mutually exclusive with `-r`. |
 | `-f, --filter BPF` | *(none)* | BPF filter (tcpdump syntax, e.g. `"port 502 or port 102"`). Works with both `-i` (applied by libpcap at capture time) and `-r` (applied per-packet after reading the file); see LIVE CAPTURE's own `--filter` subsection below. `-f` mirrors tshark's own `-f`. |
+| `-Y, --display-filter EXPR` | *(none)* | Display filter (Wireshark display-filter syntax, e.g. `'modbus.func_code == 16 && ip.src == 10.1.2.3'`), evaluated per-packet AFTER decode against dissected fields -- unlike `-f/--filter` above, which is a BPF filter applied before/during decode against raw bytes. Mirrors tshark's own `-Y`. A malformed expression is a CLI error (nonzero exit) reported before any packet is processed. See "Display filters (`-Y`)" below. |
 | `-a, --duration SECONDS` | `0` (unlimited) | Stop a live capture (`-i`) after this many seconds. `0` means rely on `--max-packets` and/or Ctrl+C instead. `-a` mirrors tshark's own `-a` autostop condition, specialized here to duration only. |
 | `--snaplen BYTES` | `65535` | Maximum bytes captured per packet with `-i`. |
 | `--no-promiscuous` | off (i.e. promiscuous by default) | With `-i`, don't put the interface into promiscuous mode. Promiscuous is the default because the main live-capture use case -- watching a mirrored/SPAN switch port for zone/conduit traffic -- needs to see traffic that isn't addressed to the capturing host at all. |
@@ -228,6 +229,160 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+
+### Display filters (`-Y`)
+
+`-Y/--display-filter` filters `decode`'s output by the VALUE of already-decoded
+fields, the way Wireshark's own display-filter bar (or tshark's `-Y`) does --
+as opposed to `-f/--filter`, a BPF filter matched against raw bytes before or
+during decode. A packet is decoded first; `-Y` then decides whether that
+packet is shown at all. The two combine as an intersection when both are
+given.
+
+```
+conduitscope decode -r capture.pcap -Y 'modbus.func_code == 16 && ip.src == 10.1.2.3'
+conduitscope decode -r capture.pcap -Y 's7comm.param.func == 0x05'
+conduitscope decode -r capture.pcap -Y 'goose.simulation == 1'
+```
+
+#### Grammar
+
+```
+expr        := or_expr
+or_expr     := and_expr ( ("||" | "or") and_expr )*
+and_expr    := unary_expr ( ("&&" | "and") unary_expr )*
+unary_expr  := ("!" | "not") unary_expr | primary
+primary     := "(" expr ")"
+             | field_ref comparison_rhs?
+             | field_ref "in" "{" literal ("," literal)* "}"
+comparison_rhs := ("==" | "!=" | "<" | "<=" | ">" | ">=") literal
+                 | ("contains" | "matches") string_literal
+field_ref   := IDENT ("." IDENT)*      // e.g. modbus.func_code, ip.src
+literal     := INT_LITERAL | STRING_LITERAL | BOOL_LITERAL | IPV4_LITERAL
+```
+
+Operators: `==` `!=` `<` `<=` `>` `>=` for comparison; `&&`/`and`, `||`/`or`,
+`!`/`not` for boolean combination, in that precedence (`!` binds tightest,
+then comparisons, then `&&`, then `||`, matching Wireshark's own precedence);
+parentheses to override it; `contains` for a case-sensitive substring test
+against a string field; `matches` for a regular-expression test (ECMAScript
+syntax) against a string field; `in {a, b, c}` for set membership. Integer
+literals accept decimal or `0x`-prefixed hex (`0x05`). Boolean literals
+accept `true`/`false` or `1`/`0`. An unquoted dotted-decimal literal
+(`10.1.2.3`) is read as an IPv4 address; an IPv6 literal must be quoted
+(`"fe80::1"`).
+
+A bare `field_ref` with no comparison, not inside `in {...}`, is a
+**field-existence test**: `modbus` alone tests whether the packet is Modbus
+at all, and `modbus.exception` alone tests whether that field is present on
+this packet -- not whether its value is true. This differs from a real
+Wireshark boolean field, where a bare name also means "value is true": here,
+`!modbus.exception` means "this field does not exist" (always false on a
+packet where the field is always present when Modbus is present), never
+"the exception flag is false" -- write `modbus.exception == false` for that.
+A bare protocol name also works for any of this tool's ~115 decoded
+protocols, not only the ones with dedicated fields below (e.g. `-Y ethercat`
+shows only EtherCAT packets), since it's checked against `decode`'s own
+top-level protocol name rather than a per-protocol field table.
+
+If a field's protocol layer isn't present on a given packet (e.g.
+`modbus.func_code == 16` against a DNP3 packet), the comparison is simply
+`false`, never an error -- the same as Wireshark. A malformed expression
+(unknown field, type mismatch, unbalanced parens, unterminated string) is
+reported as a CLI error (nonzero exit, before any packet is read), not a
+silent no-match.
+
+`ip.src`/`ip.dst` compare as exact text only in this pass -- no CIDR or
+range matching (`ip.src == 10.1.2.0/24` is not supported); only `==`/`!=`
+and `in {...}`. Using an ordering operator (`<`/`<=`/`>`/`>=`) against an
+IP-kind field is a compile-time error.
+
+UMAS rides inside Modbus rather than as its own top-level protocol (it's
+Schneider Electric's proprietary extension, carried in Modbus function code
+0x5A traffic), so there is no bare `umas` existence test -- use
+`umas.function_code` or `umas.is_response` instead, which are only present
+on packets where `modbus.protocol == "modbus"` and a UMAS payload was
+actually found.
+
+`-Y` only affects which packets are shown, counted toward `-c/--max-packets`,
+and (with `--stats`) tallied: **`-w/--write` is unaffected** and still writes
+every packet that reaches the run under `-f/--filter` alone, raw and
+unfiltered by `-Y` -- the same way tshark's own single-pass `-w` behaves. A
+`--max-packets N -Y EXPR` combination stops after N packets that MATCH the
+filter, not N packets read.
+
+#### Curated fields
+
+Field coverage in this pass is a curated subset of the ~115 protocols this
+tool decodes: the universal link/network/transport fields below, plus 13
+protocols with their own dissected fields (Modbus/UMAS, S7comm, S7comm-Plus,
+DNP3, EtherNet/IP, BACnet, IEC104, GOOSE, Sampled Values, HART-IP, OPC UA,
+MMS). Any other protocol still supports a bare existence test (`-Y bacnet`,
+`-Y arp`, ...) even without a field table here; see docs/DEVELOPMENT.md for
+the maintained rationale.
+
+| Field | Kind | Notes |
+|---|---|---|
+| `eth.src`, `eth.dst` | string | MAC address, colon-hex text |
+| `vlan.id` | int | 802.1Q VLAN ID |
+| `ip.src`, `ip.dst` | ip | exact-text equality only, see above |
+| `ip.proto` | int | IP protocol number |
+| `ip.ttl` | int | |
+| `tcp.srcport`, `tcp.dstport` | int | |
+| `tcp.flags` | string | rendered flag text, as shown in `-T text`/`--ether` output |
+| `udp.srcport`, `udp.dstport` | int | |
+| `modbus.func_code` | int | as seen on the wire -- an exception response's code includes the `0x80` bit (e.g. a read-holding-registers exception is `0x83`/131, not 3) |
+| `modbus.func_name` | string | |
+| `modbus.exception` | bool | field-existence semantics apply, see above |
+| `umas.function_code` | int | only present inside a Modbus/UMAS request |
+| `umas.is_response` | bool | |
+| `s7comm.param.func` | int | |
+| `s7comm.func_name` | string | |
+| `s7comm.plc_stop` | bool | |
+| `s7commplus.opcode` | int | |
+| `s7commplus.function`, `s7commplus.function_name` | int, string | |
+| `dnp3.function` | int | |
+| `dnp3.function_name` | string | |
+| `enip.service` | int | EtherNet/IP explicit messaging (TCP) only |
+| `enip.service_name` | string | |
+| `enip.is_io` | bool | true for CIP I/O implicit messaging (UDP) |
+| `bacnet.service`, `bacnet.service_name` | int, string | |
+| `iec104.type_id` | int | ASDU type identifier |
+| `iec104.cot` | string | cause of transmission |
+| `iec104.common_addr` | int | |
+| `goose.simulation` | bool | |
+| `goose.st_num`, `goose.sq_num` | int | |
+| `sv.appid` | int | |
+| `sv.svid` | string | |
+| `sv.smp_cnt` | int | |
+| `hartip.command` | int | |
+| `hartip.command_name` | string | |
+| `hartip.is_response` | bool | |
+| `opcua.service_type` | int | |
+| `opcua.service_name` | string | |
+| `opcua.message_type` | string | |
+| `mms.service_tag` | int | confirmed-service tag; not the PDU selector or ACSE result |
+| `mms.service_name` | string | |
+| `mms.is_response` | bool | |
+
+#### More examples
+
+```
+# packets containing an S7comm PLC Stop
+conduitscope decode -r cap.pcap -Y s7comm.plc_stop
+
+# any of three DNP3 function codes
+conduitscope decode -r cap.pcap -Y 'dnp3.function in {1, 2, 22}'
+
+# EtherNet/IP service names mentioning "Write"
+conduitscope decode -r cap.pcap -Y 'enip.service_name contains "Write"'
+
+# OPC UA service-type names matching a pattern
+conduitscope decode -r cap.pcap -Y 'opcua.service_name matches "^(Read|Write)"'
+
+# every BACnet packet, regardless of service
+conduitscope decode -r cap.pcap -Y bacnet
+```
 
 ### `info` -- print pcap file metadata and a protocol histogram
 

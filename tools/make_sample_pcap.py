@@ -21537,6 +21537,46 @@ def build_decode_as_sample():
     (TESTS_DIR / "sample_decode_as.pcap").write_bytes(data)
 
 
+def build_display_filter_mixed_sample():
+    """`-Y/--display-filter` (display_filter.hpp/cpp, decode -Y) -- a genuinely mixed-protocol
+    capture, needed to prove a display filter actually EXCLUDES non-matching-protocol packets
+    rather than just matching within an all-one-protocol capture (every other protocol's own
+    sample_X.pcap is single-protocol, so none of them can exercise this). Three packets, three
+    different protocols on the same two hosts: a Modbus FC3 (Read Holding Registers) request, a
+    DNP3 Class 0 read request, and an IEC104 Interrogation command -- reusing each protocol's own
+    minimal request shape from build_modbus_sample/build_dnp3_sample/build_iec104_sample verbatim
+    rather than inventing new wire bytes."""
+    packets = []
+
+    # 1) Modbus FC3 (Read Holding Registers) request -- same bytes as build_modbus_sample's own
+    #    first packet.
+    mb_req = struct.pack("!HHHBB HH", 1, 0, 6, 1, 3, 0, 10)
+    tcp1 = tcp_header(51000, 502, 1000, 2000, TCP_PSH | TCP_ACK, len(mb_req)) + mb_req
+    ip1 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp1), 0x7000) + tcp1
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip1)
+
+    # 2) DNP3 Class 0 read request -- same bytes as build_dnp3_sample's own packet 2.
+    read_class0 = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+    dnp3_frame = dnp3_link_frame(source=1, destination=1024, user_data=read_class0)
+    tcp2 = tcp_header(51500, 20000, 5000, 6000, TCP_PSH | TCP_ACK, len(dnp3_frame)) + dnp3_frame
+    ip2 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp2), 0x7001) + tcp2
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip2)
+
+    # 3) IEC104 Interrogation command (type 100) -- APCI I-format wrapping ASDU type_id=100,
+    #    COT=activation(6), CASDU=1, one IOA=0 object with qualifier 0x14 (station interrogation).
+    apci = bytes([0x68, 0x0E, 0x00, 0x00, 0x00, 0x00])  # I-format, N(S)=0, N(R)=0
+    asdu = bytes([100, 0x01, 0x06, 0x00, 0x01, 0x00]) + bytes([0, 0, 0]) + bytes([0x14])
+    iec104_frame = apci + asdu
+    tcp3 = tcp_header(51801, 2404, 8000, 9000, TCP_PSH | TCP_ACK, len(iec104_frame)) + iec104_frame
+    ip3 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp3), 0x7002) + tcp3
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip3)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_701_000_000 + i, i * 1000)
+    (TESTS_DIR / "sample_display_filter_mixed.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -21669,4 +21709,5 @@ if __name__ == "__main__":
     build_ipv6_attack_rogue_dhcpv6_server_sample()
     build_homeplug_av_sample()
     build_decode_as_sample()
+    build_display_filter_mixed_sample()
     print("wrote sample fixtures to", TESTS_DIR)

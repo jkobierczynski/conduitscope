@@ -261,6 +261,11 @@ struct Iec104Result {
     std::vector<std::string> notes;
 
     bool iec104_has_asdu = false;
+    uint8_t iec104_asdu_type_id = 0;  // mirrors Iec104Asdu::type_id verbatim (first ASDU only,
+                                       // same "reflects only the FIRST asdu" convention every
+                                       // other iec104_asdu_* scalar field here already follows) --
+                                       // added so display_filter_fields.cpp's iec104.type_id can
+                                       // filter numerically, not just by the rendered name fields
     std::string iec104_asdu_type_name;
     std::string iec104_asdu_type_short_name;
     std::string iec104_cot_name;

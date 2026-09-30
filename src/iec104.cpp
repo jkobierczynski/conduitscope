@@ -846,6 +846,7 @@ std::optional<ProtocolResult> Iec104Decoder::decode(ByteSpan payload, DecodeCont
         if (is_first_apdu) {
             result.summary += "; " + asdu.summary;
             result.iec104_has_asdu = true;
+            result.iec104_asdu_type_id = asdu.type_id;
             result.iec104_asdu_type_name = asdu.type_name;
             result.iec104_asdu_type_short_name = asdu.type_short_name;
             result.iec104_cot_name = asdu.cot_name;

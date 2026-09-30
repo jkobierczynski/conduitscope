@@ -1583,6 +1583,7 @@ std::optional<ProtocolResult> Dnp3Decoder::decode(ByteSpan payload, DecodeContex
         if (is_first_frame) {
             result.summary += "; " + app.summary;
             result.dnp3_has_function = app.has_function;
+            result.dnp3_function_code = app.function_code;
             result.dnp3_function_name = app.function_name;
         }
         for (const auto& n : app.notes) result.notes.push_back(n);

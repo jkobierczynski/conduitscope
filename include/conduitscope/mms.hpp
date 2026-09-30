@@ -388,6 +388,13 @@ struct MmsFrame {
     uint32_t invoke_id = 0;
 
     bool service_recognized = false;  // the ConfirmedService(Request|Response) CHOICE tag was named
+    uint32_t service_tag = 0;         // the raw CHOICE tag dispatch_confirmed_service (mms.cpp)
+                                       // already computes locally before naming it -- mirrored here
+                                       // so display_filter_fields.cpp's mms.service_tag can filter
+                                       // numerically. Mirrors only the confirmed-service tag
+                                       // (request/response dispatch), not pdu_name's own CHOICE
+                                       // selector or error_name's -- a deliberately smaller scope,
+                                       // see docs/USER_GUIDE.md's Display filters subsection
     std::string service_name;         // e.g. "read", "getNameList" -- empty when !service_recognized
     bool service_body_decoded = false;  // true for Tier 1 (full decode); false for Tier 2/unrecognized
 

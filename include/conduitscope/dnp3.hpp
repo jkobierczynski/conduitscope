@@ -435,6 +435,10 @@ struct Dnp3Result {
     std::vector<std::string> notes;
 
     bool dnp3_has_function = false;
+    uint8_t dnp3_function_code = 0;  // mirrors Dnp3ApplicationFragment::function_code verbatim --
+                                      // added so display_filter_fields.cpp's dnp3.function can
+                                      // filter numerically, not just by dnp3_function_name's
+                                      // rendered text
     std::string dnp3_function_name;
     std::vector<std::string> dnp3_object_headers;
     std::vector<std::string> dnp3_point_values;

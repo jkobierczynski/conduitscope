@@ -588,6 +588,20 @@ same filter syntax either way); either one requires this build to have
 libpcap/Npcap support -- see \fBLIVE CAPTURE\fR. \fB\-f\fR mirrors tshark's
 own \fB\-f\fR.
 .TP
+.BR \-Y ", " \-\-display\-filter " " \fIEXPR\fR
+Display filter (Wireshark display-filter syntax), e.g.
+\fB'modbus.func_code == 16 && ip.src == 10.1.2.3'\fR. Unlike \fB\-f\fR
+(a BPF filter, applied before/during decode against raw bytes), this is
+evaluated per-packet AFTER decode against dissected fields -- mirrors
+tshark's own \fB\-Y\fR. Covers universal eth/ip/tcp/udp fields plus a
+curated set of protocols (Modbus/UMAS, S7comm, S7comm-Plus, DNP3,
+EtherNet/IP, BACnet, IEC104, GOOSE, Sampled Values, HART-IP, OPC UA, MMS);
+a bare protocol name (e.g. \fB\-Y bacnet\fR) works as an existence test for
+any decoded protocol. Does not affect \fB\-w\fR, which stays governed by
+\fB\-f\fR only. A malformed expression is a CLI error (nonzero exit) before
+any packet is processed. See \fBdocs/USER_GUIDE.md\fR's "Display filters"
+section for the full grammar and field table.
+.TP
 .BR \-a ", " \-\-duration " " \fISECONDS\fR
 Stop a live capture (\fB\-i\fR) after this many seconds. Default: 0
 (unlimited -- rely on \fB\-\-max\-packets\fR and/or Ctrl+C instead).

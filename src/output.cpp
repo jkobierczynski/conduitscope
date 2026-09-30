@@ -3658,6 +3658,10 @@ void write_mms_json_fields(std::ostream& out, const MmsFrame& mf) {
         out << "    \"mms_service_recognized\": " << (mf.service_recognized ? "true" : "false") << ",\n";
         if (mf.service_recognized) {
             out << "    \"mms_service\": \"" << json_escape(mf.service_name) << "\",\n";
+            // Raw CHOICE tag mms.hpp's own MmsFrame::service_tag mirrors -- added so a -Y/
+            // --display-filter expression (mms.service_tag == N) can filter numerically, not just
+            // by mms_service's own rendered name. See display_filter_fields.cpp.
+            out << "    \"mms_service_tag\": " << mf.service_tag << ",\n";
         }
         if (mf.has_error) {
             out << "    \"mms_error\": \"" << json_escape(mf.error_name) << "\",\n";
@@ -3946,6 +3950,10 @@ void write_dnp3_json_fields(std::ostream& out, const Dnp3Result& dr) {
     out << "    \"dnp3_block_crc_failures\": " << dr.block_crc_failures << ",\n";
     if (dr.dnp3_has_function) {
         out << "    \"dnp3_function\": \"" << json_escape(dr.dnp3_function_name) << "\",\n";
+        // Raw function code Dnp3Result::dnp3_function_code mirrors from Dnp3ApplicationFragment --
+        // added so -Y/--display-filter's dnp3.function can filter numerically, not just by
+        // dnp3_function's own rendered name. See display_filter_fields.cpp.
+        out << "    \"dnp3_function_code\": " << static_cast<unsigned>(dr.dnp3_function_code) << ",\n";
     }
     if (!dr.dnp3_object_headers.empty()) {
         out << "    \"dnp3_objects\": [";
@@ -3991,6 +3999,11 @@ void write_dnp3_json_fields(std::ostream& out, const Dnp3Result& dr) {
 // migration.
 void write_iec104_json_fields(std::ostream& out, const Iec104Result& ir) {
     if (ir.iec104_has_asdu) {
+        // Raw type-ID Iec104Result::iec104_asdu_type_id mirrors from the first ASDU's own
+        // Iec104Asdu::type_id -- added so -Y/--display-filter's iec104.type_id can filter
+        // numerically, not just by iec104_asdu_type's own rendered name. See
+        // display_filter_fields.cpp.
+        out << "    \"iec104_asdu_type_id\": " << static_cast<unsigned>(ir.iec104_asdu_type_id) << ",\n";
         out << "    \"iec104_asdu_type\": \"" << json_escape(ir.iec104_asdu_type_name) << "\",\n";
         out << "    \"iec104_asdu_type_short\": \"" << json_escape(ir.iec104_asdu_type_short_name) << "\",\n";
         out << "    \"iec104_cot\": \"" << json_escape(ir.iec104_cot_name) << "\",\n";
@@ -4016,6 +4029,10 @@ void write_iec104_json_fields(std::ostream& out, const Iec104Result& ir) {
 // before this migration.
 void write_s7comm_json_fields(std::ostream& out, const S7CommResult& sr) {
     if (sr.has_function) {
+        // Raw function code S7CommResult::function_code mirrors from S7CommFrame -- added so
+        // -Y/--display-filter's s7comm.param.func can filter numerically (e.g. == 0x05), not just
+        // by s7comm_function's own rendered name. See display_filter_fields.cpp.
+        out << "    \"s7comm_function_code\": " << static_cast<unsigned>(sr.function_code) << ",\n";
         out << "    \"s7comm_function\": \"" << json_escape(sr.function_name) << "\",\n";
     }
     if (!sr.items.empty()) {

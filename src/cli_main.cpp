@@ -44,6 +44,7 @@
 #include "conduitscope/bpf_filter.hpp"
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
+#include "conduitscope/display_filter.hpp"
 #include "conduitscope/flow_direction.hpp"
 #include "conduitscope/inventory_merge.hpp"
 #include "conduitscope/live_capture.hpp"
@@ -912,7 +913,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag, bool show_direction, bool show_mac,
                 const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump,
-                bool verbose, bool redact, bool detect_highlight) {
+                bool verbose, bool redact, bool detect_highlight,
+                const std::optional<CompiledDisplayFilter>& display_filter) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     bool writing_to_stdout = output.empty();
@@ -1206,8 +1208,27 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 // Wireshark's own display-filter numbering), rather than renumbering from 1 within
                 // just the matches; see PacketSource::next()'s own comment.
                 size_t index = source.index();
+                // -w/--write passthrough stays PRE-filter, deliberately: it is raw capture
+                // passthrough governed by -f/--filter only (see that flag's own doc text above),
+                // not by -Y/--display-filter -- a decode-fidelity-dependent, later-stage concept.
+                // Making -w depend on -Y would mean a display-filter expression referencing a field
+                // this decoder can't parse could silently drop packets from the raw pcap output, a
+                // surprising failure mode for a "give me the raw bytes" flag. Matches tshark's own
+                // one-pass (non -2) behavior, where -w combined with a display filter still writes
+                // everything captured.
                 if (pcap_writer) pcap_writer->write_packet(pkt);
                 DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
+                // -Y/--display-filter gate: a non-matching packet is invisible to everything below
+                // -- direction tracking, detect-highlighting, stats, the output writer, -x hex dump,
+                // and (via `continue`, before ++decoded_count) --max-packets counting -- matching
+                // Wireshark's own display-filter semantics. A parse-error packet always still counts
+                // as a warning below, regardless of the filter (a decode-quality signal, orthogonal
+                // to whatever the filter is selecting FOR -- see docs/USER_GUIDE.md's Display
+                // filters subsection for this and the -w/--max-packets interaction, both stated
+                // explicitly there).
+                if (display_filter && dp.protocol != "parse-error" && !display_filter->matches(dp)) {
+                    continue;
+                }
                 direction_tracker.observe(dp);
                 if (detect_engine) {
                     pending_hit.reset();
@@ -2267,7 +2288,7 @@ int main(int argc, char** argv) {
     // --- decode ---------------------------------------------------------
     auto* decode_cmd =
         app.add_subcommand("decode", "Decode a pcap/pcapng capture and print each recognized packet");
-    std::string decode_input, decode_interface, decode_filter, decode_output;
+    std::string decode_input, decode_interface, decode_filter, decode_display_filter, decode_output;
     int decode_duration = 0;
     int decode_snaplen = 65535;
     bool decode_promiscuous = true;
@@ -2324,6 +2345,21 @@ int main(int argc, char** argv) {
                             "applied per-packet after reading the file (same filter syntax either way); "
                             "requires this build to have been compiled with libpcap/Npcap support in "
                             "both cases -- mirrors tshark's own -f");
+    decode_cmd->add_option("-Y,--display-filter", decode_display_filter,
+                            "Display filter (Wireshark display-filter syntax), e.g. "
+                            "'modbus.func_code == 16 && ip.src == 10.1.2.3'. Unlike -f/--filter (a BPF "
+                            "filter applied to raw bytes before/during decode), this is evaluated "
+                            "per-packet AFTER decode, against the same dissected fields this run's own "
+                            "-T json output would show -- mirrors tshark's own -Y. A non-matching "
+                            "packet is skipped entirely: it is not counted toward --max-packets and "
+                            "does not appear in the output stream, but -w/--write's raw pcap "
+                            "passthrough is unaffected (governed by -f/--filter only -- see "
+                            "docs/USER_GUIDE.md's Display filters subsection). Covers universal "
+                            "eth/ip/tcp/udp fields plus a curated set of protocols (Modbus, S7comm, "
+                            "S7comm-Plus, DNP3, EtherNet/IP, BACnet, IEC104, GOOSE, SV, HART-IP, OPC "
+                            "UA, MMS, UMAS) -- see docs/USER_GUIDE.md for the full field list. A "
+                            "malformed expression is a CLI error (nonzero exit) before any packet is "
+                            "processed.");
     decode_cmd->add_option("-a,--duration", decode_duration,
                             "Stop a live capture (-i) after this many seconds (0 = unlimited; stop "
                             "with Ctrl+C or --max-packets instead) -- mirrors tshark's own -a "
@@ -3502,6 +3538,18 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        // Compiled once, before any packet is read, the same fail-fast-before-the-loop posture as
+        // parse_decode_as_rules above -- see display_filter.hpp's own compile_display_filter comment.
+        std::optional<CompiledDisplayFilter> decode_display_filter_compiled;
+        if (!decode_display_filter.empty()) {
+            std::string display_filter_error;
+            decode_display_filter_compiled = compile_display_filter(decode_display_filter, &display_filter_error);
+            if (!decode_display_filter_compiled) {
+                std::cerr << display_filter_error;
+                return 1;
+            }
+        }
+
         return run_decode(decode_input, decode_interface, decode_filter, decode_duration, decode_snaplen,
                            decode_promiscuous, decode_output, decode_format, decode_protocol,
                            decode_modbus_ports, decode_dnp3_ports, decode_s7comm_ports, decode_iec104_ports,
@@ -3530,7 +3578,8 @@ int main(int argc, char** argv) {
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac, decode_fields, decode_write, decode_hex,
-                           decode_verbose, decode_redact, decode_detect_highlight);
+                           decode_verbose, decode_redact, decode_detect_highlight,
+                           decode_display_filter_compiled);
     }
     if (info_cmd->parsed()) {
         return run_info(info_input, std::cout);

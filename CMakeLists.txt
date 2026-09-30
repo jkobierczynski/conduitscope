@@ -138,6 +138,8 @@ add_library(conduitscope_core STATIC
   src/protocol_registry.cpp
   src/resource_limits.cpp
   src/decoder.cpp
+  src/display_filter_parser.cpp
+  src/display_filter_fields.cpp
   src/resolver.cpp
   src/time_format.cpp
   src/packet_range.cpp
@@ -545,6 +547,10 @@ if(CONDUITSCOPE_ENABLE_FUZZING)
   # unofficial, reverse-engineered sources (umas.hpp's own header comment), with no official
   # spec's own edge cases already anticipated.
   add_conduitscope_fuzzer(umas)
+  # -Y/--display-filter (display_filter.hpp/display_filter_parser.cpp) -- this codebase's first
+  # hand-rolled TEXT parser over untrusted-shaped input, rather than a binary wire-format decoder;
+  # see fuzz_display_filter.cpp's own file header for why it needs no DecodedPacket at all.
+  add_conduitscope_fuzzer(display_filter)
 endif()
 
 add_test(NAME decode_modbus_sample
@@ -4652,7 +4658,7 @@ set_tests_properties(mms_information_report_values PROPERTIES
 add_test(NAME mms_tier2_takecontrol_shown_as_hex
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
 set_tests_properties(mms_tier2_takecontrol_shown_as_hex PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"mms_service\": \"takeControl\",\n *\"mms_body_shown_as_hex\": true,\n *\"mms_body_length\": 12,\n *\"mms_body_hex\": \"800a49454431446576696365\"")
+  PASS_REGULAR_EXPRESSION "\"mms_service\": \"takeControl\",\n *\"mms_service_tag\": 19,\n *\"mms_body_shown_as_hex\": true,\n *\"mms_body_length\": 12,\n *\"mms_body_hex\": \"800a49454431446576696365\"")
 
 add_test(NAME mms_serviceerror_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text --verbose)
@@ -16946,3 +16952,241 @@ add_test(NAME detect_umas_fields_absent_for_ordinary_modbus
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
 set_tests_properties(detect_umas_fields_absent_for_ordinary_modbus PROPERTIES
   FAIL_REGULAR_EXPRESSION "UMAS")
+
+# ---------------------------------------------------------------------------------------------
+# -Y/--display-filter (display_filter.hpp/cpp, decode -Y only -- see Jurgen's own request: a
+# Wireshark-style display-filter language applied post-decode, e.g.
+# `modbus.func_code == 16 && ip.src == 10.1.2.3`, `s7comm.param.func == 0x05`,
+# `goose.simulation == 1`). sample_modbus.pcap's own three packets (all function_code==3 "Read
+# Holding Registers": #1 request from 192.168.1.50, #2 response, #3 exception response) already
+# cover most of the grammar; sample_display_filter_mixed.pcap (build_display_filter_mixed_sample,
+# tools/make_sample_pcap.py) is the one genuinely mixed-protocol capture (one Modbus, one DNP3, one
+# IEC104 packet) needed to prove a filter actually excludes a non-matching protocol's packets, not
+# just narrows within an all-one-protocol capture.
+# ---------------------------------------------------------------------------------------------
+
+add_test(NAME decode_display_filter_modbus_func_code_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == 3" --stats)
+set_tests_properties(decode_display_filter_modbus_func_code_match PROPERTIES
+  # Only #1/#2 -- #3 is packet 3's OWN exception response, whose function_code on the wire carries
+  # the 0x80 exception bit (function_code == 0x83, "as seen on the wire" -- see ModbusFrame's own
+  # comment, modbus.hpp), so it does not match a plain == 3.
+  PASS_REGULAR_EXPRESSION "packets: *2")
+
+add_test(NAME decode_display_filter_modbus_func_code_no_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == 99" --stats)
+set_tests_properties(decode_display_filter_modbus_func_code_no_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *0"
+  FAIL_REGULAR_EXPRESSION "modbus +[1-9]")
+
+# && combines a numeric field match with an ip.src match -- only packet #1 (the request) has
+# src_ip 192.168.1.50; #2/#3 are the PLC's own responses, src_ip 192.168.1.10.
+add_test(NAME decode_display_filter_and_operator
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_code == 3 && ip.src == 192.168.1.50")
+set_tests_properties(decode_display_filter_and_operator PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#1 .*request: read 10 holding register\\(s\\)"
+  FAIL_REGULAR_EXPRESSION "#2 |#3 ")
+
+add_test(NAME decode_display_filter_or_operator
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.exception == true || ip.src == 192.168.1.50" --stats)
+set_tests_properties(decode_display_filter_or_operator PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *2")
+
+# A bare boolean field name (e.g. `modbus.exception` alone) is a field-EXISTENCE test --
+# present-and-non-null, not "value is true" -- see display_filter.hpp's own file header comment.
+# modbus.exception is present (true or false) on every decoded Modbus packet, so `!modbus.exception`
+# (negated existence) matches nothing here; `modbus.exception == false` is the correct way to test
+# the value, matching #1/#2 (non-exception) and excluding #3 (the exception response).
+add_test(NAME decode_display_filter_not_operator_is_existence_not_value
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "!modbus.exception" --stats)
+set_tests_properties(decode_display_filter_not_operator_is_existence_not_value PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *0")
+
+add_test(NAME decode_display_filter_bool_equality
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.exception == false" --stats)
+set_tests_properties(decode_display_filter_bool_equality PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *2")
+
+# Parentheses genuinely change which packets match: `!` > comparisons > && > ||, so
+# "A || B && C" groups as "A || (B && C)", giving #1 (via B&&C) and #3 (via A) -- but
+# "(A || B) && C" groups differently, giving only #1 (every packet satisfies A||B here since B
+# -- func_code==3 -- is always true, but only #1 also satisfies C, the ip.src match).
+add_test(NAME decode_display_filter_parens_change_grouping
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "(modbus.exception == true || modbus.func_code == 3) && ip.src == 192.168.1.50")
+set_tests_properties(decode_display_filter_parens_change_grouping PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#1 "
+  FAIL_REGULAR_EXPRESSION "#2 |#3 ")
+
+add_test(NAME decode_display_filter_in_set_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_code in {3,4,16}" --stats)
+set_tests_properties(decode_display_filter_in_set_match PROPERTIES
+  # Same 0x80-exception-bit caveat as decode_display_filter_modbus_func_code_match above -- #3's
+  # own function_code is 0x83, not 3, so only #1/#2 are in {3,4,16}.
+  PASS_REGULAR_EXPRESSION "packets: *2")
+
+add_test(NAME decode_display_filter_in_set_no_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_code in {4,16}" --stats)
+set_tests_properties(decode_display_filter_in_set_no_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *0")
+
+add_test(NAME decode_display_filter_contains
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_name contains \"Read\"" --stats)
+set_tests_properties(decode_display_filter_contains PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *3")
+
+add_test(NAME decode_display_filter_contains_no_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_name contains \"Write\"" --stats)
+set_tests_properties(decode_display_filter_contains_no_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *0")
+
+add_test(NAME decode_display_filter_matches_regex
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_name matches \"^Read\"" --stats)
+set_tests_properties(decode_display_filter_matches_regex PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *3")
+
+# Bare protocol-name existence tests genuinely exclude other protocols' packets -- the point of
+# sample_display_filter_mixed.pcap's own three-different-protocols shape.
+add_test(NAME decode_display_filter_bare_existence_modbus
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_display_filter_mixed.pcap" -Y "modbus")
+set_tests_properties(decode_display_filter_bare_existence_modbus PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(modbus\\)"
+  FAIL_REGULAR_EXPRESSION "\\(dnp3\\)|\\(iec104\\)")
+
+add_test(NAME decode_display_filter_bare_existence_dnp3
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_display_filter_mixed.pcap" -Y "dnp3")
+set_tests_properties(decode_display_filter_bare_existence_dnp3 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(dnp3\\)"
+  FAIL_REGULAR_EXPRESSION "\\(modbus\\)|\\(iec104\\)")
+
+add_test(NAME decode_display_filter_bare_existence_iec104
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_display_filter_mixed.pcap" -Y "iec104")
+set_tests_properties(decode_display_filter_bare_existence_iec104 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(iec104\\)"
+  FAIL_REGULAR_EXPRESSION "\\(modbus\\)|\\(dnp3\\)")
+
+# Malformed-expression tests -- each a CLI error (nonzero exit) before any packet is processed,
+# following this project's own "error: <context> '<offending>' <what's wrong> (expected <hint>)"
+# convention.
+add_test(NAME decode_display_filter_error_unknown_field
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.nope == 3")
+set_tests_properties(decode_display_filter_error_unknown_field PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter 'modbus\\.nope == 3' field 'modbus\\.nope' is not a recognized display-filter field")
+
+add_test(NAME decode_display_filter_error_type_mismatch
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == \"abc\"")
+set_tests_properties(decode_display_filter_error_type_mismatch PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter 'modbus\\.func_code == \"abc\"' cannot compare numeric field 'modbus\\.func_code' against a string literal \\(expected a numeric value, e\\.g\\. modbus\\.func_code == 16\\)")
+
+add_test(NAME decode_display_filter_error_unbalanced_paren
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "(modbus.func_code == 3")
+set_tests_properties(decode_display_filter_error_unbalanced_paren PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter '\\(modbus\\.func_code == 3' '<end of expression>' was unexpected \\(expected a closing '\\)'\\)")
+
+add_test(NAME decode_display_filter_error_unterminated_string
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_name contains \"abc")
+set_tests_properties(decode_display_filter_error_unterminated_string PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter '.*' '.*abc' has an unterminated string literal")
+
+# Numeric-field-mirroring regression tests (display_filter.hpp's Phase-4 fix: S7CommResult/
+# Dnp3Result/Iec104Result/MmsFrame each previously exposed only a rendered name string, no raw
+# numeric code) -- confirms both the new -T json field and the corresponding -Y filter field work.
+add_test(NAME decode_display_filter_s7comm_param_func_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --format json)
+set_tests_properties(decode_display_filter_s7comm_param_func_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"s7comm_function_code\": 4")
+
+add_test(NAME decode_display_filter_s7comm_param_func_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" -Y "s7comm.param.func == 0x04" --stats)
+set_tests_properties(decode_display_filter_s7comm_param_func_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *2")
+
+add_test(NAME decode_display_filter_dnp3_function_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
+set_tests_properties(decode_display_filter_dnp3_function_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_function_code\": 1")
+
+add_test(NAME decode_display_filter_dnp3_function_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" -Y "dnp3.function == 1" --stats)
+set_tests_properties(decode_display_filter_dnp3_function_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "dnp3 +[1-9]")
+
+add_test(NAME decode_display_filter_iec104_type_id_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format json)
+set_tests_properties(decode_display_filter_iec104_type_id_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"iec104_asdu_type_id\": 100")
+
+add_test(NAME decode_display_filter_iec104_type_id_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" -Y "iec104.type_id == 100" --stats)
+set_tests_properties(decode_display_filter_iec104_type_id_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "iec104 +[1-9]")
+
+add_test(NAME decode_display_filter_mms_service_tag_json
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(decode_display_filter_mms_service_tag_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_service_tag\": [0-9]+")
+
+add_test(NAME decode_display_filter_mms_service_tag_match
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" -Y "mms.service_tag == 4" --stats)
+set_tests_properties(decode_display_filter_mms_service_tag_match PROPERTIES
+  PASS_REGULAR_EXPRESSION "mms +[1-9]")
+
+# UMAS is nested under Modbus (ModbusFrame::umas), not its own top-level protocol -- see
+# display_filter_fields.cpp's own file header comment -- so `umas.function_code` (a dotted
+# field-existence test) is the correct way to select UMAS traffic, not a bare `umas`.
+add_test(NAME decode_display_filter_umas_function_code
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" -Y "umas.function_code" --stats)
+set_tests_properties(decode_display_filter_umas_function_code PROPERTIES
+  PASS_REGULAR_EXPRESSION "modbus +1[0-9]")
+
+# --max-packets counts only filter-MATCHING packets -- matches Wireshark's own display-filter
+# semantics, where a non-matching packet is invisible to every downstream consumer including a
+# count-based stop condition. modbus.exception == false matches #1/#2 only (#3 is the exception);
+# --max-packets 1 must yield #1 alone, not "the first packet scanned regardless of match".
+add_test(NAME decode_display_filter_max_packets_counts_post_filter
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.exception == false" --max-packets 1)
+set_tests_properties(decode_display_filter_max_packets_counts_post_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#1 "
+  FAIL_REGULAR_EXPRESSION "#2 |#3 ")
+
+# -w/--write stays PRE-filter -- raw capture passthrough, governed by -f/--filter only, unaffected
+# by -Y/--display-filter (see cli_main.cpp's own comment at the loop's insertion point). Writing
+# with a narrowing -Y, then reading the written pcap back with no filter at all, must reproduce
+# every packet from the original capture, not just the -Y-matching subset.
+add_test(NAME decode_display_filter_write_unaffected_by_filter
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap' && \
+    '$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' \
+      -Y 'modbus.exception == false' --write '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap' --format json >/dev/null && \
+    '$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap' --stats")
+set_tests_properties(decode_display_filter_write_unaffected_by_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *3")
+
+# Jurgen's own three literal example expressions from the original feature request, confirmed to
+# parse and evaluate without error (regression guard against the exact syntax he asked for).
+add_test(NAME decode_display_filter_literal_example_modbus_and_ip
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_code == 16 && ip.src == 10.1.2.3" --stats)
+set_tests_properties(decode_display_filter_literal_example_modbus_and_ip PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *0")
+
+add_test(NAME decode_display_filter_literal_example_s7comm_hex
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap"
+    -Y "s7comm.param.func == 0x05" --stats)
+set_tests_properties(decode_display_filter_literal_example_s7comm_hex PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *[0-9]+")
+
+add_test(NAME decode_display_filter_literal_example_goose_simulation
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap"
+    -Y "goose.simulation == 1" --stats)
+set_tests_properties(decode_display_filter_literal_example_goose_simulation PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets: *1")

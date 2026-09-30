@@ -3916,6 +3916,7 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                             sr.summary = s7.summary;
                             sr.notes = s7.notes;
                             sr.has_function = s7.has_function;
+                            sr.function_code = s7.function_code;
                             sr.function_name = s7.function_name;
                             const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
                             // `items` carries forward unmodified -- S7Item has no ByteSpan of its own,

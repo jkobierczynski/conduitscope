@@ -288,6 +288,11 @@ struct S7CommResult {
     std::vector<std::string> notes;
 
     bool has_function = false;
+    uint8_t function_code = 0;  // mirrors S7CommFrame::function_code verbatim -- see this struct's
+                                 // own comment above for why S7CommResult isn't simply S7CommFrame
+                                 // carried forward unmodified; added so display_filter_fields.cpp's
+                                 // s7comm.param.func can filter numerically (e.g. == 0x05), not just
+                                 // by function_name's rendered text
     std::string function_name;
 
     std::vector<S7Item> items;                // safe to defer -- see this struct's own comment

@@ -14855,6 +14855,101 @@ it done as its own patch.
     ASan/UBSan `build-fuzz`, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`, MinGW
     cross-compile `build-mingw`), plus a clean-room extract-rebuild-test cycle before delivery.
 
+101. **Wireshark-style display filters for `decode` (`-Y/--display-filter`).** Jurgen's own direct
+    request: "Can you add Wireshark's display-filter language (and the dissected-field engine
+    behind it)?: expressions like `modbus.func_code == 16 && ip.src == 10.1.2.3`,
+    `s7comm.param.func == 0x05`, `goose.simulation == 1`, applied after decode rather than as BPF
+    at capture time." Three scoping decisions were confirmed with Jurgen up front: engine plus a
+    curated first batch of 13 protocols (Modbus/UMAS, S7comm, S7comm-Plus, DNP3, EtherNet/IP,
+    BACnet, IEC104, GOOSE, Sampled Values, HART-IP, OPC UA, MMS) rather than every decoded
+    protocol; `decode` only, not `detect`/`baseline`/`policy validate`/`inventory`; and a v1
+    grammar covering comparison/boolean operators, parentheses, `contains`/`matches`,
+    bare-field-existence tests, and `in {...}` set membership, deliberately excluding
+    byte-slicing and bitwise field tests.
+
+    **Engine, from scratch.** No boolean-expression lexer/parser existed anywhere in this
+    codebase before this. `include/conduitscope/display_filter.hpp` is the public surface
+    (`FilterValue`/`FilterValueKind`, `FieldRegistry`, `CompiledDisplayFilter`,
+    `compile_display_filter`); `src/display_filter_parser.cpp` is a hand-rolled
+    index-and-peek lexer plus a recursive-descent parser (one function per grammar production,
+    the same "hand-rolled, one function per construct" style already used by `yaml_mini.cpp`)
+    building a small closed `FilterNode` AST, a one-pass type-checker that walks the AST against
+    the registry's declared field kinds before any packet is read (same "fail fast, once, before
+    the loop" posture as `-d/--decode-as`'s own `parse_decode_as_rules`), and a recursive
+    evaluator; `src/display_filter_fields.cpp` is the field registry itself, organized one
+    `register_<protocol>_fields` section per curated protocol plus a `register_universal_fields`
+    for eth/vlan/ip/tcp/udp, mirroring `output.cpp`'s own per-protocol JSON-writer organization
+    as a style model.
+
+    **Design decisions worth flagging.** A bare field name with no comparison
+    (`modbus.exception` alone) is a field-EXISTENCE test (present-and-non-null), not a
+    value-is-true test -- this deliberately differs from a real Wireshark boolean field, where a
+    bare name also means "value is true." `!modbus.exception` therefore means "field does not
+    exist," never "exception flag is false" -- documented prominently in USER_GUIDE.md given how
+    easy this is to get wrong. `ip.src`/`ip.dst` compare as exact text only (`==`/`!=`/`in{...}`,
+    no CIDR/range) since `DecodedPacket::src_ip`/`dst_ip` are plain strings with no parsed-octet
+    form anywhere in this codebase; `FilterValueKind::Ip` is kept as its own tag rather than
+    folded into `String` so a later pass can add real address-aware comparison without renaming
+    anything. An unquoted dotted-decimal literal (`10.1.2.3`) is specially lexed as an IPv4
+    literal (an `Ip`-kind field's type-check already accepts `String`-kind literals, so no new
+    token kind was needed); IPv6 needs explicit quoting. A Bool-kind field also accepts an
+    Int-kind literal of exactly `0` or `1` (an `int_as_bool` allowance in both the Compare and
+    InSet type-check cases) specifically so Jurgen's own `goose.simulation == 1` example works,
+    matching the grammar's `BOOL_LITERAL := "true" | "false" | "1" | "0"` production. UMAS rides
+    inside Modbus (`ModbusFrame::umas`), never as its own top-level `dp.protocol` value --
+    `umas.function_code`/`umas.is_response` are dotted fields gated on the Modbus layer, and no
+    bare `umas` protocol-name existence test is registered, since one would never match anything.
+
+    **Four numeric-field-mirroring fixes.** S7comm, DNP3, IEC104, and MMS each had a raw
+    numeric function/type/service code already parsed onto their frame struct, but only its
+    rendered name string mirrored onto the `Result` struct the CLI/JSON layer sees -- the same
+    "mirror a needed field from the raw parse struct onto the Result struct" pattern already
+    used by `S7CommResult`'s own SZL fields. `S7CommResult::function_code`,
+    `Dnp3Result::dnp3_function_code`, `Iec104Result::iec104_asdu_type_id`, and
+    `MmsFrame::service_tag` were added (one field + one assignment each, at an already-exercised
+    construction site), and also exposed in `--format json` output (`s7comm_function_code`,
+    `dnp3_function_code`, `iec104_asdu_type_id`, `mms_service_tag`) so the CLI help text's own
+    claim -- that `-Y` filters against "the same dissected fields `-T json` would show" -- stays
+    literally true.
+
+    **CLI wiring.** `-Y,--display-filter` on `decode` only, compiled and type-checked once before
+    the packet loop (mirroring `-d/--decode-as`'s own fail-fast-before-capture posture), then
+    consulted right after `DecodedPacket dp = decoder.decode(...)` in `run_decode`'s single packet
+    loop. Three deliberate behavioral choices: a `parse-error` packet always counts as a warning
+    regardless of `-Y` (a decode-quality signal orthogonal to what's being filtered for);
+    `-w/--write` stays pre-filter, governed by `-f`/BPF only, matching tshark's own one-pass `-w`
+    behavior, so a `-Y` expression can never silently drop packets from a raw-bytes capture;
+    `--max-packets` counts only filter-matching packets, matching Wireshark's own semantics for
+    "give me the first N matching packets."
+
+    **Verification.** Manual smoke testing surfaced and fixed four real bugs before any test was
+    written: unquoted IP literals weren't lexed at all (`lex_number` had no dotted-decimal
+    handling); `goose.simulation == 1` was rejected outright (the `int_as_bool` allowance above);
+    a hyphenated bare protocol name like `s7comm-plus` failed to lex (`-` wasn't in `lex_ident`'s
+    accepted character set, safe to add since the grammar has no subtraction operator); and a
+    type-mismatch error message was missing its closing parenthesis. 33 new CTest entries cover
+    every curated protocol's match/no-match pair, each boolean/grouping operator, `in {...}`,
+    `contains`, `matches`, bare existence, four malformed-expression error cases, a `-T json`
+    regression per numeric-mirroring fix, a `--max-packets`-counts-post-filter case, and a
+    `-w`-unaffected-by-`-Y` case -- all against a new three-packet mixed-protocol fixture
+    (`tests/sample_display_filter_mixed.pcap`, Modbus + DNP3 + IEC104) built to prove a filter
+    genuinely excludes non-matching-protocol packets, not just matches within an
+    already-single-protocol capture. A new `fuzz_display_filter` harness extends this project's
+    "every decoder gets fuzzed" convention to "every hand-rolled untrusted-shaped-text parser
+    gets fuzzed" -- this is the first fuzz target here over free-form text rather than a binary
+    wire format, feeding raw fuzzer bytes straight into `compile_display_filter`. A 45-second/
+    474,063-run campaign against the seed corpus under `build-fuzz` (Clang ASan/UBSan) found zero
+    crashes or sanitizer findings. Full CTest across all four standing build configs (default GCC
+    `build`, ASan/UBSan `build-fuzz`, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`,
+    MinGW cross-compile `build-mingw`), plus a clean-room extract-rebuild-test cycle, before
+    delivery.
+
+    **Field-coverage note** (alongside "Protocols not covered at all" below): `-Y` field tables
+    are scoped to the 13 curated protocols plus universal eth/ip/tcp/udp fields, not all ~115
+    protocols this tool decodes -- a bare protocol-name existence test (`-Y ethercat`) still works
+    for any of them, since it's checked against `decode`'s own top-level protocol name rather than
+    a per-protocol field table.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -1543,6 +1543,7 @@ void dispatch_confirmed_service(const BerTlv& svc, MmsFrame& frame, bool is_resp
         return;
     }
     frame.service_recognized = true;
+    frame.service_tag = tag;
     frame.service_name = name;
     bool decoded = true;
     if (!is_response) {
