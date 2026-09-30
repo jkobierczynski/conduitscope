@@ -14747,6 +14747,114 @@ it done as its own patch.
     same doc was left as-is (broadening it to explicitly cross-reference
     the new tool-wide section was offered, not yet requested).
 
+100. **Detection false-positive validation against legitimate operations, plus a major CTest
+    infrastructure defect found and fixed along the way.** Jurgen's own direct follow-up, working
+    down his shared priority-list document (Tier 2, item 3): "Detection false-positive validation
+    against legitimate operations. This may be difficult I think." Sourced from
+    `docs/reviews/2026-09-chatgpt-security-review-patch257.md` section 4.5 (High priority), whose
+    exact wording is the authoritative scope: "Validate detection patterns against legitimate
+    commissioning, maintenance, firmware upgrades, and redundant-controller behavior. Detection
+    output should retain the underlying evidence and explain the conditions that triggered the
+    finding."
+
+    **Audit.** A structured pass over every finding-producing code block in `detect_engine.cpp`
+    (~45 distinct call sites), each rated for false-positive risk against the four named legitimate
+    scenarios, with its exact trigger condition and existing severity/evidence/caveat status
+    recorded. This audit is the evidentiary basis for every editing decision below.
+
+    **Scope decision (reasoned, not exhaustive).** Rather than touch all ~19 flagged Critical
+    findings scattered across ~40 call sites, honest caveat text was added only to the four findings
+    whose *shape* -- not their severity -- makes them most likely to be misread as direct evidence of
+    an attack technique when a routine, authorized cause produces the identical bytes on the wire:
+
+    - `modbus-rogue-master`/`dnp3-rogue-master` (T0848 Rogue Master) -- a second write-capable master
+      appearing is also exactly what a redundant/standby controller becoming active during a failover
+      looks like. Both descriptions now say so, framed as a prompt to confirm which controller should
+      be active, not as confirmed misuse.
+    - The Composite Download+Restart finding (T0831 Manipulation of Control) -- a firmware/logic
+      download followed by a restart/mode-change within `kCompositeWindowSeconds` (300s) is also
+      exactly the shape of a routine, authorized firmware/logic upgrade. The description now says so.
+    - `dnp3-broadcast-command` (T0855) and `iec104-broadcast-interrogation` -- a write/operate command
+      or General Interrogation addressed to DNP3/IEC 104's own reserved broadcast address is also
+      exactly what a standby master resyncing every outstation after a failover, or an operator
+      re-enabling unsolicited reporting/running a full poll during commissioning or maintenance,
+      produces. Both descriptions now say so.
+
+    Severity was left unchanged everywhere -- this engine's own `DetectionSeverity` design (impact if
+    genuine, never a claim of intent) was already correct, and lowering severity because a shape can
+    also be legitimate would have been the actual mistake patch257 was warning against. The great
+    majority of other Critical/always-notable findings got no new text at all: their own descriptions
+    already state only the operational fact, and none share the four edited findings' specific
+    failure mode. Documented in `docs/USER_GUIDE.md`'s new "False positives: legitimate operations
+    that can trigger these findings" DETECT subsection (end of that section) as the explicit, reasoned
+    scope decision it is, not an oversight to revisit.
+
+    **New fixture, `tests/sample_detect_legitimate_operations.pcap`
+    (`detect_legitimate_operations_all_findings`/`_json_shape`, CMakeLists.txt), covers the other two
+    named scenarios directly** -- commissioning (Modbus Read Device Identification, a CIP
+    identity-object write, and 5 BACnet Who-Is broadcasts as a deliberate negative control, well under
+    `kBacnetWhoIsFloodThreshold`/100) and maintenance (DNP3 Cold Restart, Modbus Diagnostics Restart
+    Communications Option). All four operational findings still fire, honestly, at their existing
+    severity; the Who-Is negative control proves ordinary commissioning-time device discovery does not
+    trip the flood finding on presence alone. "Firmware upgrades" and "redundant-controller behavior"
+    needed no new fixture: `tests/sample_detect_snort_patterns.pcap`'s own pre-existing S7 Request
+    Download + PLC Stop sequence and `tests/sample_umas.pcap`'s own UMAS mirror of it already exercise
+    the Composite finding's new text, and `tests/sample_detect_snort_patterns_batch5.pcap`'s own Rogue
+    Master scenarios plus `tests/real_captures/dnp3/dnp3_test_data_part1.pcap`'s own broadcast-destined
+    DNP3 commands already exercise the Rogue Master/broadcast findings' new text.
+
+    **A major, previously-undiscovered CTest infrastructure defect was found while updating the
+    pinned `PASS_REGULAR_EXPRESSION` text for these changes, and is a more consequential finding than
+    the feature work itself.** Two CTest entries whose pinned text should have needed updating
+    (`detect_snort_patterns_batch5_all_findings`, `detect_umas_all_findings`) kept reporting "Passed"
+    against clearly-stale text -- the third time this exact "quirk" had been seen in this project's
+    history (previously `inventory_diagram_and_policy_out_smoke`, noted but not root-caused). Root
+    cause, confirmed with a minimal standalone reproduction (a two-line `add_test`/
+    `set_tests_properties` in a scratch CMake project): **CTest's `PASS_REGULAR_EXPRESSION` silently
+    truncates its pattern at the first unescaped `;` character.** CMake test properties are internally
+    semicolon-delimited lists; a raw `;` inside the property string (extremely easy to introduce by
+    accident, since ordinary English prose and this project's own finding-description text both use
+    semicolons freely -- "first occurrence within this capture; no --baseline-file was supplied" is a
+    verbatim example) splits the value, and only the first list element is ever compiled as the
+    regex -- CTest's own `LastTest.log` "Test Pass Reason: Regex=[...]" line, once inspected directly,
+    showed the truncation plainly. Everything after the first raw semicolon in any affected
+    `PASS_REGULAR_EXPRESSION` had never actually been checked.
+
+    A project-wide scan found **75 of this project's 2108 `PASS_REGULAR_EXPRESSION` entries** (in
+    `CMakeLists.txt`) contained at least one unescaped `;` (120 occurrences total). All 75 were fixed
+    by escaping every raw `;` to `\;` (a scripted, mechanical, purely-additive change -- it cannot
+    make a previously-passing assertion fail unless the "hidden" tail genuinely no longer matches
+    real output). Re-running the full suite after the fix surfaced **16 tests that had been silently
+    broken**, none related to this session's own feature work: stale/wrong field ordering
+    (`policy_functions_modbus_restricted` and 6 sibling `policy_functions_*` tests all expected
+    `matched conduit "..."` to appear *before* the violation's own `function '...' observed; ...`
+    line, when the real report always prints VIOLATIONS before ALLOWED), a genuinely stale assertion
+    two full protocols out of date (`inventory_diagram_and_policy_out_smoke`'s "Conduits never
+    exercised" count, from a capture that had since grown two more protocols' worth of traffic without
+    this test noticing), a JSON `notes` array that had switched from pretty-printed to compact
+    single-line formatting with nothing updating the pinned assertion (`winrm_chunked_body_not_
+    reassembled`), a missing character count in an OPC UA JSON-key-order assertion
+    (`real_opcua_create_session_response_matches_wireshark_session_id`), and similar small,
+    genuine drifts in `mms_pipelined_tpkt_frames_limitation_note`, `s7commplus_getmultivar_response_
+    all_datatype_shapes`, and `twincat_payload_truncated_relative_to_command_shape_noted`. Every one
+    was fixed by regenerating the affected fragment from the real, current binary output (this
+    project's own standing rule -- never hand-write expected output), not by loosening the assertion.
+    Final state: 2262/2262 (2260 pre-existing + 2 new), zero known-truncated `PASS_REGULAR_EXPRESSION`
+    entries remaining in `CMakeLists.txt`.
+
+    **This finding materially widens what "verified: N/N tests passing" has actually meant across
+    this project's entire prior history** for any test whose pinned text happened to contain a raw
+    semicolon -- such a test could report Passed while asserting substantially less than its author
+    believed, with no error or warning of any kind. It does not mean prior work was wrong -- the 16
+    surfaced drifts were all genuine but minor documentation-of-current-behavior staleness, not
+    functional regressions -- but it does mean the *test coverage itself* was thinner than believed
+    in those 75 spots until this pass. Flagged here prominently, and to Jurgen directly, rather than
+    folded quietly into the feature delivery.
+
+    **Verification.** Full CTest across all four standing build configs (default GCC `build`,
+    ASan/UBSan `build-fuzz`, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`, MinGW
+    cross-compile `build-mingw`), plus a clean-room extract-rebuild-test cycle before delivery.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

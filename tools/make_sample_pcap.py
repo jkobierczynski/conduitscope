@@ -19495,6 +19495,125 @@ def build_detect_snort_patterns_batch5_sample():
     (TESTS_DIR / "sample_detect_snort_patterns_batch5.pcap").write_bytes(data)
 
 
+def build_detect_legitimate_operations_sample():
+    """patch257 section 4.5's own false-positive validation pass (docs/reviews/2026-09-chatgpt-
+    security-review-patch257.md: "Validate detection patterns against legitimate commissioning,
+    maintenance, firmware upgrades, and redundant-controller behavior") -- the "commissioning" and
+    "maintenance" halves of that ask. The other two ("firmware upgrades", "redundant-controller
+    behavior") are already proven by existing fixtures: sample_detect_snort_patterns.pcap's own
+    scenario 8 (S7comm Request Download then PLC Stop within the composite window) already exercises
+    the Composite Download+Restart finding's new caveat text (see detect_snort_patterns_all_findings/
+    detect_umas_all_findings in CMakeLists.txt), and sample_detect_snort_patterns_batch5.pcap's own
+    scenarios 30-33 (Modbus/DNP3 Rogue Master) plus tests/real_captures/dnp3/dnp3_test_data_part1.pcap
+    (DNP3 broadcast command, real_dnp3_detect_batch2_findings) already exercise the Rogue Master and
+    DNP3 broadcast-command findings' own new caveat text -- no new fixture needed for those two.
+
+    This fixture's own job is different from those: it doesn't test new caveat TEXT (none of these
+    finding types got one -- see the scope note below), it proves the existing findings' behavior is
+    already honest and correctly scoped against ordinary commissioning/maintenance traffic, per this
+    engine's own "severity reflects operational impact if genuine, not a determination of intent"
+    design (detect_engine.hpp's own DetectionSeverity doc comment) -- i.e. these operations DO
+    legitimately still fire (a device really is being named, restarted, or reinitialized, regardless
+    of who did it or why), and that's the correct, honest behavior, not a bug to suppress. The
+    negative control (scenario 1c) proves the one commissioning-shaped signal that COULD plausibly
+    be conflated with reconnaissance -- a burst of BACnet Who-Is broadcasts during device discovery --
+    genuinely needs volume to fire, not just presence, so ordinary commissioning-time discovery
+    doesn't trip it.
+
+    Scope note: none of these five findings got new caveat text during this validation pass (unlike
+    Rogue Master/Composite/DNP3-broadcast/IEC104-broadcast-GI above) -- their descriptions were
+    already honestly scoped (Read Device Identification is Informational and makes no claim beyond
+    "a device-identity query happened"; the CIP Identity write, DNP3 Cold Restart, and Modbus Restart
+    Communications Option descriptions already state only the operational fact -- "a device is being
+    named/restarted/reinitialized" -- not an accusation) and none of them share the same
+    "could-easily-be-misread-as-an-attack-signature" shape the four edited findings have (a second
+    master appearing, or a stop+download+restart sequence). Documented here as the explicit, reasoned
+    scope decision, not an oversight.
+
+    Scenarios:
+      1a) Commissioning -- Modbus Read Device Identification (function 0x2B, MEI type 0x0E) against a
+          newly-commissioned device -- EngineeringStationActivity/T0888, Informational (see
+          detect_snort_patterns_batch1_sample's own scenario 5 for the exact wire shape this reuses).
+      1b) Commissioning -- CIP Set_Attribute_Single write to the Identity object (class 0x01), the
+          shape this engine uses as a broadened stand-in for a device-naming/configuration write
+          during commissioning -- ProtocolMisuse/T0855, Critical (see
+          build_detect_snort_patterns_sample's own scenario 1 for the exact wire shape this reuses).
+      1c) Commissioning, negative control -- 5 BACnet Who-Is broadcasts from a device performing
+          ordinary discovery while joining the network -- well under kBacnetWhoIsFloodThreshold (100,
+          detect_engine.cpp) -- must NOT fire the Who-Is flood/enumeration-sweep finding.
+      2a) Maintenance -- DNP3 Cold Restart request against an outstation during a maintenance window
+          -- FirmwareLogicChange/T0816, Critical.
+      2b) Maintenance -- Modbus Diagnostics Restart Communications Option (sub-function 0x0001)
+          against a device during a maintenance window -- FirmwareLogicChange/T0816, Critical.
+    """
+    COMM_ENG_IP, COMM_ENG_MAC = "192.168.1.190", mac("00:0c:29:cd:30:01")
+    COMM_READDEV_IP, COMM_READDEV_MAC = "192.168.1.191", mac("00:0c:29:cd:30:02")
+    COMM_CIP_IP, COMM_CIP_MAC = "192.168.1.192", mac("00:0c:29:cd:30:03")
+    COMM_BAC_SRC_IP, COMM_BAC_SRC_MAC = "192.168.1.193", mac("00:0c:29:cd:30:04")
+    BCAST_IP, BCAST_MAC = "255.255.255.255", mac("ff:ff:ff:ff:ff:ff")
+
+    MAINT_ENG_IP, MAINT_ENG_MAC = "192.168.1.194", mac("00:0c:29:cd:30:05")
+    MAINT_DNP3_IP, MAINT_DNP3_MAC = "192.168.1.195", mac("00:0c:29:cd:30:06")
+    MAINT_MB_IP, MAINT_MB_MAC = "192.168.1.196", mac("00:0c:29:cd:30:07")
+
+    packets = []  # (payload_bytes, offset_seconds)
+
+    def add_tcp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident):
+        tcp = tcp_header(src_port, dst_port, 1000 + ident, 2000, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), 0x4A00 + ident) + tcp
+        pkt = eth_header(dst_mac, src_mac, 0x0800) + ip
+        packets.append((pkt, ident))
+
+    def add_udp(src_ip, src_mac, dst_ip, dst_mac, src_port, dst_port, payload, ident):
+        udp = udp_header(src_port, dst_port, payload)
+        ip = ipv4_header(src_ip, dst_ip, 17, len(udp), 0x4A00 + ident) + udp
+        pkt = eth_header(dst_mac, src_mac, 0x0800) + ip
+        packets.append((pkt, ident))
+
+    def modbus_mbap(transaction_id, unit_id, pdu):
+        return struct.pack("!HHHB", transaction_id, 0, 1 + len(pdu), unit_id) + pdu
+
+    # 1a) Modbus Read Device Identification (function 0x2B, MEI type 0x0E) -- minimal request: MEI
+    #     type(1) + Read Device ID code(1)=0x01 (basic) + Object Id(1)=0x00.
+    add_tcp(COMM_ENG_IP, COMM_ENG_MAC, COMM_READDEV_IP, COMM_READDEV_MAC, 49900, 502,
+            modbus_mbap(501, 1, bytes([0x2B, 0x0E, 0x01, 0x00])), 1)
+
+    # 1b) CIP Set_Attribute_Single (service 0x10) write to Identity object (class 0x01, instance 1,
+    #     attribute 1) -- path: Class(0x20,0x01) Instance(0x24,0x01) Attribute(0x30,0x01), same
+    #     8-bit-logical-segment encoding build_detect_snort_patterns_sample's own scenario 1 uses.
+    identity_write_cip = bytes([0x10, 0x03, 0x20, 0x01, 0x24, 0x01, 0x30, 0x01, 0xAA])
+    identity_write_msg = enip_message(0x006F, data=enip_cpf_unconnected(identity_write_cip),
+                                       session_handle=0x3001, sender_context=b"COMMISS1")
+    add_tcp(COMM_ENG_IP, COMM_ENG_MAC, COMM_CIP_IP, COMM_CIP_MAC, 49901, ENIP_PORT, identity_write_msg, 2)
+
+    # 1c) 5 BACnet Who-Is broadcasts (ordinary discovery while joining the network) -- well under
+    #     kBacnetWhoIsFloodThreshold (100) -- must NOT fire the flood finding.
+    who_is = apdu_unconfirmed_request(8, b"")  # service choice 8, "who-Is", no device-instance range
+    for i in range(5):
+        msg = bvlc_message(0x0B, npdu_header() + who_is)  # 0x0B: Original-Broadcast-NPDU
+        add_udp(COMM_BAC_SRC_IP, COMM_BAC_SRC_MAC, BCAST_IP, BCAST_MAC, 47900 + i, BACNET_PORT, msg, 3 + i)
+
+    # 2a) DNP3 Cold Restart request (function 0x0D), no object headers -- a routine maintenance-
+    #     window device restart.
+    cold_restart = dnp3_link_frame(source=1, destination=3000, user_data=bytes([0xC0, 0xC0, 0x0D]))
+    add_tcp(MAINT_ENG_IP, MAINT_ENG_MAC, MAINT_DNP3_IP, MAINT_DNP3_MAC, 49910, 20000, cold_restart, 8)
+
+    # 2b) Modbus Diagnostics Restart Communications Option (sub-function 0x0001) -- a routine
+    #     maintenance-window comm-interface reinitialization.
+    restart_pdu = bytes([0x08, 0x00, 0x01, 0x00, 0x00])
+    add_tcp(MAINT_ENG_IP, MAINT_ENG_MAC, MAINT_MB_IP, MAINT_MB_MAC, 49911, 502,
+            modbus_mbap(502, 1, restart_pdu), 9)
+
+    data = pcap_global_header()
+    base_ts = 1_700_100_000.0
+    for pkt, offset in packets:
+        ts = base_ts + float(offset)
+        sec = int(ts)
+        usec = int(round((ts - sec) * 1_000_000))
+        data += pcap_record(pkt, sec, usec)
+    (TESTS_DIR / "sample_detect_legitimate_operations.pcap").write_bytes(data)
+
+
 def umas_mbap(transaction_id: int, unit_id: int, umas_payload: bytes) -> bytes:
     """One Modbus/TCP MBAP frame carrying UMAS (function code 0x5A/90) as its PDU -- see
     umas.hpp's own header comment for the protocol. `umas_payload` is the UMAS-layer bytes
@@ -21536,6 +21655,7 @@ if __name__ == "__main__":
     build_detect_snort_patterns_batch3_sample()
     build_detect_snort_patterns_batch4_sample()
     build_detect_snort_patterns_batch5_sample()
+    build_detect_legitimate_operations_sample()
     build_umas_sample()
     build_amqp091_sample()
     build_amqp10_sample()

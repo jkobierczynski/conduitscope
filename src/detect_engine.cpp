@@ -678,6 +678,16 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             // write/operate command" framing -- every Write-classified function is inherently
             // master-issued (Confirm/Select/Response/Unsolicited Response are all Other, never
             // Write), so no extra direction gating is needed here.
+            // patch257 section 4.5 (this engine's own false-positive validation pass, see
+            // detect_snort_patterns_all_findings/detect_batch2_*_findings for the fixtures this
+            // reasoning is proven against): the audit for that pass flagged this finding as
+            // directly relevant to the "redundant-controller behavior" legitimate scenario --
+            // a standby master resyncing every outstation right after a failover, or an operator
+            // re-enabling unsolicited reporting plant-wide during commissioning/maintenance, both
+            // produce this exact wire shape (a write/operate command to the reserved broadcast
+            // address). The finding still fires at the same severity either way -- a broadcast
+            // write genuinely does reach every outstation at once regardless of who sent it or
+            // why -- this only adds the honest alternative explanation to the description text.
             static const std::vector<std::string> kDnp3WriteFunctionNames = dnp3_write_function_names();
             bool is_dnp3_write = std::find(kDnp3WriteFunctionNames.begin(), kDnp3WriteFunctionNames.end(),
                                             dr.dnp3_function_name) != kDnp3WriteFunctionNames.end();
@@ -687,7 +697,11 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                 d << "DNP3 " << dr.dnp3_function_name << " addressed to reserved broadcast destination "
                      "address 0x" << std::hex << dr.destination_address << std::dec
                   << " -- reaches every outstation on the segment at once, a single message with "
-                     "plant-wide blast radius";
+                     "plant-wide blast radius; can also be a redundant/standby master issuing a "
+                     "legitimate resync broadcast after a failover, or a commissioning/maintenance "
+                     "broadcast re-enabling unsolicited reporting plant-wide -- treat as a prompt to "
+                     "confirm which master should be active and why a broadcast was used, not "
+                     "confirmed misuse";
                 record_always_notable("dnp3-broadcast-command", DetectionCategory::ProtocolMisuse,
                                        mitre_t0855_unauthorized_command_message(), dp.src_ip, dp.dst_ip,
                                        "dnp3", dp.dst_port, d.str());
@@ -810,6 +824,12 @@ void DetectEngine::observe(const DecodedPacket& dp) {
             // own type/COT/IOA-range work) -- pure wiring, no new decode work. Deliberately a SEPARATE
             // finding from iec104-unexpected-cot/iec104-reset-process above -- a distinct wire
             // condition, not a variant of either.
+            // patch257 section 4.5: same "redundant-controller behavior" relevance as the DNP3
+            // broadcast-command finding just above -- a standby SCADA master resynchronizing full
+            // plant state right after a failover, or a legitimate commissioning-time full poll,
+            // both produce this exact wire shape. Severity is unchanged (a broadcast GI genuinely
+            // does force every RTU to report at once, whoever sent it); only the description gets
+            // the honest alternative explanation.
             if (ir.iec104_asdu_type_short_name == "C_IC_NA_1" && ir.iec104_cot_name == "activation" &&
                 ir.iec104_common_address == 0xFFFF) {
                 record_always_notable(
@@ -818,7 +838,9 @@ void DetectEngine::observe(const DecodedPacket& dp) {
                     dp.dst_port,
                     "IEC 104 General Interrogation (C_IC_NA_1) addressed to the broadcast Common "
                     "Address of ASDU (0xFFFF) -- forces every RTU on the segment to report full state "
-                    "at once");
+                    "at once; can also be a redundant/standby master resynchronizing full plant state "
+                    "after a failover, or a legitimate commissioning-time full poll -- treat as a "
+                    "prompt to confirm which master should be active, not confirmed misuse");
             }
         }
     }
@@ -1986,18 +2008,33 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
             } else if (c.source_tag == "modbus-rogue-master") {
                 // Batch 5 item 25 -- a second, different client issuing a write-classified Modbus
                 // request against an outstation that already has an established write-capable master
-                // (modbus_write_originators_by_server_, detect_engine.hpp).
+                // (modbus_write_originators_by_server_, detect_engine.hpp). patch257 section 4.5's own
+                // false-positive validation pass (docs/DEVELOPMENT.md) flagged this as the single
+                // highest-risk finding in this engine for a redundant-controller failover: a standby
+                // master becoming active and issuing its own writes to outstations the primary was
+                // already writing to is EXACTLY this wire shape, and "Rogue Master" reads as
+                // unambiguously hostile with no hedge -- hence the added clause below, matching this
+                // file's own established pattern (dnp3-operate-without-select, modbus/dnp3-write-burst)
+                // of naming a specific, plausible legitimate cause rather than leaving a Critical,
+                // ambiguously-named finding to speak for itself.
                 d << "Modbus write-classified request from a second write-capable master " << c.client_ip
                   << " to " << c.server_ip
                   << " -- a different client than the one(s) already seen issuing write-classified "
-                     "requests to this outstation in this capture";
+                     "requests to this outstation in this capture; can also be a redundant/standby "
+                     "controller becoming active during a failover, not necessarily an unauthorized "
+                     "master -- treat as a prompt to confirm which controller should be active, not "
+                     "confirmed misuse";
             } else if (c.source_tag == "dnp3-rogue-master") {
                 // Batch 5 item 25 -- the DNP3 analog of modbus-rogue-master above
-                // (dnp3_write_originators_by_server_, detect_engine.hpp).
+                // (dnp3_write_originators_by_server_, detect_engine.hpp). Same patch257 4.5 hedge as
+                // modbus-rogue-master above -- see that branch's own comment.
                 d << "DNP3 write-classified request from a second write-capable master " << c.client_ip
                   << " to " << c.server_ip
                   << " -- a different master than the one(s) already seen issuing write-classified "
-                     "requests to this outstation in this capture";
+                     "requests to this outstation in this capture; can also be a redundant/standby "
+                     "controller becoming active during a failover, not necessarily an unauthorized "
+                     "master -- treat as a prompt to confirm which controller should be active, not "
+                     "confirmed misuse";
             } else {
                 // "cip-new-originator" -- the remaining, original non-remote-access source (the
                 // fallback here, not because it's the only other one, but because it was this
@@ -2117,14 +2154,23 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
             f.last_seen = std::max(best_download->last_seen, best_restart->last_seen);
             f.packet_count = best_download->packet_count + best_restart->packet_count;
             std::ostringstream d;
+            // patch257 section 4.5's own false-positive validation pass (docs/DEVELOPMENT.md) flagged
+            // this composite as the single highest-risk finding in this engine for a legitimate
+            // firmware/logic upgrade: stop-or-download-then-restart is not just plausibly triggered by
+            // a routine, authorized upgrade -- it's the literal, universal shape of one. The caveat
+            // below says so explicitly, alongside (not instead of) the attack-pattern framing, matching
+            // this file's own "name the plausible legitimate cause, let severity reflect impact not
+            // intent" convention used elsewhere (dnp3/modbus-rogue-master, dnp3-operate-without-select).
             d << "Composite finding: a firmware/logic download (" << best_download->technique.id << " "
               << best_download->technique.name << ", " << best_download->protocol
               << ") and a restart/mode-change (" << best_restart->technique.id << " "
               << best_restart->technique.name << ", " << best_restart->protocol << ") both observed against "
               << server_ip << " within " << static_cast<long>(kCompositeWindowSeconds)
-              << "s of each other -- consistent with a download-then-activate attack pattern, not "
-                 "necessarily two unrelated findings; see the individual findings above for each event's "
-                 "own detail";
+              << "s of each other -- consistent with a download-then-activate attack pattern, but this is "
+                 "also the exact shape of a routine, authorized firmware/logic upgrade (stop or download, "
+                 "then restart to activate it); severity reflects the operational impact of this sequence "
+                 "if unauthorized, not a determination that it was -- see the individual findings above "
+                 "for each event's own detail";
             f.description = d.str();
             composites.push_back(std::move(f));
         }

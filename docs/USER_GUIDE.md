@@ -1508,7 +1508,7 @@ $ conduitscope detect -r tests/real_captures/dnp3/dnp3_test_data_part1.pcap
 [Protocol Misuse] T0855 (Unauthorized Command Message)
   evidence: Confirmed  novelty: N/A  severity: Critical
   10.0.0.8 -> 10.0.0.3:20000 (dnp3)
-  DNP3 Disable Unsolicited Responses addressed to reserved broadcast destination address 0xffff -- reaches every outstation on the segment at once, a single message with plant-wide blast radius
+  DNP3 Disable Unsolicited Responses addressed to reserved broadcast destination address 0xffff -- reaches every outstation on the segment at once, a single message with plant-wide blast radius; can also be a redundant/standby master issuing a legitimate resync broadcast after a failover, or a commissioning/maintenance broadcast re-enabling unsolicited reporting plant-wide -- treat as a prompt to confirm which master should be active and why a broadcast was used, not confirmed misuse
   first seen: 2004-10-11 16:09:10.238687Z  last seen: 2004-10-11 16:09:19.359091Z  packets: 2
 
 [Engineering-Station Activity] T0858 (Change Operating Mode)
@@ -1520,7 +1520,7 @@ $ conduitscope detect -r tests/real_captures/dnp3/dnp3_test_data_part1.pcap
 [Protocol Misuse] T0855 (Unauthorized Command Message)
   evidence: Confirmed  novelty: N/A  severity: Critical
   10.0.0.9 -> 10.0.0.3:20000 (dnp3)
-  DNP3 Stop Application addressed to reserved broadcast destination address 0xffff -- reaches every outstation on the segment at once, a single message with plant-wide blast radius
+  DNP3 Stop Application addressed to reserved broadcast destination address 0xffff -- reaches every outstation on the segment at once, a single message with plant-wide blast radius; can also be a redundant/standby master issuing a legitimate resync broadcast after a failover, or a commissioning/maintenance broadcast re-enabling unsolicited reporting plant-wide -- treat as a prompt to confirm which master should be active and why a broadcast was used, not confirmed misuse
   first seen: 2004-10-11 16:46:21.093332Z  last seen: 2004-10-11 16:46:22.837583Z  packets: 2
 ```
 
@@ -1706,7 +1706,7 @@ findings: 11 (Critical 4, Moderate 3, Informational 4)
 
 [Protocol Misuse] T0848 (Rogue Master)
   192.168.1.171 -> 192.168.1.172:502 (modbus)
-  Modbus write-classified request from a second write-capable master 192.168.1.171 to 192.168.1.172 -- a different client than the one(s) already seen issuing write-classified requests to this outstation in this capture (first occurrence within this capture; no --baseline-file was supplied)
+  Modbus write-classified request from a second write-capable master 192.168.1.171 to 192.168.1.172 -- a different client than the one(s) already seen issuing write-classified requests to this outstation in this capture; can also be a redundant/standby controller becoming active during a failover, not necessarily an unauthorized master -- treat as a prompt to confirm which controller should be active, not confirmed misuse (first occurrence within this capture; no --baseline-file was supplied)
 
 [Protocol Misuse] T0806 (Brute Force I/O)
   192.168.1.176 -> 192.168.1.177:502 (modbus)
@@ -1829,6 +1829,93 @@ INITIALIZE_DOWNLOAD (T0843) trigger it here too, exactly as an S7 PLC Stop + dow
 `baseline learn`/`baseline check` also treat UMAS START_PLC/STOP_PLC as always-flagged control-plane
 operations, the same treatment S7comm's own PLC Control/PLC Stop already gets -- `baseline check`
 reports them regardless of whether the baseline file has ever seen them before.
+
+### False positives: legitimate operations that can trigger these findings
+
+`docs/reviews/2026-09-chatgpt-security-review-patch257.md` section 4.5 asked this engine to be
+validated against four kinds of ordinary, authorized OT activity that can look similar to an
+attack pattern at the wire level: commissioning, maintenance, firmware/logic upgrades, and
+redundant-controller (failover) behavior. This section is the result of that validation pass --
+what it found, what changed, and what deliberately did not.
+
+**The interpretive key is this engine's own severity design, stated in full in
+`include/conduitscope/detect_engine.hpp`'s `DetectionSeverity` doc comment and repeated in every
+report's own printed legend:** severity reflects the *operational impact if the finding is
+genuine*, never a claim that it *is* malicious or that whoever triggered it lacked authorization. A
+PLC Stop is Critical regardless of who sent it or whether it is new, because the CPU actually stops
+either way. That design was already correct going into this validation pass and nothing here
+changes it -- no finding's severity was lowered because its trigger condition can also happen
+legitimately. What this pass added, in the four findings most likely to be *misread* as an attack
+signature specifically because of their shape (not their severity), is an honest sentence naming
+the legitimate alternative, so the human analyst reading the report has both explanations in front
+of them rather than having to already know this engine's own caveats from memory:
+
+- **`modbus-rogue-master`/`dnp3-rogue-master` (T0848 Rogue Master, Critical)** -- a second
+  write-capable master appearing against an outstation this capture already saw a different master
+  write to. The clearest legitimate cause is a redundant/standby controller becoming active during
+  a failover: from the wire alone, a real rogue master and a standby taking over produce the exact
+  same shape (a second writer, same outstation). The description now says so and frames the finding
+  as a prompt to confirm which controller should be active, not as confirmed misuse.
+- **The Composite Download+Restart finding (T0831 Manipulation of Control, Critical)** -- a
+  firmware/logic download and a restart/mode-change against the same server within
+  `kCompositeWindowSeconds` (300s) of each other. This is also the exact shape of a routine,
+  authorized firmware/logic upgrade: stop (or download), then restart to activate it. The
+  description now says so explicitly, while keeping the severity unchanged -- the sequence's
+  operational impact is the same either way.
+- **`dnp3-broadcast-command` (T0855 Unauthorized Command Message, Critical)** and
+  **`iec104-broadcast-interrogation`** -- a write/operate command, or a General Interrogation,
+  addressed to DNP3/IEC 104's own reserved broadcast address. Beyond an attacker's plant-wide blast,
+  the same shape is produced by a standby master resyncing every outstation right after a failover,
+  or by an operator re-enabling unsolicited reporting/running a full poll during commissioning or
+  maintenance. Both descriptions now name that alternative.
+
+**Worked example** (`tests/sample_detect_snort_patterns_batch5.pcap`, the same fixture
+`detect_snort_patterns_batch5_all_findings` in this project's own CTest suite exercises):
+
+```
+$ conduitscope detect -r tests/sample_detect_snort_patterns_batch5.pcap
+...
+[Protocol Misuse] T0848 (Rogue Master)
+  evidence: Confirmed  novelty: First Occurrence  severity: Critical
+  192.168.1.171 -> 192.168.1.172:502 (modbus)
+  Modbus write-classified request from a second write-capable master 192.168.1.171 to 192.168.1.172 -- a different client than the one(s) already seen issuing write-classified requests to this outstation in this capture; can also be a redundant/standby controller becoming active during a failover, not necessarily an unauthorized master -- treat as a prompt to confirm which controller should be active, not confirmed misuse (first occurrence within this capture; no --baseline-file was supplied)
+  first seen: 2023-11-15 23:13:51.000000Z  last seen: 2023-11-15 23:13:51.000000Z  packets: 1
+```
+
+**What was deliberately left unchanged.** The great majority of this engine's other Critical/
+always-notable findings (S7/UMAS PLC Stop and PLC Control, DNP3/BACnet device restarts, S7/UMAS
+firmware/logic downloads on their own, CIP Forward Open from a new originator, and so on) got no
+new caveat text. That is a reasoned scope decision, not an oversight: those findings' own
+descriptions already state only the operational fact ("a program/logic block is being written TO
+the CPU", "an outstation's application layer is being halted") without implying an accusation, and
+none of them share the four edited findings' specific failure mode -- a shape that a reader could
+plausibly mistake for direct evidence of an attack technique (a second master appearing; a
+stop-then-download-then-restart sequence; a message that reaches every outstation at once) when a
+routine, authorized cause produces the identical bytes on the wire. Piling a caveat clause onto
+every finding would dilute the ones that actually need it and make every report longer without
+making any of them more honest.
+
+**Commissioning and maintenance traffic.** `tests/sample_detect_legitimate_operations.pcap`
+(`detect_legitimate_operations_all_findings` in this project's own CTest suite) validates this
+engine's behavior against the other two named scenarios directly: a newly-commissioned device
+answering a Modbus Read Device Identification query and receiving a CIP identity-object write (its
+name being set), a device joining the network via a handful of ordinary BACnet Who-Is broadcasts,
+and a DNP3 outstation plus a Modbus device both being restarted/reinitialized during a maintenance
+window. All four operational findings still fire, honestly, at their existing severity -- a device
+really is being named or restarted, regardless of who did it or why, and suppressing that would be
+dishonest, not helpful. The BACnet Who-Is broadcasts are a deliberate negative control: only 5 of
+them, well under `kBacnetWhoIsFloodThreshold` (100) -- proving that ordinary commissioning-time
+device discovery does not, on its own, trip the Who-Is flood/enumeration-sweep finding, which
+genuinely needs volume rather than mere presence to fire.
+
+**Firmware/logic upgrades and redundant-controller behavior** are the other two scenarios patch257
+section 4.5 named; both are already validated by fixtures this project had before this pass, now
+carrying the new caveat text above: `tests/sample_detect_snort_patterns.pcap`'s own S7comm Request
+Download + PLC Stop sequence (`detect_snort_patterns_all_findings`) and `tests/sample_umas.pcap`'s
+own UMAS mirror of the same sequence (`detect_umas_all_findings`) for firmware/logic upgrades; the
+Rogue Master scenarios above, plus `tests/real_captures/dnp3/dnp3_test_data_part1.pcap`'s own
+broadcast-destined DNP3 commands (`real_dnp3_detect_batch2_findings`), for redundant-controller
+behavior.
 
 ### `capture` -- continuous, disk-bounded live capture to rotated pcap files
 
