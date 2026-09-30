@@ -720,6 +720,17 @@ add_test(NAME dnp3_reassembly_sequence_mismatch_discarded
 set_tests_properties(dnp3_reassembly_sequence_mismatch_discarded PROPERTIES
   PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame's sequence number \\(35\\) does not follow the previous frame's \\(expected 11\\)")
 
+# packets 23-24: a duplicate/replayed data-link frame -- frame 23 begins a fragment (SEQ=20),
+# frame 24 repeats the SAME SEQ=20 instead of advancing to 21 -- distinct from packets 11-12's
+# arbitrary sequence JUMP above (expected 11, got 35); must be rejected the exact same way, not
+# specially "recognized" as a harmless repeat. Security audit follow-up (docs/reviews/2026-09-
+# chatgpt-security-review-patch257.md's "4. OT-specific security risks", item 3, "Protocol
+# reassembly").
+add_test(NAME dnp3_reassembly_duplicate_sequence_discarded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --verbose)
+set_tests_properties(dnp3_reassembly_duplicate_sequence_discarded PROPERTIES
+  PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame's sequence number \\(20\\) does not follow the previous frame's \\(expected 21\\) -- discarding 5 already-buffered byte\\(s\\) and abandoning this fragment reassembly; application layer not decoded")
+
 add_test(NAME stats_mode_dnp3
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap")
 set_tests_properties(stats_mode_dnp3 PROPERTIES
@@ -973,11 +984,29 @@ set_tests_properties(tcp_reassembly_completes_despite_duplicate PROPERTIES
 add_test(NAME tcp_reassembly_partial_overlap_trimmed
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --verbose)
 set_tests_properties(tcp_reassembly_partial_overlap_trimmed PROPERTIES
-  PASS_REGULAR_EXPRESSION "TCP segment on this flow overlaps 3 already-buffered byte\\(s\\) \\(likely a retransmission\\) -- trimmed and only the new byte\\(s\\) appended")
+  PASS_REGULAR_EXPRESSION "TCP segment on this flow overlaps 3 already-buffered byte\\(s\\) with identical content \\(a genuine retransmission\\) -- trimmed and only the new byte\\(s\\) appended")
 
 add_test(NAME tcp_reassembly_partial_overlap_completes_correctly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --verbose)
 set_tests_properties(tcp_reassembly_partial_overlap_completes_correctly PROPERTIES
+  PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 3 TCP segments")
+
+# G) A partial overlap whose overlapping bytes DISAGREE with what's already buffered (distinct
+#    from scenario F above, whose overlap is genuine identical content) -- security audit
+#    follow-up, docs/reviews/2026-09-chatgpt-security-review-patch257.md's "4. OT-specific
+#    security risks", item 3, "Protocol reassembly". The note must say the content disagrees
+#    (not the generic "likely a retransmission" wording scenario F's identical-content overlap
+#    gets), and the final decode must still show the REAL register values -- proving first-
+#    received-wins holds even when a later segment's own overlapping bytes actively disagree,
+#    not just when they're an identical repeat.
+add_test(NAME tcp_reassembly_conflicting_overlap_content_flagged
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --verbose)
+set_tests_properties(tcp_reassembly_conflicting_overlap_content_flagged PROPERTIES
+  PASS_REGULAR_EXPRESSION "TCP segment on this flow overlaps 3 already-buffered byte\\(s\\) whose content disagrees with what's already buffered \\(ambiguous/conflicting data -- possibly a crafted overlap\\) -- the already-buffered byte\\(s\\) are kept for that range \\(first-received-wins\\) and only the segment's new byte\\(s\\) beyond the overlap are appended")
+
+add_test(NAME tcp_reassembly_conflicting_overlap_first_received_wins
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --verbose)
+set_tests_properties(tcp_reassembly_conflicting_overlap_first_received_wins PROPERTIES
   PASS_REGULAR_EXPRESSION "response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^#]*reassembled a Modbus/TCP PDU/frame from 29 byte\\(s\\) spanning 3 TCP segments")
 
 # --------------------------------------------------------------------------
@@ -3548,6 +3577,21 @@ add_test(NAME bacnet_segment_reassembly_sequence_gap_abandons_and_stays_raw
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --verbose)
 set_tests_properties(bacnet_segment_reassembly_sequence_gap_abandons_and_stays_raw PROPERTIES
   PASS_REGULAR_EXPRESSION "invoke-id=62 readPropertyMultiple\n *note: segmented APDU:[^\n]*\n *note: segmented BACnet APDU \\(sequence-number 2\\) does not continue the in-progress reassembly for this \\(flow, invoke-id\\) as expected \\(expected sequence-number 1, same PDU type/service-choice\\) -- discarding 4 already-buffered byte\\(s\\) and abandoning this reassembly\; service data not reassembled, shown above as this segment's own raw hex only")
+
+# Security audit follow-up (docs/reviews/2026-09-chatgpt-security-review-patch257.md's own "4.
+# OT-specific security risks", item 3, "Protocol reassembly"): a DUPLICATE segment sequence-
+# number (the second segment repeats sequence-number 0 instead of advancing to 1) rather than a
+# sequence GAP -- its own dedicated fixture (tools/make_sample_pcap.py's
+# build_bacnet_reassembly_adversarial_sample) since sample_bacnet.pcap itself feeds several
+# exact-count tests a new exchange would perturb. Falls into the same abandon-on-any-anomaly path
+# as the sequence-gap case above (bacnet.cpp's reassembly check doesn't special-case "repeats the
+# last sequence-number" from "skips ahead" -- both simply aren't "the expected next
+# sequence-number"), proving a replayed/duplicated segment can never silently re-merge into, or
+# manufacture, a complete command either.
+add_test(NAME bacnet_segment_reassembly_duplicate_sequence_discarded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet_reassembly_adversarial.pcap" --format text --verbose)
+set_tests_properties(bacnet_segment_reassembly_duplicate_sequence_discarded PROPERTIES
+  PASS_REGULAR_EXPRESSION "segmented BACnet APDU \\(sequence-number 0\\) does not continue the in-progress reassembly for this \\(flow, invoke-id\\) as expected \\(expected sequence-number 1, same PDU type/service-choice\\) -- discarding 4 already-buffered byte\\(s\\) and abandoning this reassembly\; service data not reassembled, shown above as this segment's own raw hex only")
 
 # JSON mirror: bacnet_reassembly_completed/bacnet_reassembly_segment_count only ever appear on a
 # segmented APDU (bacnet_segmented=true), and bacnet_reassembly_segment_count is only emitted
@@ -12288,6 +12332,43 @@ add_test(NAME max_reassembly_segments_abandons_normally_successful_reassembly
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tcp_reassembly.pcap" --format text --max-reassembly-segments 1 --verbose)
 set_tests_properties(max_reassembly_segments_abandons_normally_successful_reassembly PROPERTIES
   PASS_REGULAR_EXPRESSION "TCP segment reassembly on this flow exceeded its safety cap \\(29 byte\\(s\\) across 2 segment\\(s\\)\\) -- abandoning it\; this segment's own payload is tried fresh instead")
+
+# Security audit follow-up (docs/reviews/2026-09-chatgpt-security-review-patch257.md's own "4.
+# OT-specific security risks", item 3, "Protocol reassembly"): the same two --max-reassembly-*
+# flags above, exercised against DNP3's OWN local fragment-reassembly cap (Dnp3ReassemblyState,
+# dnp3.cpp) instead of the generic TCP-segment cap -- sample_dnp3.pcap's packets 8-9 normally
+# reassemble a 2-frame, 18-byte fragment cleanly (see dnp3_reassembly_completes_across_packets
+# below); set low enough, dnp3.cpp's own cap abandons it instead, with the application layer
+# left undecoded.
+add_test(NAME max_reassembly_bytes_abandons_dnp3_fragment_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --max-reassembly-bytes 5 --verbose)
+set_tests_properties(max_reassembly_bytes_abandons_dnp3_fragment_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "DNP3 fragment reassembly on this TCP flow exceeded its safety cap \\(18 byte\\(s\\) across 2 frame\\(s\\)\\) -- abandoning it\; application layer not decoded")
+
+add_test(NAME max_reassembly_segments_abandons_dnp3_fragment_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format text --max-reassembly-segments 1 --verbose)
+set_tests_properties(max_reassembly_segments_abandons_dnp3_fragment_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "DNP3 fragment reassembly on this TCP flow exceeded its safety cap \\(18 byte\\(s\\) across 2 frame\\(s\\)\\) -- abandoning it\; application layer not decoded")
+
+# Same audit, BACnet's own local segment-reassembly cap (BacnetReassemblyState, bacnet.cpp)
+# instead -- sample_bacnet.pcap's invoke-id=60 exchange normally reassembles a 2-segment,
+# 18-byte Confirmed-Request cleanly (see
+# bacnet_segment_reassembly_confirmed_request_completes_and_decodes below). Unlike DNP3, BACnet's
+# cap check is reachable from BOTH the starting and continuing segment branches (they fall
+# through to shared code rather than the starting branch returning early), so the two flags trip
+# at DIFFERENT points here: --max-reassembly-segments 1 still only trips once the second segment
+# arrives (18 byte(s) across 2 segment(s), matching DNP3's shape), but --max-reassembly-bytes 5
+# trips immediately on the FIRST segment alone, since that segment's own 9 bytes already exceed
+# the cap before a second segment ever arrives.
+add_test(NAME max_reassembly_segments_abandons_bacnet_segment_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --max-reassembly-segments 1 --verbose)
+set_tests_properties(max_reassembly_segments_abandons_bacnet_segment_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "segmented BACnet APDU reassembly for this \\(flow, invoke-id\\) exceeded its safety cap \\(18 byte\\(s\\) across 2 segment\\(s\\)\\) -- abandoning it\; service data not reassembled")
+
+add_test(NAME max_reassembly_bytes_abandons_bacnet_segment_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --format text --max-reassembly-bytes 5 --verbose)
+set_tests_properties(max_reassembly_bytes_abandons_bacnet_segment_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "segmented BACnet APDU reassembly for this \\(flow, invoke-id\\) exceeded its safety cap \\(9 byte\\(s\\) across 1 segment\\(s\\)\\) -- abandoning it\; service data not reassembled")
 
 # --max-recursion-depth: tests/sample_goose_deep_nesting.pcap (tools/make_sample_pcap.py's own
 # build_goose_deep_nesting_sample -- see its docstring) is a GOOSE allData structure nested three

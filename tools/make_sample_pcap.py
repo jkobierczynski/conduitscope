@@ -680,6 +680,29 @@ def build_dnp3_sample():
     ip22 = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp22), 0x2015) + tcp22
     packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip22)
 
+    # 23) & 24) A duplicate/replayed data-link frame: frame 23 begins a fragment (FIR=1 FIN=0
+    #     SEQ=20), but frame 24 repeats the SAME SEQ=20 instead of advancing to 21 -- a duplicate
+    #     transport segment (e.g. a retransmitted/replayed data-link frame), distinct from packets
+    #     11-12's arbitrary sequence JUMP (expected 11, got 35) above -- must be rejected the exact
+    #     same way (discarding the buffered bytes, abandoning the reassembly), not specially
+    #     "recognized" as a harmless repeat and silently re-accepted. Own port (51504, matching
+    #     packets 8-12's own per-scenario port isolation) so this flow's reassembly state can't
+    #     interact with any other scenario's. Security audit follow-up (docs/reviews/2026-09-
+    #     chatgpt-security-review-patch257.md's "4. OT-specific security risks", item 3, "Protocol
+    #     reassembly").
+    dup_seq_first_payload = bytes([0x94]) + bytes([0xC0, 0x01, 60, 2, 0x06])  # FIR=1 FIN=0 SEQ=20
+    dup_seq_first = dnp3_link_frame(source=1, destination=1024, user_data=dup_seq_first_payload)
+    tcp23 = tcp_header(51504, 20000, 15000, 16000, TCP_PSH | TCP_ACK, len(dup_seq_first)) + dup_seq_first
+    ip23 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp23), 0x2016) + tcp23
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip23)
+
+    dup_seq_second_payload = bytes([0x54]) + bytes([0xAA, 0xBB])  # FIR=0 FIN=1 SEQ=20 (duplicate)
+    dup_seq_second = dnp3_link_frame(source=1, destination=1024, user_data=dup_seq_second_payload)
+    tcp24 = tcp_header(51504, 20000, 15000 + len(dup_seq_first), 16000, TCP_PSH | TCP_ACK,
+                        len(dup_seq_second)) + dup_seq_second
+    ip24 = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp24), 0x2017) + tcp24
+    packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip24)
+
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_000_100 + i, i * 1000)
@@ -3214,6 +3237,43 @@ def build_bacnet_sample():
     for i, pkt in enumerate(packets):
         data += pcap_record(pkt, 1_700_005_000 + i, i * 1000)
     (TESTS_DIR / "sample_bacnet.pcap").write_bytes(data)
+
+
+def build_bacnet_reassembly_adversarial_sample():
+    """Dedicated fixture for BACnet segmented-APDU reassembly adversarial testing -- security audit
+    follow-up, docs/reviews/2026-09-chatgpt-security-review-patch257.md's "4. OT-specific security
+    risks", item 3 ("Protocol reassembly"). Kept SEPARATE from sample_bacnet.pcap rather than
+    appended to it: that fixture feeds several EXACT-count regressions (bacnet_stats_counted's own
+    packet/protocol/service tallies, zeek_format_udp_broadcast_aggregates_into_one_flow's
+    orig_pkts, info_max_conversations/endpoints_caps_table_and_warns's conversation/endpoint
+    counts) that one more readPropertyMultiple-shaped exchange would perturb -- the same reasoning
+    build_resource_exhaustion_active_flows_sample/build_ip_fragment_resource_exhaustion_sample
+    already established for exactly this situation (their own docstrings explain it further)."""
+    packets = []
+
+    def add(bvlc: bytes, **kw):
+        packets.append(bacnet_frame(bvlc=bvlc, **kw))
+
+    # 1) & 2) A segmented Confirmed-Request whose SECOND segment repeats the FIRST's own
+    #     sequence-number (0, then 0 again) instead of advancing to 1 -- a duplicate/replayed
+    #     segment, distinct from sample_bacnet.pcap's own packets 67-68 GAP scenario (0, then 2).
+    #     Must be rejected the exact same way BacnetReassemblyState's combined PDU-type/service-
+    #     choice/sequence check already rejects a sequence gap: discard the buffered bytes,
+    #     abandon the reassembly, leave this segment's own service data as raw hex only -- not
+    #     specially "recognized" as a harmless repeat and silently re-accepted.
+    dup_full = bacnet_read_access_spec(0, 4, [85])
+    dup_split = len(dup_full) // 2
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, dup_full[:dup_split], invoke_id=70,
+                                              segmented=True, seq=0, more=True, window=8)))
+    add(bvlc_message(0x0A, npdu_header() +
+                      apdu_confirmed_request(14, dup_full[dup_split:], invoke_id=70,
+                                              segmented=True, seq=0, more=False, window=8)))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_100_000 + i, i * 1000)
+    (TESTS_DIR / "sample_bacnet_reassembly_adversarial.pcap").write_bytes(data)
 
 
 ENIP_PORT = 44818
@@ -6630,6 +6690,26 @@ def build_tcp_reassembly_sample():
     add_segment(502, 51605, 50000, 600, part1_f, 0x500D, from_plc=True)
     add_segment(502, 51605, 50000 + 7, 600, part2_f, 0x500E, from_plc=True)
     add_segment(502, 51605, 50000 + len(part1_f) + (len(part2_f) - 3), 600, part3_f, 0x500F, from_plc=True)
+
+    # G) A partial overlap whose overlapping bytes DISAGREE with what's already buffered --
+    #    distinct from scenario F above, whose overlap is genuine identical content (both parts
+    #    are slices of the very same adu_f). Here the second segment's own first 3 bytes (the
+    #    overlapping range) are deliberately corrupted (XOR 0xFF -- guaranteed to differ from the
+    #    real bytes for every possible byte value) while its remaining 10 bytes carry the REAL
+    #    continuation. Security audit follow-up (docs/reviews/2026-09-chatgpt-security-review-
+    #    patch257.md's "4. OT-specific security risks", item 3, "Protocol reassembly"): proves
+    #    first-received-wins holds even when a later segment's overlapping content actively
+    #    disagrees (not just an identical retransmission) -- the completed decode below must still
+    #    show the REAL, unmodified register values, never the attacker's differing bytes.
+    adu_g = struct.pack("!HHHBBB", 0xEEEE, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+    part1_g = adu_g[:10]
+    real_continuation_g = adu_g[7:20]  # same 13-byte span scenario F's part2_f covers
+    corrupted_overlap_g = bytes(b ^ 0xFF for b in real_continuation_g[:3])  # always != the real byte
+    part2_g = corrupted_overlap_g + real_continuation_g[3:]
+    part3_g = adu_g[20:]
+    add_segment(502, 51606, 60000, 700, part1_g, 0x5010, from_plc=True)
+    add_segment(502, 51606, 60000 + 7, 700, part2_g, 0x5011, from_plc=True)
+    add_segment(502, 51606, 60000 + len(part1_g) + (len(part2_g) - 3), 700, part3_g, 0x5012, from_plc=True)
 
     data = pcap_global_header()
     for i, pkt in enumerate(packets):
@@ -21860,6 +21940,7 @@ if __name__ == "__main__":
     build_devicenet_sample()
     build_canopen_j1939_sample()
     build_bacnet_sample()
+    build_bacnet_reassembly_adversarial_sample()
     build_hartip_sample()
     build_opcua_sample()
     build_s7comm_sample()

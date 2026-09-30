@@ -15553,6 +15553,130 @@ it done as its own patch.
     field-computation path (`JsonWriter::write_packet`), touching no protocol-decoder parsing code
     itself, matching the precedent set for item 105's CLI-argv-only changes.
 
+107. **Protocol reassembly adversarial testing: BACnet, DNP3, TCP.** Jurgen's direct request:
+    "Protocol reassembly adversarial testing. (patch257 section 4.3) BACnet, DNP3 and TCP
+    reassembly against adversarial sequence changes, retransmission, overlapping data, and
+    resource-limit boundaries; confirm a complete command is never manufactured from missing or
+    ambiguous segments." Sourced from
+    `docs/reviews/2026-09-chatgpt-security-review-patch257.md` section 4's unheaded five-item
+    list, item 3 (High priority) -- "section 4.3" following the identical informal numbering item
+    100 already used for that same list's item 5 ("section 4.5"). Exact wording: "Validate
+    BACnet, DNP3, and TCP reassembly against adversarial sequence changes, retransmissions,
+    overlapping data, and resource-limit boundaries. Never manufacture a complete command from
+    missing or ambiguous segments."
+
+    **Shape: an audit-and-test task, matching item 100's own precedent.** Read every adversarial-
+    handling code path in all three reassemblers, confirm each named scenario (sequence changes,
+    retransmissions, overlapping data, resource-limit boundaries) is handled safely with a
+    purpose-built regression test proving it, and fix only what the audit actually found to risk
+    manufacturing a decode from missing/ambiguous data.
+
+    **Audit findings.**
+    - TCP general reassembly (`Decoder::reassemble_tcp_payload`, `decoder.cpp`): sequence-gap and
+      full-duplicate/retransmission handling were already safe and already tested
+      (`tcp_reassembly_gap_abandons_reassembly`/`_flow_recovers_after_gap`,
+      `tcp_reassembly_duplicate_retransmit_ignored`/`_completes_despite_duplicate`). **Partial
+      overlap was a real gap**: the code always kept the already-buffered bytes for an
+      overlapping byte range and appended only the new segment's bytes past the overlap --
+      first-received-wins, the same deliberate policy `reassemble_ip_fragment` already documents
+      for IP fragments -- but unlike IP fragmentation (whose Teardrop attack-detect signal in
+      `attack_detect.cpp` DOES compare fragment content), nothing ever compared the TCP-layer
+      overlap's actual byte content. The note said "likely a retransmission" regardless of
+      whether the overlapping bytes actually agreed. This is the literal "ambiguous segment"
+      patch257 warns about: two different byte values could apply to the same offset with no
+      record of which applied, or whether they even matched.
+    - DNP3 fragment reassembly (`Dnp3Decoder::process_frame`, `dnp3.cpp`): every anomaly
+      (sequence gap, orphan continuation, a new FIR arriving mid-reassembly, the byte/frame
+      safety cap) already abandons the entire in-progress buffer and explicitly marks the
+      application layer as not decoded -- there is no byte-level merge step at all, so there is
+      no equivalent overlap-content question. A duplicate/replayed frame (same SEQ repeated
+      instead of advancing) falls safely into the same "does not follow the previous frame's
+      expected SEQ" abandon path, confirmed by reading but previously untested as its own named
+      scenario. No production-code gap; two test gaps (duplicate-sequence coverage, and the
+      resource caps never tripped via an actual DNP3 fixture -- only via the generic Modbus/TCP
+      proxy fixture).
+    - BACnet segmented-APDU reassembly (`reassemble_bacnet_apdu_segment`, `bacnet.cpp`):
+      identical safety posture to DNP3 -- one combined PDU-type/service-choice/sequence check that
+      abandons the whole buffer on any mismatch, including a duplicate/repeated sequence-number.
+      Same two test gaps as DNP3. **One structural difference found and confirmed via
+      smoke-testing**: BACnet's resource-cap check is reachable from both the starting and
+      continuing segment branches (they fall through to shared code, unlike DNP3's starting
+      branch, which returns early before any cap check) -- so `--max-reassembly-bytes` can trip
+      on BACnet's very first segment alone if that segment's own bytes already exceed the cap,
+      rather than only ever tripping on a later continuation frame the way DNP3's always does.
+      The two new BACnet cap tests reflect this directly (`_segments_abandons_...`: "18 byte(s)
+      across 2 segment(s)", matching DNP3's shape; `_bytes_abandons_...`: "9 byte(s) across 1
+      segment(s)", tripping immediately).
+
+    **The one code change: TCP overlap content comparison** (`decoder.cpp`,
+    `reassemble_tcp_payload`'s partial-overlap branch). Before trimming, the new segment's
+    overlapping prefix is now compared (`std::equal`, `compare_len = std::min(overlap,
+    fb.bytes.size())` guarding against the attacker-influenced sequence-derived `overlap` ever
+    exceeding what's actually buffered) against the already-buffered bytes at that same offset
+    range. The note now says explicitly whether the overlap's content agrees (a genuine,
+    content-identical retransmission) or disagrees (ambiguous/conflicting data -- possibly a
+    crafted overlap). **The resolution itself is unchanged** -- first-received-wins, matching IP
+    fragmentation's own deliberate policy -- only the operator-facing evidence improves, directly
+    serving patch257's own sibling wording (item 4.5) that "detection output should retain the
+    underlying evidence and explain the conditions that triggered the finding." No behavior
+    change to DNP3/BACnet: their existing "abandon the whole buffer on any anomaly" posture
+    already gives strictly stronger guarantees than TCP's byte-level merge ever needs.
+
+    **Deliberately out of scope, named rather than silently dropped.**
+    - `reassemble_ip_fragment`'s own identical content-blind overlap note (a different engine,
+      item 102) is not named in patch257's item 3 (BACnet/DNP3/TCP only) and was left untouched
+      -- a considered parity gap, not an oversight.
+    - A dedicated fuzz harness reaching the cross-packet reassembly state machines directly
+      (DNP3's `Dnp3ReassemblyState`, BACnet's `BacnetReassemblyState` -- today only reachable via
+      the much-lower-throughput full `fuzz_packet_decode` pipeline) is a good follow-up, not built
+      here -- this task's deliverable is CTest regression coverage, matching every prior
+      audit-style ROADMAP item's own testing vehicle (item 100 added CTest tests, not new fuzz
+      harnesses).
+
+    **Tests.** Eight new `CMakeLists.txt` entries, plus one updated regex:
+    `tcp_reassembly_partial_overlap_trimmed` (updated to the new "identical content" wording, since
+    its own overlap is genuinely content-identical under the fix);
+    `tcp_reassembly_conflicting_overlap_content_flagged`/`_first_received_wins` (new TCP Scenario
+    G in `sample_tcp_reassembly.pcap`: a deliberately XOR-corrupted overlapping prefix, proving
+    both the disagreement is flagged and the real register values still win);
+    `dnp3_reassembly_duplicate_sequence_discarded` (two new packets appended to `sample_dnp3.pcap`
+    on their own isolated port); `max_reassembly_bytes/segments_abandons_dnp3_fragment_reassembly`
+    (reusing the existing packets 8-9 fragment with `--max-reassembly-bytes 5`/
+    `--max-reassembly-segments 1`); `bacnet_segment_reassembly_duplicate_sequence_discarded`
+    (a new dedicated fixture, `tests/sample_bacnet_reassembly_adversarial.pcap`, since
+    `sample_bacnet.pcap` feeds several exact-count regressions -- `bacnet_stats_counted`,
+    `zeek_format_udp_broadcast_aggregates_into_one_flow`, the `info` conversations/endpoints
+    tests -- that a new readPropertyMultiple-shaped exchange would perturb, matching this
+    codebase's own established precedent for when a scenario needs its own fixture rather than an
+    append, e.g. `build_resource_exhaustion_active_flows_sample`); and
+    `max_reassembly_segments/bytes_abandons_bacnet_segment_reassembly` (reusing the existing
+    invoke-id=60 exchange in `sample_bacnet.pcap`). Every new fixture scenario gets its own
+    port pair (TCP) or invoke-id (BACnet) so reassembly state can't interact across scenarios, and
+    every new regex is a single-literal, unanchored (or correctly end/start-anchored) match, per
+    this file's own established lessons (items 105/106) about catastrophic backtracking and
+    CMake/CTest's whole-output (not per-line) `^`/`$` anchoring.
+
+    **Fixture-regeneration hazard, discovered and worked around.** `tools/make_sample_pcap.py`'s
+    `if __name__ == "__main__":` block unconditionally calls every `build_X_sample()` function, so
+    running the full script to regenerate the three fixtures this task actually touches
+    collaterally regenerated every other fixture too, surfacing pre-existing, unrelated
+    script/fixture drift in two files this task never intended to touch
+    (`sample_s7comm_1200sym.pcap`, `sample_link_transport_layers.pcap`). Future fixture
+    regeneration in this project should call only the specific `build_X_sample()` function(s)
+    actually needed (a scoped Python import, as used to fix this) rather than running the full
+    script, or diff and revert anything outside the intended scope afterward if the full script
+    must be run.
+
+    **Verification.** Same standing bar as items 104-106: full CTest across all four standing
+    build configs (default GCC `build`; Clang ASan/UBSan `build-fuzz`;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile `build-mingw`,
+    build-only), confirming the exact expected +8 test count with zero regressions, plus a
+    clean-room extract-rebuild-test cycle, before delivery as a zip of touched/new files via the
+    standing no-git-commit convention. A fresh standalone libFuzzer campaign was judged
+    unnecessary for `build-fuzz` beyond the full ASan/UBSan CTest run, since the one production
+    change reuses already-fuzzed `decoder.cpp` reassembly code paths without touching any
+    protocol-decoder parsing itself.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

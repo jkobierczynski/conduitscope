@@ -6469,7 +6469,20 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   that would need to be held and inserted later is treated the same as a
   gap, not buffered for eventual reordering (matching how this tool
   processes packets generally -- one single, strict capture-file-order pass,
-  with no out-of-order buffering anywhere else in the codebase either).
+  with no out-of-order buffering anywhere else in the codebase either). An
+  overlapping segment's overlapping bytes are now also compared against
+  what's already buffered for that same byte range before being trimmed: if
+  they agree, the note says so plainly (a genuine, content-identical
+  retransmission); if they disagree, the note instead calls out the
+  disagreement explicitly as ambiguous/conflicting data -- possibly a crafted
+  overlap -- rather than silently describing every overlap as "likely a
+  retransmission" regardless of whether that was actually true. Either way
+  the resolution itself is unchanged: the already-buffered bytes win for the
+  overlapping range (first-received-wins), the same deliberate policy IP
+  fragment reassembly's own overlap handling documents elsewhere in this
+  codebase -- only the operator-facing evidence improves, and a disagreeing
+  overlap can never manufacture a complete command from the attacker's
+  conflicting bytes.
   What this does NOT cover: true out-of-order reordering, per the
   resync-not-reorder paragraph above -- an out-of-order segment is treated
   as a gap (abandon and resync), never held and spliced in later. Two

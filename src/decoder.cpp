@@ -357,14 +357,40 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
                 tcp_reassembly_[flow_key] = std::move(fb);
                 return false;
             }
+            // Security audit follow-up (docs/reviews/2026-09-chatgpt-security-review-patch257.md's
+            // own "4. OT-specific security risks", item 3, "Protocol reassembly"): compare the new
+            // segment's OVERLAPPING prefix against what's already buffered at that same offset
+            // range, so the note below can say whether this is a genuine, content-identical
+            // retransmission or a segment whose overlapping bytes actually DISAGREE with what this
+            // flow already has -- ambiguous/conflicting data a malformed capture or a crafted
+            // overlap could produce. Either way the RESOLUTION is unchanged below (first-received-
+            // wins, the same deliberate policy reassemble_ip_fragment's own overlap handling already
+            // documents -- "this engine's job is best-effort correctness, not redundant security
+            // signaling"); only the operator-facing evidence improves. compare_len guards against
+            // `overlap` (derived from an attacker-influenced TCP sequence number) ever exceeding
+            // the bytes actually buffered so far -- should never happen given how `overlap` and
+            // `fb.bytes` are kept in lockstep by this function, but this reads attacker-controlled
+            // input, so it's checked rather than assumed.
+            size_t compare_len = std::min(overlap, fb.bytes.size());
+            bool content_matches = std::equal(tcp.payload.data(), tcp.payload.data() + compare_len,
+                                               fb.bytes.data() + (fb.bytes.size() - compare_len));
             storage = fb.bytes;
             ByteSpan new_part = tcp.payload.from(overlap);
             storage.insert(storage.end(), new_part.data(), new_part.data() + new_part.size());
             candidate = ByteSpan(storage.data(), storage.size());
             combined = true;
-            out.notes.push_back("TCP segment on this flow overlaps " + std::to_string(overlap) +
-                                 " already-buffered byte(s) (likely a retransmission) -- trimmed and only "
-                                 "the new byte(s) appended");
+            if (content_matches) {
+                out.notes.push_back("TCP segment on this flow overlaps " + std::to_string(overlap) +
+                                     " already-buffered byte(s) with identical content (a genuine "
+                                     "retransmission) -- trimmed and only the new byte(s) appended");
+            } else {
+                out.notes.push_back("TCP segment on this flow overlaps " + std::to_string(overlap) +
+                                     " already-buffered byte(s) whose content disagrees with what's "
+                                     "already buffered (ambiguous/conflicting data -- possibly a "
+                                     "crafted overlap) -- the already-buffered byte(s) are kept for "
+                                     "that range (first-received-wins) and only the segment's new "
+                                     "byte(s) beyond the overlap are appended");
+            }
         } else {
             out.notes.push_back(
                 "TCP sequence gap on this flow (expected seq " + std::to_string(fb.next_seq) + ", got " +
