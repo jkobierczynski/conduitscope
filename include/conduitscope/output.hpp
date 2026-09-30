@@ -228,18 +228,118 @@ private:
                                                     // conn.log ordering)
 };
 
+// Conversations/Endpoints tables (tshark's own `-z conv,ip`/`-z endpoints,ip` as design
+// precedent) -- ip_conversations_/ip_endpoints_/eth_conversations_/eth_endpoints_ below are the
+// only StatsWriter maps keyed by attacker-controlled, effectively unbounded-cardinality identity
+// (every other map here is keyed by a small fixed vocabulary of protocol/function/opnum names),
+// so unlike those, these four are capped -- same posture as kDefaultMaxInventoryAssets/
+// kDefaultMaxInventoryEdges (asset_inventory.hpp) for the identical class of risk. Applied
+// independently per map (an IP-conversation flood and an Ethernet-conversation flood each get
+// their own budget, not a shared one), via --max-conversations/--max-endpoints (cli_main.cpp).
+inline constexpr size_t kDefaultMaxConversationEntries = 200000;
+inline constexpr size_t kDefaultMaxEndpointEntries = 200000;
+
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
 // as usual, then print_summary(out) once at the end (that's separate from
 // OutputWriter::end() so `info` and `decode --stats` can share this class
 // while formatting their headers differently).
 class StatsWriter : public OutputWriter {
 public:
+    // max_conversations/max_endpoints: 0 means "use the default" (kDefaultMaxConversationEntries/
+    // kDefaultMaxEndpointEntries above) -- 0 is never itself a usable cap (an all-zero cap would
+    // silently produce permanently-empty tables), so it doubles as "not explicitly set," the same
+    // "0 means use the built-in default" sentinel several existing --max-* options already use
+    // (see cli_main.cpp's build_resource_limits). Every existing call site that builds a
+    // StatsWriter with no arguments keeps compiling unchanged and gets the default caps.
+    explicit StatsWriter(size_t max_conversations = 0, size_t max_endpoints = 0);
     void write_packet(const DecodedPacket& packet) override;
     void print_summary(std::ostream& out) const;
 
     size_t total_packets() const { return total_packets_; }
 
 private:
+    // Shared shape for both the IPv4 and the raw-Ethernet conversation/endpoint tables -- the
+    // fields mean the same thing at either layer, only the address strings' own format differs
+    // (dotted-quad vs colon-hex MAC). "A"/"B" are assigned once, from whichever address sent the
+    // conversation's very first packet (address_a = that packet's src, address_b = its dst) --
+    // matches tshark's own A/B assignment convention, and ZeekWriter's own identical orig_h/resp_h
+    // "first packet seen becomes orig" precedent just above in this same file -- NOT an alphabetic
+    // tiebreak (that's used only for the internal, never-displayed map key, so A<->B and B<->A
+    // packets collapse into one entry regardless of which side happened to be "src" on any given
+    // packet).
+    struct AddrConversationStats {
+        std::string address_a, address_b;
+        uint64_t frames_a_to_b = 0, bytes_a_to_b = 0;
+        uint64_t frames_b_to_a = 0, bytes_b_to_a = 0;
+        double first_ts = 0.0, last_ts = 0.0;
+    };
+    // tx/rx are this address's own role: tx = frames where this address was the source, rx =
+    // frames where it was the destination -- the address-centric analog of AddrConversationStats'
+    // pair-centric a_to_b/b_to_a above.
+    struct AddrEndpointStats {
+        uint64_t tx_frames = 0, tx_bytes = 0;
+        uint64_t rx_frames = 0, rx_bytes = 0;
+    };
+    // Shared update logic for all four maps below (IP and Ethernet each have one conversation map
+    // and one endpoint map) -- src/dst are already-formatted address strings (dotted-quad or
+    // colon-hex MAC, whichever table this call is for), bytes is DecodedPacket::original_len (the
+    // on-the-wire frame length, matching tshark's own frame.len-based tallying -- correct even
+    // under a truncating snaplen), ts is DecodedPacket::timestamp. Once table.size() == max_entries
+    // and this pair/address is not already tracked, the packet is dropped from THIS table only
+    // (every other StatsWriter counter for the same packet is unaffected) and *truncated is set --
+    // print_summary reports that with a trailing warning line, see output.cpp.
+    static void update_conversation(std::map<std::string, AddrConversationStats>& table,
+                                     std::vector<std::string>& order, bool& truncated,
+                                     size_t max_entries, const std::string& src,
+                                     const std::string& dst, uint64_t bytes, double ts);
+    static void update_endpoint(std::map<std::string, AddrEndpointStats>& table,
+                                 std::vector<std::string>& order, bool& truncated,
+                                 size_t max_entries, const std::string& addr, bool is_tx,
+                                 uint64_t bytes);
+    // Rendering helpers for print_summary (output.cpp) -- label is e.g. "ipv4 conversations"/
+    // "ethernet endpoints", used verbatim as the printed section header. Rows are sorted by total
+    // bytes descending (a stable_sort over `order`, so equal-byte entries keep their first-seen
+    // order as a deterministic tiebreak) -- more useful for scanning a report than raw first-seen
+    // order, and matches what Wireshark's own Conversations/Endpoints GUI defaults to sorting by.
+    // Each is a no-op (prints nothing, not even a header) when `table` is empty, matching every
+    // other conditional block in print_summary.
+    static void print_conversations(std::ostream& out, const char* label,
+                                     const std::map<std::string, AddrConversationStats>& table,
+                                     const std::vector<std::string>& order, bool truncated,
+                                     size_t max_entries);
+    static void print_endpoints(std::ostream& out, const char* label,
+                                 const std::map<std::string, AddrEndpointStats>& table,
+                                 const std::vector<std::string>& order, bool truncated,
+                                 size_t max_entries);
+
+    size_t max_conversations_;  // resolved (never 0) in the constructor -- see output.cpp
+    size_t max_endpoints_;
+
+    // Populated from DecodedPacket::src_ip/dst_ip whenever has_ip -- see write_packet. Every IP
+    // fragment (buffering, abandoned, or the one that completes reassembly) already has has_ip and
+    // src_ip/dst_ip populated before Decoder::reassemble_ip_fragment even runs, so a fragment
+    // counts as ordinary traffic between those two hosts with no special-casing needed here.
+    std::map<std::string, AddrConversationStats> ip_conversations_;
+    std::vector<std::string> ip_conversation_order_;
+    bool ip_conversations_truncated_ = false;
+    std::map<std::string, AddrEndpointStats> ip_endpoints_;
+    std::vector<std::string> ip_endpoint_order_;
+    bool ip_endpoints_truncated_ = false;
+
+    // Populated from DecodedPacket::src_mac/dst_mac whenever has_ethernet -- for EVERY Ethernet-
+    // linktype frame, IP-carrying or not, so an IPv4 packet is counted in both its IP conversation
+    // above AND its underlying Ethernet conversation here, independently -- exactly like tshark's
+    // own conv,ip and conv,eth are two independent layers, not parent/child. This is what actually
+    // gives visibility into PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK/unrecognized-EtherType traffic,
+    // which has no IP layer at all (the same raw-L2 blind spot ROADMAP item 103's own
+    // ethertypes:/to_macs: policy-side work closed for `policy validate`).
+    std::map<std::string, AddrConversationStats> eth_conversations_;
+    std::vector<std::string> eth_conversation_order_;
+    bool eth_conversations_truncated_ = false;
+    std::map<std::string, AddrEndpointStats> eth_endpoints_;
+    std::vector<std::string> eth_endpoint_order_;
+    bool eth_endpoints_truncated_ = false;
+
     size_t total_packets_ = 0;
     std::map<std::string, size_t> protocol_counts_;
     // Keyed by direction_source_name ("handshake"/"content"/"port-heuristic") -- counted whenever

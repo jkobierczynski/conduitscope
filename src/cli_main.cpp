@@ -706,6 +706,32 @@ PolicyEngineLimits resolve_policy_engine_limits(size_t max_tcp_flows, size_t max
     return limits;
 }
 
+// Shared by `info` and `decode --stats` -- both hand these straight to StatsWriter's own
+// constructor (output.hpp/output.cpp), which resolves 0 into kDefaultMaxConversationEntries/
+// kDefaultMaxEndpointEntries the same "0 = leave it at its own default" convention as
+// add_policy_engine_limit_options above. Conversations/Endpoints tables (tshark's own
+// `-z conv,ip`/`-z endpoints,ip` as design precedent) are the one part of StatsWriter's output
+// keyed by attacker-controlled, effectively unbounded-cardinality identity (IP/MAC addresses),
+// unlike every other StatsWriter table (a small fixed vocabulary of protocol/function names) --
+// see output.hpp's own comment on this.
+void add_conversation_stats_options(CLI::App* cmd, size_t& max_conversations, size_t& max_endpoints) {
+    cmd->add_option(
+           "--max-conversations", max_conversations,
+           "Cap the number of distinct address-pair conversations tracked for the "
+           "Conversations tables (IPv4 and Ethernet, each capped independently; default "
+           "200,000). 0 = leave it at its own default; past this, a packet between a new, "
+           "not-yet-seen address pair is dropped from these tables only (every other --stats/"
+           "info counter is unaffected), and a warning line is printed")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-endpoints", max_endpoints,
+           "Cap the number of distinct addresses tracked for the Endpoints tables (IPv4 and "
+           "Ethernet, each capped independently; default 200,000). 0 = leave it at its own "
+           "default; past this, a packet naming a new, not-yet-seen address is dropped from "
+           "these tables only, and a warning line is printed")
+        ->capture_default_str();
+}
+
 // -------------------------------------------------------------------------------------------
 // `-d`/`--decode-as` (Wireshark/tshark-style "force a decoder onto traffic that wouldn't
 // otherwise be recognized as it") -- see decoder.hpp's own comment on DecodeAsRule/
@@ -922,6 +948,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::string& range_text,
                 const ResourceLimitCliVars& limit_vars,
                 bool stats, bool strict, bool quiet,
+                size_t max_conversations, size_t max_endpoints,
                 bool no_color, bool force_color,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
@@ -1149,7 +1176,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         Decoder decoder(options);
 
         std::unique_ptr<OutputWriter> writer;
-        StatsWriter stats_writer;
+        StatsWriter stats_writer(max_conversations, max_endpoints);
         if (!stats) {
             if (format == "json") {
                 writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan, *parsed_time_format,
@@ -1384,11 +1411,11 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     return 0;
 }
 
-int run_info(const std::string& input, std::ostream& out) {
+int run_info(const std::string& input, std::ostream& out, size_t max_conversations, size_t max_endpoints) {
     try {
         PcapReader reader(input);
         Decoder decoder(DecodeOptions{});
-        StatsWriter stats_writer;
+        StatsWriter stats_writer(max_conversations, max_endpoints);
 
         PcapPacket pkt;
         size_t index = 0;
@@ -2330,6 +2357,7 @@ int main(int argc, char** argv) {
     size_t decode_max_packets = 0;
     std::string decode_range;  // empty means "not given" -- see packet_range.hpp
     ResourceLimitCliVars decode_limit_vars;
+    size_t decode_max_conversations = 0, decode_max_endpoints = 0;
     bool decode_stats = false, decode_strict = false;
     bool decode_mac_vendor = false, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
@@ -2712,6 +2740,7 @@ int main(int argc, char** argv) {
     decode_range_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_range_opt);
     add_resource_limit_options(decode_cmd, decode_limit_vars);
+    add_conversation_stats_options(decode_cmd, decode_max_conversations, decode_max_endpoints);
     decode_cmd->add_flag("--stats", decode_stats,
                           "Print an aggregate summary (protocol/function-code histogram) instead of "
                           "one line per packet; ignores --format");
@@ -2825,6 +2854,8 @@ int main(int argc, char** argv) {
     info_cmd->add_option("-r,--read", info_input, "Input capture file (classic pcap or pcapng, auto-detected)")
         ->required()
         ->check(CLI::ExistingFile);
+    size_t info_max_conversations = 0, info_max_endpoints = 0;
+    add_conversation_stats_options(info_cmd, info_max_conversations, info_max_endpoints);
 
     // --- interfaces -----------------------------------------------------------
     auto* interfaces_cmd = app.add_subcommand(
@@ -3589,7 +3620,8 @@ int main(int argc, char** argv) {
                            decode_as_rules,
                            decode_flood_threshold,
                            decode_max_packets, decode_range, decode_limit_vars, decode_stats, decode_strict,
-                           quiet, no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
+                           quiet, decode_max_conversations, decode_max_endpoints,
+                           no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac, decode_fields, decode_write, decode_hex,
@@ -3597,7 +3629,7 @@ int main(int argc, char** argv) {
                            decode_display_filter_compiled);
     }
     if (info_cmd->parsed()) {
-        return run_info(info_input, std::cout);
+        return run_info(info_input, std::cout, info_max_conversations, info_max_endpoints);
     }
     if (interfaces_cmd->parsed()) {
         return run_interfaces(std::cout);

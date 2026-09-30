@@ -2241,7 +2241,7 @@ set_tests_properties(real_ethercat_frame_zero_matches_synthetic_baseline PROPERT
 add_test(NAME real_ethercat_stats_all_type1_zero_notes
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --stats)
 set_tests_properties(real_ethercat_stats_all_type1_zero_notes PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +986[^\n]*\n[^\n]*\nprotocols:\n *ethercat +986\nethercat frame types:\n *EtherCAT command +986\nethercat datagrams \\(summed across every frame\\): 8140")
+  PASS_REGULAR_EXPRESSION "packets: +986[^\n]*\n[^\n]*\nprotocols:\n *ethercat +986\n(.*\n)*ethercat frame types:\n *EtherCAT command +986\nethercat datagrams \\(summed across every frame\\): 8140")
 
 add_test(NAME real_ethercat_no_notes_anywhere_in_capture
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --format text)
@@ -3537,7 +3537,7 @@ set_tests_properties(bacnet_segment_reassembly_json_fields_on_abandonment PROPER
 add_test(NAME bacnet_stats_counted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --stats)
 set_tests_properties(bacnet_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +68[^\n]*\n[^\n]*\nprotocols:\n *bacnet +64\n *udp +4\nbacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n.*readPropertyMultiple +17\n")
+  PASS_REGULAR_EXPRESSION "packets: +68[^\n]*\n[^\n]*\nprotocols:\n *bacnet +64\n *udp +4\n(.*\n)*bacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n.*readPropertyMultiple +17\n")
 
 # --------------------------------------------------------------------------
 # Real-world BACnet/IP capture -- see tests/real_captures/bacnet/ATTRIBUTION.md for provenance: a
@@ -3554,7 +3554,7 @@ add_test(NAME real_bacnet_ics_ot_network_001_does_not_crash
 add_test(NAME real_bacnet_stats_all_original_unicast_readproperty
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --stats)
 set_tests_properties(real_bacnet_stats_all_original_unicast_readproperty PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +54[^\n]*\n[^\n]*\nprotocols:\n *bacnet +54\nbacnet bvlc functions:\n *Original-Unicast-NPDU +54\nbacnet apdu services:\n *readProperty +54")
+  PASS_REGULAR_EXPRESSION "packets: +54[^\n]*\n[^\n]*\nprotocols:\n *bacnet +54\n(.*\n)*bacnet bvlc functions:\n *Original-Unicast-NPDU +54\nbacnet apdu services:\n *readProperty +54")
 
 add_test(NAME real_bacnet_first_request_response_pair_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --format text)
@@ -6619,7 +6619,7 @@ set_tests_properties(kerberos_json_fields_krb_error PROPERTIES
 add_test(NAME kerberos_stats_krb_error_counts
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_kerberos.pcap" --stats)
 set_tests_properties(kerberos_stats_krb_error_counts PROPERTIES
-  PASS_REGULAR_EXPRESSION "protocols:\n *kerberos +15\nkerberos krb-error codes:\n *KDC_ERR_C_PRINCIPAL_UNKNOWN +1\n *KDC_ERR_PREAUTH_REQUIRED +1")
+  PASS_REGULAR_EXPRESSION "protocols:\n *kerberos +15\n(.*\n)*kerberos krb-error codes:\n *KDC_ERR_C_PRINCIPAL_UNKNOWN +1\n *KDC_ERR_PREAUTH_REQUIRED +1")
 
 add_test(NAME kerberos_protocol_filter_excludes_other_protocols
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --protocol kerberos --format text)
@@ -17473,3 +17473,82 @@ add_test(NAME decode_display_filter_literal_example_goose_simulation
     -Y "goose.simulation == 1" --stats)
 set_tests_properties(decode_display_filter_literal_example_goose_simulation PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: *1")
+
+# ---------------------------------------------------------------------------------------------
+# Conversations/Endpoints tables (tshark's own `-z conv,ip`/`-z endpoints,ip` as design precedent)
+# -- see StatsWriter's own file-header comment (output.hpp) and print_conversations'/
+# print_endpoints' comments (output.cpp) for the A/B-assignment, byte-counting, sort-order, and
+# truncation conventions this section exercises. `info` and `decode --stats` share the exact same
+# StatsWriter code path, so most cases below only test `info`; one test confirms `decode --stats`
+# renders the identical tables from the same underlying accumulation.
+
+# sample_modbus.pcap (3 packets: 1 request 192.168.1.50->192.168.1.10, 2 responses the other way --
+# see the pre-existing bacnet_stats_counted-style tests above for this fixture's own shape) gives
+# an exact, hand-verifiable A->B/B->A split for both the IPv4 and (same two hosts) Ethernet tables.
+add_test(NAME info_ipv4_conversations_both_directions_counted
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(info_ipv4_conversations_both_directions_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ipv4 conversations \\(1, ranked by total bytes\\):\n *192\\.168\\.1\\.50 <-> 192\\.168\\.1\\.10 +3 frame\\(s\\), 212 byte\\(s\\) total +\\(A->B: 1 frame\\(s\\)/66 byte\\(s\\), B->A: 2 frame\\(s\\)/146 byte\\(s\\), duration [0-9.]+s\\)")
+
+add_test(NAME info_ipv4_endpoints_tx_rx_split
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(info_ipv4_endpoints_tx_rx_split PROPERTIES
+  PASS_REGULAR_EXPRESSION "ipv4 endpoints \\(2, ranked by total bytes\\):\n *192\\.168\\.1\\.50 +3 frame\\(s\\), 212 byte\\(s\\) total +\\(tx: 1 frame\\(s\\)/66 byte\\(s\\), rx: 2 frame\\(s\\)/146 byte\\(s\\)\\)\n *192\\.168\\.1\\.10 +3 frame\\(s\\), 212 byte\\(s\\) total +\\(tx: 2 frame\\(s\\)/146 byte\\(s\\), rx: 1 frame\\(s\\)/66 byte\\(s\\)\\)")
+
+add_test(NAME info_ethernet_conversations_and_endpoints_counted
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(info_ethernet_conversations_and_endpoints_counted PROPERTIES
+  PASS_REGULAR_EXPRESSION "ethernet conversations \\(1, ranked by total bytes\\):\n *00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc +3 frame\\(s\\), 212 byte\\(s\\) total.*\nethernet endpoints \\(2, ranked by total bytes\\):")
+
+# The actual new capability -- an EtherType this decoder doesn't name (raw-Ethernet POWERLINK on a
+# VLAN, ROADMAP item 103's own fixture) has no IP layer at all, so it's invisible to an IPv4-only
+# table by construction. Confirms the Ethernet/MAC table sees it (proving the L2 blind spot an
+# IP-only conversations table would have is actually closed) AND that no "ipv4 conversations"
+# section is printed at all for a capture with zero has_ip packets (every section is a no-op when
+# its own map is empty, matching every other conditional block in print_summary).
+add_test(NAME info_ethernet_only_traffic_visible_with_no_ip_layer
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_l2_ethertype_powerlink.pcap")
+set_tests_properties(info_ethernet_only_traffic_visible_with_no_ip_layer PROPERTIES
+  PASS_REGULAR_EXPRESSION "ethernet conversations \\(1, ranked by total bytes\\):\n *00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc +4 frame\\(s\\)"
+  FAIL_REGULAR_EXPRESSION "ipv4 conversations")
+
+# `decode --stats` shares StatsWriter's exact same code path as `info` -- confirms it renders the
+# identical tables, not just `info`.
+add_test(NAME decode_stats_shows_conversations_and_endpoints
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --stats)
+set_tests_properties(decode_stats_shows_conversations_and_endpoints PROPERTIES
+  PASS_REGULAR_EXPRESSION "ipv4 conversations \\(1, ranked by total bytes\\):.*\nipv4 endpoints \\(2, ranked by total bytes\\):")
+
+# --max-conversations/--max-endpoints: sample_bacnet.pcap has 2 distinct IPv4 conversations and 4
+# distinct IPv4 endpoints (see bacnet_stats_counted's own fixture above), so capping each at 1
+# forces the truncation path -- confirms the table is capped at exactly that many rows and the
+# warning line names the flag and the limit that was hit.
+add_test(NAME info_max_conversations_caps_table_and_warns
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --max-conversations 1)
+set_tests_properties(info_max_conversations_caps_table_and_warns PROPERTIES
+  PASS_REGULAR_EXPRESSION "ipv4 conversations \\(1, ranked by total bytes\\):\n(.*\n){1} *\\(--max-conversations limit of 1 reached; some conversations are not shown -- rerun with a higher --max-conversations to see them all\\)")
+
+add_test(NAME info_max_endpoints_caps_table_and_warns
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --max-endpoints 1)
+set_tests_properties(info_max_endpoints_caps_table_and_warns PROPERTIES
+  PASS_REGULAR_EXPRESSION "ipv4 endpoints \\(1, ranked by total bytes\\):\n(.*\n){1} *\\(--max-endpoints limit of 1 reached; some endpoints are not shown -- rerun with a higher --max-endpoints to see them all\\)")
+
+# Not reaching the cap: no warning line at all, on the same fixture with a generous limit --
+# guards against the warning firing unconditionally regardless of whether the cap was actually hit.
+add_test(NAME info_conversations_no_warning_when_cap_not_reached
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --max-conversations 200)
+set_tests_properties(info_conversations_no_warning_when_cap_not_reached PROPERTIES
+  FAIL_REGULAR_EXPRESSION "limit of [0-9]+ reached")
+
+# --max-conversations/--max-endpoints are documented in both `info --help` and `decode --help`,
+# same "flags are discoverable from --help" regression guard as
+# resource_limit_flags_present_in_decode_help above.
+add_test(NAME conversation_stats_flags_present_in_info_help
+  COMMAND conduitscope info --help)
+set_tests_properties(conversation_stats_flags_present_in_info_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-conversations(.*\n)*.*--max-endpoints")
+
+add_test(NAME conversation_stats_flags_present_in_decode_help
+  COMMAND conduitscope decode --help)
+set_tests_properties(conversation_stats_flags_present_in_decode_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "--max-conversations(.*\n)*.*--max-endpoints")

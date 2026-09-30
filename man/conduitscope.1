@@ -360,8 +360,14 @@ which pcapng block types are understood.
 Decode a capture (or live interface) and print each recognized packet. See
 \fBOPTIONS (decode)\fR below.
 .TP
-.B info \fB\-r\fR \fIFILE\fR
-Print pcap file metadata and a protocol histogram. Offline files only; see
+.B info \fB\-r\fR \fIFILE\fR [\fB\-\-max\-conversations\fR \fIN\fR] [\fB\-\-max\-endpoints\fR \fIN\fR]
+Print pcap file metadata, a protocol histogram, and IPv4/Ethernet
+Conversations and Endpoints tables (conduitscope's own equivalent of
+tshark's \fB\-z conv,ip\fR/\fB\-z endpoints,ip\fR \-\- see
+\fBdocs/USER_GUIDE.md\fR's "Conversations and Endpoints tables" subsection).
+\fB\-\-max\-conversations\fR/\fB\-\-max\-endpoints\fR cap those tables'
+own resource use (default 200,000 entries each; same meaning as
+\fBdecode\fR's own options of the same name). Offline files only; see
 \fBLIVE CAPTURE\fR for the live equivalent.
 .TP
 .B interfaces
@@ -1387,8 +1393,21 @@ more), combined. Default: 0 (unbounded). The same category of fix as
 per-session state instead of the general TCP reassembly path.
 .TP
 .B \-\-stats
-Print an aggregate summary instead of one line per packet. Ignores
-\fB\-\-format\fR.
+Print an aggregate summary instead of one line per packet, including the
+IPv4/Ethernet Conversations and Endpoints tables described under
+\fBinfo\fR below. Ignores \fB\-\-format\fR.
+.TP
+.BI \-\-max\-conversations " N"
+With \fB\-\-stats\fR: cap the number of distinct address-pair conversations
+tracked for the Conversations tables (IPv4 and Ethernet, each capped
+independently). Default: 0 (use the built-in default of 200,000). Past
+this, a packet between a new, not-yet-seen address pair is dropped from
+these tables only, and a warning line is printed.
+.TP
+.BI \-\-max\-endpoints " N"
+With \fB\-\-stats\fR: cap the number of distinct addresses tracked for the
+Endpoints tables (IPv4 and Ethernet, each capped independently). Default:
+0 (use the built-in default of 200,000).
 .TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.

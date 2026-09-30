@@ -15217,6 +15217,96 @@ it done as its own patch.
     build-only), plus a clean-room extract-rebuild-test cycle, before delivery as a zip of
     touched/new files via the standing no-git-commit convention.
 
+104. **Conversations/Endpoints tables for `info`/`decode --stats` (tshark's `-z conv,ip`/`-z
+    endpoints,ip` as design precedent).** Jurgen's request: "Add Conversations / endpoints tables
+    (tshark -z conv,ip / endpoints)." `info` and `decode --stats` already shared `StatsWriter`
+    (`output.hpp`/`output.cpp`) for every aggregate summary they print, but neither had ever shown
+    who talked to whom -- only a flat protocol-name histogram and per-protocol command/opnum
+    breakdowns. Scope was widened up front (AskUserQuestion) to cover both IPv4 (address-based) and
+    raw Ethernet (MAC-based) tables, not just IPv4: conduitscope's own OT differentiator is exactly
+    the raw-L2 traffic (PROFINET RT, GOOSE, Sampled Values, EtherCAT, Ethernet POWERLINK, undecoded
+    EtherTypes) that an IP-only table can never see at all, the same blind spot item 103's own
+    `ethertypes:`/`to_macs:` policy-side work closed for `policy validate`.
+
+    **Design.** Four new `StatsWriter` maps, added to the class that already owns every other
+    aggregate view rather than a new file/class: `ip_conversations_`/`ip_endpoints_` (keyed on
+    `DecodedPacket::src_ip`/`dst_ip`, updated whenever `has_ip`) and
+    `eth_conversations_`/`eth_endpoints_` (keyed on `src_mac`/`dst_mac`, updated whenever
+    `has_ethernet` -- for *every* Ethernet-linktype frame, IP-carrying or not, so one IPv4 packet
+    updates both its IP conversation and its underlying Ethernet conversation independently, exactly
+    like tshark's own `conv,ip`/`conv,eth` are two separate layers, not parent/child). Byte counts
+    use `DecodedPacket::original_len` (the on-the-wire frame length, matching tshark's own
+    `frame.len`-based tallying, correct even under a truncating snaplen) -- the same field
+    `ZeekWriter::write_packet`'s own `orig_ip_bytes`/`resp_ip_bytes` already use, and
+    `ZeekWriter`'s existing "whichever side sent the first packet becomes orig/resp" convention was
+    reused directly for each conversation's "A"/"B" assignment (matches tshark's own A/B convention
+    too), keyed for lookup by an order-independent `min(addr)+"|"+max(addr)` string separate from
+    the displayed A/B roles. Every IP fragment (buffering, abandoned, or the one completing
+    reassembly) already has `has_ip`/`src_ip`/`dst_ip` populated before
+    `Decoder::reassemble_ip_fragment` runs, so fragments count as ordinary traffic with no
+    special-casing.
+
+    **Resource bound.** IP/MAC addresses are the first attacker-controlled, unbounded-cardinality
+    identity any `StatsWriter` map has ever been keyed by (every other counter here -- protocol
+    names, function codes, opnums -- is a small fixed vocabulary). Following this codebase's own
+    established posture for that exact risk class (`kDefaultMaxInventoryAssets`/`Edges` = 200,000,
+    `asset_inventory.hpp`), two new constants, `kDefaultMaxConversationEntries`/
+    `kDefaultMaxEndpointEntries` = 200,000, apply independently per map (an IP-conversation flood
+    and an Ethernet-conversation flood each get their own budget). Two new CLI flags,
+    `--max-conversations`/`--max-endpoints`, added to both `info` and `decode` (a new
+    `add_conversation_stats_options` helper, mirroring `add_policy_engine_limit_options`'s own
+    per-subcommand duplication pattern), thread into a new `StatsWriter(size_t max_conversations,
+    size_t max_endpoints)` constructor (both default to 0, resolved to the built-in default inside
+    the constructor -- the same "0 = use the built-in default" sentinel `--max-policy-tcp-flows`
+    and friends already use). Past the cap, a packet that would create a brand-new entry is dropped
+    from that table only -- every other counter for the same packet is unaffected -- and a trailing
+    warning line is printed. No new exit code: unlike `policy validate`/`inventory`/`baseline
+    check`, `info`/`decode` have never had a truncation-affects-exit-status concept (they just
+    print a summary, they don't check compliance), so this stays a printed warning only.
+
+    **Rendering.** New sections in `print_summary`, right after `direction_source_counts_`
+    (general/cross-protocol, same as that block) and before the protocol-specific breakdowns:
+    `ipv4 conversations`, `ipv4 endpoints`, `ethernet conversations`, `ethernet endpoints`, each a
+    no-op when its own map is empty. Follows this file's established "sentence-per-entry" rendering
+    convention (`write_inventory_report_text`'s COMMUNICATIONS block, `asset_inventory.cpp`) rather
+    than inventing an aligned-column ASCII table style nothing else in this codebase uses. Rows are
+    sorted by total bytes descending (`std::stable_sort`, so equal-byte rows keep first-seen order
+    as a deterministic tiebreak) -- more useful for scanning a report than raw first-seen order, and
+    matches what Wireshark's own Conversations/Endpoints GUI defaults to sorting by. Counts use this
+    codebase's existing `N thing(s)` singular/plural convention (`byte(s)`, `join(s)`, `candidate-
+    RP(s)` elsewhere in `output.cpp`) rather than a bare plural. No OUI vendor-name annotation on the
+    Ethernet tables in this pass -- `print_summary` has never taken a `Resolver` (no existing
+    `StatsWriter` table resolves anything today), and wiring one through would mean adding
+    `--mac-vendor`/`--resolve`/`--hosts`/`--services` to `info`, which doesn't have them at all
+    currently; left as a natural, self-contained follow-up. No JSON output either: `info` has no
+    `-T`/format option at all, and `decode --stats`'s own help text already says it "ignores
+    --format" -- every existing `StatsWriter` table is text-only today, so these new ones staying
+    text-only is consistent, not a gap.
+
+    **Verification.** `sample_modbus.pcap` (a known 3-packet, 1-request/2-response fixture already
+    used by several pre-existing `--stats` tests) gives an exact, hand-verifiable A->B/B->A split for
+    both the IPv4 and Ethernet tables; `sample_policy_l2_ethertype_powerlink.pcap` (item 103's own
+    fixture -- raw-EtherType/POWERLINK traffic on a VLAN, zero IP packets) confirms the Ethernet
+    table sees traffic an IPv4-only table structurally cannot, and that no `ipv4 conversations`
+    section is printed at all when the underlying map is empty; `sample_bacnet.pcap` (2 distinct
+    IPv4 conversations, 4 distinct endpoints) exercises `--max-conversations 1`/`--max-endpoints 1`'s
+    truncation-and-warning path, plus a no-warning control at a generous limit. One test confirms
+    `decode --stats` renders the identical tables `info` does (same underlying `StatsWriter` path),
+    and two confirm the new flags are discoverable from `--help`, matching the existing
+    `resource_limit_flags_present_in_*_help` precedent. Ten new `add_test`/`set_tests_properties`
+    entries in `CMakeLists.txt`. Adding four new, always-populated-when-applicable sections between
+    the existing `protocols:`/`direction sources:` block and the per-protocol breakdowns broke four
+    pre-existing `--stats` regex fixtures that asserted exact line-by-line adjacency
+    (`real_ethercat_stats_all_type1_zero_notes`, `bacnet_stats_counted`,
+    `real_bacnet_stats_all_original_unicast_readproperty`, `kerberos_stats_krb_error_counts`) --
+    fixed by inserting this codebase's own existing `(.*\n)*` "skip an arbitrary number of whole
+    lines" idiom (already used elsewhere in `CMakeLists.txt`, e.g. the NOTABLE IT PROTOCOLS test)
+    into each, an expected consequence of the new sections' insertion point, not a regression. Full
+    CTest across all four standing build configs (default GCC `build`; Clang ASan/UBSan
+    `build-fuzz`; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile
+    `build-mingw`, build-only), plus a clean-room extract-rebuild-test cycle, before delivery as a
+    zip of touched/new files via the standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

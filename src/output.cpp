@@ -5840,6 +5840,65 @@ void ZeekWriter::end() {
     out_ << "#close\t" << open_time << "\n";
 }
 
+StatsWriter::StatsWriter(size_t max_conversations, size_t max_endpoints)
+    : max_conversations_(max_conversations != 0 ? max_conversations : kDefaultMaxConversationEntries),
+      max_endpoints_(max_endpoints != 0 ? max_endpoints : kDefaultMaxEndpointEntries) {}
+
+// Shared by ip_conversations_/eth_conversations_ -- see output.hpp's own comment on this method
+// and on AddrConversationStats for the A/B and byte-counting conventions.
+void StatsWriter::update_conversation(std::map<std::string, AddrConversationStats>& table,
+                                       std::vector<std::string>& order, bool& truncated,
+                                       size_t max_entries, const std::string& src,
+                                       const std::string& dst, uint64_t bytes, double ts) {
+    const std::string key = std::min(src, dst) + "|" + std::max(src, dst);
+    auto it = table.find(key);
+    if (it == table.end()) {
+        if (table.size() >= max_entries) {
+            truncated = true;
+            return;
+        }
+        AddrConversationStats stats;
+        stats.address_a = src;
+        stats.address_b = dst;
+        stats.first_ts = stats.last_ts = ts;
+        order.push_back(key);
+        it = table.emplace(key, std::move(stats)).first;
+    }
+    AddrConversationStats& stats = it->second;
+    stats.last_ts = std::max(stats.last_ts, ts);
+    if (src == stats.address_a) {
+        stats.frames_a_to_b++;
+        stats.bytes_a_to_b += bytes;
+    } else {
+        stats.frames_b_to_a++;
+        stats.bytes_b_to_a += bytes;
+    }
+}
+
+// Shared by ip_endpoints_/eth_endpoints_.
+void StatsWriter::update_endpoint(std::map<std::string, AddrEndpointStats>& table,
+                                   std::vector<std::string>& order, bool& truncated,
+                                   size_t max_entries, const std::string& addr, bool is_tx,
+                                   uint64_t bytes) {
+    auto it = table.find(addr);
+    if (it == table.end()) {
+        if (table.size() >= max_entries) {
+            truncated = true;
+            return;
+        }
+        order.push_back(addr);
+        it = table.emplace(addr, AddrEndpointStats{}).first;
+    }
+    AddrEndpointStats& stats = it->second;
+    if (is_tx) {
+        stats.tx_frames++;
+        stats.tx_bytes += bytes;
+    } else {
+        stats.rx_frames++;
+        stats.rx_bytes += bytes;
+    }
+}
+
 void StatsWriter::write_packet(const DecodedPacket& p) {
     total_packets_++;
     protocol_counts_[p.protocol]++;
@@ -5849,6 +5908,27 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     // of them, consistent with that precedent.
     if (p.has_direction) {
         direction_source_counts_[direction_source_name(p.direction_source)]++;
+    }
+    // Conversations/Endpoints tables (tshark's `-z conv,ip`/`-z endpoints,ip` as design precedent
+    // -- see output.hpp's own comment on these four maps). Two independent layers: an IPv4 packet
+    // updates BOTH the IP tables (address-keyed) and the Ethernet tables (MAC-keyed) below, since
+    // has_ip and has_ethernet are independent facts about the same frame -- not gated on
+    // p.protocol, matching direction_source_counts_'s own cross-protocol posture just above.
+    if (p.has_ip) {
+        update_conversation(ip_conversations_, ip_conversation_order_, ip_conversations_truncated_,
+                             max_conversations_, p.src_ip, p.dst_ip, p.original_len, p.timestamp);
+        update_endpoint(ip_endpoints_, ip_endpoint_order_, ip_endpoints_truncated_, max_endpoints_,
+                         p.src_ip, /*is_tx=*/true, p.original_len);
+        update_endpoint(ip_endpoints_, ip_endpoint_order_, ip_endpoints_truncated_, max_endpoints_,
+                         p.dst_ip, /*is_tx=*/false, p.original_len);
+    }
+    if (p.has_ethernet) {
+        update_conversation(eth_conversations_, eth_conversation_order_, eth_conversations_truncated_,
+                             max_conversations_, p.src_mac, p.dst_mac, p.original_len, p.timestamp);
+        update_endpoint(eth_endpoints_, eth_endpoint_order_, eth_endpoints_truncated_, max_endpoints_,
+                         p.src_mac, /*is_tx=*/true, p.original_len);
+        update_endpoint(eth_endpoints_, eth_endpoint_order_, eth_endpoints_truncated_, max_endpoints_,
+                         p.dst_mac, /*is_tx=*/false, p.original_len);
     }
     if (p.protocol == "modbus" && p.result) {
         const ModbusFrame& mb = p.result->as<ModbusFrame>();
@@ -6361,6 +6441,65 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     }
 }
 
+// Shared rendering for ip_conversations_/eth_conversations_ -- see output.hpp's own comment on
+// this method for the sort order and truncation-warning conventions.
+void StatsWriter::print_conversations(std::ostream& out, const char* label,
+                                       const std::map<std::string, AddrConversationStats>& table,
+                                       const std::vector<std::string>& order, bool truncated,
+                                       size_t max_entries) {
+    if (table.empty()) return;
+    std::vector<std::string> sorted = order;
+    std::stable_sort(sorted.begin(), sorted.end(), [&table](const std::string& lhs, const std::string& rhs) {
+        const AddrConversationStats& l = table.at(lhs);
+        const AddrConversationStats& r = table.at(rhs);
+        return (l.bytes_a_to_b + l.bytes_b_to_a) > (r.bytes_a_to_b + r.bytes_b_to_a);
+    });
+    out << label << " (" << table.size() << ", ranked by total bytes):\n";
+    for (const auto& key : sorted) {
+        const AddrConversationStats& c = table.at(key);
+        const uint64_t total_frames = c.frames_a_to_b + c.frames_b_to_a;
+        const uint64_t total_bytes = c.bytes_a_to_b + c.bytes_b_to_a;
+        out << "  " << c.address_a << " <-> " << c.address_b << "  " << total_frames << " frame(s), "
+            << total_bytes << " byte(s) total  (A->B: " << c.frames_a_to_b << " frame(s)/" << c.bytes_a_to_b
+            << " byte(s), B->A: " << c.frames_b_to_a << " frame(s)/" << c.bytes_b_to_a
+            << " byte(s), duration " << std::fixed << std::setprecision(3) << (c.last_ts - c.first_ts)
+            << "s)\n";
+    }
+    if (truncated) {
+        out << "  (--max-conversations limit of " << max_entries
+            << " reached; some conversations are not shown -- rerun with a higher "
+               "--max-conversations to see them all)\n";
+    }
+}
+
+// Shared rendering for ip_endpoints_/eth_endpoints_.
+void StatsWriter::print_endpoints(std::ostream& out, const char* label,
+                                   const std::map<std::string, AddrEndpointStats>& table,
+                                   const std::vector<std::string>& order, bool truncated,
+                                   size_t max_entries) {
+    if (table.empty()) return;
+    std::vector<std::string> sorted = order;
+    std::stable_sort(sorted.begin(), sorted.end(), [&table](const std::string& lhs, const std::string& rhs) {
+        const AddrEndpointStats& l = table.at(lhs);
+        const AddrEndpointStats& r = table.at(rhs);
+        return (l.tx_bytes + l.rx_bytes) > (r.tx_bytes + r.rx_bytes);
+    });
+    out << label << " (" << table.size() << ", ranked by total bytes):\n";
+    for (const auto& addr : sorted) {
+        const AddrEndpointStats& e = table.at(addr);
+        const uint64_t total_frames = e.tx_frames + e.rx_frames;
+        const uint64_t total_bytes = e.tx_bytes + e.rx_bytes;
+        out << "  " << addr << "  " << total_frames << " frame(s), " << total_bytes
+            << " byte(s) total  (tx: " << e.tx_frames << " frame(s)/" << e.tx_bytes
+            << " byte(s), rx: " << e.rx_frames << " frame(s)/" << e.rx_bytes << " byte(s))\n";
+    }
+    if (truncated) {
+        out << "  (--max-endpoints limit of " << max_entries
+            << " reached; some endpoints are not shown -- rerun with a higher --max-endpoints to "
+               "see them all)\n";
+    }
+}
+
 void StatsWriter::print_summary(std::ostream& out) const {
     out << "packets:        " << total_packets_ << "\n";
     if (has_ts_) {
@@ -6381,6 +6520,20 @@ void StatsWriter::print_summary(std::ostream& out) const {
             out << "  " << std::left << std::setw(16) << name << count << "\n";
         }
     }
+    // Conversations/Endpoints tables (tshark's own `-z conv,ip`/`-z endpoints,ip` as design
+    // precedent) -- see output.hpp's own comment on these four maps and print_conversations'/
+    // print_endpoints' own comments for the sort order and truncation-warning conventions. IPv4
+    // first, then the raw-Ethernet/MAC tables, which is what actually covers non-IP OT L2 traffic
+    // (PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK/unrecognized EtherTypes) an IP-only table can't see
+    // at all.
+    print_conversations(out, "ipv4 conversations", ip_conversations_, ip_conversation_order_,
+                         ip_conversations_truncated_, max_conversations_);
+    print_endpoints(out, "ipv4 endpoints", ip_endpoints_, ip_endpoint_order_, ip_endpoints_truncated_,
+                     max_endpoints_);
+    print_conversations(out, "ethernet conversations", eth_conversations_, eth_conversation_order_,
+                         eth_conversations_truncated_, max_conversations_);
+    print_endpoints(out, "ethernet endpoints", eth_endpoints_, eth_endpoint_order_,
+                     eth_endpoints_truncated_, max_endpoints_);
     if (!modbus_function_counts_.empty()) {
         out << "modbus function codes:\n";
         for (const auto& [name, count] : modbus_function_counts_) {
