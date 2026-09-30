@@ -1788,6 +1788,13 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             out.has_udp = true;
             out.src_port = udp.src_port;
             out.dst_port = udp.dst_port;
+            // ROADMAP item 108 (follow-stream) -- see DecodeOptions::capture_transport_payload's
+            // own comment. No tcp_seq equivalent here -- UDP has no sequence number, and
+            // FollowStreamWriter's own UDP path never needs one (see its own file header comment:
+            // UDP "streams" are just capture-order concatenation, unlike TCP's seq-ordered one).
+            if (options_.capture_transport_payload) {
+                out.raw_transport_payload = udp.payload.to_vector();
+            }
             // Attack detection (see attack_detect.hpp): Fraggle + UDP flood counter. Runs
             // regardless of which application-layer protocol (if any) this datagram is
             // subsequently recognized as -- out.notes is additive, never reset below.
@@ -3121,6 +3128,16 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         out.src_port = tcp.src_port;
         out.dst_port = tcp.dst_port;
         out.tcp_flags = format_tcp_flags(tcp.flags);
+        // ROADMAP item 108 (follow-stream) -- see DecodeOptions::capture_transport_payload's own
+        // comment for why this is opt-in. Deliberately BEFORE the empty-payload early return
+        // directly below, same reasoning as the attack-detection block right after it: tcp_seq is
+        // still meaningful (and still needed by FollowStreamWriter to establish a direction's own
+        // relative-offset-0 anchor) on a bare handshake/ACK/teardown segment, even though
+        // raw_transport_payload itself ends up empty for one.
+        if (options_.capture_transport_payload) {
+            out.tcp_seq = tcp.seq;
+            out.raw_transport_payload = tcp.payload.to_vector();
+        }
         // Attack detection (see attack_detect.hpp): LAND, WinNuke, and the SYN/ACK/TCP flood
         // counters. Deliberately BEFORE the empty-payload early return directly below -- LAND,
         // SYN flood, and ACK flood are all classically bare (no-payload) segments, so running

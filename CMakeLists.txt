@@ -17755,7 +17755,30 @@ set_tests_properties(info_no_conversations_or_endpoints_tables_without_z PROPERT
 add_test(NAME info_z_rejects_unrecognized_value
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z bogus)
 set_tests_properties(info_z_rejects_unrecognized_value PROPERTIES
-  PASS_REGULAR_EXPRESSION "bogus not in \\{conv,ip,endpoints,ip,conv,eth,endpoints,eth\\}")
+  PASS_REGULAR_EXPRESSION "'bogus' not in \\{conv,ip, endpoints,ip, conv,eth, endpoints,eth, conv,tcp, follow,tcp,stream,<N>, follow,udp,stream,<N>\\}")
+
+# ROADMAP item 108 ("Follow stream as a first-class object") -- a follow,tcp/follow,udp value with
+# a non-numeric (or missing) stream index is rejected with its own, more specific message rather
+# than falling into the generic "not in {...}" one above -- see validate_stat_value's own comment
+# (cli_main.cpp).
+add_test(NAME info_z_follow_rejects_non_numeric_stream_index
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z follow,tcp,stream,abc)
+set_tests_properties(info_z_follow_rejects_non_numeric_stream_index PROPERTIES
+  PASS_REGULAR_EXPRESSION "'follow,tcp,stream,abc' must end with a non-negative integer stream index")
+
+add_test(NAME info_z_follow_rejects_missing_stream_index
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z follow,udp,stream,)
+set_tests_properties(info_z_follow_rejects_missing_stream_index PROPERTIES
+  PASS_REGULAR_EXPRESSION "'follow,udp,stream,' must end with a non-negative integer stream index")
+
+# An unsupported transport name after "follow," (tshark itself supports follow,http/follow,tls/
+# follow,http2/follow,quic too -- this tool deliberately doesn't, see FollowStreamWriter's own file
+# header comment, output.hpp) falls through to the generic "not in {...}" message -- it doesn't
+# match either follow,tcp,stream,/follow,udp,stream, prefix at all.
+add_test(NAME info_z_rejects_unsupported_follow_transport
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z follow,http,0)
+set_tests_properties(info_z_rejects_unsupported_follow_transport PROPERTIES
+  PASS_REGULAR_EXPRESSION "'follow,http,0' not in \\{conv,ip, endpoints,ip, conv,eth, endpoints,eth, conv,tcp, follow,tcp,stream,<N>, follow,udp,stream,<N>\\}")
 
 # --max-conversations/--max-endpoints: sample_bacnet.pcap has 2 distinct IPv4 conversations and 4
 # distinct IPv4 endpoints (see bacnet_stats_counted's own fixture above), so capping each at 1
@@ -17791,7 +17814,132 @@ set_tests_properties(conversation_stats_flags_present_in_info_help PROPERTIES
 add_test(NAME conversation_stats_flags_absent_from_decode_help
   COMMAND conduitscope decode --help)
 set_tests_properties(conversation_stats_flags_absent_from_decode_help PROPERTIES
-  FAIL_REGULAR_EXPRESSION "--max-conversations|--max-endpoints|-z,--stat|--stats")
+  FAIL_REGULAR_EXPRESSION "--max-conversations|--max-endpoints|-z,--stat|--stats|--max-follow-bytes")
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 108 ("Follow stream as a first-class object") -- `info`'s own `-z conv,tcp` and
+# `-z follow,tcp,stream,<N>`/`-z follow,udp,stream,<N>`, tshark's own `-z conv,tcp`/Follow Stream
+# as design precedent. tests/sample_follow_stream.pcap (tools/make_sample_pcap.py's
+# build_follow_stream_sample) lays out five independent sessions, each scenario's own comment
+# there explaining exactly what it proves and which tcp.stream/udp.stream index it lands on.
+
+# Scenario A (tcp.stream 0) -- an ordinary in-order exchange. Also the base case for --max-follow-
+# bytes truncation, below.
+add_test(NAME info_follow_tcp_simple_in_order
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,0)
+set_tests_properties(info_follow_tcp_simple_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "follow tcp stream 0: 192.168.1.50:56000 <-> 192.168.1.10:502\n  192.168.1.50:56000 -> 192.168.1.10:502 \\(1 segment\\(s\\), 11 byte\\(s\\)\\):\n.*GET STATUS.*\n  192.168.1.10:502 -> 192.168.1.50:56000 \\(1 segment\\(s\\), 19 byte\\(s\\)\\):\n.*STATUS=OK TEMP")
+# (the 19-byte B->A payload wraps onto a second 16-bytes-per-line hex dump row -- asserting on
+# "STATUS=OK TEMP" alone, which fits entirely within the first row, avoids depending on exactly
+# where write_hex_ascii_dump's own fixed 16-byte wrap boundary falls)
+
+# Scenario B (tcp.stream 1) -- "HIJ" is captured BEFORE "CDEFG", the segment that actually closes
+# the gap between the direction's first segment ("AB") and it -- must still reconstruct in
+# SEQUENCE order, not capture order, with the gap fully closed.
+add_test(NAME info_follow_tcp_out_of_order_reassembles_in_sequence_order
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,1)
+set_tests_properties(info_follow_tcp_out_of_order_reassembles_in_sequence_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:56001 -> 192.168.1.10:502 \\(3 segment\\(s\\), 10 byte\\(s\\)\\):\n.*ABCDEFGHIJ")
+set_tests_properties(info_follow_tcp_out_of_order_reassembles_in_sequence_order PROPERTIES
+  FAIL_REGULAR_EXPRESSION "never became contiguous")
+
+# Scenario C (tcp.stream 2) -- an exact-duplicate retransmission of "HELLO" must be ignored (not
+# appended twice, not flagged as a conflict), leaving a clean "HELLOWORLD".
+add_test(NAME info_follow_tcp_identical_retransmission_deduplicated
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,2)
+set_tests_properties(info_follow_tcp_identical_retransmission_deduplicated PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:56002 -> 192.168.1.10:502 \\(3 segment\\(s\\), 10 byte\\(s\\)\\):\n.*HELLOWORLD")
+set_tests_properties(info_follow_tcp_identical_retransmission_deduplicated PROPERTIES
+  FAIL_REGULAR_EXPRESSION "disagreed with what was already captured")
+
+# Scenario D (tcp.stream 3) -- security-relevant: a retransmission at the same seq whose content
+# actively DISAGREES ("XXXXX" vs the real "AAAAA") must resolve first-received-wins (the real
+# bytes survive), with the conflict flagged once, matching decoder.cpp's own reassemble_tcp_payload
+# overlap policy (ROADMAP item 107).
+add_test(NAME info_follow_tcp_conflicting_overlap_first_received_wins
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,3)
+set_tests_properties(info_follow_tcp_conflicting_overlap_first_received_wins PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.50:56003 -> 192.168.1.10:502 \\(3 segment\\(s\\), 10 byte\\(s\\)\\):\n.*AAAAABBBBB(.*\n)*.*disagreed with what was already captured -- first-received bytes were kept")
+set_tests_properties(info_follow_tcp_conflicting_overlap_first_received_wins PROPERTIES
+  FAIL_REGULAR_EXPRESSION "XXXXX")
+
+# Scenario E (udp.stream 0) -- UDP has no sequence number: two same-direction datagrams
+# ("UDPQUERY1" then "UDPQUERY2") must simply concatenate in CAPTURE order.
+add_test(NAME info_follow_udp_concatenates_in_capture_order
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,udp,stream,0)
+set_tests_properties(info_follow_udp_concatenates_in_capture_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "follow udp stream 0: 192.168.1.50:56010 <-> 192.168.1.10:47900\n  192.168.1.50:56010 -> 192.168.1.10:47900 \\(2 datagram\\(s\\), 18 byte\\(s\\)\\):\n.*UDPQUERY1UDPQUER(.*\n)*.*192.168.1.10:47900 -> 192.168.1.50:56010 \\(1 datagram\\(s\\), 9 byte\\(s\\)\\):\n.*UDPREPLY1")
+# (18 bytes wraps the same way -- "UDPQUERY1UDPQUER" is the full first 16-byte row, proving both
+# datagrams concatenated back-to-back with nothing dropped, without depending on the wrap point)
+
+# Repeatable `-z`, several follow requests in one run, printed back in the order asked (not a
+# fixed table order) -- also proves TCP and UDP index spaces are independent (tcp.stream 0 and
+# udp.stream 0 are unrelated sessions).
+add_test(NAME info_follow_multiple_requests_printed_in_flag_order
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,udp,stream,0 -z follow,tcp,stream,0)
+set_tests_properties(info_follow_multiple_requests_printed_in_flag_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "follow udp stream 0:(.*\n)*follow tcp stream 0:")
+
+# A repeated, IDENTICAL follow request is de-duplicated -- printed once, not twice.
+add_test(NAME info_follow_duplicate_request_deduplicated
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,0 -z follow,tcp,stream,0)
+set_tests_properties(info_follow_duplicate_request_deduplicated PROPERTIES
+  PASS_REGULAR_EXPRESSION "follow tcp stream 0:")
+# Counts occurrences via a trick: FAIL if the header line appears a second time anywhere.
+set_tests_properties(info_follow_duplicate_request_deduplicated PROPERTIES
+  FAIL_REGULAR_EXPRESSION "follow tcp stream 0:(.*\n)*follow tcp stream 0:")
+
+# A stream index past what the capture actually has -- an explicit, actionable diagnostic rather
+# than silence (this fixture's highest tcp.stream index is 3).
+add_test(NAME info_follow_tcp_stream_not_found
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,99)
+set_tests_properties(info_follow_tcp_stream_not_found PROPERTIES
+  PASS_REGULAR_EXPRESSION "follow tcp stream 99: no such stream in this capture \\(highest tcp.stream index seen: 3\\)")
+
+add_test(NAME info_follow_udp_stream_not_found_when_no_udp_at_all
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z follow,udp,stream,0)
+set_tests_properties(info_follow_udp_stream_not_found_when_no_udp_at_all PROPERTIES
+  PASS_REGULAR_EXPRESSION "follow udp stream 0: no such stream in this capture \\(no UDP streams observed\\)")
+
+# --max-follow-bytes: scenario A's own B->A direction is 19 bytes -- capping at 5 forces
+# truncation of THAT direction only (the smaller A->B direction, 11 bytes, is untouched since its
+# own cap isn't reached -- each direction's budget is independent, see TcpDirection's own comment,
+# output.hpp).
+add_test(NAME info_follow_max_follow_bytes_truncates_and_warns
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z follow,tcp,stream,0 --max-follow-bytes 5)
+set_tests_properties(info_follow_max_follow_bytes_truncates_and_warns PROPERTIES
+  PASS_REGULAR_EXPRESSION "192.168.1.10:502 -> 192.168.1.50:56000 \\(1 segment\\(s\\), 5 byte\\(s\\)\\):\n.*STATU(.*\n)*.*--max-follow-bytes limit of 5 reached for this direction; stream truncated")
+set_tests_properties(info_follow_max_follow_bytes_truncates_and_warns PROPERTIES
+  FAIL_REGULAR_EXPRESSION "GET STATUS(.*\n)*.*--max-follow-bytes limit")  # A->B (11 bytes) must NOT be truncated
+
+# `-z conv,tcp`: four TCP sessions in this fixture, each with its own address:port pair and
+# tcp.stream index -- the same index a `-z follow,tcp,stream,<N>` above asks for.
+add_test(NAME info_conv_tcp_lists_sessions_with_stream_index
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z conv,tcp)
+set_tests_properties(info_conv_tcp_lists_sessions_with_stream_index PROPERTIES
+  PASS_REGULAR_EXPRESSION "tcp conversations \\(4, ranked by total bytes\\):(.*\n)*.*192.168.1.50:56000 <-> 192.168.1.10:502  \\(tcp.stream 0\\)")
+
+# conv,tcp is independent of conv,ip -- requesting one does not accumulate (or print) the other,
+# same "nothing requested, nothing tracked" posture conv,ip/conv,eth/endpoints,ip/endpoints,eth
+# already established.
+add_test(NAME info_conv_tcp_does_not_imply_conv_ip
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z conv,tcp)
+set_tests_properties(info_conv_tcp_does_not_imply_conv_ip PROPERTIES
+  FAIL_REGULAR_EXPRESSION "ipv4 conversations")
+
+add_test(NAME info_max_conversations_caps_tcp_conversations_table_too
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z conv,tcp --max-conversations 1)
+set_tests_properties(info_max_conversations_caps_tcp_conversations_table_too PROPERTIES
+  PASS_REGULAR_EXPRESSION "tcp conversations \\(1, ranked by total bytes\\):\n(.*\n){1} *\\(--max-conversations limit of 1 reached; some conversations are not shown -- rerun with a higher --max-conversations to see them all\\)")
+
+# --max-follow-bytes is discoverable from `info --help`, same "flags are discoverable from --help"
+# regression guard --max-conversations/--max-endpoints already have above; -z's own help text also
+# names conv,tcp/follow,tcp,stream,<N>/follow,udp,stream,<N> so they're never only discoverable by
+# reading source.
+add_test(NAME follow_stream_flags_present_in_info_help
+  COMMAND conduitscope info --help)
+set_tests_properties(follow_stream_flags_present_in_info_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "'conv,tcp'.*'follow,tcp,stream,<N>'(.*\n)*.*--max-follow-bytes")
 
 # ---------------------------------------------------------------------------------------------
 # Subcommand-alias flags (--decode/--info/--interfaces/--policy/--inventory/--detect/--baseline/

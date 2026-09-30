@@ -15677,6 +15677,117 @@ it done as its own patch.
     change reuses already-fuzzed `decoder.cpp` reassembly code paths without touching any
     protocol-decoder parsing itself.
 
+108. **Follow stream as a first-class object.** Jurgen's direct request: "ConduitScope has
+    narrow TCP reassembly for known OT PDUs. tshark's follow-stream model (one directional byte
+    stream, pairing, export) is what you want when a capture starts mid-session or when policy
+    direction is 'who initiated.' Add options `-z conv,tcp`, `-z follow,tcp,stream,0`,
+    `-z follow,udp,stream,0`. No http, https, https/2, quic for now." tshark's own `-z conv,tcp`
+    and Follow Stream feature are the explicit design precedent, deliberately narrowed to raw
+    TCP/UDP bytes -- no application-protocol-aware reassembly (HTTP, HTTP/2, QUIC) at all, which
+    keeps this orthogonal to the existing per-PDU reassemblers (Modbus/DNP3-link/TPKT, item
+    "Reassemble Modbus/DNP3-link/TPKT PDUs split across TCP segments"; DNP3 application fragments,
+    S7comm chaining) rather than replacing or competing with them: those still decode known OT
+    PDUs; this gives the operator the raw bytes underneath, for the mid-session-start and
+    who-initiated cases tshark's own model targets.
+
+    **Design: opt-in and zero-cost when unused.** A new `DecodeOptions::capture_transport_payload`
+    flag (false by default) gates two new `DecodedPacket` fields --
+    `raw_transport_payload` (the segment/datagram's raw bytes) and `tcp_seq` (the absolute
+    on-the-wire TCP sequence number, not ISN-relative) -- populated only in `decoder.cpp`'s TCP and
+    UDP branches when the flag is set. `info` only sets it when the user's own `-z` asked for at
+    least one `follow,tcp,stream,<N>`/`follow,udp,stream,<N>` table, so every existing caller
+    (`decode`, `policy validate`, `baseline`, ...) pays nothing -- no allocation, no copy -- matching
+    this codebase's standing "a table/field nobody asked for is never even accumulated" convention
+    (items 104/106).
+
+    **`-z conv,tcp`**: a new `tcp_conversations_` table in `StatsWriter`, parallel to the existing
+    `conv,ip`/`conv,eth` tables but keyed on the TCP 4-tuple and carrying a `tcp.stream` index
+    (tshark's own term) assigned in first-observed order -- the same index a `follow,tcp,stream,<N>`
+    request names. Independent of `conv,ip`/`conv,eth`: requesting `conv,tcp` alone does not
+    accumulate or print the IP/Ethernet tables, the same "nothing requested, nothing tracked"
+    posture those tables already established. `--max-conversations` caps it identically to the
+    existing tables.
+
+    **`-z follow,tcp,stream,<N>` / `-z follow,udp,stream,<N>`**: a new `FollowStreamWriter`
+    (`output.hpp`/`.cpp`) that assigns every TCP/UDP session a stream index as it's first seen
+    (independent of whether any `-z` requested it -- indices must stay stable and match `conv,tcp`'s
+    own numbering), but only buffers bytes for sessions actually named by a `-z follow,...` flag.
+    Each direction (A->B, B->A) gets its own byte buffer, rendered with the existing
+    `write_hex_ascii_dump` (the same tcpdump/tshark-style 16-bytes-per-line hex+ASCII dump `decode
+    -x` already uses). `CLI::IsMember`, used for the fixed `conv,ip`/`endpoints,ip`/etc. set, can't
+    express `follow,{tcp,udp},stream,<N>`'s variable numeric suffix, so `-z`'s validator moved to a
+    custom `->check(validate_stat_value)` function instead, still rejecting anything else with the
+    same "not in {...}" message shape. A new `--max-follow-bytes` option (default 16 MiB,
+    `kDefaultMaxFollowStreamBytes`) caps each *direction's* buffer independently, so one huge
+    direction truncating never affects the other, and a trailing warning line names the limit that
+    was hit -- the same per-flag-named-limit convention `--max-conversations`/`--max-endpoints`
+    already use.
+
+    **TCP ordering and overlap policy, and its one deliberate scope boundary.** Segments are
+    tracked relative to each direction's own first-CAPTURED segment (`TcpDirection::isn`, an
+    anchor, not necessarily the true ISN -- deliberately, since this is exactly what lets a capture
+    that starts mid-session, missing the real SYN, still follow correctly, per Jurgen's own stated
+    motivation). Out-of-order segments buffer in a `pending` map keyed by relative offset and drain
+    once the gap closes; overlapping segments are compared byte-for-byte against what's already
+    buffered (`std::string::compare`, bounded so an attacker-controlled sequence number can never
+    read past what's actually buffered) and resolved first-received-wins -- content-identical
+    overlap (genuine retransmission) and content-conflicting overlap (ambiguous/crafted) are both
+    handled, with the conflicting case flagged in the printed output via
+    `had_conflicting_overlap`, mirroring item 107's identical TCP-overlap-content-comparison work
+    at the general-reassembly layer, applied here at the follow-stream layer. The scope boundary,
+    documented in `TcpDirection::isn`'s own comment: the anchor is fixed the first time a direction
+    is touched and never rebased, so correct seq-sorted reconstruction requires the first-CAPTURED
+    segment in a direction to also be genuinely first in sequence order -- a capture where
+    reordering put a later-sequenced segment ahead of a direction's very first appearance would
+    misplace everything after it. Reordering *after* the anchor is established is handled
+    correctly. This is the same limitation Wireshark's own relative-sequence-number tracking has,
+    for the identical reason, and is narrow enough (it requires reordering to specifically hit a
+    direction's first packet) not to be worth a heavier stateful redesign for a first-class-object
+    feature explicitly scoped to raw bytes, not protocol awareness. UDP has no such concern --
+    datagrams are simply concatenated in capture order per direction, since UDP has no sequence
+    numbers to reorder by.
+
+    **A real bug found and fixed along the way: `write_hex_ascii_dump` stream-state leak.**
+    `StatsWriter::print_summary`'s pre-existing `std::left` (for column-aligned histogram output)
+    was never reset, and `write_hex_ascii_dump`'s own `std::setw`/`std::setfill('0')` offset
+    zero-padding pads on whichever side `std::ios::adjustfield` currently says -- so calling it
+    on a stream still left in `std::left` mode (exactly what happens once `-z conv,tcp`'s own
+    table print ran before a `follow,tcp,stream,<N>` table in the same invocation) silently
+    right-pads offsets instead of zero-padding them (e.g. "1000" printed instead of "0010"),
+    corrupting every subsequent hex-dump line. `decode -x`'s only pre-existing call site never
+    exercised this because it always runs on a pristine stream. Fixed with one `out << std::right;`
+    at the top of `write_hex_ascii_dump`, benefiting every caller, not just this feature.
+
+    **Tests.** A new dedicated fixture, `tests/sample_follow_stream.pcap` (its own
+    `build_follow_stream_sample()` in `make_sample_pcap.py`, matching this project's established
+    "reused fixture with exact-count tests gets a dedicated fixture instead of an append" precedent,
+    items 106/107), with five isolated scenarios each on its own port: simple in-order TCP,
+    out-of-order TCP that reassembles correctly once the gap closes, identical-retransmission TCP
+    (deduplicated, no conflict), conflicting-overlap TCP (flagged, first-received-wins, proven via
+    the reconstructed bytes), and UDP capture-order concatenation. ~20 new `CMakeLists.txt` tests
+    cover: `-z` validation errors for non-numeric/missing stream indices and unsupported follow
+    transports; each fixture scenario; repeatable `-z` flags printed in flag order and de-duplicated
+    when repeated; "no such stream" diagnostics (including the UDP-specific "no UDP streams
+    observed" wording when a capture has no UDP traffic at all); `--max-follow-bytes` truncating one
+    direction while leaving the other's smaller buffer untouched; `conv,tcp`'s session listing,
+    its independence from `conv,ip`, and `--max-conversations` capping it too; and `--help`
+    discoverability for both `-z`'s new values and `--max-follow-bytes` (extending item 106's own
+    `conversation_stats_flags_absent_from_decode_help` FAIL check to also cover
+    `--max-follow-bytes`).
+
+    **Deliberately out of scope, named rather than silently dropped**, per Jurgen's own explicit
+    instruction: HTTP, HTTPS, HTTP/2, and QUIC-aware follow-stream reassembly. `follow,tcp,...`/
+    `follow,udp,...` always return raw transport-layer bytes regardless of what protocol rides on
+    top, matching tshark's *raw* Follow Stream mode (not its protocol-decode-aware "Follow HTTP
+    Stream" variant).
+
+    **Verification.** Same standing bar as items 105-107: full CTest across all four standing build
+    configs (default GCC `build`; Clang ASan/UBSan `build-fuzz`;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile `build-mingw`,
+    build-only), confirming the exact expected test-count increase with zero regressions, plus a
+    clean-room extract-rebuild-test cycle, before delivery as a zip of touched/new files via the
+    standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

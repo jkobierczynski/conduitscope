@@ -291,6 +291,13 @@ struct RequestedStatsTables {
     bool ip_endpoints = false;
     bool eth_conversations = false;
     bool eth_endpoints = false;
+    // ROADMAP item 108 ("Follow stream as a first-class object") -- `-z conv,tcp`. Unlike
+    // ip_conversations/eth_conversations above (address-only, so one UDP and one TCP session
+    // between the same two hosts collapse into a single row), this is keyed by address:PORT pair
+    // -- a genuinely different, TCP-specific view tshark's own `-z conv,tcp` mirrors, and the one
+    // that actually correlates with a tcp.stream index a later `-z follow,tcp,stream,<N>` can ask
+    // for (see StatsWriter::AddrConversationStats::stream_index below).
+    bool tcp_conversations = false;
 };
 
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
@@ -330,6 +337,12 @@ private:
         uint64_t frames_a_to_b = 0, bytes_a_to_b = 0;
         uint64_t frames_b_to_a = 0, bytes_b_to_a = 0;
         double first_ts = 0.0, last_ts = 0.0;
+        // ROADMAP item 108 -- only ever set (to >= 0) for tcp_conversations_'s own rows; always -1
+        // (and never rendered, see print_conversations) for ip_conversations_/eth_conversations_,
+        // which have no stream-index concept. This session's 0-based tcp.stream index (see
+        // FollowStreamWriter's own comment for the numbering rule) -- printed alongside the row so
+        // a reader can go straight from "-z conv,tcp" to the matching "-z follow,tcp,stream,<N>".
+        int64_t stream_index = -1;
     };
     // tx/rx are this address's own role: tx = frames where this address was the source, rx =
     // frames where it was the destination -- the address-centric analog of AddrConversationStats'
@@ -346,10 +359,16 @@ private:
     // and this pair/address is not already tracked, the packet is dropped from THIS table only
     // (every other StatsWriter counter for the same packet is unaffected) and *truncated is set --
     // print_summary reports that with a trailing warning line, see output.cpp.
+    // stream_index: -1 (the default) for ip_conversations_/eth_conversations_, which never set it;
+    // tcp_conversations_'s own call site passes its session's real 0-based tcp.stream index --
+    // stored on the entry ONLY the first time it's created (a conversation's stream index never
+    // changes once assigned, same as address_a/address_b above), see AddrConversationStats' own
+    // comment.
     static void update_conversation(std::map<std::string, AddrConversationStats>& table,
                                      std::vector<std::string>& order, bool& truncated,
                                      size_t max_entries, const std::string& src,
-                                     const std::string& dst, uint64_t bytes, double ts);
+                                     const std::string& dst, uint64_t bytes, double ts,
+                                     int64_t stream_index = -1);
     static void update_endpoint(std::map<std::string, AddrEndpointStats>& table,
                                  std::vector<std::string>& order, bool& truncated,
                                  size_t max_entries, const std::string& addr, bool is_tx,
@@ -398,6 +417,22 @@ private:
     std::map<std::string, AddrEndpointStats> eth_endpoints_;
     std::vector<std::string> eth_endpoint_order_;
     bool eth_endpoints_truncated_ = false;
+
+    // ROADMAP item 108 -- `-z conv,tcp`. Keyed by an undirected "ip#port<->ip#port" session string
+    // (this class's own tcp_conversation_session_key, output.cpp -- '#' not ':' between address and
+    // port for the same IPv6-ambiguity reason decoder.cpp's tcp_session_key already documents;
+    // independently reimplemented here rather than shared with decoder.cpp's own anonymous-
+    // namespace helper of the same name, since StatsWriter only ever sees already-decoded
+    // DecodedPacket fields, never decoder-internal state). tcp_stream_index_/next_tcp_stream_
+    // assign each session the same 0-based, first-seen-order index FollowStreamWriter's own,
+    // entirely separate indexer would assign for the identical packets -- see that class's own
+    // comment for why two independent indexers over the same packet stream are guaranteed to agree
+    // rather than needing to be the same object.
+    std::map<std::string, AddrConversationStats> tcp_conversations_;
+    std::vector<std::string> tcp_conversation_order_;
+    bool tcp_conversations_truncated_ = false;
+    std::map<std::string, uint64_t> tcp_stream_index_;
+    uint64_t next_tcp_stream_ = 0;
 
     size_t total_packets_ = 0;
     std::map<std::string, size_t> protocol_counts_;
@@ -714,6 +749,150 @@ private:
     size_t amqp10_sasl_failure_count_ = 0;
     bool has_ts_ = false;
     double first_ts_ = 0.0, last_ts_ = 0.0;
+};
+
+// ROADMAP item 108 ("Follow stream as a first-class object") -- one `-z follow,tcp,stream,<N>` /
+// `-z follow,udp,stream,<N>` request (cli_main.cpp parses each raw `-z` value into this). is_tcp
+// distinguishes the two independent index spaces -- tshark's own tcp.stream/udp.stream
+// convention: a TCP stream 0 and a UDP stream 0 are unrelated sessions, each numbered in its own
+// separate 0,1,2,... sequence.
+struct FollowStreamRequest {
+    bool is_tcp = true;
+    uint64_t stream_index = 0;
+};
+
+// Overrides decoder.cpp's general TCP reassembly cap (see resource_limits.hpp's
+// max_reassembly_bytes) as this class's own default per-direction byte budget -- same order of
+// magnitude reasoning (a single session's own reconstructed stream is bounded the same way a
+// single in-progress PDU reassembly already is), overridable via `info`'s own
+// --max-follow-bytes (cli_main.cpp).
+inline constexpr uint64_t kDefaultMaxFollowStreamBytes = 16u * 1024u * 1024u;  // 16 MiB
+
+// Reconstructs and prints the raw, per-direction byte stream for one or more specific TCP/UDP
+// sessions -- tshark's own "Follow Stream" (`-z follow,tcp,...`/`-z follow,udp,...`) as design
+// precedent, Jurgen's own framing: "tshark's follow-stream model (one directional byte stream,
+// pairing, export) is what you want when a capture starts mid-session or when policy direction is
+// 'who initiated'". Deliberately scoped to raw TCP/UDP bytes only -- no HTTP/TLS/HTTP-2/QUIC-aware
+// reassembly (tshark's own follow,http/follow,tls/follow,http2/follow,quic variants), matching
+// Jurgen's own explicit "No http, https, https/2, quic for now" scoping. See
+// docs/DEVELOPMENT.md's ROADMAP item 108 for the full design writeup.
+//
+// MEMORY: unlike StatsWriter's conv,ip/conv,tcp tables (which must track EVERY session to build a
+// complete table), this class only ever BUFFERS BYTES for the specific stream_index(es) actually
+// requested -- a capture with a million TCP sessions but one `-z follow,tcp,stream,0` request
+// costs the same as a capture with exactly one session. Every session still needs its INDEX
+// assigned in first-seen order (tcp_stream_index_/udp_stream_index_ below), which is O(1) map
+// bookkeeping per packet, not a byte buffer -- only a session matching a requested (is_tcp, index)
+// pair goes on to accumulate actual payload bytes (tcp_sessions_/udp_sessions_ below). Each
+// requested stream's own accumulated bytes are still capped (max_bytes_per_direction_, default
+// kDefaultMaxFollowStreamBytes above) per direction, for the same "a single crafted session can't
+// exhaust memory" reason every other unbounded-cardinality StatsWriter table is capped.
+//
+// TCP ORDERING: segments are placed by their own TCP sequence number (DecodedPacket::tcp_seq),
+// relative to whichever segment this class saw FIRST in that direction (not necessarily the true
+// SYN/ISN -- this is deliberate, see DecodedPacket::tcp_seq's own comment: it's what lets a
+// capture that starts mid-session still follow correctly, matching tshark's own relative sequence
+// numbers). An overlapping retransmission is resolved first-received-wins, the SAME policy
+// decoder.cpp's own reassemble_tcp_payload uses for PDU reassembly (see that function's own
+// comment) -- only genuinely new bytes past what's already recorded are appended, and a conflict
+// (the overlapping bytes actually DISAGREE, not just repeat) is flagged once in the printed
+// summary rather than silently favored either way. An out-of-order arrival (this segment's start
+// offset is past the current contiguous end) is buffered and spliced in once the gap closes --
+// see TcpDirection::pending below for the one deliberately-unhandled corner case (a segment that
+// itself only partially overlaps an EXISTING pending, not-yet-contiguous segment).
+//
+// UDP ORDERING: none -- UDP has no sequence number, so each direction's bytes are simply
+// concatenated in CAPTURE order (the order write_packet saw them), tshark's own udp.stream follow
+// behavior for the same reason.
+class FollowStreamWriter {
+public:
+    explicit FollowStreamWriter(std::vector<FollowStreamRequest> requests,
+                                 uint64_t max_bytes_per_direction = 0);
+    void write_packet(const DecodedPacket& p);
+    void print_summary(std::ostream& out) const;
+
+private:
+    // TCP's own per-direction accumulator -- sequence-ordered, overlap-aware. See this class' own
+    // file header comment ("TCP ORDERING") for the algorithm `insert_segment` (output.cpp)
+    // implements over `bytes`/`pending` below.
+    struct TcpDirection {
+        bool have_isn = false;
+        // This direction's own FIRST-CAPTURED segment's raw tcp_seq -- relative-offset-0 anchor,
+        // NOT necessarily the true ISN (deliberate -- see this class's own file header comment,
+        // "TCP ORDERING": it's what lets a capture that starts mid-session, missing the real SYN
+        // entirely, still follow correctly). SCOPE BOUNDARY this does NOT cover: the anchor is
+        // fixed forever the first time this direction is touched and never rebased, so it only
+        // gives correct seq-sorted reconstruction when the first-CAPTURED segment in a direction
+        // is also genuinely first in SEQUENCE order. A capture where packet reordering (NIC/driver
+        // reordering, multi-path capture) put a LATER-sequenced segment ahead of an EARLIER one
+        // specifically for THIS direction's very first appearance would misplace everything after
+        // it (the earlier segment's own offset, computed against the wrong anchor, wraps via
+        // unsigned 32-bit subtraction into an enormous "far in the future" value instead of "before
+        // the start"). Reordering AFTER the anchor is already established is handled correctly
+        // (see `pending` below) -- this boundary is narrow: only the anchor-establishing segment
+        // itself needs to already be first in true sequence order, exactly the same limitation
+        // Wireshark's own relative-sequence-number tracking has for the identical reason.
+        uint32_t isn = 0;
+        std::string bytes;        // contiguous bytes, from relative offset 0 up to bytes.size()
+        // Segments that arrived before their predecessor (a gap not yet filled), keyed by their
+        // own relative start offset -- drained into `bytes` once that offset becomes reachable
+        // (i.e. equals bytes.size()). NOT itself checked for overlap against OTHER pending entries
+        // (only ever checked against the committed `bytes` prefix) -- a segment that partially
+        // overlaps an already-pending, not-yet-contiguous entry is simply stored at its own offset
+        // as a second, separate pending entry; this requires BOTH out-of-order arrival AND an
+        // overlapping retransmission of that same not-yet-delivered range to actually matter, and
+        // is documented here rather than chased further.
+        std::map<uint64_t, std::string> pending;
+        uint64_t pending_bytes = 0;  // running total of pending values' own sizes -- avoids an
+                                       // O(pending.size()) rescan on every insert's cap check
+        uint64_t frames = 0;
+        bool truncated = false;
+        bool had_conflicting_overlap = false;
+    };
+    struct TcpSession {
+        std::string addr_a; uint16_t port_a = 0;  // whichever endpoint sent this session's very
+        std::string addr_b; uint16_t port_b = 0;   // first packet -- matches AddrConversationStats'
+                                                     // own A/B convention (StatsWriter, above)
+        TcpDirection a_to_b, b_to_a;
+    };
+    // UDP's own per-direction accumulator -- capture-order concatenation only, no sequencing (see
+    // this class's own file header comment, "UDP ORDERING").
+    struct UdpDirection {
+        std::string bytes;
+        uint64_t frames = 0;
+        bool truncated = false;
+    };
+    struct UdpSession {
+        std::string addr_a; uint16_t port_a = 0;
+        std::string addr_b; uint16_t port_b = 0;
+        UdpDirection a_to_b, b_to_a;
+    };
+
+    static void insert_tcp_segment(TcpDirection& dir, uint64_t offset, std::string bytes,
+                                    uint64_t max_bytes);
+    static void append_udp_datagram(UdpDirection& dir, const std::string& bytes, uint64_t max_bytes);
+    void print_tcp_stream(std::ostream& out, uint64_t index) const;
+    void print_udp_stream(std::ostream& out, uint64_t index) const;
+
+    std::vector<FollowStreamRequest> requests_;  // de-duplicated, first-occurrence order preserved
+                                                   // -- see output.cpp's constructor
+    uint64_t max_bytes_per_direction_;
+    std::set<uint64_t> requested_tcp_indices_, requested_udp_indices_;
+
+    // Index assignment -- EVERY has_tcp/has_udp packet updates the matching one of these (first-
+    // seen session -> next sequential index), regardless of whether that particular index was
+    // ever requested; only a session matching a requested (is_tcp, index) pair goes on to get a
+    // TcpSession/UdpSession entry below. Keyed by an undirected "ip#port<->ip#port" session string
+    // -- see output.cpp's tcp_conversation_session_key (shared with StatsWriter's own
+    // tcp_conversations_ table for the identical string shape, though each class keeps its own
+    // independent map instance -- see this class' own file header comment on why that's fine).
+    std::map<std::string, uint64_t> tcp_stream_index_;
+    uint64_t next_tcp_stream_ = 0;
+    std::map<std::string, uint64_t> udp_stream_index_;
+    uint64_t next_udp_stream_ = 0;
+
+    std::map<uint64_t, TcpSession> tcp_sessions_;  // only requested indices ever get an entry
+    std::map<uint64_t, UdpSession> udp_sessions_;
 };
 
 std::string json_escape(const std::string& s);

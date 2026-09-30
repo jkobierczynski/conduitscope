@@ -6717,6 +6717,87 @@ def build_tcp_reassembly_sample():
     (TESTS_DIR / "sample_tcp_reassembly.pcap").write_bytes(data)
 
 
+def build_follow_stream_sample():
+    """ROADMAP item 108 ("Follow stream as a first-class object") -- exercises `info`'s own
+    `-z conv,tcp`/`-z follow,tcp,stream,<N>`/`-z follow,udp,stream,<N>` (output.hpp's
+    FollowStreamWriter) directly: raw, per-direction TCP/UDP byte-stream reconstruction,
+    independent of and alongside whatever protocol-level decoding a payload also gets. Each
+    scenario below uses its own port pair so flows can't interact, and is appended to `packets` in
+    the exact order that fixes its own tcp.stream/udp.stream index (0, 1, 2, ... -- assigned by
+    FIRST-PACKET-IN-FILE order across every session, not per-port) -- see each scenario's own
+    comment for the index it lands on. Every payload here is deliberately human-readable ASCII, not
+    a real protocol PDU, so a CTest PASS_REGULAR_EXPRESSION can assert on the reconstructed byte
+    stream's own ASCII column directly."""
+    packets = []
+
+    def add_segment(src_port, dst_port, seq, payload, ident, from_plc, flags=TCP_PSH | TCP_ACK):
+        tcp = tcp_header(src_port, dst_port, seq, 1, flags, len(payload)) + payload
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    def add_udp(src_port, dst_port, payload, ident, from_plc):
+        udp = udp_header(src_port, dst_port, payload)
+        src_ip, dst_ip = (PLC_IP, HMI_IP) if from_plc else (HMI_IP, PLC_IP)
+        src_mac, dst_mac = (PLC_MAC, HMI_MAC) if from_plc else (HMI_MAC, PLC_MAC)
+        ip = ipv4_header(src_ip, dst_ip, 17, len(udp), ident) + udp
+        packets.append(eth_header(dst_mac, src_mac, 0x0800) + ip)
+
+    # Scenario A (tcp.stream 0) -- an ordinary, fully in-order bidirectional exchange: HMI sends
+    # the session's very first packet, so HMI:56000 is this session's "A" and PLC:502 is "B".
+    add_segment(56000, 502, 1000, b"GET STATUS\n", 0x7000, from_plc=False)
+    add_segment(502, 56000, 2000, b"STATUS=OK TEMP=42C\n", 0x7001, from_plc=True)
+
+    # Scenario B (tcp.stream 1) -- out-of-order CAPTURE arrival that must still reconstruct in the
+    # correct SEQUENCE order ("tshark's follow-stream model... is what you want when a capture
+    # starts mid-session" -- Jurgen's own framing: this is the same seq-sorted-not-capture-order
+    # reconstruction that scenario applies to). The FIRST segment captured ("AB", seq 1000) is also
+    # the direction's true first byte -- see TcpDirection's own comment (output.hpp) for why THAT
+    # has to hold (this class establishes its relative-offset-0 anchor from whichever segment it
+    # sees FIRST, so the very first captured segment being genuinely first in sequence order is a
+    # real, documented scope boundary, not incidental to this fixture) -- what's reordered is the
+    # pair AFTER it: "HIJ" (seq 1007) arrives in the capture BEFORE "CDEFG" (seq 1002), the segment
+    # that actually closes the gap between them. Reconstruction must read "ABCDEFGHIJ", with the
+    # gap fully closed (no leftover "never became contiguous" note).
+    add_segment(56001, 502, 1000, b"AB", 0x7002, from_plc=False)
+    add_segment(56001, 502, 1007, b"HIJ", 0x7003, from_plc=False)    # arrives before its predecessor
+    add_segment(56001, 502, 1002, b"CDEFG", 0x7004, from_plc=False)  # closes the 1002-1006 gap
+    add_segment(502, 56001, 2000, b"ACK\n", 0x7005, from_plc=True)
+
+    # Scenario C (tcp.stream 2) -- an exact-duplicate retransmission (same seq, IDENTICAL content)
+    # arriving mid-stream must be ignored, not appended a second time -- "HELLO" (seq 1000) is
+    # retransmitted byte-for-byte before "WORLD" (seq 1005) ever arrives. Final reconstruction must
+    # read "HELLOWORLD", with no conflict flagged (the overlap agrees with what's already there).
+    add_segment(56002, 502, 1000, b"HELLO", 0x7005, from_plc=False)
+    add_segment(56002, 502, 1000, b"HELLO", 0x7006, from_plc=False)  # exact duplicate retransmission
+    add_segment(56002, 502, 1005, b"WORLD", 0x7007, from_plc=False)
+
+    # Scenario D (tcp.stream 3) -- security-relevant case (docs/reviews/2026-09-chatgpt-security-
+    # review-patch257.md's own "Protocol reassembly" finding, ROADMAP item 107's own overlap-
+    # content-awareness work): a retransmission at the SAME seq whose content actively DISAGREES
+    # with what was already captured ("AAAAA" first, then "XXXXX" at the identical seq/length).
+    # first-received-wins (decoder.cpp's reassemble_tcp_payload's own policy) must hold here too --
+    # final reconstruction reads "AAAAABBBBB" (the REAL first-seen bytes, never the attacker's
+    # differing ones), with the conflict flagged once in the printed summary.
+    add_segment(56003, 502, 2000, b"AAAAA", 0x7008, from_plc=False)
+    add_segment(56003, 502, 2000, b"XXXXX", 0x7009, from_plc=False)  # same seq, DISAGREEING content
+    add_segment(56003, 502, 2005, b"BBBBB", 0x700A, from_plc=False)
+
+    # Scenario E (udp.stream 0) -- UDP has no sequence number, so reconstruction is pure CAPTURE-
+    # order concatenation per direction, not seq-sorted like TCP above (see FollowStreamWriter's
+    # own "UDP ORDERING" file header paragraph, output.hpp) -- two datagrams in the same direction
+    # ("UDPQUERY1" then "UDPQUERY2") must concatenate in the order they were captured.
+    add_udp(56010, 47900, b"UDPQUERY1", 0x7010, from_plc=False)
+    add_udp(47900, 56010, b"UDPREPLY1", 0x7011, from_plc=True)
+    add_udp(56010, 47900, b"UDPQUERY2", 0x7012, from_plc=False)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_800 + i, i * 1000)
+    (TESTS_DIR / "sample_follow_stream.pcap").write_bytes(data)
+
+
 def build_resource_exhaustion_active_flows_sample():
     """Exercises --max-active-flows (docs/reviews/2026-09-chatgpt-security-review-patch160.md's
     finding 1, resource_limits.hpp's max_active_flows): two DISTINCT TCP flows (different HMI
@@ -22054,4 +22135,5 @@ if __name__ == "__main__":
     build_ip_fragment_max_active_fragment_groups_sample()
     build_policy_l2_ethertype_powerlink_sample()
     build_policy_generic_udp_sample()
+    build_follow_stream_sample()
     print("wrote sample fixtures to", TESTS_DIR)

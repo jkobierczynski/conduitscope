@@ -40,7 +40,8 @@ conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-T text|json|csv|fields]
                      [-c N] [--strict] [-w FILE] [-x]
                      [-f BPF] [-a SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
-conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth]... [--max-conversations N] [--max-endpoints N]
+conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth|conv,tcp|follow,tcp,stream,N|follow,udp,stream,N]...
+                  [--max-conversations N] [--max-endpoints N] [--max-follow-bytes N]
 
 conduitscope interfaces
 
@@ -434,15 +435,16 @@ conduitscope decode -r cap.pcap -Y bacnet
 ### `info` -- print pcap file metadata and a protocol histogram
 
 ```
-conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth]... [options]
+conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth|conv,tcp|follow,tcp,stream,N|follow,udp,stream,N]... [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `-r, --read FILE` | *(required)* | Input capture file. Classic pcap or pcapng, auto-detected. |
-| `-z, --stat {conv,ip\|endpoints,ip\|conv,eth\|endpoints,eth}` | *(none -- no tables shown)* | Print an aggregate Conversations/Endpoints table -- mirrors tshark's own `-z`. Repeatable: each occurrence adds one table, and (unlike every other section `info` prints) none of the four are shown, or even tracked internally, unless requested here -- see "Conversations and Endpoints tables" below. |
+| `-z, --stat {conv,ip\|endpoints,ip\|conv,eth\|endpoints,eth\|conv,tcp\|follow,tcp,stream,N\|follow,udp,stream,N}` | *(none -- no tables shown)* | Print an aggregate Conversations/Endpoints/Follow-stream table -- mirrors tshark's own `-z`. Repeatable: each occurrence adds one table/stream, and (unlike every other section `info` prints) none are shown, or even tracked internally, unless requested here -- see "Conversations and Endpoints tables" and "TCP conversations and Follow Stream" below. |
 | `--max-conversations N` | `0` (leave it at its own default of 200,000) | Cap the number of distinct address-pair conversations tracked for the Conversations tables below -- see their own subsection for what happens past the cap. |
 | `--max-endpoints N` | `0` (leave it at its own default of 200,000) | Cap the number of distinct addresses tracked for the Endpoints tables below. |
+| `--max-follow-bytes N` | `0` (leave it at its own default of 16 MiB) | Cap the bytes buffered *per direction* for each `follow,tcp,stream,N`/`follow,udp,stream,N` table -- see "TCP conversations and Follow Stream" below. |
 
 Prints the pcap format version, link type, snaplen, timestamp resolution, and
 then a protocol/function-code histogram and per-protocol breakdowns -- this
@@ -497,6 +499,59 @@ tables is capped independently at 200,000 entries by default
 between a new, not-yet-seen address (pair) is dropped from that table only
 -- every other counter in the report is unaffected -- and a trailing
 warning line names the flag and the limit that was hit.
+
+#### TCP conversations and Follow Stream
+
+`-z conv,tcp` and `-z follow,tcp,stream,N`/`-z follow,udp,stream,N` (ROADMAP
+item 108, "Follow stream as a first-class object") are a second, TCP/UDP-
+specific layer on top of the Conversations tables above -- tshark's own
+`-z conv,tcp` and Follow Stream feature as design precedent. Deliberately
+scoped to raw TCP/UDP bytes only: no HTTP/TLS/HTTP-2/QUIC-aware
+reassembly (tshark's own `follow,http,...`/`follow,tls,...`/
+`follow,http2,...`/`follow,quic,...` variants) -- this is the right tool
+when a capture starts mid-session (no SYN ever seen) or when what matters
+is simply "who sent which bytes, in which order," independent of whether
+conduitscope's own protocol decoders recognize the payload at all.
+
+- **`-z conv,tcp`: tcp conversations** -- like `-z conv,ip` above, but keyed
+  by address:**port** pair (not address alone), so a TCP session and a UDP
+  session between the same two hosts get separate rows. Each row also
+  prints its own 0-based **tcp.stream** index -- assigned in the order each
+  session's first packet appears in the capture (tshark's own tcp.stream
+  numbering) -- the `N` a `-z follow,tcp,stream,N` below should ask for.
+- **`-z follow,tcp,stream,N`** / **`-z follow,udp,stream,N`** --
+  reconstructs and hex+ASCII-dumps (the same 16-bytes-per-line format as
+  `decode -x`) session `N`'s raw byte stream, one direction at a time.
+  Streams are numbered 0, 1, 2, ... in first-seen order, separately for TCP
+  and UDP (a `tcp.stream 0` and a `udp.stream 0` are unrelated sessions).
+  Repeatable, and printed back in the order asked (not a fixed table
+  order, unlike the Conversations/Endpoints tables above) -- a duplicate
+  request is only shown once. Asking for an index the capture doesn't
+  have prints an explicit "no such stream in this capture" line (naming
+  the highest index actually seen) rather than staying silent.
+
+  TCP bytes are placed by their own sequence number, not capture order --
+  a segment captured out of order still lands in the right place once its
+  gap closes, and an exact-duplicate retransmission is folded in rather
+  than appended twice. A retransmission whose *overlapping* bytes actually
+  **disagree** with what was already captured (not just repeat it) is
+  resolved first-received-wins -- the same policy `decode`'s own TCP
+  reassembly uses (see PROTOCOL COVERAGE's TCP reassembly notes) -- and
+  flagged once in the printed summary so a crafted/conflicting
+  retransmission is never silently trusted either way. This requires the
+  very first segment *captured* in a direction to also be genuinely first
+  in sequence order (a capture starting mid-session still satisfies this
+  -- nothing was captured before that first segment, by definition; a
+  segment reordered by the capture path itself, ahead of an even-earlier
+  one, does not, and is a documented scope boundary, the same one
+  Wireshark's own relative-sequence-number tracking has). UDP has no
+  sequence number at all, so its two datagram streams are simply
+  concatenated in capture order.
+
+  Each direction's own bytes are capped independently (16 MiB by default,
+  `--max-follow-bytes` above) -- past the cap, that direction's stream is
+  truncated and a warning line is printed, with every other direction/
+  table in the report unaffected.
 
 ### `interfaces` -- list network interfaces available for live capture
 

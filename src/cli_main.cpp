@@ -736,6 +736,44 @@ void add_conversation_stats_options(CLI::App* cmd, size_t& max_conversations, si
         ->capture_default_str();
 }
 
+// ROADMAP item 108 ("Follow stream as a first-class object") -- validates one `-z` value for
+// `info` (that option's own help text, below, lists the full accepted set). Returns "" when
+// valid, else an error message CLI11 prefixes with the option's own name (CLI11.hpp's
+// Option::_validate_results -- the printed line ends up "... -- --stat: <this message>"). A
+// custom ->check() rather than the original four conv,ip/endpoints,ip/conv,eth/endpoints,eth
+// values' own CLI::IsMember, because 'follow,tcp,stream,<N>'/'follow,udp,stream,<N>' carry a
+// variable numeric suffix IsMember's fixed-set membership test can't express -- the same "no
+// CLI11 declarative validator fits, so parse it by hand" posture -d/--decode-as's own
+// parse_decode_as_rules (above) already established for a different variable-shaped value. Only
+// validates SHAPE here; run_info re-parses the numeric suffix with std::stoull (its own range/
+// overflow check) rather than duplicating that here -- this function's only job is to reject
+// anything CLI11 shouldn't even hand to run_info as one of its four fixed strings or a
+// well-shaped follow,<tcp|udp>,stream,<N>.
+std::string validate_stat_value(const std::string& value) {
+    static const std::vector<std::string> kFixedValues = {
+        "conv,ip", "endpoints,ip", "conv,eth", "endpoints,eth", "conv,tcp",
+    };
+    for (const auto& fixed : kFixedValues) {
+        if (value == fixed) return "";
+    }
+    for (const char* prefix : {"follow,tcp,stream,", "follow,udp,stream,"}) {
+        const std::string p = prefix;
+        if (value.rfind(p, 0) != 0) continue;
+        const std::string suffix = value.substr(p.size());
+        bool all_digits = !suffix.empty();
+        for (char c : suffix) {
+            if (c < '0' || c > '9') { all_digits = false; break; }
+        }
+        if (!all_digits) {
+            return "'" + value + "' must end with a non-negative integer stream index (e.g. '" + p + "0')";
+        }
+        return "";
+    }
+    return "'" + value +
+           "' not in {conv,ip, endpoints,ip, conv,eth, endpoints,eth, conv,tcp, "
+           "follow,tcp,stream,<N>, follow,udp,stream,<N>}";
+}
+
 // -------------------------------------------------------------------------------------------
 // `-d`/`--decode-as` (Wireshark/tshark-style "force a decoder onto traffic that wouldn't
 // otherwise be recognized as it") -- see decoder.hpp's own comment on DecodeAsRule/
@@ -1413,28 +1451,65 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 }
 
 int run_info(const std::string& input, std::ostream& out, const std::vector<std::string>& stat_values,
-             size_t max_conversations, size_t max_endpoints) {
+             size_t max_conversations, size_t max_endpoints, size_t max_follow_bytes) {
     try {
-        // -z conv,ip / -z endpoints,ip / -z conv,eth / -z endpoints,eth (tshark's own `-z` as
-        // design precedent) -- repeatable, explicit opt-in; info_cmd's own CLI::IsMember check
-        // (below, main()) already rejects anything else, so stat_values here only ever holds these
-        // four exact spellings, each at most whatever multiplicity the user repeated it.
+        // -z conv,ip / -z endpoints,ip / -z conv,eth / -z endpoints,eth / -z conv,tcp / -z
+        // follow,tcp,stream,<N> / -z follow,udp,stream,<N> (tshark's own `-z` as design precedent)
+        // -- repeatable, explicit opt-in; info_cmd's own validate_stat_value check (above) already
+        // rejects anything else, so stat_values here only ever holds the five fixed spellings or a
+        // well-shaped follow,<tcp|udp>,stream,<N>, each at most whatever multiplicity the user
+        // repeated it. The numeric suffix's own std::stoull is re-parsed here (not reused from
+        // validate_stat_value, which only checked its SHAPE) -- same division of labor
+        // parse_decode_as_rules' own port-number parsing has relative to its own CLI11-level shape
+        // checks elsewhere in this file.
         RequestedStatsTables tables;
+        std::vector<FollowStreamRequest> follow_requests;
         for (const auto& value : stat_values) {
-            if (value == "conv,ip") tables.ip_conversations = true;
-            else if (value == "endpoints,ip") tables.ip_endpoints = true;
-            else if (value == "conv,eth") tables.eth_conversations = true;
-            else if (value == "endpoints,eth") tables.eth_endpoints = true;
+            if (value == "conv,ip") { tables.ip_conversations = true; continue; }
+            if (value == "endpoints,ip") { tables.ip_endpoints = true; continue; }
+            if (value == "conv,eth") { tables.eth_conversations = true; continue; }
+            if (value == "endpoints,eth") { tables.eth_endpoints = true; continue; }
+            if (value == "conv,tcp") { tables.tcp_conversations = true; continue; }
+            for (bool is_tcp : {true, false}) {
+                const std::string prefix = is_tcp ? "follow,tcp,stream," : "follow,udp,stream,";
+                if (value.rfind(prefix, 0) != 0) continue;
+                // validate_stat_value (above) already confirmed the suffix is all-digits and
+                // non-empty; std::stoull can still throw out_of_range for a suffix with more
+                // digits than fit in an unsigned long long (an implausible but user-typeable
+                // stream index) -- caught here rather than left to propagate and terminate the
+                // process, the same "a malformed value is a clean error, never a crash" posture
+                // parse_decode_as_rules' own std::stoi handling (above) already established.
+                try {
+                    FollowStreamRequest req;
+                    req.is_tcp = is_tcp;
+                    req.stream_index = std::stoull(value.substr(prefix.size()));
+                    follow_requests.push_back(req);
+                } catch (const std::exception&) {
+                    std::cerr << "error: -z '" << value << "' has a stream index too large to "
+                                  "represent\n";
+                    return 1;
+                }
+                break;
+            }
         }
         PcapReader reader(input);
-        Decoder decoder(DecodeOptions{});
+        // capture_transport_payload is opt-in specifically because at least one follow,tcp/
+        // follow,udp table was requested -- see DecodeOptions::capture_transport_payload's own
+        // comment; every other `info` invocation (including one that only asked for conv,ip/
+        // conv,tcp/endpoints,*) leaves this false and pays nothing for it.
+        DecodeOptions decode_opts;
+        decode_opts.capture_transport_payload = !follow_requests.empty();
+        Decoder decoder(decode_opts);
         StatsWriter stats_writer(tables, max_conversations, max_endpoints);
+        FollowStreamWriter follow_writer(follow_requests, max_follow_bytes);
 
         PcapPacket pkt;
         size_t index = 0;
         while (reader.next(pkt)) {
             ++index;
-            stats_writer.write_packet(decoder.decode(pkt, reader.info().linktype, index));
+            DecodedPacket decoded = decoder.decode(pkt, reader.info().linktype, index);
+            stats_writer.write_packet(decoded);
+            if (!follow_requests.empty()) follow_writer.write_packet(decoded);
         }
 
         const auto& info = reader.info();
@@ -1444,6 +1519,7 @@ int run_info(const std::string& input, std::ostream& out, const std::vector<std:
         out << "snaplen:        " << info.snaplen << " bytes\n";
         out << "timestamps:     " << (info.nanosecond_ts ? "nanosecond" : "microsecond") << " resolution\n";
         stats_writer.print_summary(out);
+        if (!follow_requests.empty()) follow_writer.print_summary(out);
     } catch (const ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -2979,15 +3055,35 @@ int main(int argc, char** argv) {
     info_cmd
         ->add_option(
             "-z,--stat", info_stat_values,
-            "Print an aggregate Conversations/Endpoints table (mirrors tshark's own -z; repeatable "
-            "-- each occurrence adds one table, and none are shown, or even tracked, unless "
-            "requested here): 'conv,ip' (IPv4 address-pair conversations), 'endpoints,ip' "
-            "(per-address IPv4 traffic), 'conv,eth' / 'endpoints,eth' (the same two views over raw "
-            "Ethernet/MAC traffic -- also covers non-IP OT L2 traffic with no IP layer at all, such "
-            "as PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK/unrecognized EtherTypes)")
-        ->transform(CLI::IsMember({"conv,ip", "endpoints,ip", "conv,eth", "endpoints,eth"}));
+            "Print an aggregate Conversations/Endpoints/Follow-stream table (mirrors tshark's own "
+            "-z; repeatable -- each occurrence adds one table/stream, and none are shown, or even "
+            "tracked, unless requested here): 'conv,ip' (IPv4 address-pair conversations), "
+            "'endpoints,ip' (per-address IPv4 traffic), 'conv,eth' / 'endpoints,eth' (the same two "
+            "views over raw Ethernet/MAC traffic -- also covers non-IP OT L2 traffic with no IP "
+            "layer at all, such as PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK/unrecognized "
+            "EtherTypes), 'conv,tcp' (TCP address:port-pair conversations, each row also giving its "
+            "0-based tcp.stream index -- the <N> a later follow,tcp,stream,<N> should ask for), "
+            "'follow,tcp,stream,<N>' / 'follow,udp,stream,<N>' (reconstruct and hex+ASCII-dump the "
+            "raw byte stream of TCP/UDP session <N> -- streams are numbered 0,1,2,... in the order "
+            "each session's first packet appears in the capture, separately for TCP and UDP, "
+            "tshark's own tcp.stream/udp.stream convention; each direction is shown separately, "
+            "same ordering tshark's own Follow Stream uses, no HTTP/TLS/HTTP-2/QUIC-aware "
+            "reassembly -- raw TCP/UDP bytes only, deliberately, see docs/DEVELOPMENT.md's ROADMAP "
+            "item 108)")
+        ->check(validate_stat_value);
     size_t info_max_conversations = 0, info_max_endpoints = 0;
     add_conversation_stats_options(info_cmd, info_max_conversations, info_max_endpoints);
+    size_t info_max_follow_bytes = 0;
+    info_cmd
+        ->add_option(
+            "--max-follow-bytes", info_max_follow_bytes,
+            "Cap the bytes buffered PER DIRECTION for each 'follow,tcp,stream,<N>'/"
+            "'follow,udp,stream,<N>' table (default 16 MiB, the same default as decoder.cpp's own "
+            "general TCP reassembly cap -- see resource_limits.hpp's max_reassembly_bytes). 0 = "
+            "leave it at its own default; past this, that direction's own stream is truncated (not "
+            "the whole capture's read -- every other -z/info counter is unaffected) and a warning "
+            "line is printed")
+        ->capture_default_str();
 
     // --- interfaces -----------------------------------------------------------
     auto* interfaces_cmd = app.add_subcommand(
@@ -3771,7 +3867,8 @@ int main(int argc, char** argv) {
                            decode_display_filter_compiled);
     }
     if (info_cmd->parsed()) {
-        return run_info(info_input, std::cout, info_stat_values, info_max_conversations, info_max_endpoints);
+        return run_info(info_input, std::cout, info_stat_values, info_max_conversations, info_max_endpoints,
+                         info_max_follow_bytes);
     }
     if (interfaces_cmd->parsed()) {
         return run_interfaces(std::cout);

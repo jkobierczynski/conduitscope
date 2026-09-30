@@ -83,6 +83,22 @@ std::string terminal_escape(const std::string& s) {
 }
 
 void write_hex_ascii_dump(std::ostream& out, ByteSpan data) {
+    // ROADMAP item 108 fix: std::setw's zero-padding pads on whichever side the stream's CURRENT
+    // adjustfield says to -- std::right (the iostream default) pads on the left ("0010"), but
+    // std::left pads on the right ("1000"), silently turning every "0"-padded hex field below into
+    // a wrong, right-padded one. This function's only pre-existing caller (`decode -x`,
+    // cli_main.cpp) always happened to call it on a stream that was still in its default
+    // std::right state, so this never showed a symptom -- but std::ios adjustfield is a STICKY
+    // manipulator (it stays set on the stream for every later write, not just the next one, unlike
+    // std::setw itself), and StatsWriter::print_summary's own several `std::left` column headers
+    // (this same file, e.g. its protocol-histogram section) never reset it back. `info`'s `-z
+    // follow,tcp,stream,<N>`/`-z follow,udp,stream,<N>` (FollowStreamWriter::print_summary) is the
+    // first caller to run this function on the SAME ostream right after StatsWriter::print_summary
+    // already left it in std::left mode -- which is what actually surfaced this. Explicitly
+    // restoring std::right here, once, makes this function correct regardless of whatever
+    // adjustfield state the stream arrives in, rather than requiring every current and future
+    // caller to remember to reset it first.
+    out << std::right;
     const size_t n = data.size();
     for (size_t offset = 0; offset < n; offset += 16) {
         out << std::hex << std::setfill('0') << std::setw(4) << offset << "  " << std::dec;
@@ -5989,17 +6005,52 @@ void ZeekWriter::end() {
     out_ << "#close\t" << open_time << "\n";
 }
 
+namespace {
+// ROADMAP item 108 ("Follow stream as a first-class object") -- shared by StatsWriter's own
+// tcp_conversations_ table and FollowStreamWriter's index-assignment maps. '#' between address and
+// port, NOT ':' -- a canonical IPv6 address is itself full of colons, so "ip:port" is ambiguous the
+// moment ip can be IPv6 (decoder.cpp's own tcp_session_key/format_flow_endpoint already document
+// and fix the identical ambiguity; this is the output.cpp-side reimplementation of the same fix,
+// kept separate since StatsWriter/FollowStreamWriter only ever see already-decoded DecodedPacket
+// fields, never decoder-internal state). These strings are internal map keys only -- never
+// rendered (see format_endpoint_display below for the DISPLAYED form).
+std::string follow_endpoint_key(const std::string& ip, uint16_t port) {
+    return ip + "#" + std::to_string(port);
+}
+
+// Canonicalizes both directions of one TCP/UDP 4-tuple into a single, direction-independent
+// session key -- the output.cpp-side analog of decoder.cpp's own tcp_session_key, for the same
+// reason (see follow_endpoint_key above).
+std::string follow_session_key(const std::string& ip_a, uint16_t port_a, const std::string& ip_b,
+                                uint16_t port_b) {
+    std::string ea = follow_endpoint_key(ip_a, port_a);
+    std::string eb = follow_endpoint_key(ip_b, port_b);
+    return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
+}
+
+// The DISPLAYED form of one address:port endpoint -- tshark/curl/browsers' own "[ipv6]:port"
+// bracketing convention for an IPv6 address (detected by the presence of a ':' -- never true of a
+// dotted-quad IPv4 address or a MAC), so the address:port split stays unambiguous in print the same
+// way follow_endpoint_key's own '#' keeps it unambiguous as a map key.
+std::string format_endpoint_display(const std::string& ip, uint16_t port) {
+    const bool is_v6 = ip.find(':') != std::string::npos;
+    return (is_v6 ? ("[" + ip + "]") : ip) + ":" + std::to_string(port);
+}
+}  // namespace
+
 StatsWriter::StatsWriter(RequestedStatsTables tables, size_t max_conversations, size_t max_endpoints)
     : tables_(tables),
       max_conversations_(max_conversations != 0 ? max_conversations : kDefaultMaxConversationEntries),
       max_endpoints_(max_endpoints != 0 ? max_endpoints : kDefaultMaxEndpointEntries) {}
 
-// Shared by ip_conversations_/eth_conversations_ -- see output.hpp's own comment on this method
-// and on AddrConversationStats for the A/B and byte-counting conventions.
+// Shared by ip_conversations_/eth_conversations_/tcp_conversations_ -- see output.hpp's own
+// comment on this method and on AddrConversationStats for the A/B, byte-counting, and
+// stream_index conventions.
 void StatsWriter::update_conversation(std::map<std::string, AddrConversationStats>& table,
                                        std::vector<std::string>& order, bool& truncated,
                                        size_t max_entries, const std::string& src,
-                                       const std::string& dst, uint64_t bytes, double ts) {
+                                       const std::string& dst, uint64_t bytes, double ts,
+                                       int64_t stream_index) {
     const std::string key = std::min(src, dst) + "|" + std::max(src, dst);
     auto it = table.find(key);
     if (it == table.end()) {
@@ -6011,6 +6062,7 @@ void StatsWriter::update_conversation(std::map<std::string, AddrConversationStat
         stats.address_a = src;
         stats.address_b = dst;
         stats.first_ts = stats.last_ts = ts;
+        stats.stream_index = stream_index;
         order.push_back(key);
         it = table.emplace(key, std::move(stats)).first;
     }
@@ -6086,6 +6138,24 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
                          p.src_mac, /*is_tx=*/true, p.original_len);
         update_endpoint(eth_endpoints_, eth_endpoint_order_, eth_endpoints_truncated_, max_endpoints_,
                          p.dst_mac, /*is_tx=*/false, p.original_len);
+    }
+    // ROADMAP item 108 -- `-z conv,tcp` (tshark's own `-z conv,tcp` as design precedent). Unlike
+    // ip_conversations_ above (address-only), this is keyed by address:PORT pair, and each row
+    // also gets a 0-based tcp.stream index (see follow_session_key/tcp_stream_index_'s own
+    // comment, output.hpp) assigned in first-seen order -- the same index a later
+    // `-z follow,tcp,stream,<N>` should ask for. Index assignment happens for EVERY has_tcp
+    // packet (even a bare ACK/FIN with no payload), matching tshark's own tcp.stream numbering
+    // (assigned at a session's very first segment, not its first payload-bearing one).
+    if (p.has_ip && p.has_tcp && tables_.tcp_conversations) {
+        const std::string session = follow_session_key(p.src_ip, p.src_port, p.dst_ip, p.dst_port);
+        auto idx_it = tcp_stream_index_.find(session);
+        if (idx_it == tcp_stream_index_.end()) {
+            idx_it = tcp_stream_index_.emplace(session, next_tcp_stream_++).first;
+        }
+        update_conversation(tcp_conversations_, tcp_conversation_order_, tcp_conversations_truncated_,
+                             max_conversations_, format_endpoint_display(p.src_ip, p.src_port),
+                             format_endpoint_display(p.dst_ip, p.dst_port), p.original_len,
+                             p.timestamp, static_cast<int64_t>(idx_it->second));
     }
     if (p.protocol == "modbus" && p.result) {
         const ModbusFrame& mb = p.result->as<ModbusFrame>();
@@ -6598,8 +6668,11 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     }
 }
 
-// Shared rendering for ip_conversations_/eth_conversations_ -- see output.hpp's own comment on
-// this method for the sort order and truncation-warning conventions.
+// Shared rendering for ip_conversations_/eth_conversations_/tcp_conversations_ -- see output.hpp's
+// own comment on this method for the sort order and truncation-warning conventions, and on
+// AddrConversationStats::stream_index for the "(tcp.stream N)" suffix below (printed only for
+// tcp_conversations_'s own rows -- ip_conversations_/eth_conversations_ never set stream_index, so
+// this is a no-op change for their own existing output).
 void StatsWriter::print_conversations(std::ostream& out, const char* label,
                                        const std::map<std::string, AddrConversationStats>& table,
                                        const std::vector<std::string>& order, bool truncated,
@@ -6616,7 +6689,9 @@ void StatsWriter::print_conversations(std::ostream& out, const char* label,
         const AddrConversationStats& c = table.at(key);
         const uint64_t total_frames = c.frames_a_to_b + c.frames_b_to_a;
         const uint64_t total_bytes = c.bytes_a_to_b + c.bytes_b_to_a;
-        out << "  " << c.address_a << " <-> " << c.address_b << "  " << total_frames << " frame(s), "
+        out << "  " << c.address_a << " <-> " << c.address_b;
+        if (c.stream_index >= 0) out << "  (tcp.stream " << c.stream_index << ")";
+        out << "  " << total_frames << " frame(s), "
             << total_bytes << " byte(s) total  (A->B: " << c.frames_a_to_b << " frame(s)/" << c.bytes_a_to_b
             << " byte(s), B->A: " << c.frames_b_to_a << " frame(s)/" << c.bytes_b_to_a
             << " byte(s), duration " << std::fixed << std::setprecision(3) << (c.last_ts - c.first_ts)
@@ -6691,6 +6766,10 @@ void StatsWriter::print_summary(std::ostream& out) const {
                          eth_conversations_truncated_, max_conversations_);
     print_endpoints(out, "ethernet endpoints", eth_endpoints_, eth_endpoint_order_,
                      eth_endpoints_truncated_, max_endpoints_);
+    // ROADMAP item 108 -- `-z conv,tcp`. Printed right after the IP/Ethernet tables above, same
+    // "no table requested prints nothing, not even a header" print_conversations convention.
+    print_conversations(out, "tcp conversations", tcp_conversations_, tcp_conversation_order_,
+                         tcp_conversations_truncated_, max_conversations_);
     if (!modbus_function_counts_.empty()) {
         out << "modbus function codes:\n";
         for (const auto& [name, count] : modbus_function_counts_) {
@@ -7316,6 +7395,253 @@ void StatsWriter::print_summary(std::ostream& out) const {
                    "(internal-topology leakage signal) observed: "
                 << fox_host_address_mismatch_count_ << "\n";
         }
+    }
+}
+
+// ROADMAP item 108 ("Follow stream as a first-class object") -- see output.hpp's own file header
+// comment on FollowStreamWriter for the full design (memory posture, TCP ordering/overlap policy,
+// UDP ordering).
+FollowStreamWriter::FollowStreamWriter(std::vector<FollowStreamRequest> requests,
+                                        uint64_t max_bytes_per_direction)
+    : max_bytes_per_direction_(max_bytes_per_direction != 0 ? max_bytes_per_direction
+                                                              : kDefaultMaxFollowStreamBytes) {
+    // De-duplicate, preserving first-occurrence order -- `-z` is repeatable (cli_main.cpp), and a
+    // user re-stating the same follow,tcp/follow,udp value twice should print that stream once,
+    // not twice.
+    for (const auto& req : requests) {
+        bool already = false;
+        for (const auto& existing : requests_) {
+            if (existing.is_tcp == req.is_tcp && existing.stream_index == req.stream_index) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) requests_.push_back(req);
+    }
+    for (const auto& req : requests_) {
+        (req.is_tcp ? requested_tcp_indices_ : requested_udp_indices_).insert(req.stream_index);
+    }
+}
+
+// Inserts one segment's bytes at relative offset `offset` into `dir`, coalescing with whatever's
+// already there -- see output.hpp's own "TCP ORDERING" file header paragraph for the algorithm in
+// prose. An explicit queue (not recursion) drives this: an attacker-controlled chain of many small
+// out-of-order segments must not be able to build an unbounded C++ call-stack depth, the same
+// "explicit loop/counter, never unbounded recursion" posture every other resource-bounding cap in
+// this codebase uses (resource_limits.hpp's own file header).
+void FollowStreamWriter::insert_tcp_segment(TcpDirection& dir, uint64_t offset, std::string bytes,
+                                             uint64_t max_bytes) {
+    std::vector<std::pair<uint64_t, std::string>> queue;
+    queue.emplace_back(offset, std::move(bytes));
+    while (!queue.empty()) {
+        if (dir.truncated) return;
+        auto [seg_offset, seg] = std::move(queue.back());
+        queue.pop_back();
+        if (seg.empty()) continue;
+        if (seg_offset < dir.bytes.size()) {
+            // Overlaps (at least partially) bytes already committed -- first-received-wins (keep
+            // what's already recorded for the overlapping range; matches decoder.cpp's own
+            // reassemble_tcp_payload conflict-resolution policy), flagging a conflict iff the
+            // overlapping content actually disagrees rather than just repeating it. Only the
+            // genuinely new tail (if any) past the already-committed range is queued back up --
+            // it always lands exactly at dir.bytes.size(), so the next iteration takes the
+            // "exactly next expected" branch below.
+            const uint64_t overlap = std::min<uint64_t>(seg.size(), dir.bytes.size() - seg_offset);
+            if (dir.bytes.compare(seg_offset, overlap, seg, 0, overlap) != 0) {
+                dir.had_conflicting_overlap = true;
+            }
+            if (seg.size() > overlap) {
+                queue.emplace_back(dir.bytes.size(), seg.substr(overlap));
+            }
+            continue;
+        }
+        if (seg_offset > dir.bytes.size()) {
+            // Out-of-order arrival -- a gap between what's contiguous so far and this segment's
+            // own start. Buffered verbatim; drained once the gap closes, below. See TcpDirection's
+            // own comment (output.hpp) for the one deliberately-unhandled corner case.
+            if (dir.bytes.size() + dir.pending_bytes + seg.size() > max_bytes) {
+                dir.truncated = true;
+                continue;
+            }
+            dir.pending_bytes += seg.size();
+            dir.pending[seg_offset] = std::move(seg);
+            continue;
+        }
+        // seg_offset == dir.bytes.size(): the common case -- exactly the next expected byte.
+        if (dir.bytes.size() + seg.size() > max_bytes) {
+            // Only append as much as fits, then stop accepting more for this direction -- matches
+            // StatsWriter's own "truncate, note it, keep going for every OTHER table" posture,
+            // scoped here to just this one direction of this one stream.
+            const uint64_t room = max_bytes > dir.bytes.size() ? (max_bytes - dir.bytes.size()) : 0;
+            dir.bytes.append(seg, 0, room);
+            dir.truncated = true;
+            continue;
+        }
+        dir.bytes.append(seg);
+        // Drain the one pending entry this append may have just made contiguous (if any) -- its
+        // own turn through this same loop will, in turn, queue up whatever comes after IT once
+        // drained, so a whole chain of out-of-order-then-filled segments fully resolves without
+        // recursion.
+        auto it = dir.pending.begin();
+        if (it != dir.pending.end() && it->first == dir.bytes.size()) {
+            dir.pending_bytes -= it->second.size();
+            queue.emplace_back(it->first, std::move(it->second));
+            dir.pending.erase(it);
+        }
+    }
+}
+
+// UDP has no sequence number, so each direction's bytes are simply concatenated in the order
+// write_packet saw them -- see output.hpp's own "UDP ORDERING" file header paragraph.
+void FollowStreamWriter::append_udp_datagram(UdpDirection& dir, const std::string& bytes,
+                                              uint64_t max_bytes) {
+    if (dir.truncated || bytes.empty()) return;
+    if (dir.bytes.size() + bytes.size() > max_bytes) {
+        const uint64_t room = max_bytes > dir.bytes.size() ? (max_bytes - dir.bytes.size()) : 0;
+        dir.bytes.append(bytes, 0, room);
+        dir.truncated = true;
+        return;
+    }
+    dir.bytes.append(bytes);
+}
+
+void FollowStreamWriter::write_packet(const DecodedPacket& p) {
+    if (!p.has_ip) return;
+    if (p.has_tcp) {
+        const std::string session = follow_session_key(p.src_ip, p.src_port, p.dst_ip, p.dst_port);
+        auto idx_it = tcp_stream_index_.find(session);
+        if (idx_it == tcp_stream_index_.end()) {
+            idx_it = tcp_stream_index_.emplace(session, next_tcp_stream_++).first;
+        }
+        const uint64_t index = idx_it->second;
+        if (requested_tcp_indices_.find(index) == requested_tcp_indices_.end()) return;
+        auto sess_it = tcp_sessions_.find(index);
+        if (sess_it == tcp_sessions_.end()) {
+            TcpSession sess;
+            sess.addr_a = p.src_ip; sess.port_a = p.src_port;
+            sess.addr_b = p.dst_ip; sess.port_b = p.dst_port;
+            sess_it = tcp_sessions_.emplace(index, std::move(sess)).first;
+        }
+        TcpSession& sess = sess_it->second;
+        const bool a_to_b = (p.src_ip == sess.addr_a && p.src_port == sess.port_a);
+        TcpDirection& dir = a_to_b ? sess.a_to_b : sess.b_to_a;
+        if (!dir.have_isn) {
+            dir.have_isn = true;
+            dir.isn = p.tcp_seq;
+        }
+        if (!p.raw_transport_payload.empty()) {
+            dir.frames++;
+            const uint64_t rel_offset = static_cast<uint32_t>(p.tcp_seq - dir.isn);
+            std::string bytes(p.raw_transport_payload.begin(), p.raw_transport_payload.end());
+            insert_tcp_segment(dir, rel_offset, std::move(bytes), max_bytes_per_direction_);
+        }
+        return;
+    }
+    if (p.has_udp) {
+        const std::string session = follow_session_key(p.src_ip, p.src_port, p.dst_ip, p.dst_port);
+        auto idx_it = udp_stream_index_.find(session);
+        if (idx_it == udp_stream_index_.end()) {
+            idx_it = udp_stream_index_.emplace(session, next_udp_stream_++).first;
+        }
+        const uint64_t index = idx_it->second;
+        if (requested_udp_indices_.find(index) == requested_udp_indices_.end()) return;
+        auto sess_it = udp_sessions_.find(index);
+        if (sess_it == udp_sessions_.end()) {
+            UdpSession sess;
+            sess.addr_a = p.src_ip; sess.port_a = p.src_port;
+            sess.addr_b = p.dst_ip; sess.port_b = p.dst_port;
+            sess_it = udp_sessions_.emplace(index, std::move(sess)).first;
+        }
+        UdpSession& sess = sess_it->second;
+        const bool a_to_b = (p.src_ip == sess.addr_a && p.src_port == sess.port_a);
+        UdpDirection& dir = a_to_b ? sess.a_to_b : sess.b_to_a;
+        if (!p.raw_transport_payload.empty()) {
+            dir.frames++;
+            std::string bytes(p.raw_transport_payload.begin(), p.raw_transport_payload.end());
+            append_udp_datagram(dir, bytes, max_bytes_per_direction_);
+        }
+    }
+}
+
+void FollowStreamWriter::print_tcp_stream(std::ostream& out, uint64_t index) const {
+    auto it = tcp_sessions_.find(index);
+    if (it == tcp_sessions_.end()) {
+        out << "follow tcp stream " << index << ": no such stream in this capture (";
+        if (next_tcp_stream_ == 0) out << "no TCP streams observed";
+        else out << "highest tcp.stream index seen: " << (next_tcp_stream_ - 1);
+        out << ")\n";
+        return;
+    }
+    const TcpSession& s = it->second;
+    out << "follow tcp stream " << index << ": " << format_endpoint_display(s.addr_a, s.port_a)
+        << " <-> " << format_endpoint_display(s.addr_b, s.port_b) << "\n";
+    auto print_direction = [&](const std::string& from, const std::string& to, const TcpDirection& dir) {
+        out << "  " << from << " -> " << to << " (" << dir.frames << " segment(s), " << dir.bytes.size()
+            << " byte(s)):\n";
+        if (!dir.bytes.empty()) {
+            write_hex_ascii_dump(out, ByteSpan(reinterpret_cast<const uint8_t*>(dir.bytes.data()),
+                                                 dir.bytes.size()));
+        }
+        if (dir.had_conflicting_overlap) {
+            out << "  (a retransmitted segment's overlapping bytes disagreed with what was already "
+                   "captured -- first-received bytes were kept)\n";
+        }
+        if (!dir.pending.empty()) {
+            out << "  (" << dir.pending.size() << " out-of-order segment(s) totaling " << dir.pending_bytes
+                << " byte(s) never became contiguous -- a gap in this direction's capture, not shown)\n";
+        }
+        if (dir.truncated) {
+            out << "  (--max-follow-bytes limit of " << max_bytes_per_direction_
+                << " reached for this direction; stream truncated -- rerun with a higher "
+                   "--max-follow-bytes to see more)\n";
+        }
+    };
+    print_direction(format_endpoint_display(s.addr_a, s.port_a), format_endpoint_display(s.addr_b, s.port_b),
+                     s.a_to_b);
+    print_direction(format_endpoint_display(s.addr_b, s.port_b), format_endpoint_display(s.addr_a, s.port_a),
+                     s.b_to_a);
+}
+
+void FollowStreamWriter::print_udp_stream(std::ostream& out, uint64_t index) const {
+    auto it = udp_sessions_.find(index);
+    if (it == udp_sessions_.end()) {
+        out << "follow udp stream " << index << ": no such stream in this capture (";
+        if (next_udp_stream_ == 0) out << "no UDP streams observed";
+        else out << "highest udp.stream index seen: " << (next_udp_stream_ - 1);
+        out << ")\n";
+        return;
+    }
+    const UdpSession& s = it->second;
+    out << "follow udp stream " << index << ": " << format_endpoint_display(s.addr_a, s.port_a)
+        << " <-> " << format_endpoint_display(s.addr_b, s.port_b) << "\n";
+    auto print_direction = [&](const std::string& from, const std::string& to, const UdpDirection& dir) {
+        out << "  " << from << " -> " << to << " (" << dir.frames << " datagram(s), " << dir.bytes.size()
+            << " byte(s)):\n";
+        if (!dir.bytes.empty()) {
+            write_hex_ascii_dump(out, ByteSpan(reinterpret_cast<const uint8_t*>(dir.bytes.data()),
+                                                 dir.bytes.size()));
+        }
+        if (dir.truncated) {
+            out << "  (--max-follow-bytes limit of " << max_bytes_per_direction_
+                << " reached for this direction; stream truncated -- rerun with a higher "
+                   "--max-follow-bytes to see more)\n";
+        }
+    };
+    print_direction(format_endpoint_display(s.addr_a, s.port_a), format_endpoint_display(s.addr_b, s.port_b),
+                     s.a_to_b);
+    print_direction(format_endpoint_display(s.addr_b, s.port_b), format_endpoint_display(s.addr_a, s.port_a),
+                     s.b_to_a);
+}
+
+void FollowStreamWriter::print_summary(std::ostream& out) const {
+    // Printed in the order the user asked for them (-z flag order, after de-duplication) --
+    // unlike the Conversations/Endpoints tables above (whose fixed print order is independent of
+    // flag order, since they're aggregate tables, not a list of specific, individually-labeled
+    // requests), each follow,... value is its own separate, explicit ask, so "print them back in
+    // the order asked" is the more natural contract here.
+    for (const auto& req : requests_) {
+        if (req.is_tcp) print_tcp_stream(out, req.stream_index);
+        else print_udp_stream(out, req.stream_index);
     }
 }
 

@@ -721,6 +721,19 @@ struct DecodeOptions {
     // the hundreds-to-1000-per-SECOND range and would rarely fire against a modest or synthetic
     // capture. Overridable via decode's own --flood-threshold.
     size_t flood_threshold = DEFAULT_FLOOD_THRESHOLD;
+
+    // ROADMAP item 108 ("Follow stream as a first-class object" -- `info`'s own
+    // `-z follow,tcp,stream,<N>`/`-z follow,udp,stream,<N>`, cli_main.cpp/output.hpp
+    // FollowStreamWriter). False (the default) reproduces every pre-existing DecodedPacket byte
+    // for byte -- DecodedPacket::raw_transport_payload/tcp_seq below are both left at their
+    // empty/zero default and NO caller pays anything for this option existing. True only when
+    // `info` itself set it, and only because the user's own `-z` asked for at least one
+    // follow,tcp/follow,udp table -- see DecodedPacket::raw_transport_payload's own comment for
+    // why this is opt-in rather than always-on like src_port/dst_port/tcp_flags: populating it
+    // costs a heap allocation and a full payload byte copy on EVERY has_tcp/has_udp packet, which
+    // every other caller of Decoder::decode (decode/policy/baseline/inventory/capture, and `info`
+    // itself whenever no follow table was requested) has no reason to pay.
+    bool capture_transport_payload = false;
 };
 
 // How a TCP flow's client (initiator) vs. server side was determined -- shared by `decode`'s own
@@ -825,6 +838,26 @@ struct DecodedPacket {
     // all described identically as "not one of the eleven recognized protocols", when most were
     // ordinary TCP control traffic on an otherwise fully-recognized Modbus/TCP conduit.
     bool tcp_no_payload = false;
+
+    // Opt-in only (DecodeOptions::capture_transport_payload -- see that field's own comment for
+    // why). This is the RAW, per-packet application-layer payload exactly as it appeared on the
+    // wire for THIS segment/datagram alone -- never the cross-segment, cross-packet reassembled
+    // PDU bytes tcp_reassembly_ builds for protocol decoding (decoder.cpp's own
+    // reassemble_tcp_payload), so a follow-stream consumer (output.hpp's FollowStreamWriter) can
+    // do its own sequence-ordered stitching and duplicate/overlap detection completely
+    // independently of -- and without in any way disturbing -- whatever protocol-level
+    // reassembly already happened for the same packet. Populated for both has_tcp and has_udp
+    // packets (UDP: the datagram's whole payload; TCP: this one segment's own payload, which may
+    // be empty -- see tcp_no_payload above). Always empty when the option is off.
+    std::vector<uint8_t> raw_transport_payload;
+    // Only meaningful when has_tcp AND raw_transport_payload was requested -- see that field's own
+    // comment; always 0 for a has_udp packet (UDP has no sequence number) or when the option is
+    // off. This segment's own starting sequence number (TcpSegment::seq, tcp.hpp) -- the absolute,
+    // on-the-wire 32-bit value, NOT relative to any session's ISN. A follow-stream consumer
+    // computes its own per-direction relative offset from this (relative to whichever segment it
+    // saw FIRST in that direction, not necessarily the true SYN/ISN -- the same "handle a capture
+    // that starts mid-session" posture tshark's own relative sequence numbers already have).
+    uint32_t tcp_seq = 0;
 
     // "ip-fragment" (this packet is one IP fragment of a larger datagram that has not yet -- or
     // will never -- fully reassemble: still buffering more fragments, or abandoned due to a
