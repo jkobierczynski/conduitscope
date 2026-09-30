@@ -257,7 +257,7 @@ them), and IPMI 2.0's full four\-message RAKP handshake plus Open Session
 Request/Response \-\- with a curated finding for Cipher Suite 0
 ("RAKP\-none", the CVE\-2013\-4786\-class IPMI authentication\-bypass
 cipher suite), surfaced both inline and as its own headline count in
-\fB\-\-stats\fR; an Auth Code/password field is never rendered, only its
+\fBinfo\fR's own report; an Auth Code/password field is never rendered, only its
 presence and length noted, the same posture CODESYS's own credential
 fields use; AES\-CBC\-128 payload decryption and any Redfish/vendor
 (iDRAC/iLO) REST extension are explicitly out of scope; see
@@ -283,7 +283,7 @@ decode for EEC1 (Electronic Engine Controller 1), ET1 (Engine Temperature),
 CCVS (Cruise Control/Vehicle Speed), and DM1 (Active Diagnostic Trouble
 Codes, including its SPN/FMI/Occurrence\-Count/Conversion\-Method DTC
 bit\-unpacking, surfaced both inline and as its own headline count in
-\fB\-\-stats\fR); every other PGN named by number only; see
+\fBinfo\fR's own report); every other PGN named by number only; see
 \fBdocs/PROTOCOL_COVERAGE.md\fR's SAE J1939 section for the full writeup,
 plus PROFINET RT (EtherType 0x8892, DCP device discovery/configuration and
 cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType 0x88B8, ASN.1
@@ -355,19 +355,41 @@ auto-detected from the file itself, nothing to specify on the command
 line. See \fBdocs/USER_GUIDE.md\fR's "pcap vs. pcapng" section for exactly
 which pcapng block types are understood.
 .SH COMMANDS
+Every subcommand below can also be selected with a double\-dashed flag of
+the same name \-\- \fB\-\-decode\fR, \fB\-\-info\fR, \fB\-\-interfaces\fR,
+\fB\-\-policy\fR, \fB\-\-inventory\fR, \fB\-\-detect\fR, \fB\-\-baseline\fR,
+\fB\-\-capture\fR, \fB\-\-merge\fR \-\- as an alternative to the bare
+subcommand word, so editing a previous command line (swapping \fBdecode\fR
+for \fBinfo\fR, say) never requires moving a bare word around: just swap
+one \fB\-\-x\fR token in place. Only the very first non\-global token on the
+command line is ever treated this way, so \fB\-\-policy\fR typed later in
+the same command line \-\- as the pre\-existing, unrelated
+\fB\-\-policy\fR \fIFILE\fR option accepted by \fBpolicy validate\fR,
+\fBdetect\fR, and \fBbaseline check\fR \-\- is never rewritten:
+\fBconduitscope \-\-policy validate \-\-policy zones.yaml \-r cap.pcap\fR
+behaves identically to
+\fBconduitscope policy validate \-\-policy zones.yaml \-r cap.pcap\fR.
+\fB\-\-version\fR is not part of this rewrite \-\- it is already CLI11's own
+built\-in version flag, and already prints identically to the \fBversion\fR
+subcommand below.
 .TP
 .B decode (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Decode a capture (or live interface) and print each recognized packet. See
-\fBOPTIONS (decode)\fR below.
+\fBOPTIONS (decode)\fR below. (The aggregate\-summary mode this used to
+offer as \fB\-\-stats\fR now lives on \fBinfo\fR instead, as an opt\-in
+\fB\-z\fR flag \-\- see \fBinfo\fR just below.)
 .TP
-.B info \fB\-r\fR \fIFILE\fR [\fB\-\-max\-conversations\fR \fIN\fR] [\fB\-\-max\-endpoints\fR \fIN\fR]
-Print pcap file metadata, a protocol histogram, and IPv4/Ethernet
-Conversations and Endpoints tables (conduitscope's own equivalent of
-tshark's \fB\-z conv,ip\fR/\fB\-z endpoints,ip\fR \-\- see
-\fBdocs/USER_GUIDE.md\fR's "Conversations and Endpoints tables" subsection).
-\fB\-\-max\-conversations\fR/\fB\-\-max\-endpoints\fR cap those tables'
-own resource use (default 200,000 entries each; same meaning as
-\fBdecode\fR's own options of the same name). Offline files only; see
+.B info \fB\-r\fR \fIFILE\fR [\fB\-z\fR \fIVALUE\fR]... [\fB\-\-max\-conversations\fR \fIN\fR] [\fB\-\-max\-endpoints\fR \fIN\fR]
+Print pcap file metadata and a protocol histogram, and, for each
+\fB\-z\fR \fIVALUE\fR given (repeatable; conduitscope's own equivalent of
+tshark's own \fB\-z\fR), one of the four IPv4/Ethernet Conversations and
+Endpoints tables -- \fBconv,ip\fR, \fBendpoints,ip\fR, \fBconv,eth\fR,
+\fBendpoints,eth\fR (see \fBdocs/USER_GUIDE.md\fR's "Conversations and
+Endpoints tables" subsection). None of the four tables is shown, or even
+tracked, unless requested via \fB\-z\fR. \fB\-\-max\-conversations\fR/
+\fB\-\-max\-endpoints\fR cap those tables' own resource use, when
+requested (default 200,000 entries each). \fBinfo\fR is the only place
+these aggregate summaries exist; offline files only -- see
 \fBLIVE CAPTURE\fR for the live equivalent.
 .TP
 .B interfaces
@@ -505,7 +527,7 @@ own internal resource bounds were hit. See \fBOPTIONS (detect)\fR below,
 \fBdocs/design/detection-engine.md\fR for the full design record, and
 \fBdocs/USER_GUIDE.md\fR's \fBdetect\fR section for a worked example.
 .TP
-.B baseline learn \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIFILE\fR ...] [\fIOPTIONS\fR]
+.B baseline learn \fB\-\-baseline\-file\fR \fIFILE\fR (\fB\-r\fR \fIFILE\fR... | \fIFILE\fR ...) [\fIOPTIONS\fR]
 Protocol\-operation\-level communication baseline, covering S7comm, Modbus,
 EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, and FINS: decodes each given
 capture and, for every conduit (client IP, server IP, protocol, server
@@ -521,12 +543,15 @@ real addressing has no linear range to track \-\- see
 readiness\(rq section for exactly which protocol gets range\-tracking and
 why) \-\- merging into \fB\-\-baseline\-file\fR (read first if it already
 exists, always written back at the end \-\- cumulative across as many
-\fBlearn\fR runs and captures as you feed it over time). Never prints a
+\fBlearn\fR runs and captures as you feed it over time). Capture files are
+given via \fB\-r\fR/\fB\-\-read\fR (repeatable) or positionally, or a mix of
+both, matching every other file\-reading subcommand's own \fB\-r\fR/
+\fB\-\-read\fR spelling. Never prints a
 compliant/anomaly verdict \-\- that is what \fBbaseline check\fR is for. See
 \fBOPTIONS (baseline learn)\fR below and \fBdocs/design/baseline-engine.md\fR
 for the full data model.
 .TP
-.B baseline check \fB\-\-baseline\-file\fR \fIFILE\fR \fIFILE\fR [\fIOPTIONS\fR]
+.B baseline check \fB\-\-baseline\-file\fR \fIFILE\fR (\fB\-r\fR \fIFILE\fR | \fIFILE\fR) [\fIOPTIONS\fR]
 Checks a single capture against a baseline previously built with
 \fBbaseline learn\fR (never writes the baseline file). Reports one finding
 per conduit/operation that the baseline never saw: a brand\-new conduit, a
@@ -536,7 +561,10 @@ addressing outside every address range learned for it. With
 \fBpolicy validate\fR uses), a brand\-new conduit whose client IP shares a
 declared zone with another client already baselined doing this exact
 operation is instead reported as the lower\-severity
-\fBnew\-conduit\-known\-zone\fR \-\- see \fB\-\-policy\fR below. Prints a
+\fBnew\-conduit\-known\-zone\fR \-\- see \fB\-\-policy\fR below. The capture
+file is given via \fB\-r\fR/\fB\-\-read\fR or positionally, matching every
+other file\-reading subcommand's own \fB\-r\fR/\fB\-\-read\fR spelling.
+Prints a
 compliant/anomaly report, text or JSON (\fB\-T/\-\-format\fR); see
 \fBOPTIONS (baseline check)\fR and \fBEXIT STATUS\fR below.
 .TP
@@ -916,7 +944,7 @@ Manufacturer, etc.) for asset inventory, with three PHI tags (Patient's
 Name/ID/Birth Date) and the User Identity Negotiation passcode/ticket/
 assertion field redacted via the same
 \fBkRedactedSecretPlaceholder\fR mechanism every other credential in this
-tool uses. The headline \fB\-\-stats\fR finding is associations with no
+tool uses. The headline finding in \fBinfo\fR's own report is associations with no
 User Identity Negotiation at all (AE-title-only, unauthenticated trust).
 \fB\-\-dicom\-port\fR widens \fBauto\fR-mode detection to further ports.
 See \fBdocs/PROTOCOL_COVERAGE.md\fR's DICOM section for the full
@@ -939,7 +967,7 @@ reuses \fBcanopen\fR's own abort-code name table rather than
 duplicating it; Object Dictionary values (SDO Data, PReq/PRes process
 data) are shown as raw hex only, the same "no XDD/EDS device-profile
 machinery" scope decision \fBcanopen\fR already documents for its own
-PDO/SDO data. Curated \fB\-\-stats\fR findings: a disruptive NMTCommand
+PDO/SDO data. Curated findings in \fBinfo\fR's own report: a disruptive NMTCommand
 (reset/stop and their _Ex variants) targeting a node this capture
 separately observed reporting an Operational NMT state; rogue-MN /
 MN-identity tracking (more than one distinct (MAC, NodeID) pair
@@ -962,8 +990,8 @@ confidence breakdown. Decodes the line\-oriented header+tuple grammar
 generically (every \fBkey=type:value\fR tuple, including nested \fBm\fR
 messages) for every channel/command; the \fBfox\fR/\fBhello\fR
 channel/command pair alone gets curated, first\-class field extraction
-(fox.version/hostName/hostAddress/app/vm/os/etc.). The headline
-\fB\-\-stats\fR finding is unauthenticated hello exchanges observed \-\-
+(fox.version/hostName/hostAddress/app/vm/os/etc.). The headline finding
+in \fBinfo\fR's own report is unauthenticated hello exchanges observed \-\-
 a real Niagara station answers ANY syntactically valid hello frame from
 ANY unauthenticated TCP peer with a full dump of its own system identity
 (CISA ICSA\-12\-228\-01A / FBI PIN, actively exploited by
@@ -1392,23 +1420,6 @@ more), combined. Default: 0 (unbounded). The same category of fix as
 \fB\-\-max\-active\-flows\fR, for the registration-model decoders' own
 per-session state instead of the general TCP reassembly path.
 .TP
-.B \-\-stats
-Print an aggregate summary instead of one line per packet, including the
-IPv4/Ethernet Conversations and Endpoints tables described under
-\fBinfo\fR below. Ignores \fB\-\-format\fR.
-.TP
-.BI \-\-max\-conversations " N"
-With \fB\-\-stats\fR: cap the number of distinct address-pair conversations
-tracked for the Conversations tables (IPv4 and Ethernet, each capped
-independently). Default: 0 (use the built-in default of 200,000). Past
-this, a packet between a new, not-yet-seen address pair is dropped from
-these tables only, and a warning line is printed.
-.TP
-.BI \-\-max\-endpoints " N"
-With \fB\-\-stats\fR: cap the number of distinct addresses tracked for the
-Endpoints tables (IPv4 and Ethernet, each capped independently). Default:
-0 (use the built-in default of 200,000).
-.TP
 .B \-\-strict
 Abort on the first malformed packet instead of warning and continuing.
 .TP
@@ -1492,8 +1503,7 @@ which continues to stdout/\fB\-o\fR exactly as without \fB\-w\fR.
 Print a hex+ASCII dump of each packet's raw bytes below its normal decode
 line \-\- mirrors tshark's own \fB\-x\fR. Text output only
 (\fB\-T text\fR, the default); ignored under \fB\-T json\fR/\fBcsv\fR/
-\fBfields\fR and under \fB\-\-stats\fR, which have no per-packet line to
-attach it to.
+\fBfields\fR.
 .TP
 .B \-\-mac\-vendor
 Enable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
@@ -1526,6 +1536,35 @@ Disable service name (port\->name) resolution, from the built-in table and
 .B \-\-services \fIFILE\fR
 Unix /etc/services-style file to supplement/override the built-in
 port\->service-name table. Must exist.
+.SH OPTIONS (info)
+.TP
+.BR \-r ", " \-\-read " " \fIFILE\fR
+Input capture file. Must exist; classic pcap or pcapng, auto-detected.
+.TP
+.BR \-z ", " \-\-stat " " \fIVALUE\fR
+Print an aggregate Conversations/Endpoints table (mirrors tshark's own
+\fB\-z\fR; repeatable \-\- each occurrence adds one table, and none are
+shown, or even tracked, unless requested here): \fBconv,ip\fR (IPv4
+address\-pair conversations), \fBendpoints,ip\fR (per\-address IPv4
+traffic), \fBconv,eth\fR/\fBendpoints,eth\fR (the same two views over raw
+Ethernet/MAC traffic \-\- also covers non\-IP OT L2 traffic with no IP
+layer at all, such as PROFINET RT/GOOSE/SV/EtherCAT/unrecognized
+EtherTypes). An unrecognized value is a CLI error (nonzero exit) reported
+before any packet is processed.
+.TP
+.BI \-\-max\-conversations " N"
+With \fB\-z conv,ip\fR/\fB\-z conv,eth\fR: cap the number of distinct
+address-pair conversations tracked for the Conversations table(s) (IPv4
+and Ethernet, each capped independently). Default: 0 (use the built-in
+default of 200,000). Past this, a packet between a new, not-yet-seen
+address pair is dropped from these tables only, and a warning line is
+printed. Has no effect on a table not requested via \fB\-z\fR.
+.TP
+.BI \-\-max\-endpoints " N"
+With \fB\-z endpoints,ip\fR/\fB\-z endpoints,eth\fR: cap the number of
+distinct addresses tracked for the Endpoints table(s) (IPv4 and Ethernet,
+each capped independently). Default: 0 (use the built-in default of
+200,000). Has no effect on a table not requested via \fB\-z\fR.
 .SH OPTIONS (policy validate)
 .TP
 .BR \-r ", " \-\-read " " \fIFILE\fR
@@ -1940,10 +1979,13 @@ Cap the number of distinct (coalesced) target-address ranges
 at its own default; past this, further new, disjoint ranges for that
 operation are not recorded.
 .TP
-.I captures
+.BR \-r ", " \-\-read " " \fIFILE\fR ", " \fIcaptures\fR
 One or more pcap/pcapng capture files to learn from, in order (classic pcap
-or pcapng, auto-detected). Required, positional (no \fB\-r\fR/\fB\-i\fR --
-\fBbaseline learn\fR is file-only, no live-capture support). Only ever learn
+or pcapng, auto-detected). Required; repeatable \fB\-r\fR/\fB\-\-read\fR
+(\fB\-r a.pcap \-r b.pcap\fR), positional (\fBa.pcap b.pcap\fR), or a mix
+of both -- matching every other file\-reading subcommand's own \fB\-r\fR/
+\fB\-\-read\fR spelling. No \fB\-i\fR -- \fBbaseline learn\fR is file-only,
+no live-capture support. Only ever learn
 from captures already trusted to be clean: this absorbs whatever a capture
 contains with no judgment at all, so a malicious operation in a "learned"
 capture becomes baselined as normal.
@@ -2007,11 +2049,13 @@ Cap the number of distinct (coalesced) target-address ranges
 disjoint ranges for that operation are not recorded and this capture's own
 observation is marked incomplete.
 .TP
-.I capture
+.BR \-r ", " \-\-read " " \fIFILE\fR ", " \fIcapture\fR
 The single pcap/pcapng capture file to check (classic pcap or pcapng,
-auto-detected). Required, positional (no \fB\-r\fR/\fB\-i\fR --
-\fBbaseline check\fR is file-only, no live-capture support, and takes
-exactly one capture, unlike \fBbaseline learn\fR's own \fIcaptures\fR).
+auto-detected). Required; \fB\-r\fR/\fB\-\-read\fR or positional, matching
+every other file\-reading subcommand's own \fB\-r\fR/\fB\-\-read\fR
+spelling. No \fB\-i\fR -- \fBbaseline check\fR is file-only, no
+live-capture support, and takes exactly one capture, unlike
+\fBbaseline learn\fR's own \fIcaptures\fR.
 .TP
 .BR \-o ", " \-\-output " " \fIFILE\fR
 Write the report here instead of stdout. Caution: a single-dash typo of a

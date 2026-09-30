@@ -15307,6 +15307,128 @@ it done as its own patch.
     `build-mingw`, build-only), plus a clean-room extract-rebuild-test cycle, before delivery as a
     zip of touched/new files via the standing no-git-commit convention.
 
+105. **CLI ergonomics: `-z` becomes `info`'s own opt-in flag, `decode --stats` removed, subcommand-
+    alias flags, `-r`/`--read` for `baseline learn`/`baseline check`.** Jurgen's direct follow-up to
+    item 104, aimed purely at making the command line easier to edit, in four parts: (1) keep the
+    Conversations/Endpoints tables item 104 just added separate from `info`'s always-on output and
+    from `decode --stats`, as their own explicit, tshark-`-z`-style opt-in; (2) remove `--stats` from
+    `decode` entirely, leaving `info` as the only place for aggregate summaries; (3) let every
+    top-level subcommand also be selected with a double-dashed flag of the same name (`--decode`,
+    `--info`, `--interfaces`, `--policy`, `--inventory`, `--detect`, `--baseline`, `--capture`,
+    `--merge`, `--version`), so swapping one command for another on a previous command line never
+    requires moving a bare word around; and (4, a mid-turn follow-up) add `-r`/`--read` to `baseline
+    learn`/`baseline check`, the one file-reading subcommand pair that had only ever taken its
+    capture file(s) as a bare, unnamed positional argument.
+
+    **`-z`/`decode --stats` removal.** `StatsWriter` gained a `RequestedStatsTables{ip_conversations,
+    ip_endpoints, eth_conversations, eth_endpoints}` struct (`output.hpp`), passed into its
+    constructor; `write_packet` now gates each of the four `update_conversation`/`update_endpoint`
+    call pairs individually on the corresponding flag, so a table nobody asked for via `info`'s new
+    repeatable `-z,--stat` option (`CLI::IsMember({"conv,ip", "endpoints,ip", "conv,eth",
+    "endpoints,eth"})`, mirroring tshark's own `-z`) is never accumulated at all, not merely
+    unprinted -- the same "don't build a map nobody asked for" posture item 104's own resource-bound
+    section already argued for, now actually realized rather than deferred. `run_decode`
+    (`cli_main.cpp`) had its entire `stats`/`max_conversations`/`max_endpoints` branch removed --
+    `decode` always takes the per-packet-writer path now, dropping decode's own protocol-histogram/
+    direction-tier/per-protocol breakdown output along with it; `--max-conversations`/
+    `--max-endpoints` moved from being shared between `decode`/`info` to `info`-only.
+
+    **Subcommand-alias flags.** Implemented as argv preprocessing (`rewrite_subcommand_alias`,
+    `cli_main.cpp`), run once immediately before `CLI11_PARSE` in `main()` -- not as real CLI11
+    options, since CLI11 subcommands are positional tokens with no native "a flag becomes a
+    subcommand" mechanism. The pass scans `argv[1..]` left to right, skipping only the global flags
+    legally allowed before the subcommand position (`-q`/`--quiet`, `--no-color`/`--color`,
+    `--version`, `-h`/`--help`, `--log-file FILE`), and rewrites at most the first non-skippable
+    token in place (`std::strcpy` -- safe because every alias spelling is textually longer than its
+    bare-word target) before stopping entirely. Stopping after one token is the load-bearing design
+    choice: `--policy` is *also* a real, pre-existing option name used inside `policy validate`/
+    `detect`/`baseline check` (`--policy FILE`), so a blind global find-and-replace would have
+    corrupted `conduitscope policy validate --policy zones.yaml` into `policy validate policy
+    zones.yaml`. `--version` was deliberately left out of the rewrite table -- investigating it
+    surfaced a real, independent bug (below), after which it needed no rewrite-pass help at all.
+
+    **Bug found: `--version` was not actually identical to the `version` subcommand.** The original
+    plan's research assumed `app.set_version_flag("--version", version_string())` already matched
+    `version`'s own output byte-for-byte, since both call sites clearly intended the same thing --
+    but testing showed `--version` printed `"0.2.9  [...]"` while `version` printed `"conduitscope
+    0.2.9  [...]"` (the subcommand path prepends the program name, the version-flag path didn't).
+    Fixed with `app.set_version_flag("--version", "conduitscope " + version_string())`, verified
+    afterward via `diff <(conduitscope --version) <(conduitscope version)`. A reminder that "this
+    obviously already works, it's just missing a rewrite-table entry" is itself a claim worth
+    testing, not assuming.
+
+    **`-r`/`--read` for baseline.** CLI11 allows mixing dashed and bare/positional names in one
+    comma-separated `add_option` name string, so this was additive rather than a rename:
+    `baseline_learn_cmd`'s `add_option("captures", ...)` became `add_option("-r,--read,captures",
+    ...)` (repeatable, multi-file) and `baseline_check_cmd`'s `add_option("capture", ...)` became
+    `add_option("-r,--read,capture", ...)` (single file) -- every pre-existing positional invocation
+    keeps working unchanged while `-r`/`--read` becomes available too, consistent with every other
+    file-reading subcommand's own spelling.
+
+    **Test-suite fallout.** 107 `decode ... --stats` invocations in `CMakeLists.txt` needed
+    rewriting: 96 simple cases (no other decode-only flag) converted mechanically to
+    `info --read FILE`; 11 combined `--stats` with a flag `info` doesn't have (`--protocol` on 4,
+    `-Y`/display-filter on 7) -- of the `--protocol` cases, `canopen_stats_message_type_breakdown`
+    (CANopen/DeviceNet's Auto-mode dispatch collision means `--protocol canopen` is load-bearing,
+    not redundant -- see docs/PROTOCOL_COVERAGE.md's CANopen section) stayed on `decode --protocol
+    canopen` reasserting its own histogram line, split out into a companion
+    `canopen_protocol_filter_excludes_j1939` test, while the other 3 (`--protocol j1939`/`mqtt`/
+    `s7comm-plus`, each redundant against their own single-protocol-or-structurally-disjoint fixture,
+    confirmed by direct comparison against the rebuilt binary's real output rather than assumed) 
+    converted cleanly to `info`; the 7 `-Y` cases were reasserted directly against `decode`'s own
+    default per-packet text output instead of an aggregate count, reusing this file's pre-existing
+    `#N ` per-packet-index-marker technique (`PASS_REGULAR_EXPRESSION "^#1 "` +
+    `FAIL_REGULAR_EXPRESSION "#2 |#3 "`) -- arguably a more direct test of what they actually check.
+    Item 104's own ten tests were rewritten for the new `-z` grammar (each `info` invocation gains
+    the specific `-z` value(s) it's asserting on; `decode_stats_shows_conversations_and_endpoints`
+    and `conversation_stats_flags_present_in_decode_help` removed outright, since the capability and
+    the flags they tested no longer exist on `decode`); a new
+    `info_no_conversations_or_endpoints_tables_without_z` test confirms the new default-off behavior,
+    and `info_z_rejects_unrecognized_value` confirms `-z`'s validation. New tests cover: each alias
+    flag against its classic subcommand form, including after a global `-q`; the `--policy`
+    collision case specifically (`--policy validate --policy FILE ...` behaves identically to
+    `policy validate --policy FILE ...`); `--version` against `version` (post-fix); and `baseline
+    learn`/`baseline check`'s `-r`/`--read` against the pre-existing positional form (`diff
+    <(...) <(...)`, this file's own established "these two invocations must be byte-identical"
+    idiom).
+
+    **A CMake infrastructure bug found along the way: catastrophic regex backtracking hangs `ctest`
+    itself, not the test binary.** An early draft of `canopen_stats_message_type_breakdown` chained
+    multiple `(.*\n)*` "skip a line" groups in one `PASS_REGULAR_EXPRESSION` across ~38 lines of
+    repetitive output; `ctest` itself hung indefinitely (confirmed via `ps aux`: no `conduitscope`
+    process running, only `ctest` at 95-98% CPU) even though the binary itself always exited
+    instantly when run directly. Reducing to a *single* skip-group still hung it -- the literal
+    anchor text on either side recurred elsewhere in the same ~2500-character output ("CANopen NMT"
+    on 2 lines, "id=0xCF00400" on 3), which multiplies backtracking paths in CMake's own (non-PCRE)
+    regex engine combinatorially. Fixed by splitting into two single-literal tests with no skip-group
+    at all -- a substring search finds a short, unique literal anywhere in the output with no
+    skip-group needed in the first place. Documented as a code comment in `CMakeLists.txt` directly
+    above the fix, as a warning against this idiom at scale for future test-writing in this file:
+    `(.*\n)*` remains fine for a short, unique anchor pair enforcing ordering, but is fragile the
+    moment either anchor's literal text can recur in long/repetitive output.
+
+    **Docs.** `docs/USER_GUIDE.md`: `decode`'s OPTIONS table lost `--stats`/`--max-conversations`/
+    `--max-endpoints`; `info`'s section rewritten around the new `-z,--stat` option and the
+    "`info` is the only place these aggregate summaries exist any more" framing; a new paragraph
+    documents the alias-flag mechanism, including the `--policy`-collision-safe design; the one
+    `baseline learn` example invocation in the DETECT worked-example section was updated to
+    demonstrate `-r` (USER_GUIDE.md has no dedicated `baseline` OPTIONS section at all -- unlike
+    `decode`/`info`/`policy validate`/`inventory` -- so `man/conduitscope.1`, which does have
+    `OPTIONS (baseline learn)`/`OPTIONS (baseline check)` sections, is this option's canonical
+    documentation). `man/conduitscope.1`: gained a new `OPTIONS (info)` section (it previously had
+    none -- `info`'s `--max-conversations`/`--max-endpoints` had been documented, confusingly, inside
+    `OPTIONS (decode)`); the alias-flag mechanism documented once in a new `COMMANDS` intro
+    paragraph; `-r`/`--read` added to both baseline OPTIONS sections; every narrative `--stats`
+    reference in the protocol-coverage prose (RMCP/ASF/IPMI's Cipher-Suite-0 finding, SAE J1939's
+    DM1 decode, DICOM's headline finding, Ethernet POWERLINK's curated findings, Fox's hello-exchange
+    finding) repointed to `info`'s own report, since that aggregate view now lives there exclusively.
+
+    **Verification.** Same standing bar as item 104: full CTest across all four standing build
+    configs (default GCC `build`; Clang ASan/UBSan `build-fuzz`, plus a fresh fuzz campaign across
+    every target; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile
+    `build-mingw`, build-only), plus a clean-room extract-rebuild-test cycle, before delivery as a
+    zip of touched/new files via the standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

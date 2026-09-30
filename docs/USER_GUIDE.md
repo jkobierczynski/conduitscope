@@ -37,10 +37,10 @@ conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-T text|json|csv|fields]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
                      [--enip-port PORT]... [--enip-io-port PORT]... [--bacnet-port PORT]... [--hartip-port PORT]... [--opcua-port PORT]... [--mqtt-port PORT]... [--ffhse-port PORT]... [--remote-access-port PORT]... [--lateral-movement-port PORT]... [--enterprise-trust-port PORT]... [--wireless-backhaul-port PORT]... [--tunnel-vpn-port PORT]...
                      [-d <tcp|udp>.port==PORT,NAME]...
-                     [-c N] [--stats] [--strict] [-w FILE] [-x]
+                     [-c N] [--strict] [-w FILE] [-x]
                      [-f BPF] [-a SECONDS] [--snaplen BYTES] [--no-promiscuous]
 
-conduitscope info -r FILE
+conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth]... [--max-conversations N] [--max-endpoints N]
 
 conduitscope interfaces
 
@@ -66,6 +66,20 @@ exception to conduitscope's otherwise zero-dependency design (see BUILDING).
 `auto`; see docs/PROTOCOL_COVERAGE.md below for the full, current list of valid
 protocol names (one per subsection there) -- it's not repeated here so this
 list can't drift out of sync as protocols are added.
+
+Every subcommand listed above can also be selected with a double-dashed flag
+of its own name in place of the bare word -- `conduitscope --decode ...` is
+the same as `conduitscope decode ...`, and likewise for `--info`, `--interfaces`,
+`--policy`, `--inventory`, `--detect`, `--baseline`, `--capture`, and `--merge`
+(`--version` already works this way via its own flag, unrelated to this
+mechanism). This is meant to make editing a previous command line faster --
+swapping `decode` for `info` in a shell history entry is a one-token edit
+(`--decode` -> `--info`) instead of moving a bare word into position. Only the
+very first command-line token is ever treated as a candidate for this
+rewrite, so `--policy` used later on the line -- as the real `--policy FILE`
+option inside `policy validate`, `detect`, or `baseline check` -- is always
+left alone: `conduitscope --policy validate --policy zones.yaml ...` behaves
+identically to `conduitscope policy validate --policy zones.yaml ...`.
 
 ## DESCRIPTION
 
@@ -184,6 +198,11 @@ subcommand name on the command line (standard CLI11 behavior).
 conduitscope decode (-r FILE | -i INTERFACE) [options]
 ```
 
+`decode` always prints one line per packet now -- the aggregate-summary mode
+this used to offer as `--stats` moved to `info` (ROADMAP item 105), as a
+tshark-`-z`-style explicit opt-in (`-z conv,ip`, etc.) rather than a mode
+flag on `decode`; see `info` below.
+
 | Option | Default | Description |
 |---|---|---|
 | `-r, --read FILE` | *(required unless `-i` given)* | Input capture file. Must exist; classic pcap or pcapng, auto-detected. Mutually exclusive with `-i`. |
@@ -213,19 +232,16 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `-d, --decode-as <tcp\|udp>.port==PORT,NAME` | *(none)* | Force a specific decoder onto traffic on a given port that wouldn't otherwise be recognized as it -- mirrors Wireshark/tshark's own `-d`, restricted here to this one selector shape (repeatable). UNLIKE every `--x-port` option above, which only annotates an already-detected protocol's port as expected/unexpected, `-d` genuinely widens WHAT gets detected on that port -- but only as a LAST RESORT: it's consulted after every one of this decoder's own stronger structural/port checks has already failed to match anything, so it can never override an already-correct match (a real VNC RFB banner, say, still wins over a `-d` rule naming a different protocol on that same port). Deliberately scoped to port-gated protocols only -- see docs/DEVELOPMENT.md's ROADMAP item 69 for the full design and why the ~40 opportunistic ICS protocols (Modbus/DNP3/S7comm/etc., already tried on every port by structural signature) and the tunnel-vpn tier's IP-protocol-number-gated names (gre/nvgre/eoip/esp/ah/ip-in-ip/6in4) are out of scope. Supported `NAME` values: every name that already has its own dedicated `--x-port` option above (`dns`, `mdns`, `llmnr`, `nbns`, `doh`, `rip`, `hsrp`, `winrm`, `dcom`, `ge-srtp`, `bsap`, `coap`, `rmcp`, `amqp`, `dicom`, `fox`, `powerlink-sdo`, `dhcpv6` -- each restricted to that name's own real transport), plus the individual protocol names inside the five "IT protocols an OT auditor flags" tiers that `--remote-access-port`/`--lateral-movement-port`/`--enterprise-trust-port`/`--wireless-backhaul-port`/`--tunnel-vpn-port` can otherwise only widen as a whole tier: `rdp`/`vnc`/`teamviewer`/`anydesk`/`zoom` (tcp or udp); `ssh`/`http`/`https`/`telnet`/`ftp` (tcp only); `snmp`/`tftp` (udp only); `ntp`/`dhcp`/`radius` (udp only); `ldaps`/`tacacs-plus` (tcp only); `capwap-control`/`capwap-data`/`lwapp-control`/`lwapp-data`/`gtp-u` (udp only); `ike`/`l2tp`/`vxlan`/`geneve`/`wireguard`/`dtls-tunnel` (udp only); `openvpn` (tcp or udp); `stt` (tcp only). Example: `-d tcp.port==8443,ldaps` reports port 8443/TCP traffic as LDAPS even though it isn't one of LDAPS's own configured ports, without disturbing detection on any other port. A malformed rule, an unrecognized name, or a name/transport mismatch is reported as a CLI error (nonzero exit) rather than silently ignored. |
 | `-c, --max-packets N` | `0` (unlimited) | Stop after decoding this many packets. With `-i`, this also bounds a live capture (in addition to `--duration` and Ctrl+C). `-c` mirrors tshark's own `-c`. |
 | `--range SPEC` | *(none)* | Select packets by their real 1-based position in the capture file: a comma-separated list of individual packet numbers and/or inclusive `start-end` ranges, e.g. `--range 5,10-20,30-40`. Same syntax and numbering as Wireshark's separate `editcap` tool (there is no equivalent in tshark or tcpdump themselves -- see docs/DEVELOPMENT.md's ROADMAP item 78), and the same numbering this tool's own text output already shows as `#<n>`. Numbers are the packet's REAL position in the file, never renumbered among whatever else also matched -- so `--range 10` combined with `-f/--filter` still means "the file's 10th packet, if it also matches the filter," not "the 10th matching packet." `-r` only -- excluded from `-i` (live capture) at the option level, since "select packet #N" presupposes a finished, numbered file. Combines with `-f/--filter` as an intersection (both must match) and with `-c/--max-packets`, which caps the number of packets taken from the `--range` selection the same way it already caps everything else. An out-of-range, zero, or malformed value (empty token, non-numeric, or an `end` before its `start`) is a CLI error, not a silent "select nothing." |
-| `--stats` | off | Print an aggregate summary (protocol counts, a cross-protocol TCP-flow direction-tier breakdown, IPv4/Ethernet Conversations and Endpoints tables -- see `info`'s own "Conversations and Endpoints tables" subsection below -- Modbus function-code histogram, exception count, capture time span) instead of one line per packet. Ignores `--format`. |
-| `--max-conversations N` | `0` (leave it at its own default of 200,000) | With `--stats`: cap the number of distinct address-pair conversations tracked for the Conversations tables. Same option and meaning as `info --max-conversations`. |
-| `--max-endpoints N` | `0` (leave it at its own default of 200,000) | With `--stats`: cap the number of distinct addresses tracked for the Endpoints tables. Same option and meaning as `info --max-endpoints`. |
 | `--strict` | off | Abort with a nonzero exit status on the first packet that fails to parse at the Ethernet/IPv4/TCP layer, instead of reporting a per-packet warning and continuing. Does not affect Modbus/DNP3-level ambiguity, which is always handled by heuristic + note rather than error. |
 | `-v, --verbose` | off | Show per-packet notes (longer-form contextual/security observations) and the trailing `(client X -- tier)` direction-source suffix; both are suppressed by default to keep default output readable, since on a busy capture the notes in particular can swamp the per-packet lines. Text output only (`-T text`, the default) -- JSON/CSV always include notes/direction fields unconditionally. `--no-direction` still suppresses the direction suffix even under `-v`. See OUTPUT FORMATS below. |
 | `--redact` / `--no-redact` | on (i.e. cleartext secrets redacted by default) | Mask cleartext authentication secrets found while decoding (HSRP/VRRP authentication data, OPC UA `ActivateSessionRequest` passwords, MQTT `CONNECT` passwords) with `[REDACTED]` wherever they would otherwise appear -- summary/notes text and JSON value fields alike -- so output can be shared safely by default. `--no-redact` shows the real cleartext values. Usernames are never redacted, only passwords/authentication data. See OUTPUT FORMATS below. |
 | `--detect-highlight` / `--no-detect-highlight` | on (i.e. always-notable highlighting on by default) | Flag, inline, any packet that would also show up in `detect`'s own report as an "always-notable" finding (traffic whose shape alone is notable, decided live/per-packet -- see `detect`'s own ALWAYS-NOTABLE-vs-NEW-VS-KNOWN split above) -- so a capture containing e.g. an S7 PLC Stop or a DNP3 unsolicited-response misuse doesn't scroll by looking like ordinary protocol traffic. Reuses `detect`'s own `DetectEngine` live, packet-by-packet, as a read-only hook -- no separate detection logic, no separate pass. Deliberately excludes any finding that can only be resolved once the whole capture is read (novelty/"new vs. known" findings against a baseline, and the two capture-wide S7comm-probing/program-download-then-restart patterns) -- those remain `detect`-only, since `decode` (including `-i` live capture) has no opportunity to look ahead or back. See OUTPUT FORMATS' "Always-notable highlighting" subsection below. |
 | `--no-vlan` | off (i.e. VLAN ID display on by default) | Disable display of the 802.1Q VLAN ID for a VLAN-tagged packet. See OUTPUT FORMATS below. |
-| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). Does not affect `decode --stats`'s own direction-tier breakdown, which has no display toggles of its own (the same way `--no-vlan`/`--mac-vendor` don't affect it either). See OUTPUT FORMATS below. |
+| `--no-direction` | off (i.e. TCP flow direction display on by default) | Disable display of per-packet TCP flow direction (client/server determination and which tier decided it -- handshake/content/port-heuristic). See OUTPUT FORMATS below. |
 | `--ether` | off (i.e. the Ethernet header display off by default, to keep output compact) | For a packet with an IP layer, show its Ethernet header (source/destination MAC address, VLAN tag) below the packet line in **text** output -- mirrors tcpdump's own `-e` (long-form only in this codebase -- `-e` itself is reserved for `--field` below, tshark's own convention). Implied by `--mac-vendor` (there'd be nothing to attach a vendor name to otherwise). A no-op for a packet with no IP layer at all (ARP/LLDP/EAPOL/PPPoE/MPLS/PROFINET RT/GOOSE/Sampled Values/EtherCAT/STP/etc.), since that packet's MAC address pair is already shown on its own head line unconditionally, `--ether` or not. Does not affect JSON/CSV output, which always include `src_mac`/`dst_mac` as base fields, same as `src_ip`/`dst_ip`. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `-e, --field FIELD` | *(none)* | With `-T fields`, print this field's value (repeatable, printed in the order given, tab-separated). Mirrors tshark's own `-e`. The field name is whatever key appears in this tool's own `--format json` output for that packet (e.g. `src_ip`, `dst_port`, `modbus_function_code`); a field absent for a given packet (wrong protocol, or an optional field not present) prints as an empty column rather than an error. Requires `-T fields` -- given without it, a one-line advisory note is printed and the field selection is ignored, not treated as an error. See OUTPUT FORMATS' "Field selection (`-T fields`)" subsection below. |
 | `-w, --write FILE` | *(none)* | Write every packet that reaches this run (after `-f`/`--filter`, if given) to this path as a new classic-pcap capture file, raw and unmodified -- mirrors tshark/tcpdump's own `-w`. Works identically whether packets come from a live capture (`-i`) or an offline read (`-r`); does not change or replace the normal `--format` output, which continues to stdout/`-o` exactly as without `-w`. |
-| `-x, --hex` | off | Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- mirrors tshark's own `-x`. Text output only (`-T text`, the default); ignored under `-T json`/`csv`/`fields` and under `--stats`, which have no per-packet line to attach it to. |
+| `-x, --hex` | off | Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- mirrors tshark's own `-x`. Text output only (`-T text`, the default); ignored under `-T json`/`csv`/`fields`. |
 | `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
@@ -322,10 +338,10 @@ Schneider Electric's proprietary extension, carried in Modbus function code
 on packets where `modbus.protocol == "modbus"` and a UMAS payload was
 actually found.
 
-`-Y` only affects which packets are shown, counted toward `-c/--max-packets`,
-and (with `--stats`) tallied: **`-w/--write` is unaffected** and still writes
-every packet that reaches the run under `-f/--filter` alone, raw and
-unfiltered by `-Y` -- the same way tshark's own single-pass `-w` behaves. A
+`-Y` only affects which packets are shown and counted toward
+`-c/--max-packets`: **`-w/--write` is unaffected** and still writes every
+packet that reaches the run under `-f/--filter` alone, raw and unfiltered by
+`-Y` -- the same way tshark's own single-pass `-w` behaves. A
 `--max-packets N -Y EXPR` combination stops after N packets that MATCH the
 filter, not N packets read.
 
@@ -405,57 +421,65 @@ conduitscope decode -r cap.pcap -Y bacnet
 ### `info` -- print pcap file metadata and a protocol histogram
 
 ```
-conduitscope info -r FILE
+conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth]... [options]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `-r, --read FILE` | *(required)* | Input capture file. Classic pcap or pcapng, auto-detected. |
+| `-z, --stat {conv,ip\|endpoints,ip\|conv,eth\|endpoints,eth}` | *(none -- no tables shown)* | Print an aggregate Conversations/Endpoints table -- mirrors tshark's own `-z`. Repeatable: each occurrence adds one table, and (unlike every other section `info` prints) none of the four are shown, or even tracked internally, unless requested here -- see "Conversations and Endpoints tables" below. |
 | `--max-conversations N` | `0` (leave it at its own default of 200,000) | Cap the number of distinct address-pair conversations tracked for the Conversations tables below -- see their own subsection for what happens past the cap. |
 | `--max-endpoints N` | `0` (leave it at its own default of 200,000) | Cap the number of distinct addresses tracked for the Endpoints tables below. |
 
 Prints the pcap format version, link type, snaplen, timestamp resolution, and
-then the same protocol/function-code histogram, Conversations/Endpoints
-tables, and per-protocol breakdowns as `decode --stats`, without requiring
-you to also specify `--stats` explicitly. Useful as a first look at an
+then a protocol/function-code histogram and per-protocol breakdowns -- this
+part is always shown, unconditionally. Useful as a first look at an
 unfamiliar capture before deciding whether/how to filter it with `decode`.
 `info` currently only works against offline files; there's no live equivalent
 (a live capture never ends on its own the way a file does, so "metadata about
-the whole thing" doesn't have a natural moment to print) -- use `decode -i
---stats` instead for a live summary, bounded by `--duration`/`--max-packets`/Ctrl+C.
+the whole thing" doesn't have a natural moment to print).
+
+`info` is also the only place these aggregate summaries exist any more --
+`decode` no longer has a `--stats` mode of its own (ROADMAP item 105); it
+always prints one line per packet.
 
 #### Conversations and Endpoints tables
 
-Both `info` and `decode --stats` (they share the exact same accumulation
-code) print four "who talked to whom" tables, conduitscope's own equivalent
-of tshark's `-z conv,ip`/`-z endpoints,ip`:
+`-z` (repeatable; see the OPTIONS table above) prints up to four "who talked
+to whom" tables, conduitscope's own equivalent of tshark's `-z conv,ip`/
+`-z endpoints,ip`/`-z conv,eth`/`-z endpoints,eth` -- each one is opt-in, and
+none of the four are tracked at all unless its own `-z` value is given
+(not just "tracked but hidden" -- see the accumulation-time gating in
+`StatsWriter::write_packet`, `src/output.cpp`, for anyone reading the source):
 
-- **ipv4 conversations** -- one row per distinct pair of IPv4 addresses that
-  exchanged at least one packet, with frame/byte counts in each direction,
-  a combined total, and the conversation's duration.
-- **ipv4 endpoints** -- one row per distinct IPv4 address, with its own
-  transmitted (tx) and received (rx) frame/byte counts.
-- **ethernet conversations** / **ethernet endpoints** -- the same two
-  tables, keyed by MAC address instead of IP address, populated for
-  *every* Ethernet-linktype frame regardless of whether it carries IP at
-  all. This is what actually covers raw-L2 OT traffic with no IP layer
-  (PROFINET RT, GOOSE, Sampled Values, EtherCAT, Ethernet POWERLINK, and
-  any EtherType this tool doesn't decode by name) -- an IPv4-only
-  conversations table is blind to that traffic by construction, the same
-  gap the policy engine's own `ethertypes:`/`to_macs:` conduit fields (see
-  POLICY FILE FORMAT below) close on the compliance-checking side.
+- **`-z conv,ip`: ipv4 conversations** -- one row per distinct pair of IPv4
+  addresses that exchanged at least one packet, with frame/byte counts in
+  each direction, a combined total, and the conversation's duration.
+- **`-z endpoints,ip`: ipv4 endpoints** -- one row per distinct IPv4
+  address, with its own transmitted (tx) and received (rx) frame/byte
+  counts.
+- **`-z conv,eth`/`-z endpoints,eth`: ethernet conversations** /
+  **ethernet endpoints** -- the same two tables, keyed by MAC address
+  instead of IP address, populated for *every* Ethernet-linktype frame
+  regardless of whether it carries IP at all. This is what actually covers
+  raw-L2 OT traffic with no IP layer (PROFINET RT, GOOSE, Sampled Values,
+  EtherCAT, Ethernet POWERLINK, and any EtherType this tool doesn't decode
+  by name) -- an IPv4-only conversations table is blind to that traffic by
+  construction, the same gap the policy engine's own `ethertypes:`/
+  `to_macs:` conduit fields (see POLICY FILE FORMAT below) close on the
+  compliance-checking side.
 
-Each table is printed only when it has at least one entry (a capture with no
-IP traffic at all prints no `ipv4 conversations`/`ipv4 endpoints` sections).
-Rows are sorted by total bytes, descending, with equal-byte rows kept in
-first-seen order. In each conversation row, "A" is whichever address sent
-that conversation's first packet (not an alphabetic ordering) -- the same
-convention tshark itself uses.
+A requested table is printed only when it has at least one entry (e.g.
+`-z conv,ip` against a capture with no IP traffic at all prints no
+`ipv4 conversations` section). Rows are sorted by total bytes, descending,
+with equal-byte rows kept in first-seen order. In each conversation row,
+"A" is whichever address sent that conversation's first packet (not an
+alphabetic ordering) -- the same convention tshark itself uses.
 
 IP/MAC addresses are attacker-controlled, effectively unbounded-cardinality
-identity (unlike this tool's other `--stats`/`info` counters, which are all
-keyed by a small fixed vocabulary of protocol/function names), so each of
-the four tables is capped independently at 200,000 entries by default
+identity (unlike every other counter `info` prints, which is keyed by a
+small fixed vocabulary of protocol/function names), so each of the four
+tables is capped independently at 200,000 entries by default
 (`--max-conversations`/`--max-endpoints` above). Past the cap, a packet
 between a new, not-yet-seen address (pair) is dropped from that table only
 -- every other counter in the report is unaffected -- and a trailing
@@ -1973,8 +1997,10 @@ note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.
 an IEC 104 Reset Process, and BACnet ReinitializeDevice/DeviceCommunicationControl -- are omitted
 above for brevity; every one of the 9 findings this capture produces is exercised by this project's
 own CTest suite.) Re-running the same capture against a baseline that has already learned the RDP
-conduit and the CIP originator (`baseline learn --baseline-file b.json tests/sample_detect.pcap`,
-then `detect -r tests/sample_detect.pcap --baseline-file b.json`) drops the CIP finding entirely
+conduit and the CIP originator (`baseline learn -r tests/sample_detect.pcap --baseline-file b.json`
+-- like every other file-reading subcommand, `baseline learn`/`baseline check` accept their capture
+file(s) as `-r`/`--read`, positionally, or a mix of both; `-r` is shown here, matching `detect`'s own
+spelling just below -- then `detect -r tests/sample_detect.pcap --baseline-file b.json`) drops the CIP finding entirely
 (now a known originator) and upgrades the RDP finding's novelty from `First Occurrence` to
 **`Confirmed New`** (its severity stays Moderate throughout -- a baseline only ever resolves
 novelty), its description changing to `"confirmed absent from the supplied baseline"`. Adding
