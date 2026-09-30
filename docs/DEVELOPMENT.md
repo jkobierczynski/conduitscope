@@ -15788,6 +15788,117 @@ it done as its own patch.
     clean-room extract-rebuild-test cycle, before delivery as a zip of touched/new files via the
     standing no-git-commit convention.
 
+109. **`-z` usable without typing `info`; no subcommand defaults to `decode`.** Jurgen's direct
+    request, immediately following item 108's own delivery: "I want the -z option can be done
+    independent from the --info subcommand, also I want (unless -z option is used) when no
+    subcommand have been given the decode is the default subcommand used. If the -z option is
+    used, no output is expected except the of the -z option output." tshark itself needs no
+    subcommand to read a capture and print it, or to run a `-z` stats table -- conduitscope's own
+    subcommand structure had no equivalent "just read it" default, so both required explicitly
+    typing `decode`/`info` first. This closes that gap, and makes `info -z ...`'s own output a
+    self-contained report rather than a table bolted onto `info`'s unrelated metadata/histogram
+    dump.
+
+    **Shape: two independent, additive changes, no existing behavior removed.**
+
+    **1. No subcommand at all now has a default, chosen by whether `-z`/`--stat` is present.**
+    `inject_default_subcommand` (`cli_main.cpp`) runs in `main()` immediately after
+    `rewrite_subcommand_alias` (item 105's own pre-parse argv rewrite for `--decode`/`--info`/...
+    alias flags) and only when THAT returns "nothing found" -- i.e. argv has no subcommand word or
+    alias flag anywhere on it at all, classic or otherwise. `rewrite_subcommand_alias` itself was
+    changed from `void` to returning either -1 ("a subcommand is already present, I'm done") or the
+    `candidate_start` position a subcommand word belongs at (reusing its own existing leading-
+    global-flags scan rather than duplicating it) -- this is the only change to that function's own
+    logic; every one of item 105's existing behaviors (the nine alias flags, the `--policy`
+    collision carve-out, order independence after the leading position) is untouched.
+    `inject_default_subcommand` then re-scans from that position for a literal `-z`/`--stat` token
+    and picks `info` if found, `decode` otherwise, and builds a brand new argv (owned by two
+    `main()`-local containers that must outlive the `CLI11_PARSE` call immediately after) with that
+    word inserted -- a genuinely new insertion, unlike `rewrite_subcommand_alias`'s own
+    overwrite-and-rotate, since there is no existing token to relabel here. A leading global flag
+    (`-q`, `--log-file FILE`, ...) is still skipped over correctly, the same scan
+    `rewrite_subcommand_alias` already uses. `decode`'s own pre-existing "needs exactly one of
+    -r/--read or -i/--interface" validation is what a truly bare `conduitscope` invocation (no `-z`,
+    no arguments at all) now falls through to -- deliberately not special-cased, since there is
+    nothing `info`-specific about an invocation with no `-z` on it.
+
+    **2. `info -z ...` now prints ONLY what `-z` asked for.** Before this item, `info` always
+    printed its classic file-metadata/packet-count/protocol-histogram block, with any requested
+    `-z` table(s) interleaved into (for the four Conversations/Endpoints/`conv,tcp` tables) or
+    appended after (for `follow,tcp/udp,stream,<N>`) that block -- so `-z`'s own output was never
+    actually self-contained, whether reached via the new no-subcommand default or by typing `info`
+    explicitly. `StatsWriter` gained a new constructor parameter, `stat_output_only` (stored as
+    `stat_output_only_`), set by `run_info` (`cli_main.cpp`) to `!stat_values.empty()` -- true the
+    moment at least one `-z` value was given, independent of whether it happened to match any
+    traffic in this particular capture. `StatsWriter::print_summary` (`output.cpp`) wraps its
+    packet-count/protocols-histogram/direction-source-breakdown block, and everything from the
+    per-protocol sections (modbus function codes, twincat, melsec, ..., down through the Fox
+    hello-exchange finding at the very end of the function) onward, in `if (!stat_output_only_)`/an
+    early `return` -- while the five `print_conversations`/`print_endpoints` calls for the
+    IPv4/Ethernet/`conv,tcp` tables stay unconditional in between, since each one is already a
+    no-op (prints nothing, not even a header) for a table nothing requested (`tables_`'s own
+    per-table gate, unchanged) -- so this is correct whether or not the rest of the function is
+    about to be skipped. `run_info` itself gates its own "file:"/"pcap version:"/"link type:"/
+    "snaplen:"/"timestamps:" block on the same `stat_output_only` flag, and the `FollowStreamWriter`
+    print call (already conditional on `!follow_requests.empty()`, item 108) is untouched -- it was
+    already "-z output" only. If every requested table/stream ends up empty (no matching traffic),
+    the entire output can legitimately be empty -- documented explicitly as correct, not a bug (see
+    `docs/USER_GUIDE.md`'s own new paragraph on this).
+
+    **Deliberately scoped as described, nothing broader.** `-z`/`--stat` was NOT added as an option
+    on `decode` itself -- `decode` still has no stats mode of its own (that removal was item 105);
+    `-z`'s mere presence on an otherwise-bare command line is what selects `info`, rather than
+    teaching `decode` a second, parallel output mode. An explicitly typed `decode -z ...` is
+    unaffected by this item and still a plain CLI11 "no such option" error, exactly as before.
+    Likewise, `stat_output_only` suppression is unconditional on `-z` being given at all -- it does
+    NOT depend on how `info` was reached (typed, `--info`, or the new default), so explicit
+    `info -z ...` invocations from before this item now behave differently too (this is the
+    intended fix, not a side effect -- see Jurgen's own third sentence, quoted above).
+
+    **Tests.** ~13 new `CMakeLists.txt` entries, all at the real-binary argv level (matching item
+    105's own `diff <(...) <(...)` "byte-identical output" idiom for this exact kind of pre-parse
+    argv rewrite): `no_subcommand_defaults_to_decode`/`_with_stat_flag_defaults_to_info`/
+    `_with_long_form_stat_flag_defaults_to_info`/`_global_flag_before_stat_flag_still_defaults_to_info`/
+    `_follow_stream_matches_explicit_info` (each a `diff` against the equivalent classic-form
+    invocation); `bare_invocation_reports_decode_missing_source_error` (a truly empty command line
+    falls through to `decode`'s own existing validation, not a separate "info with nothing to do"
+    path); `info_alias_flag_without_stat_flag_shows_classic_output` (proves it's `-z`'s presence,
+    not the word `info` itself, that selects the new suppressed-output behavior);
+    `info_stat_flag_suppresses_file_metadata_and_histogram`/
+    `_without_stat_flag_still_shows_classic_metadata_and_histogram`/
+    `_suppresses_metadata_even_when_table_is_empty`/`_suppresses_metadata_with_multiple_z_values`
+    (the `StatsWriter::stat_output_only_` regression guards, run through the classic `info -z ...`
+    form since the no-subcommand tests above already proved that's byte-identical to the new
+    default); and `no_subcommand_default_documented_in_top_level_help`/
+    `stat_flag_no_info_needed_documented_in_info_help` (`--help` discoverability, matching every
+    prior CLI-ergonomics item's own regression guard, items 105/106/108). A CMake/CTest whole-output
+    (not per-line) `^`/`$`-anchoring mistake was caught and fixed during this item's own test
+    authoring -- three new multi-line `PASS_REGULAR_EXPRESSION`s initially anchored a SECOND `^` to
+    what was meant as "start of the next line", which CMake's regex engine never matches mid-pattern
+    (only true start-of-string) -- fixed by dropping the embedded `^` in favor of a `.*` prefix,
+    the same pattern `follow_stream_flags_present_in_info_help` (item 108) already used correctly.
+
+    **Docs.** `docs/USER_GUIDE.md`: SYNOPSIS's `<command>` is now `[<command>]`, a new paragraph
+    right after the existing item-105 alias-flag section describes the no-subcommand default and
+    its `-z`-triggered exception, the stale "same as typing no subcommand" sentence in that same
+    section (now factually wrong -- there IS a default now) is corrected, `info`'s own section notes
+    `-z` doesn't need `info` typed, and the previously-unconditional "this part is always shown"
+    claim about `info`'s metadata/histogram block is corrected to state the `stat_output_only`
+    exception plainly. `man/conduitscope.1`: the equivalent SYNOPSIS/COMMANDS/OPTIONS (info)
+    updates, plus (found stale during this pass, predating even item 108) the `-z` description
+    under COMMANDS and OPTIONS (info) never having been updated for item 108's own
+    `conv,tcp`/`follow,tcp,stream,<N>`/`follow,udp,stream,<N>`/`--max-follow-bytes` additions --
+    brought current here rather than left further behind, since this item was already rewriting the
+    exact paragraphs that needed it. `-z`'s own CLI help text (`cli_main.cpp`) and the top-level
+    app footer gained matching notes, verified via the two new `--help` discoverability tests above.
+
+    **Verification.** Same standing bar as items 105-108: full CTest across all four standing build
+    configs (default GCC `build`; Clang ASan/UBSan `build-fuzz`;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile `build-mingw`,
+    build-only), confirming the exact expected test-count increase with zero regressions, plus a
+    clean-room extract-rebuild-test cycle, before delivery as a zip of touched/new files via the
+    standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

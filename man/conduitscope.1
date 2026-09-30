@@ -3,7 +3,11 @@
 conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), Kerberos, LDAP, SMB2/NTLM (the Windows Active Directory suite), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
 .SH SYNOPSIS
 .B conduitscope
-[\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] \fICOMMAND\fR [\fIOPTIONS\fR]
+[\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-color\fR|\fB\-\-color\fR] [\fB\-\-log\-file\fR \fIFILE\fR] [\fICOMMAND\fR] [\fIOPTIONS\fR]
+.br
+\fICOMMAND\fR may be omitted: it then defaults to \fBdecode\fR, or to
+\fBinfo\fR if \fB\-z\fR/\fB\-\-stat\fR appears anywhere on the line (see
+COMMANDS below).
 .SH DESCRIPTION
 .B conduitscope
 reads a pcap or pcapng capture file, or optionally a live network
@@ -378,11 +382,30 @@ parse as the ordinary option it usually is:
 behaves identically to
 \fBconduitscope policy validate \-\-policy zones.yaml \-r cap.pcap\fR, and
 \fBconduitscope \-r cap.pcap \-\-policy validate\fR (with \fB\-\-policy\fR
-not leading) is simply an incomplete command line, the same "a subcommand
-is required" error as typing no subcommand at all.
+not leading) is simply an incomplete command line \-\- with no subcommand
+word anywhere on it either, it falls to the no\-subcommand default described
+next, which for a line with no \fB\-z\fR/\fB\-\-stat\fR on it is
+\fBdecode\fR, so this fails the same way
+\fBconduitscope decode \-r cap.pcap \-\-policy validate\fR would (\fBdecode\fR
+has no \fB\-\-policy\fR option of its own).
 \fB\-\-version\fR is not part of this rewrite \-\- it is already CLI11's own
 built\-in version flag, and already prints identically to the \fBversion\fR
 subcommand below.
+.PP
+\fICOMMAND\fR can be omitted entirely: conduitscope then behaves as if you
+had typed \fBdecode\fR, tshark's own "just read a capture and print it, no
+subcommand needed" convention \-\- \fBconduitscope \-r file.pcap\fR is
+exactly \fBconduitscope decode \-r file.pcap\fR. The one exception is
+\fB\-z\fR/\fB\-\-stat\fR (\fBinfo\fR's own table/stream\-selection flag): if
+it appears anywhere on the line, the default becomes \fBinfo\fR instead,
+since \fB\-z\fR is not meaningful under \fBdecode\fR at all \-\-
+\fBconduitscope \-r file.pcap \-z conv,tcp\fR is exactly
+\fBconduitscope info \-r file.pcap \-z conv,tcp\fR. This is what makes
+\fB\-z\fR usable without ever typing \fBinfo\fR, not a separate mechanism
+from it. A leading global flag (\fB\-q\fR, \fB\-\-no\-color\fR, etc.) is
+still allowed to come first, exactly as it always could. Once \fB\-z\fR is
+given at all \-\- however \fBinfo\fR was reached \-\- its output changes
+too: see \fBOPTIONS (info)\fR below.
 .TP
 .B decode (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) [\fIOPTIONS\fR]
 Decode a capture (or live interface) and print each recognized packet. See
@@ -390,16 +413,30 @@ Decode a capture (or live interface) and print each recognized packet. See
 offer as \fB\-\-stats\fR now lives on \fBinfo\fR instead, as an opt\-in
 \fB\-z\fR flag \-\- see \fBinfo\fR just below.)
 .TP
-.B info \fB\-r\fR \fIFILE\fR [\fB\-z\fR \fIVALUE\fR]... [\fB\-\-max\-conversations\fR \fIN\fR] [\fB\-\-max\-endpoints\fR \fIN\fR]
+.B info \fB\-r\fR \fIFILE\fR [\fB\-z\fR \fIVALUE\fR]... [\fB\-\-max\-conversations\fR \fIN\fR] [\fB\-\-max\-endpoints\fR \fIN\fR] [\fB\-\-max\-follow\-bytes\fR \fIN\fR]
 Print pcap file metadata and a protocol histogram, and, for each
 \fB\-z\fR \fIVALUE\fR given (repeatable; conduitscope's own equivalent of
-tshark's own \fB\-z\fR), one of the four IPv4/Ethernet Conversations and
+tshark's own \fB\-z\fR), one of: the four IPv4/Ethernet Conversations and
 Endpoints tables -- \fBconv,ip\fR, \fBendpoints,ip\fR, \fBconv,eth\fR,
 \fBendpoints,eth\fR (see \fBdocs/USER_GUIDE.md\fR's "Conversations and
-Endpoints tables" subsection). None of the four tables is shown, or even
-tracked, unless requested via \fB\-z\fR. \fB\-\-max\-conversations\fR/
-\fB\-\-max\-endpoints\fR cap those tables' own resource use, when
-requested (default 200,000 entries each). \fBinfo\fR is the only place
+Endpoints tables" subsection); \fBconv,tcp\fR, a TCP address:port\-pair
+Conversations table that also gives each session's 0\-based
+\fBtcp.stream\fR index; or \fBfollow,tcp,stream,\fIN\fR/\fBfollow,udp,
+stream,\fIN\fR, which reconstruct and hex+ASCII\-dump session \fIN\fR's raw
+byte stream, one direction at a time, no HTTP/TLS/HTTP\-2/QUIC\-aware
+reassembly (see \fBdocs/USER_GUIDE.md\fR's "TCP conversations and Follow
+Stream" subsection, and \fBdocs/DEVELOPMENT.md\fR's ROADMAP item 108). None
+of these is shown, or even tracked, unless requested via \fB\-z\fR.
+\fB\-\-max\-conversations\fR/\fB\-\-max\-endpoints\fR cap the IPv4/Ethernet/
+\fBconv,tcp\fR tables' own resource use, when requested (default 200,000
+entries each); \fB\-\-max\-follow\-bytes\fR caps the bytes buffered per
+direction for a \fBfollow,tcp\fR/\fBfollow,udp\fR stream (default 16 MiB).
+\fBinfo\fR's own typed subcommand word is not actually required to use
+\fB\-z\fR (ROADMAP item 109) \-\- see the SYNOPSIS note above. Once
+\fB\-z\fR is given at all, \fBinfo\fR prints \fBonly\fR the table(s)/
+stream(s) it actually asked for -- no file metadata, packet count, or
+protocol histogram; see \fBOPTIONS (info)\fR below for the full detail.
+\fBinfo\fR is the only place
 these aggregate summaries exist; offline files only -- see
 \fBLIVE CAPTURE\fR for the live equivalent.
 .TP
@@ -1569,29 +1606,63 @@ port\->service-name table. Must exist.
 Input capture file. Must exist; classic pcap or pcapng, auto-detected.
 .TP
 .BR \-z ", " \-\-stat " " \fIVALUE\fR
-Print an aggregate Conversations/Endpoints table (mirrors tshark's own
-\fB\-z\fR; repeatable \-\- each occurrence adds one table, and none are
-shown, or even tracked, unless requested here): \fBconv,ip\fR (IPv4
-address\-pair conversations), \fBendpoints,ip\fR (per\-address IPv4
-traffic), \fBconv,eth\fR/\fBendpoints,eth\fR (the same two views over raw
-Ethernet/MAC traffic \-\- also covers non\-IP OT L2 traffic with no IP
-layer at all, such as PROFINET RT/GOOSE/SV/EtherCAT/unrecognized
-EtherTypes). An unrecognized value is a CLI error (nonzero exit) reported
-before any packet is processed.
+Print an aggregate Conversations/Endpoints/Follow\-stream table (mirrors
+tshark's own \fB\-z\fR; repeatable \-\- each occurrence adds one
+table/stream, and none are shown, or even tracked, unless requested here):
+\fBconv,ip\fR (IPv4 address\-pair conversations), \fBendpoints,ip\fR
+(per\-address IPv4 traffic), \fBconv,eth\fR/\fBendpoints,eth\fR (the same
+two views over raw Ethernet/MAC traffic \-\- also covers non\-IP OT L2
+traffic with no IP layer at all, such as PROFINET RT/GOOSE/SV/EtherCAT/
+unrecognized EtherTypes), \fBconv,tcp\fR (TCP address:port\-pair
+conversations, each row also giving its 0\-based \fBtcp.stream\fR index
+\-\- the \fIN\fR a later \fBfollow,tcp,stream,\fIN\fR should ask for),
+\fBfollow,tcp,stream,\fIN\fR/\fBfollow,udp,stream,\fIN\fR (reconstruct and
+hex+ASCII\-dump the raw byte stream of TCP/UDP session \fIN\fR \-\- streams
+are numbered 0,1,2,... in the order each session's first packet appears in
+the capture, separately for TCP and UDP; each direction is shown
+separately; no HTTP/TLS/HTTP\-2/QUIC\-aware reassembly \-\- raw TCP/UDP
+bytes only, deliberately, see \fBdocs/DEVELOPMENT.md\fR's ROADMAP item
+108). An unrecognized value is a CLI error (nonzero exit) reported before
+any packet is processed.
+
+\fBinfo\fR's own typed subcommand word is not required to use \fB\-z\fR
+(ROADMAP item 109): \fBconduitscope \-r \fIFILE\fB \-z conv,tcp\fR (no
+subcommand) is exactly \fBconduitscope info \-r \fIFILE\fB \-z conv,tcp\fR,
+since no subcommand at all now defaults to \fBinfo\fR whenever \fB\-z\fR/
+\fB\-\-stat\fR appears anywhere on the line (\fBdecode\fR otherwise \-\-
+see SYNOPSIS above). Also ROADMAP item 109: once \fB\-z\fR is given at all
+(however the subcommand was reached), \fBinfo\fR prints \fBonly\fR the
+table(s)/stream(s) actually requested \-\- no file metadata line, no
+packet count, no protocol histogram, none of \fBinfo\fR's other usual
+output. This is unconditional: it applies the moment any \fB\-z\fR value
+is given, even one that turns out to match no traffic in this particular
+capture, in which case the entire output can be empty. Without \fB\-z\fR
+at all, \fBinfo\fR's classic behavior \-\- file metadata, packet count,
+protocol histogram \-\- is unchanged.
 .TP
 .BI \-\-max\-conversations " N"
-With \fB\-z conv,ip\fR/\fB\-z conv,eth\fR: cap the number of distinct
-address-pair conversations tracked for the Conversations table(s) (IPv4
-and Ethernet, each capped independently). Default: 0 (use the built-in
-default of 200,000). Past this, a packet between a new, not-yet-seen
-address pair is dropped from these tables only, and a warning line is
-printed. Has no effect on a table not requested via \fB\-z\fR.
+With \fB\-z conv,ip\fR/\fB\-z conv,eth\fR/\fB\-z conv,tcp\fR: cap the
+number of distinct address\-pair (or, for \fBconv,tcp\fR,
+address:port\-pair) conversations tracked for the Conversations table(s)
+(IPv4, Ethernet, and TCP, each capped independently). Default: 0 (use the
+built-in default of 200,000). Past this, a packet between a new,
+not-yet-seen address pair is dropped from these tables only, and a warning
+line is printed. Has no effect on a table not requested via \fB\-z\fR.
 .TP
 .BI \-\-max\-endpoints " N"
 With \fB\-z endpoints,ip\fR/\fB\-z endpoints,eth\fR: cap the number of
 distinct addresses tracked for the Endpoints table(s) (IPv4 and Ethernet,
 each capped independently). Default: 0 (use the built-in default of
 200,000). Has no effect on a table not requested via \fB\-z\fR.
+.TP
+.BI \-\-max\-follow\-bytes " N"
+With \fB\-z follow,tcp,stream,\fIN\fB\fR/\fB\-z follow,udp,stream,\fIN\fB\fR:
+cap the bytes buffered \fBper direction\fR for each requested stream
+(default 16 MiB, the same default as the general TCP reassembly cap used
+elsewhere in this tool). Default: 0 (use the built-in default). Past this,
+that direction's own stream is truncated \-\- not the whole capture's read,
+every other \fB\-z\fR/\fBinfo\fR counter is unaffected \-\- and a warning
+line is printed. Has no effect on a stream not requested via \fB\-z\fR.
 .SH OPTIONS (policy validate)
 .TP
 .BR \-r ", " \-\-read " " \fIFILE\fR

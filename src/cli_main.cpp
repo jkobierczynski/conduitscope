@@ -1500,7 +1500,15 @@ int run_info(const std::string& input, std::ostream& out, const std::vector<std:
         DecodeOptions decode_opts;
         decode_opts.capture_transport_payload = !follow_requests.empty();
         Decoder decoder(decode_opts);
-        StatsWriter stats_writer(tables, max_conversations, max_endpoints);
+        // ROADMAP item 109 -- Jurgen's own explicit request: "If the -z option is used, no output
+        // is expected except of the -z option output." stat_output_only mirrors exactly what
+        // gated `info`'s own pre-item-109 default behavior (stat_values empty means classic `info`
+        // -- file metadata, packet count, protocol histogram, no -z tables at all) -- true the
+        // moment the caller passed at least one `-z` value, whether `info` was typed explicitly or
+        // (see inject_default_subcommand, above main()) selected automatically because `-z`
+        // appeared with no subcommand at all.
+        const bool stat_output_only = !stat_values.empty();
+        StatsWriter stats_writer(tables, max_conversations, max_endpoints, stat_output_only);
         FollowStreamWriter follow_writer(follow_requests, max_follow_bytes);
 
         PcapPacket pkt;
@@ -1512,12 +1520,15 @@ int run_info(const std::string& input, std::ostream& out, const std::vector<std:
             if (!follow_requests.empty()) follow_writer.write_packet(decoded);
         }
 
-        const auto& info = reader.info();
-        out << "file:           " << input << "\n";
-        out << "pcap version:   " << info.version_major << "." << info.version_minor << "\n";
-        out << "link type:      " << link_type_name(info.linktype) << "\n";
-        out << "snaplen:        " << info.snaplen << " bytes\n";
-        out << "timestamps:     " << (info.nanosecond_ts ? "nanosecond" : "microsecond") << " resolution\n";
+        if (!stat_output_only) {
+            const auto& info = reader.info();
+            out << "file:           " << input << "\n";
+            out << "pcap version:   " << info.version_major << "." << info.version_minor << "\n";
+            out << "link type:      " << link_type_name(info.linktype) << "\n";
+            out << "snaplen:        " << info.snaplen << " bytes\n";
+            out << "timestamps:     " << (info.nanosecond_ts ? "nanosecond" : "microsecond")
+                << " resolution\n";
+        }
         stats_writer.print_summary(out);
         if (!follow_requests.empty()) follow_writer.print_summary(out);
     } catch (const ParseError& e) {
@@ -2433,7 +2444,16 @@ int run_merge_inventory(const std::vector<std::string>& inputs, const std::strin
 // confirmed by comparing both call sites -- so `--version` already IS "a double-dashed flag that
 // does what the `version` subcommand does," just via CLI11's own built-in mechanism (immediate
 // exit, no require_subcommand(1) involved). Nothing to rewrite there.
-void rewrite_subcommand_alias(int argc, char** argv) {
+//
+// Return value (ROADMAP item 109, added alongside inject_default_subcommand just below): -1 when
+// argv already names a subcommand by the time this returns -- either a bare word that was already
+// there, or a --decode/--info/... alias flag this same call just resolved and rotated into place
+// -- meaning the caller has nothing more to do. Otherwise, the scan reached the end of argv
+// without ever finding one, and the return value is the candidate_start position a subcommand
+// word belongs at (argc itself if the entire line was nothing but the leading run of global
+// flags, or a bare invocation with no arguments at all) -- the caller passes this straight to
+// inject_default_subcommand.
+int rewrite_subcommand_alias(int argc, char** argv) {
     static const std::map<std::string, std::string> kAliases = {
         {"--decode", "decode"},     {"--info", "info"},         {"--interfaces", "interfaces"},
         {"--policy", "policy"},     {"--inventory", "inventory"}, {"--detect", "detect"},
@@ -2462,7 +2482,7 @@ void rewrite_subcommand_alias(int argc, char** argv) {
             candidate_start = i;
         }
         if (kBareSubcommands.count(token) != 0) {
-            return;  // already the classic form from here on -- nothing to rewrite.
+            return -1;  // already the classic form from here on -- nothing to rewrite.
         }
         auto it = kAliases.find(token);
         if (it == kAliases.end()) {
@@ -2478,8 +2498,52 @@ void rewrite_subcommand_alias(int argc, char** argv) {
         for (int j = i; j > candidate_start; --j) {
             std::swap(argv[j], argv[j - 1]);
         }
-        return;
+        return -1;
     }
+    return candidate_start == -1 ? argc : candidate_start;
+}
+
+// ROADMAP item 109 -- Jurgen's own direct request: "-z option can be done independent from the
+// --info subcommand", and "(unless -z option is used) when no subcommand have been given the
+// decode is the default subcommand used." Called from main() only when rewrite_subcommand_alias
+// (run immediately before this, same call site) returned non-negative -- i.e. argv has no
+// subcommand word or alias flag anywhere on it at all, classic or otherwise.
+//
+// tshark itself needs no subcommand to just read a capture and print it, or to run a `-z` stats
+// table -- conduitscope's own subcommand structure has no equivalent "just read it" default, so
+// today both require explicitly typing `decode`/`info` first. This closes that gap: no
+// subcommand at all now defaults to `decode` (tshark's own "just read and print" convention),
+// UNLESS a `-z`/`--stat` token appears anywhere on the line -- `-z` is otherwise only ever
+// meaningful under `info` (it isn't a decode option), so its mere presence is itself now enough
+// to select `info` instead, with no subcommand word required -- exactly what makes `-z`
+// "independent from the --info subcommand" in the first place, rather than teaching `decode` a
+// second, parallel stats-output mode of its own.
+//
+// Unlike rewrite_subcommand_alias (which only ever overwrites+rotates an EXISTING token into
+// place, since every alias spelling it resolves is already present somewhere on the line), there
+// is no existing token to relabel here -- the default subcommand word is genuinely new, so this
+// builds a brand new argv rather than mutating the original in place: `storage` owns the one new
+// string ("decode" or "info"), and `new_argv` is the full replacement pointer array (every other
+// entry just aliases the original argv's own storage, which is fine -- CLI11 only reads through
+// these pointers once, during the CLI11_PARSE call immediately after, never past it). Both must
+// stay alive across that call, so the caller declares them in main()'s own scope, not this
+// function's.
+void inject_default_subcommand(int argc, char** argv, int candidate_start,
+                                std::vector<std::string>& storage, std::vector<char*>& new_argv) {
+    bool has_stat_flag = false;
+    for (int i = candidate_start; i < argc; ++i) {
+        if (std::string(argv[i]) == "-z" || std::string(argv[i]) == "--stat") {
+            has_stat_flag = true;
+            break;
+        }
+    }
+
+    storage.emplace_back(has_stat_flag ? "info" : "decode");
+    new_argv.reserve(static_cast<size_t>(argc) + 1);
+    for (int i = 0; i < candidate_start; ++i) new_argv.push_back(argv[i]);
+    new_argv.push_back(storage.back().data());  // C++17: std::string::data() is mutable here, but
+                                                 // CLI11 only ever reads through this pointer.
+    for (int i = candidate_start; i < argc; ++i) new_argv.push_back(argv[i]);
 }
 
 }  // namespace
@@ -2497,7 +2561,10 @@ int main(int argc, char** argv) {
     app.footer(
         "Run 'conduitscope <command> --help' for command-specific options, or see docs/MANUAL.md\n"
         "in the source tree for the full reference including output-format examples and the\n"
-        "current Roadmap.");
+        "current Roadmap.\n\n"
+        "COMMAND may be omitted: it then defaults to 'decode', or to 'info' if -z/--stat appears\n"
+        "anywhere on the line (ROADMAP item 109) -- e.g. 'conduitscope -r FILE' is 'decode -r FILE',\n"
+        "and 'conduitscope -r FILE -z conv,tcp' is 'info -r FILE -z conv,tcp'.");
 
     bool quiet = false;
     bool no_color = false;
@@ -3046,7 +3113,10 @@ int main(int argc, char** argv) {
 
     // --- info -------------------------------------------------------------
     auto* info_cmd = app.add_subcommand(
-        "info", "Print pcap file metadata and a protocol histogram, without full per-packet output");
+        "info",
+        "Print pcap file metadata and a protocol histogram, without full per-packet output. "
+        "Typing 'info' isn't actually required to use this subcommand's own -z/--stat -- see "
+        "-z's own help text below, and docs/DEVELOPMENT.md's ROADMAP item 109");
     std::string info_input;
     info_cmd->add_option("-r,--read", info_input, "Input capture file (classic pcap or pcapng, auto-detected)")
         ->required()
@@ -3069,7 +3139,13 @@ int main(int argc, char** argv) {
             "tshark's own tcp.stream/udp.stream convention; each direction is shown separately, "
             "same ordering tshark's own Follow Stream uses, no HTTP/TLS/HTTP-2/QUIC-aware "
             "reassembly -- raw TCP/UDP bytes only, deliberately, see docs/DEVELOPMENT.md's ROADMAP "
-            "item 108)")
+            "item 108). ROADMAP item 109: -z doesn't need 'info' typed at all -- 'conduitscope -r "
+            "FILE -z conv,tcp' (no subcommand) works exactly like 'conduitscope info -r FILE -z "
+            "conv,tcp', since no subcommand at all now defaults to 'info' whenever -z/--stat "
+            "appears anywhere on the line (decode otherwise). Also item 109: once -z is given at "
+            "all (however the subcommand was reached), 'info' prints ONLY the table(s)/stream(s) "
+            "actually requested here -- no file metadata, no packet count, no protocol histogram, "
+            "none of info's other usual output")
         ->check(validate_stat_value);
     size_t info_max_conversations = 0, info_max_endpoints = 0;
     add_conversation_stats_options(info_cmd, info_max_conversations, info_max_endpoints);
@@ -3741,9 +3817,27 @@ int main(int argc, char** argv) {
     // every subcommand above is also selectable via a double-dashed flag of its own name -- see
     // rewrite_subcommand_alias's own comment for why this is a pre-parse argv rewrite rather than
     // a CLI11 option.
-    rewrite_subcommand_alias(argc, argv);
+    //
+    // ROADMAP item 109: when that leaves argv with no subcommand at all (rewrite_subcommand_alias
+    // returns non-negative rather than -1), inject_default_subcommand picks `decode` or `info`
+    // (see its own comment) and builds a replacement argv with that word inserted -- owned by
+    // default_subcommand_storage/default_subcommand_argv, which must outlive the CLI11_PARSE call
+    // just below, hence declared here rather than inside either function. parse_argc/parse_argv
+    // point at the replacement only when one was actually built; otherwise they're just the
+    // original argc/argv, unchanged, exactly as before item 109 existed.
+    int subcommand_candidate_start = rewrite_subcommand_alias(argc, argv);
+    std::vector<std::string> default_subcommand_storage;
+    std::vector<char*> default_subcommand_argv;
+    int parse_argc = argc;
+    char** parse_argv = argv;
+    if (subcommand_candidate_start >= 0) {
+        inject_default_subcommand(argc, argv, subcommand_candidate_start, default_subcommand_storage,
+                                   default_subcommand_argv);
+        parse_argc = static_cast<int>(default_subcommand_argv.size());
+        parse_argv = default_subcommand_argv.data();
+    }
 
-    CLI11_PARSE(app, argc, argv);
+    CLI11_PARSE(app, parse_argc, parse_argv);
 
     // -r/-i are mutually exclusive (enforced above via ->excludes()) but neither is individually
     // ->required(), since exactly which one is required depends on the other -- CLI11 has no

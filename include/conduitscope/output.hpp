@@ -315,8 +315,20 @@ public:
     // existing call site that builds a StatsWriter with no arguments keeps compiling unchanged and
     // gets a writer that tracks none of the four tables, with the default caps ready for whenever
     // one is requested.
+    // stat_output_only: ROADMAP item 109 -- Jurgen's own explicit request, "If the -z option is
+    // used, no output is expected except of the -z option output." False (the default) is `info`'s
+    // original behavior, unchanged: print_summary always prints the packet-count/protocols
+    // histogram and every populated protocol-specific section, with the four Conversations/
+    // Endpoints/`conv,tcp` tables (still individually gated by `tables` above) interleaved among
+    // them. True -- set by `info` only when at least one `-z` value was actually given, whether
+    // `info` was typed explicitly or (item 109) selected automatically because `-z` appeared with
+    // no subcommand at all -- makes print_summary skip everything EXCEPT those four tables: no
+    // packet count, no histogram, no per-protocol sections. write_packet's own accumulation is
+    // completely unaffected either way -- this only changes what print_summary chooses to render
+    // from what's already been counted.
     explicit StatsWriter(RequestedStatsTables tables = RequestedStatsTables{},
-                          size_t max_conversations = 0, size_t max_endpoints = 0);
+                          size_t max_conversations = 0, size_t max_endpoints = 0,
+                          bool stat_output_only = false);
     void write_packet(const DecodedPacket& packet) override;
     void print_summary(std::ostream& out) const;
 
@@ -392,6 +404,7 @@ private:
     RequestedStatsTables tables_;  // which of the four tables write_packet actually accumulates
     size_t max_conversations_;  // resolved (never 0) in the constructor -- see output.cpp
     size_t max_endpoints_;
+    bool stat_output_only_;  // ROADMAP item 109 -- see the constructor's own comment above
 
     // Populated from DecodedPacket::src_ip/dst_ip whenever has_ip -- see write_packet. Every IP
     // fragment (buffering, abandoned, or the one that completes reassembly) already has has_ip and

@@ -31,7 +31,7 @@ conduitscope -- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, IEC 61850
 ## SYNOPSIS
 
 ```
-conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] <command> [command options]
+conduitscope [-q|--quiet] [--no-color|--color] [--log-file FILE] [--version] [-h|--help] [<command>] [command options]
 
 conduitscope decode (-r FILE | -i INTERFACE) [-o FILE] [-T text|json|csv|fields] [-e FIELD]... [--protocol NAME]
                      [--modbus-port PORT]... [--dnp3-port PORT]... [--s7comm-port PORT]... [--iec104-port PORT]...
@@ -91,8 +91,35 @@ to parse as the ordinary option it usually is, so
 `conduitscope --policy validate --policy zones.yaml ...` behaves identically
 to `conduitscope policy validate --policy zones.yaml ...`, and
 `conduitscope -r file.pcap --policy validate` (with `--policy` not leading)
-is simply an incomplete command line, the same "a subcommand is required"
-error as typing no subcommand at all.
+is simply an incomplete command line -- with no subcommand word anywhere on
+it either, it falls to the no-subcommand default described next, which for
+a line with no `-z`/`--stat` on it is `decode`, so this ends up equivalent
+to `conduitscope decode -r file.pcap --policy validate` (and fails there,
+since `decode` has no `--policy` option of its own).
+
+`<command>` itself can be omitted entirely (ROADMAP item 109) --
+conduitscope then behaves as if you'd typed `decode`, tshark's own "just
+read a capture and print it, no subcommand needed" convention:
+`conduitscope -r file.pcap` is exactly `conduitscope decode -r file.pcap`,
+and `conduitscope -i eth0` is exactly `conduitscope decode -i eth0`. The one
+exception is `-z`/`--stat` (`info`'s own table/stream-selection flag,
+see `info` below): if it appears anywhere on the line, the default becomes
+`info` instead, since `-z` isn't meaningful under `decode` at
+all -- `conduitscope -r file.pcap -z conv,tcp` is exactly
+`conduitscope info -r file.pcap -z conv,tcp`. This is what makes `-z` usable
+without ever typing `info`, not a separate mechanism from it. A leading
+global flag (`-q`, `--no-color`, etc.) is still allowed to come first, the
+same as it always could; it's skipped over when deciding which default
+applies, exactly as it's skipped when resolving a `--decode`/`--info`/...
+alias flag above. If `<command>` is left off AND no arguments follow it at
+all, the result is whatever `decode` itself reports for being given neither
+`-r` nor `-i` (see `decode` below) -- there's nothing `info`-specific about
+a truly bare `conduitscope` invocation, since there's no `-z` on the line
+to trigger it.
+
+Once `-z`/`--stat` is given at all -- whether `info` was reached this way
+or typed explicitly -- `info`'s own output changes too: see "TCP
+conversations and Follow Stream" below for what, specifically.
 
 ## DESCRIPTION
 
@@ -438,6 +465,11 @@ conduitscope decode -r cap.pcap -Y bacnet
 conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth|conv,tcp|follow,tcp,stream,N|follow,udp,stream,N]... [options]
 ```
 
+Typing `info` isn't actually required to use `-z`/`--stat` -- see the
+no-subcommand-default note in SYNOPSIS above (ROADMAP item 109):
+`conduitscope -r FILE -z conv,tcp` is exactly `conduitscope info -r FILE
+-z conv,tcp`.
+
 | Option | Default | Description |
 |---|---|---|
 | `-r, --read FILE` | *(required)* | Input capture file. Classic pcap or pcapng, auto-detected. |
@@ -447,12 +479,26 @@ conduitscope info -r FILE [-z conv,ip|endpoints,ip|conv,eth|endpoints,eth|conv,t
 | `--max-follow-bytes N` | `0` (leave it at its own default of 16 MiB) | Cap the bytes buffered *per direction* for each `follow,tcp,stream,N`/`follow,udp,stream,N` table -- see "TCP conversations and Follow Stream" below. |
 
 Prints the pcap format version, link type, snaplen, timestamp resolution, and
-then a protocol/function-code histogram and per-protocol breakdowns -- this
-part is always shown, unconditionally. Useful as a first look at an
-unfamiliar capture before deciding whether/how to filter it with `decode`.
-`info` currently only works against offline files; there's no live equivalent
-(a live capture never ends on its own the way a file does, so "metadata about
-the whole thing" doesn't have a natural moment to print).
+then a protocol/function-code histogram and per-protocol breakdowns. Useful
+as a first look at an unfamiliar capture before deciding whether/how to
+filter it with `decode`. `info` currently only works against offline files;
+there's no live equivalent (a live capture never ends on its own the way a
+file does, so "metadata about the whole thing" doesn't have a natural moment
+to print).
+
+This metadata/histogram output is shown unconditionally *only when `-z`/
+`--stat` isn't given at all* -- the classic, pre-ROADMAP-item-109 `info`
+behavior. The moment at least one `-z` value is given (however `info` was
+reached -- typed explicitly, via `--info`, or selected automatically because
+`-z` appeared with no subcommand at all), `info` prints *only* the
+table(s)/stream(s) that `-z` actually asked for: no file metadata line, no
+packet count, no protocol histogram, none of the per-protocol breakdowns
+below. This is Jurgen's own explicit design for `-z`: it behaves as its own
+self-contained report, the same way `tshark -z ... -r FILE` doesn't also
+print an unrelated capture summary alongside the stats table it was asked
+for. If none of the requested tables end up with any matching traffic, the
+entire output can be empty -- that's still correct, not a bug: there simply
+was nothing for the requested `-z` value(s) to report.
 
 `info` is also the only place these aggregate summaries exist any more --
 `decode` no longer has a `--stats` mode of its own (ROADMAP item 105); it

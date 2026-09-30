@@ -18050,3 +18050,112 @@ add_test(NAME baseline_check_dash_dash_read_matches_positional_form
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' && \
     '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && \
     diff <('$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# ---------------------------------------------------------------------------------------------
+# No-subcommand default (ROADMAP item 109) -- Jurgen's own direct request: `-z` usable without
+# ever typing `info`, and no subcommand at all now defaults to `decode` UNLESS `-z`/`--stat`
+# appears anywhere on the line, in which case it defaults to `info` instead. See
+# inject_default_subcommand's own comment (cli_main.cpp) for the full design; this section proves
+# it end to end, at the real-binary argv level, the same `diff <(...) <(...)` "byte-identical
+# output" idiom the item 105 alias-flag section above already established for an identical kind of
+# pre-parse argv rewrite.
+
+# No subcommand + no -z: identical output to the classic `decode` form.
+add_test(NAME no_subcommand_defaults_to_decode
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# No subcommand + -z: identical output to explicit `info -z ...` (which item 109 also changed --
+# see the stat_output_only tests below -- so this is comparing two invocations of the NEW
+# behavior, not the old one).
+add_test(NAME no_subcommand_with_stat_flag_defaults_to_info
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z conv,tcp) <('$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z conv,tcp)")
+
+# --stat (long form of -z) triggers the same default as -z itself.
+add_test(NAME no_subcommand_with_long_form_stat_flag_defaults_to_info
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' --stat conv,tcp) <('$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z conv,tcp)")
+
+# A leading global flag (-q) before -z is still correctly detected -- the default-subcommand scan
+# must skip past it the same way rewrite_subcommand_alias's own candidate_start scan does (kept in
+# sync with it, see inject_default_subcommand's own comment) rather than mistaking -q's own
+# position for where -z would have to be.
+add_test(NAME no_subcommand_global_flag_before_stat_flag_still_defaults_to_info
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' -q --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z conv,tcp) <('$<TARGET_FILE:conduitscope>' -q info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z conv,tcp)")
+
+# follow,tcp,stream,<N> works the same way with no subcommand typed, not just conv,tcp.
+add_test(NAME no_subcommand_follow_stream_matches_explicit_info
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z follow,tcp,stream,0) <('$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z follow,tcp,stream,0)")
+
+# A bare invocation with no arguments at all still fails cleanly (exactly the same required-
+# -r/-i error `decode` itself would give), rather than CLI11's old, less specific "a subcommand is
+# required" message -- confirms the injected default participates in decode's own existing
+# argument validation, not some separate code path.
+add_test(NAME bare_invocation_reports_decode_missing_source_error
+  COMMAND conduitscope)
+set_tests_properties(bare_invocation_reports_decode_missing_source_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "'decode' needs exactly one of -r/--read.*or -i/--interface")
+
+# --decode/--info alias flags (already resolved to a bare subcommand word by
+# rewrite_subcommand_alias itself, ROADMAP item 105) are unaffected by item 109's own new
+# default-injection step -- it never runs at all once a subcommand is already present. `--info`
+# alone (no explicit -z) still shows the classic full metadata+histogram output, same as typing
+# `info` -- confirms `-z`'s presence, not the word `info` itself, is what selects the new
+# stat_output_only behavior.
+add_test(NAME info_alias_flag_without_stat_flag_shows_classic_output
+  COMMAND conduitscope --info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(info_alias_flag_without_stat_flag_shows_classic_output PROPERTIES
+  PASS_REGULAR_EXPRESSION "^file: +.*sample_modbus.pcap(.*\n)*.*packets: +3")
+
+# ---------------------------------------------------------------------------------------------
+# `-z`-only output (ROADMAP item 109) -- Jurgen's own direct request: "If the -z option is used,
+# no output is expected except of the -z option output." Exercised through the classic `info -z
+# ...` form (the no-subcommand form above already proved byte-identical to this), so these are the
+# real regression guards for StatsWriter::stat_output_only_ itself (output.hpp/.cpp).
+
+# None of `info`'s own always-on metadata/histogram lines appear once any -z value was given --
+# this fixture has both IP and protocol-histogram content that WOULD show up here (see the
+# existing info_ipv4_conversations_both_directions_counted-style tests elsewhere in this file,
+# which use the very same fixture without -z), so their total absence is a real behavioral check.
+add_test(NAME info_stat_flag_suppresses_file_metadata_and_histogram
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z conv,ip)
+set_tests_properties(info_stat_flag_suppresses_file_metadata_and_histogram PROPERTIES
+  PASS_REGULAR_EXPRESSION "^ipv4 conversations"
+  FAIL_REGULAR_EXPRESSION "^file:|^pcap version:|^link type:|^snaplen:|^timestamps:|^packets:|^protocols:|modbus function codes")
+
+# The pre-item-109 behavior is unchanged when `-z` is never given at all -- `info` alone still
+# shows the classic file metadata + packet count + protocol histogram, exactly as
+# info_stat_flag_suppresses_file_metadata_and_histogram's own fixture would if -z had been given.
+add_test(NAME info_without_stat_flag_still_shows_classic_metadata_and_histogram
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(info_without_stat_flag_still_shows_classic_metadata_and_histogram PROPERTIES
+  PASS_REGULAR_EXPRESSION "^file:(.*\n)*.*packets:(.*\n)*.*protocols:")
+
+# A -z value that happens to match nothing in this particular capture (no UDP traffic in
+# sample_modbus.pcap, so follow,udp,stream,0 finds no such stream) still suppresses the classic
+# metadata/histogram output -- stat_output_only is keyed on whether -z was GIVEN, never on whether
+# it happened to produce a non-empty table.
+add_test(NAME info_stat_flag_suppresses_metadata_even_when_table_is_empty
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z follow,udp,stream,0)
+set_tests_properties(info_stat_flag_suppresses_metadata_even_when_table_is_empty PROPERTIES
+  PASS_REGULAR_EXPRESSION "^follow udp stream 0: no such stream"
+  FAIL_REGULAR_EXPRESSION "^file:|^packets:|^protocols:")
+
+# `-z conv,tcp` plus `follow,tcp,stream,<N>` together -- both tables print, and still nothing else.
+add_test(NAME info_stat_flag_suppresses_metadata_with_multiple_z_values
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap" -z conv,tcp -z follow,tcp,stream,0)
+set_tests_properties(info_stat_flag_suppresses_metadata_with_multiple_z_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "^tcp conversations(.*\n)*.*follow tcp stream 0:"
+  FAIL_REGULAR_EXPRESSION "^file:|^packets:|^protocols:")
+
+# The no-subcommand default and -z's own "works without typing info" behavior are both
+# discoverable from --help, not just from source -- same "flags are discoverable from --help"
+# regression guard this file already applies to every other CLI ergonomics feature (items 105/106/
+#108 above).
+add_test(NAME no_subcommand_default_documented_in_top_level_help
+  COMMAND conduitscope --help)
+set_tests_properties(no_subcommand_default_documented_in_top_level_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "COMMAND may be omitted.*defaults to 'decode'.*'info' if -z")
+
+add_test(NAME stat_flag_no_info_needed_documented_in_info_help
+  COMMAND conduitscope info --help)
+set_tests_properties(stat_flag_no_info_needed_documented_in_info_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "-z doesn't need 'info' typed at all")

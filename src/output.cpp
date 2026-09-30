@@ -6038,10 +6038,12 @@ std::string format_endpoint_display(const std::string& ip, uint16_t port) {
 }
 }  // namespace
 
-StatsWriter::StatsWriter(RequestedStatsTables tables, size_t max_conversations, size_t max_endpoints)
+StatsWriter::StatsWriter(RequestedStatsTables tables, size_t max_conversations, size_t max_endpoints,
+                          bool stat_output_only)
     : tables_(tables),
       max_conversations_(max_conversations != 0 ? max_conversations : kDefaultMaxConversationEntries),
-      max_endpoints_(max_endpoints != 0 ? max_endpoints : kDefaultMaxEndpointEntries) {}
+      max_endpoints_(max_endpoints != 0 ? max_endpoints : kDefaultMaxEndpointEntries),
+      stat_output_only_(stat_output_only) {}
 
 // Shared by ip_conversations_/eth_conversations_/tcp_conversations_ -- see output.hpp's own
 // comment on this method and on AddrConversationStats for the A/B, byte-counting, and
@@ -6733,23 +6735,31 @@ void StatsWriter::print_endpoints(std::ostream& out, const char* label,
 }
 
 void StatsWriter::print_summary(std::ostream& out) const {
-    out << "packets:        " << total_packets_ << "\n";
-    if (has_ts_) {
-        out << "time span:      " << std::fixed << std::setprecision(3) << (last_ts_ - first_ts_)
-            << " s\n";
-    }
-    out << "protocols:\n";
-    for (const auto& [name, count] : protocol_counts_) {
-        out << "  " << std::left << std::setw(16) << name << count << "\n";
-    }
-    // Cross-protocol breakdown, printed right after the protocols histogram it complements rather
-    // than down among the protocol-specific sections below -- see direction_source_counts_'s own
-    // comment (output.hpp). Never populated (so never printed) for `info`, which never runs
-    // FlowDirectionTracker.
-    if (!direction_source_counts_.empty()) {
-        out << "direction sources (tcp flows only):\n";
-        for (const auto& [name, count] : direction_source_counts_) {
+    // ROADMAP item 109 -- Jurgen's own explicit request: when `-z` was actually used
+    // (stat_output_only_, set only by `info`'s own caller -- see this field's own comment,
+    // output.hpp), nothing below this block runs: no packet count, no protocols histogram, no
+    // direction-source breakdown, and none of the per-protocol sections further down this
+    // function. write_packet already accumulated all of it regardless (this flag only changes
+    // what gets PRINTED), so skipping it here costs nothing and loses no state for a later call.
+    if (!stat_output_only_) {
+        out << "packets:        " << total_packets_ << "\n";
+        if (has_ts_) {
+            out << "time span:      " << std::fixed << std::setprecision(3) << (last_ts_ - first_ts_)
+                << " s\n";
+        }
+        out << "protocols:\n";
+        for (const auto& [name, count] : protocol_counts_) {
             out << "  " << std::left << std::setw(16) << name << count << "\n";
+        }
+        // Cross-protocol breakdown, printed right after the protocols histogram it complements
+        // rather than down among the protocol-specific sections below -- see
+        // direction_source_counts_'s own comment (output.hpp). Never populated (so never printed)
+        // for `info`, which never runs FlowDirectionTracker.
+        if (!direction_source_counts_.empty()) {
+            out << "direction sources (tcp flows only):\n";
+            for (const auto& [name, count] : direction_source_counts_) {
+                out << "  " << std::left << std::setw(16) << name << count << "\n";
+            }
         }
     }
     // Conversations/Endpoints tables (tshark's own `-z conv,ip`/`-z endpoints,ip` as design
@@ -6757,7 +6767,10 @@ void StatsWriter::print_summary(std::ostream& out) const {
     // print_endpoints' own comments for the sort order and truncation-warning conventions. IPv4
     // first, then the raw-Ethernet/MAC tables, which is what actually covers non-IP OT L2 traffic
     // (PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK/unrecognized EtherTypes) an IP-only table can't see
-    // at all.
+    // at all. Printed unconditionally (not gated on stat_output_only_) -- each call is already a
+    // no-op (prints nothing, not even a header) for a table nothing requested, tables_'s own
+    // per-table gate (write_packet) -- so this is correct, and identical to the pre-item-109
+    // behavior, whether or not the rest of this function is about to be skipped.
     print_conversations(out, "ipv4 conversations", ip_conversations_, ip_conversation_order_,
                          ip_conversations_truncated_, max_conversations_);
     print_endpoints(out, "ipv4 endpoints", ip_endpoints_, ip_endpoint_order_, ip_endpoints_truncated_,
@@ -6770,6 +6783,11 @@ void StatsWriter::print_summary(std::ostream& out) const {
     // "no table requested prints nothing, not even a header" print_conversations convention.
     print_conversations(out, "tcp conversations", tcp_conversations_, tcp_conversation_order_,
                          tcp_conversations_truncated_, max_conversations_);
+    // ROADMAP item 109 -- everything from here down is `info`'s own always-on, per-protocol
+    // breakdown (modbus function codes, twincat/melsec/fins/kerberos/..., down to the Fox hello-
+    // exchange finding at the very end of this function) -- none of it is `-z` output, so none of
+    // it prints when stat_output_only_ asked for `-z`-only output.
+    if (stat_output_only_) return;
     if (!modbus_function_counts_.empty()) {
         out << "modbus function codes:\n";
         for (const auto& [name, count] : modbus_function_counts_) {
