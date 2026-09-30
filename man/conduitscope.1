@@ -1595,9 +1595,10 @@ Past this, further new flows are not evaluated and the result is marked
 incomplete \-\- see \fBEXIT STATUS\fR's code 6.
 .TP
 .B \-\-max\-policy\-udp\-flows \fIN\fR
-Cap the number of distinct UDP flows (BACnet/IP, CIP I/O) \fBPolicyEngine\fR
-tracks per capture \-\- only populated once the policy names \fBbacnet\fR/
-\fBenip\fR/\fBany\fR on a CIDR- or hostname-zone conduit. Default: 100,000
+Cap the number of distinct UDP flows (BACnet/IP, CIP I/O, HART\-IP, FF\-HSE)
+\fBPolicyEngine\fR tracks per capture \-\- only populated once the policy
+names \fBbacnet\fR/\fBenip\fR/\fBhartip\fR/\fBffhse\fR/\fBany\fR on a CIDR-
+or hostname-zone conduit. Default: 100,000
 (0 = leave it at its own compiled default). Past this, further new flows
 are not evaluated and the result is marked incomplete.
 .TP
@@ -2664,13 +2665,12 @@ against the synthetic \fBtests/sample_canopen_j1939.pcap\fR fixture (see
 Ethernet frames and non-TCP
 IPv4 payloads (including UDP) are otherwise still just recognized and
 NAMED for a small OT-relevant set (ARP, LLDP, ICMP, and the rest) but not further decoded.
-\fBpolicy validate\fR can evaluate two of these UDP protocols against a
-conduit \-\- CIP I/O (EtherNet/IP's UDP/2222 implicit messaging) and
-BACnet/IP \-\- but only once a policy opts in, by naming \fBbacnet\fR,
-\fBenip\fR, or \fBany\fR in any conduit's \fBprotocols\fR; that single
-conduit turns UDP flow evaluation on for the entire policy, not just
-itself. HART-IP's own UDP traffic and FF-HSE's own UDP traffic have no
-such opt-in yet and are still never evaluated against any conduit. A
+\fBpolicy validate\fR can evaluate four of these UDP protocols against a
+conduit \-\- CIP I/O (EtherNet/IP's UDP/2222 implicit messaging), BACnet/IP,
+HART-IP, and FF-HSE \-\- but only once a policy opts in, by naming
+\fBbacnet\fR, \fBenip\fR, \fBhartip\fR, \fBffhse\fR, or \fBany\fR in any
+conduit's \fBprotocols\fR; that single conduit turns UDP flow evaluation on
+for the entire policy, not just itself. A
 zone can instead be declared as a set of
 hostnames (\fBhostnames:\fR), matched like an ordinary IPv4-CIDR zone but
 requiring both \fB\-\-resolve\fR and \fB\-\-hosts\fR (a policy that

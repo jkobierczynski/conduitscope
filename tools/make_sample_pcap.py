@@ -3670,6 +3670,48 @@ def build_policy_udp_bacnet_cip_io_sample():
     (TESTS_DIR / "sample_policy_udp_bacnet_cip_io.pcap").write_bytes(data)
 
 
+def build_policy_udp_hartip_ffhse_sample():
+    """Minimal fixture for policy validate's UDP/IP flow evaluation of HART-IP and FF-HSE
+    (finishing the "policy validate: support UDP flows" work -- see
+    docs/design/policy-engine-zoning.md's Phase 3, which shipped BACnet/IP + CIP I/O first and
+    deliberately left these two for later, and PolicyEngine::observe's own comment). Mirrors
+    build_policy_udp_bacnet_cip_io_sample's own shape exactly, same HMI_IP/PLC_IP zone pair, one
+    genuine request/response exchange per protocol so PolicyEngine::observe's content-based
+    direction logic (HartIpFrame::message_type / FfhseHeader::type) is exercised end to end rather
+    than falling back to the UDP-port-heuristic:
+
+      - HART-IP (UDP/5094): a Pass-Through Command 0 (Read Unique Identifier) request from HMI_IP
+        to PLC_IP (MessageType 0/Request -> source is client) and PLC_IP's response (MessageType
+        1/Response -> destination is client), same cmd0 body shape build_hartip_sample's own
+        packets 12/13 already use.
+      - FF-HSE (UDP/1090, ff-fms): an FMS Status request from HMI_IP to PLC_IP (Type 0/Request ->
+        source is client) and PLC_IP's response (Type 1/Response -> destination is client), same
+        minimal empty-request/small-response shape build_ffhse_sample's own packets 25/26 already
+        use."""
+    packets = []
+
+    # 1) & 2) HART-IP Pass-Through Command 0 request/response -- HMI (client) to PLC (server) and
+    #    back, decided by content (MessageType 0=Request/1=Response), not port (both packets use
+    #    UDP/5094 on both ends).
+    packets.append(hartip_udp_frame(hartip_message(0, 3, pass_through_body(2, 0, b""), txn=1),
+                                     src_ip=HMI_IP, dst_ip=PLC_IP, src_mac=HMI_MAC, dst_mac=PLC_MAC))
+    cmd0_basic = struct.pack("!BHBBBBBB", 0xFE, 0x1234, 5, 7, 1, 3, (12 << 3) | 2, 0x80) + bytes([0x00, 0x11, 0x22])
+    packets.append(hartip_udp_frame(hartip_message(1, 3, pass_through_body(6, 0, cmd0_basic, response_code=0), txn=1),
+                                     src_ip=PLC_IP, dst_ip=HMI_IP, src_mac=PLC_MAC, dst_mac=HMI_MAC))
+
+    # 3) & 4) FF-HSE FMS Status request/response -- HMI (client) to PLC (server) and back, decided
+    #    by content (Type 0=Request/1=Response), not port.
+    packets.append(ffhse_udp_frame(ffhse_pdu(FFHSE_FMS, FFHSE_REQ, 0, True), FFHSE_PORT_FMS, FFHSE_PORT_FMS,
+                                    HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+    packets.append(ffhse_udp_frame(ffhse_pdu(FFHSE_FMS, FFHSE_RSP, 0, True, fms_status_body(0x00, 0x00, 0)),
+                                    FFHSE_PORT_FMS, FFHSE_PORT_FMS, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_022_000 + i, i * 1000)
+    (TESTS_DIR / "sample_policy_udp_hartip_ffhse.pcap").write_bytes(data)
+
+
 def tpkt_frame(cotp_header: bytes, user_data: bytes = b"") -> bytes:
     """Wraps a COTP header in its length-indicator byte and the 4-byte TPKT
     header, then appends `user_data` (e.g. an S7comm payload) AFTER the
@@ -21392,6 +21434,7 @@ if __name__ == "__main__":
     build_enip_cip_io_sample()
     build_policy_functions_enip_sample()
     build_policy_udp_bacnet_cip_io_sample()
+    build_policy_udp_hartip_ffhse_sample()
     build_profinet_sample()
     build_goose_sample()
     build_sv_sample()

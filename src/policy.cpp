@@ -288,6 +288,8 @@ bool Policy::has_udp_eligible_conduit() const {
         if (c.kind == ZoneKind::Vlan) return false;
         return std::find(c.protocols.begin(), c.protocols.end(), "bacnet") != c.protocols.end() ||
                std::find(c.protocols.begin(), c.protocols.end(), "enip") != c.protocols.end() ||
+               std::find(c.protocols.begin(), c.protocols.end(), "hartip") != c.protocols.end() ||
+               std::find(c.protocols.begin(), c.protocols.end(), "ffhse") != c.protocols.end() ||
                std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
     });
 }

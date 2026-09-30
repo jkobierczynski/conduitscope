@@ -9843,6 +9843,36 @@ set_tests_properties(policy_udp_zone_unclassified_summarized PROPERTIES
   PASS_REGULAR_EXPRESSION "UDP UNCLASSIFIED TRAFFIC \\(2 flow\\(s\\), summarized into 2 distinct pattern\\(s\\) -- rerun without --summarize-unclassified, or with --format json, for the full per-flow listing\\):.*-- 1 flow\\(s\\), 2 packet\\(s\\) total.*-- 1 flow\\(s\\), 2 packet\\(s\\) total")
 
 # ---------------------------------------------------------------------------------------------
+# "policy validate: support UDP flows" finishing pass -- Phase 3 above shipped BACnet/IP + CIP I/O
+# first; this closes the two protocols it left for later, HART-IP's UDP form and FF-HSE's UDP
+# form, on the SAME policy-wide opt-in gate (Policy::has_udp_eligible_conduit()) and the same
+# CIDR/hostname-zone UdpFlowReport machinery -- just two more protocol names. Direction is decided
+# from each protocol's own request/response signal (HartIpFrame::message_type,
+# FfhseHeader::type), mirroring BACnet's own content-based precedent (CIP I/O has no such signal
+# and stays port-heuristic-only). See tests/sample_policy_udp_hartip_ffhse.pcap (one HART-IP
+# Pass-Through request/response exchange plus one FF-HSE FMS Status request/response exchange,
+# same HMI_IP<->PLC_IP pair) and tests/policies/udp_hartip_*.yaml.
+
+add_test(NAME policy_udp_hartip_ffhse_compliant_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_hartip_ffhse.pcap" --policy "${POLICY_DIR}/udp_hartip_ffhse_compliant.yaml")
+set_tests_properties(policy_udp_hartip_ffhse_compliant_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*UDP flows evaluated: 2 \\(2 allowed, 0 violation\\(s\\), 0 unclassified\\).*UDP ALLOWED \\(2\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:5094 \\(hart-ip\\).*matched conduit \"HMI reads PLC via HART-IP and FF-HSE\".*direction: content.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:1090 \\(ff-fms\\).*matched conduit \"HMI reads PLC via HART-IP and FF-HSE\".*direction: content")
+
+add_test(NAME policy_udp_hartip_ffhse_compliant_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_hartip_ffhse.pcap" --policy "${POLICY_DIR}/udp_hartip_ffhse_compliant.yaml" --format json)
+set_tests_properties(policy_udp_hartip_ffhse_compliant_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"hartip\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 5094,.*\"observed_functions\": \\[\"Request\", \"Response\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via HART-IP and FF-HSE\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"ffhse\",.*\"server_port\": 1090,.*\"observed_functions\": \\[\"FMS Status Req\", \"FMS Status Rsp\"\\],.*\"verdict\": \"allowed\",.*\"matched_conduit\": \"HMI reads PLC via HART-IP and FF-HSE\",.*\"direction_source\": \"content\"\n *\\}\n *\\],\n *\"multi_homed_assets\": \\[\n *\\],\n *\"jump_host_flows\": \\[\n *\\]\n\\}")
+
+# udp_hartip_only_violation.yaml names only "hartip" -- proves the gate is still policy-wide, not
+# per-protocol: FF-HSE is still evaluated (and violates, since no conduit here permits "ffhse")
+# purely because *some* conduit named a UDP-eligible protocol, exactly the same proof the
+# BACnet-only/CIP-I/O-violation test above already gives for that first protocol pair.
+add_test(NAME policy_udp_hartip_only_conduit_ffhse_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_hartip_ffhse.pcap" --policy "${POLICY_DIR}/udp_hartip_only_violation.yaml")
+set_tests_properties(policy_udp_hartip_only_conduit_ffhse_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(1 violation\\(s\\), 0 unclassified flow\\(s\\)\\).*UDP flows evaluated: 2 \\(1 allowed, 1 violation\\(s\\), 0 unclassified\\).*UDP VIOLATIONS \\(1\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:1090 \\(ff-fms\\).*a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits ffhse traffic on port 1090.*UDP ALLOWED \\(1\\):.*192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:5094 \\(hart-ip\\).*matched conduit \"HMI reads PLC via HART-IP only\"")
+
+# ---------------------------------------------------------------------------------------------
 # Resolver, wired into `policy validate`'s report too (write_policy_report_text/
 # write_policy_report_json in policy_engine.cpp) -- the same OUI/hostname/service-name
 # annotations exercised earlier (see this file's own "Resolver" section, above the resolver_*

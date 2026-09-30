@@ -1906,11 +1906,13 @@ void write_inventory_policy_yaml(std::ostream& out, const AssetInventoryReport& 
     }
 
     out << "#\n";
-    out << "# A conduit inferred from BACnet/IP or EtherNet/IP CIP I/O traffic (both UDP) parses "
-           "and validates\n";
-    out << "# fine here but cannot yet be exercised by `policy validate`, which only evaluates TCP "
-           "flows -- see\n";
-    out << "# docs/MANUAL.md's LIMITATIONS.\n";
+    out << "# A conduit inferred from BACnet/IP or EtherNet/IP CIP I/O traffic (both UDP) parses, "
+           "validates,\n";
+    out << "# and IS exercised by `policy validate` -- it evaluates UDP-based BACnet/IP, CIP I/O, "
+           "HART-IP, and\n";
+    out << "# FF-HSE flows too, classified by the same CIDR/hostname zones as TCP flows, once a "
+           "conduit names\n";
+    out << "# one of those protocols. See docs/USER_GUIDE.md's POLICY FILE FORMAT section.\n";
     out << "zones:\n";
     for (const auto& z : report.zones) {
         out << "  " << z.name << ":\n";

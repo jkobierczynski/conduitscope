@@ -657,9 +657,10 @@ void add_policy_engine_limit_options(CLI::App* cmd, size_t& max_tcp_flows, size_
         ->capture_default_str();
     cmd->add_option(
            "--max-policy-udp-flows", max_udp_flows,
-           "Cap the number of distinct UDP flows (BACnet/IP, CIP I/O) PolicyEngine tracks per "
-           "capture (default 100,000). 0 = leave it at its own default; past this, further new "
-           "flows observed in the capture are not evaluated and the result is marked incomplete")
+           "Cap the number of distinct UDP flows (BACnet/IP, CIP I/O, HART-IP, FF-HSE) PolicyEngine "
+           "tracks per capture (default 100,000). 0 = leave it at its own default; past this, "
+           "further new flows observed in the capture are not evaluated and the result is marked "
+           "incomplete")
         ->capture_default_str();
     cmd->add_option(
            "--max-policy-ethernet-flows", max_ethernet_flows,

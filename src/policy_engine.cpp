@@ -59,15 +59,23 @@ bool src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
     return src_port > dst_port;                 // neither/both known: lower port number is the server
 }
 
-// UDP counterpart to is_known_service_port/src_is_client_by_port above, for the two UDP-based IP
-// protocols PolicyEngine::observe's own UDP-flow branch can evaluate (BACnet/IP, CIP I/O) -- used
-// only as the direction fallback when no authoritative content-based answer is available (BACnet
-// with no decoded APDU yet, or CIP I/O, which has no content-based answer at all). Deliberately a
+// UDP counterpart to is_known_service_port/src_is_client_by_port above, for the four UDP-based IP
+// protocols PolicyEngine::observe's own UDP-flow branch can evaluate (BACnet/IP, CIP I/O, HART-IP,
+// FF-HSE) -- used only as the direction fallback when no authoritative content-based answer is
+// available (BACnet with no decoded APDU yet, CIP I/O which has no content-based answer at all,
+// HART-IP's own Publish message type, or an FF-HSE frame whose Type field isn't one of the three
+// this decoder names -- see PolicyEngine::observe's own comment for all four). Deliberately a
 // separate small function rather than widening is_known_service_port itself: that function's own
 // five ports are all TCP, and mixing a UDP port into the same "known service port" set an ordinary
 // TCP flow's own direction guess consults would be a correctness bug waiting to happen (a TCP flow
 // coincidentally using port 47808 or 2222 would suddenly be treated as a known OT service port).
-bool is_known_udp_service_port(uint16_t port) { return port == BACNET_UDP_PORT || port == ENIP_IO_UDP_PORT; }
+// FF-HSE's own four ports are all included, same "every registered port counts, the sub-protocol
+// is signaled in-band" posture decoder.cpp's own FF-HSE dispatch already uses.
+bool is_known_udp_service_port(uint16_t port) {
+    return port == BACNET_UDP_PORT || port == ENIP_IO_UDP_PORT || port == HARTIP_PORT ||
+           port == FFHSE_PORT_ANNUNC || port == FFHSE_PORT_FMS || port == FFHSE_PORT_SM ||
+           port == FFHSE_PORT_LAN;
+}
 
 bool udp_src_is_client_by_port(uint16_t src_port, uint16_t dst_port) {
     bool src_known = is_known_udp_service_port(src_port);
@@ -277,13 +285,14 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         return;
     }
 
-    if (dp.has_udp && any_udp_ip_eligible_conduit_ && (dp.protocol == "bacnet" || dp.protocol == "enip")) {
+    if (dp.has_udp && any_udp_ip_eligible_conduit_ &&
+        (dp.protocol == "bacnet" || dp.protocol == "enip" || dp.protocol == "hartip" || dp.protocol == "ffhse")) {
         // See this function's own doc comment (policy_engine.hpp) for why this branch only exists
-        // once the policy has opted in by naming "bacnet"/"enip"/"any" on a CIDR- or hostname-zone
-        // conduit -- backward compatibility for every policy file written before this feature
-        // existed. Keyed by the same canonical, order-independent session_key() a TCP flow uses (see
-        // UdpFlowState's own comment for why), prefixed with the protocol so a BACnet flow and a CIP
-        // I/O flow between coincidentally-overlapping endpoints never collide.
+        // once the policy has opted in by naming "bacnet"/"enip"/"hartip"/"ffhse"/"any" on a CIDR- or
+        // hostname-zone conduit -- backward compatibility for every policy file written before this
+        // feature existed. Keyed by the same canonical, order-independent session_key() a TCP flow
+        // uses (see UdpFlowState's own comment for why), prefixed with the protocol so flows of
+        // different UDP-based protocols between coincidentally-overlapping endpoints never collide.
         std::string key = dp.protocol + ":" + session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
 
         // Direction: BACnet decides authoritatively from its own decoded APDU type when one is
@@ -291,8 +300,17 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         // PDU type -- Simple-ACK/Complex-ACK/Segment-ACK/Error/Reject/Abort -- -> destination is
         // client), exactly mirroring AssetInventoryEngine's own BACnet direction logic
         // (asset_inventory.cpp) since both tools face the identical "no session, no handshake"
-        // problem for this protocol. CIP I/O has no request/response concept at all (cyclic
-        // producer/consumer traffic) -- always the UDP port-heuristic fallback.
+        // problem for this protocol. HART-IP decides the same way from its own MessageType
+        // (0=Request -> source is client; 1=Response/3=Error/15=NAK -- all replies to an earlier
+        // request -- -> destination is client; 2=Publish is a field-device-initiated unsolicited
+        // report with no preceding request to reply to, so it's treated the same as "no content
+        // signal yet" and falls through to the port heuristic below, same as an as-yet-undecided
+        // BACnet flow). FF-HSE decides the same way again from its own header Type field (0=Request
+        // -> source is client; 1=Response/2=Error -> destination is client; the 4th value the 2-bit
+        // field allows is never named by this decoder -- see ffhse.cpp's type_name -- and falls
+        // through to the port heuristic like HART-IP's own Publish case). CIP I/O has no
+        // request/response concept at all (cyclic producer/consumer traffic) -- always the UDP
+        // port-heuristic fallback.
         bool direction_known = false;
         bool src_is_client = false;
         if (dp.protocol == "bacnet" && dp.result) {
@@ -301,6 +319,24 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
                 direction_known = true;
                 src_is_client = bf.npdu.apdu.pdu_type_name == "Confirmed-Request" ||
                                  bf.npdu.apdu.pdu_type_name == "Unconfirmed-Request";
+            }
+        } else if (dp.protocol == "hartip" && dp.result) {
+            uint8_t mt = dp.result->as<HartIpResult>().first.message_type;
+            if (mt == 0) {
+                direction_known = true;
+                src_is_client = true;
+            } else if (mt == 1 || mt == 3 || mt == 15) {
+                direction_known = true;
+                src_is_client = false;
+            }
+        } else if (dp.protocol == "ffhse" && dp.result) {
+            uint8_t t = dp.result->as<FfhseResult>().first.header.type;
+            if (t == 0) {
+                direction_known = true;
+                src_is_client = true;
+            } else if (t == 1 || t == 2) {
+                direction_known = true;
+                src_is_client = false;
             }
         }
         if (!direction_known) {
@@ -328,9 +364,10 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             udp_flow_order_.push_back(key);
             it = udp_flows_.emplace(key, std::move(st)).first;
         } else if (direction_known && it->second.direction_source != DirectionSource::Content) {
-            // A later packet on this flow carried an authoritative BACnet APDU an earlier one
-            // didn't -- upgrade from the port-heuristic guess, mirroring FlowState's own SYN/SYN-ACK
-            // upgrade rule above at this coarser, no-handshake granularity.
+            // A later packet on this flow carried an authoritative content-based answer (a BACnet
+            // APDU, a HART-IP Request/Response/Error/NAK, or an FF-HSE Request/Response/Error) an
+            // earlier one didn't -- upgrade from the port-heuristic guess, mirroring FlowState's own
+            // SYN/SYN-ACK upgrade rule above at this coarser, no-handshake granularity.
             it->second.client_ip = src_is_client ? dp.src_ip : dp.dst_ip;
             it->second.server_ip = src_is_client ? dp.dst_ip : dp.src_ip;
             it->second.server_port = src_is_client ? dp.dst_port : dp.src_port;
@@ -350,6 +387,17 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             if (bf.has_npdu && bf.npdu.has_apdu && !bf.npdu.apdu.service_choice_name.empty()) {
                 st.functions.insert(bf.npdu.apdu.service_choice_name);
             }
+        } else if (dp.protocol == "hartip" && dp.result) {
+            // Same field TCP HART-IP flows already populate FlowState::functions from -- see this
+            // function's own TCP-flow block further down. Always set once a "hartip" packet decodes
+            // at all (see hartip.hpp), no separate guard needed beyond dp.result itself.
+            const std::string& mt = dp.result->as<HartIpResult>().first.message_type_name;
+            if (!mt.empty()) st.functions.insert(mt);
+        } else if (dp.protocol == "ffhse" && dp.result) {
+            // Same field TCP FF-HSE flows already populate FlowState::functions from -- see this
+            // function's own TCP-flow block further down. FfhseFrame::message_name is always set.
+            const std::string& name = dp.result->as<FfhseResult>().first.message_name;
+            if (!name.empty()) st.functions.insert(name);
         }
         // CIP I/O ("enip" with dp.has_udp) has no function/service-name concept at all -- st.functions
         // stays empty for it, same as any protocol with nothing to report here (see
@@ -1598,9 +1646,9 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
         out << "\n";
     }
 
-    // Only printed at all once the policy opts in by naming "bacnet"/"enip"/"any" on a CIDR- or
-    // hostname-zone conduit (see PolicyEngine::observe's own comment) -- a report from a policy that
-    // never does renders byte-for-byte identically to before this feature existed.
+    // Only printed at all once the policy opts in by naming "bacnet"/"enip"/"hartip"/"ffhse"/"any"
+    // on a CIDR- or hostname-zone conduit (see PolicyEngine::observe's own comment) -- a report from
+    // a policy that never does renders byte-for-byte identically to before this feature existed.
     if (!report.udp_flows.empty()) {
         size_t udp_allowed = static_cast<size_t>(std::count_if(
             report.udp_flows.begin(), report.udp_flows.end(),
@@ -1613,8 +1661,8 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
             [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
         out << "UDP flows evaluated: " << report.udp_flows.size() << " (" << udp_allowed << " allowed, "
             << udp_violation << " violation(s), " << udp_unclassified << " unclassified)\n";
-        out << "  BACnet/IP and/or CIP I/O traffic, classified by CIDR/hostname zone -- see "
-               "docs/USER_GUIDE.md's POLICY FILE FORMAT section\n\n";
+        out << "  BACnet/IP, CIP I/O, HART-IP, and/or FF-HSE traffic, classified by CIDR/hostname "
+               "zone -- see docs/USER_GUIDE.md's POLICY FILE FORMAT section\n\n";
 
         std::vector<const UdpFlowReport*> udp_violations, udp_unclassified_list, udp_allowed_list;
         for (const auto& f : report.udp_flows) {
@@ -1915,11 +1963,11 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
     }
     out << "  ],\n";
 
-    // BACnet/IP and/or CIP I/O flows -- see UdpFlowReport's own comment. Appended last, after every
-    // pre-existing field (idmz_conduits was the prior last field) -- always present as an array,
-    // empty when the policy never opts in (see Policy::has_udp_eligible_conduit), so a policy that
-    // never uses this feature gets one more (empty) field, same posture idmz_conduits/ethernet_flows
-    // took when each was new.
+    // BACnet/IP, CIP I/O, HART-IP, and/or FF-HSE flows -- see UdpFlowReport's own comment. Appended
+    // last, after every pre-existing field (idmz_conduits was the prior last field) -- always
+    // present as an array, empty when the policy never opts in (see
+    // Policy::has_udp_eligible_conduit), so a policy that never uses this feature gets one more
+    // (empty) field, same posture idmz_conduits/ethernet_flows took when each was new.
     out << "  \"udp_flows\": [\n";
     for (size_t i = 0; i < report.udp_flows.size(); ++i) {
         const UdpFlowReport& f = report.udp_flows[i];

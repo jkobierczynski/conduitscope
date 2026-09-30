@@ -3200,13 +3200,21 @@ top of it.** Item 1 (real Windows/Npcap capture against a real
 OT/mirrored-switch-port network, not just Linux loopback and found
 captures) -- every other item's correctness claims currently rest on
 synthetic fixtures and a handful of found real captures, never a live
-production-like capture end to end. Alongside it: widening `policy
-validate` to evaluate UDP flows at all, the single most-repeated "still
-open" call-out in this document (items 9, 14, 15, and 17 each hit it from
-a different angle) -- it's the one gap blocking BACnet/IP, EtherNet/IP CIP
-I/O, HART-IP's UDP form, and FF-HSE's UDP form from ever actually being
-checked against a conduit, and blocking `inventory`'s own UDP-based
-inferred conduits from ever showing anything but "never exercised."
+production-like capture end to end.
+
+**Update: the UDP `policy validate` gap named below is now fully closed.**
+This paragraph originally named widening `policy validate` to evaluate UDP
+flows at all as the single most-repeated "still open" call-out in this
+document (items 9, 14, 15, and 17 each hit it from a different angle) --
+the one gap blocking BACnet/IP, EtherNet/IP CIP I/O, HART-IP's UDP form,
+and FF-HSE's UDP form from ever actually being checked against a conduit.
+Item 71 below (Phase 3) closed it first for BACnet/IP and CIP I/O; item
+71's own "Update" then closed it for HART-IP's and FF-HSE's UDP forms too,
+on a direct, separate request ("policy validate: support UDP flows") --
+see that item for the full account. `inventory`'s own UDP-based inferred
+conduits (BACnet/IP, CIP I/O) now show up as exercised and matched rather
+than "never exercised" once round-tripped through `policy validate`, the
+same closed loop.
 
 **IPv6 support (item 24, new)** belongs in the same foundational category:
 `decoder.cpp` only ever parses an IPv4 outer header today, so any
@@ -3803,10 +3811,13 @@ useful, none blocking anything else on this list.
     `modbus`/`dnp3`/`s7comm`/`iec104`/`enip` already have); naming one of
     them in `functions` is now rejected with a specific "not yet
     supported for protocol '...'" error rather than silently failing
-    every entry against an empty table. Also still open: `policy
-    validate` evaluating UDP flows at all (the only path that could ever
-    let `bacnet` -- or HART-IP's/FF-HSE's own UDP forms -- match), and
-    the VLAN-based zone model for protocols with no IP layer (item 15).
+    every entry against an empty table. Also still open at the time:
+    `policy validate` evaluating UDP flows at all (the only path that
+    could ever let `bacnet` -- or HART-IP's/FF-HSE's own UDP forms --
+    match), and the VLAN-based zone model for protocols with no IP layer
+    (item 15). **Update: the UDP gap closed** -- item 71 below (Phase 3)
+    for `bacnet`/`enip`-as-CIP-I/O, item 71's own "Update" for `hartip`/
+    `ffhse`'s UDP forms; item 15 immediately below closed the VLAN gap.
 15. ~~**A VLAN-membership-based conduit/zone model**~~, as an alternative to
     (not a replacement for) the existing IPv4-CIDR one, for the four
     protocols with no IP layer at all (PROFINET RT, GOOSE, Sampled
@@ -11480,6 +11491,63 @@ it done as its own patch.
     the policy-wide-not-per-protocol gating nuance and the CIP-I/O
     functions quirk). No new CLI flags were needed -- the opt-in lives
     entirely in the policy file's existing `protocols:` field.
+
+    **Update: HART-IP's and FF-HSE's own UDP forms closed the same gap,
+    finishing Jurgen's later, separate "policy validate: support UDP
+    flows" request.** This phase above had already closed the gap for
+    BACnet/IP and CIP I/O; HART-IP and FF-HSE were the two protocols this
+    document's own "Priority order" section kept naming as the remaining
+    piece (see above). Investigation found the fix was a straight
+    extension of this same Phase 3 architecture, not new design: both
+    protocols already had working TCP AND UDP decoders
+    (`HartIpTcpDecoder`/`HartIpUdpDecoder`, `FfhseTcpDecoder`/
+    `FfhseUdpDecoder`, both pairs sharing one `id()` and one result type
+    per protocol, from well before this request), and `Policy` already
+    accepted `hartip`/`ffhse` as valid conduit protocol names (from the
+    same item-14 widening that added `opcua`/`mms`/`mqtt` -- see item 70
+    above) -- they simply weren't evaluated over UDP by `policy validate`
+    yet. `Policy::has_udp_eligible_conduit()` (the single, policy-wide gate
+    this phase introduced) was widened to also recognize `hartip`/`ffhse`,
+    rather than adding a second, parallel gate -- the same
+    "fully inert unless a policy actually declares it" backward-
+    compatibility rule applies unchanged (a policy naming none of the four
+    is byte-for-byte unaffected). `PolicyEngine::observe`'s UDP branch,
+    direction-decision chain, and `observed_functions` population were each
+    extended with one more `else if` per protocol, reading each protocol's
+    own native content field the same way BACnet's branch already did:
+    HART-IP's `HartIpFrame::message_type` (0 = Request means the source is
+    the client; 1 = Response, 3 = Error, or 15 = NAK means the destination
+    is the client; 2 = Publish isn't authoritative and falls back to the
+    port heuristic, mirroring BACnet's own "no content signal yet"
+    treatment) and FF-HSE's `FfhseHeader::type` (0 = Request, 1 = Response,
+    2 = Error, same three-way split; an unrecognized fourth value falls
+    back). `is_known_udp_service_port()` (the UDP-specific port-heuristic
+    tie-break, deliberately kept separate from the TCP-only
+    `is_known_service_port()`) gained HART-IP's and FF-HSE's four UDP
+    ports. `protocol_has_known_function_table()` already returned `false`
+    for both (only modbus/dnp3/s7comm/iec104/enip return `true`), so no
+    validation-logic change was needed for `observed_functions` population
+    to extend cleanly -- a `functions:`-restricted `hartip`/`ffhse` conduit
+    behaves exactly as it always did on TCP, now consistently on UDP too.
+    New `tests/sample_policy_udp_hartip_ffhse.pcap` (one HART-IP
+    Pass-Through request/response exchange plus one FF-HSE FMS Status
+    request/response exchange, same HMI/PLC IP pair, mirroring Phase 3's
+    own fixture design) and 3 new CTest cases (the two-protocol-compliant
+    case, the hartip-only-still-gates-FF-HSE-in violation case proving the
+    gate stays policy-wide, and the true-last JSON field shape), each built
+    from real captured output per this project's standing rule. Full CTest
+    suite: 2260/2260 (default build) -- zero regressions elsewhere;
+    zero-warning rebuilds across the default, ASan/UBSan, no-live-capture,
+    and MinGW-w64 cross-compile configs, plus a clean-room extract-rebuild-
+    test before delivery. `docs/USER_GUIDE.md`'s "UDP flow evaluation"
+    subsection (retitled to name all four protocols), its JSON report
+    schema entry, its `--max-policy-udp-flows` option-table entry, and a
+    handful of other stale "TCP only"/"never evaluates" claims about
+    HART-IP/FF-HSE across USER_GUIDE.md and PROTOCOL_COVERAGE.md were all
+    corrected; `inventory`'s own separate, TCP-flow-shaped asset/edge model
+    was deliberately left as-is (still HART-IP/FF-HSE-over-TCP-only) --
+    that's a different command's own scoping decision, not part of this
+    request. No new CLI flags were needed here either.
 
 72. **Policy engine: match how plants are zoned -- Grok gap #1, third
     increment (Phase 4: operation-level read/write direction).** Continues

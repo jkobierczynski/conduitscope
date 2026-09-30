@@ -1,0 +1,19 @@
+# Opts in to HART-IP + FF-HSE UDP flow evaluation (finishing "policy validate: support UDP flows"
+# -- docs/design/policy-engine-zoning.md's Phase 3 shipped BACnet/IP + CIP I/O first and left these
+# two for later) by naming both "hartip" and "ffhse" on one conduit -- matches every packet in
+# tests/sample_policy_udp_hartip_ffhse.pcap, so `policy validate` against it reports COMPLIANT with
+# both a HART-IP and an FF-HSE UdpFlowReport allowed.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks:
+      - 192.168.1.50/32
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "HMI reads PLC via HART-IP and FF-HSE"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [hartip, ffhse]

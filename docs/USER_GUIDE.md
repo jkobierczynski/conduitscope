@@ -286,7 +286,7 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to the report's flow server port. |
 | `--services FILE` | *(none)* | Same meaning as `decode --services`: Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
 | `--max-policy-tcp-flows N` | `200,000` | Cap the number of distinct TCP flows `PolicyEngine` tracks per capture. `0` = leave it at its own compiled default. Past this, further new flows observed in the capture are not evaluated and the result is marked incomplete (see "Resource bounds and OBSERVATION INCOMPLETE" below). |
-| `--max-policy-udp-flows N` | `100,000` | Cap the number of distinct UDP flows (BACnet/IP, CIP I/O) `PolicyEngine` tracks per capture -- only populated once the policy names `bacnet`/`enip`/`any` on a CIDR- or hostname-zone conduit. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
+| `--max-policy-udp-flows N` | `100,000` | Cap the number of distinct UDP flows (BACnet/IP, CIP I/O, HART-IP, FF-HSE) `PolicyEngine` tracks per capture -- only populated once the policy names `bacnet`/`enip`/`hartip`/`ffhse`/`any` on a CIDR- or hostname-zone conduit. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
 | `--max-policy-ethernet-flows N` | `100,000` | Cap the number of distinct raw-Ethernet L2 flows (PROFINET RT/GOOSE/SV/EtherCAT) `PolicyEngine` tracks per capture -- only populated once the policy declares at least one VLAN zone. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
 | `--max-policy-notable-protocols N` | `50,000` | Cap the number of distinct notable-IT-protocol observations (see POLICY FILE FORMAT's "Notable IT protocols" subsection below) `PolicyEngine` records per capture. `0` = leave it at its own compiled default. Past this, further new combinations are not recorded and the result is marked incomplete. |
 
@@ -470,15 +470,18 @@ its own, separate finding regardless: see "Notable IT protocols" below.
 
 Two of those ten -- **HART-IP** and **FF-HSE** -- are counted here ONLY
 when carried over TCP, even though both can also appear over UDP (HART-IP
-conventionally; FF-HSE almost always, in real deployments). `policy
-validate` only ever evaluates TCP flows, so a conduit inferred from a UDP
-HART-IP or FF-HSE packet could never actually be checked -- unlike BACnet
-and CIP I/O (both UDP-only, still counted, with an explicit "cannot be
-exercised" note baked into the generated policy YAML, see "Closing the
-loop" below), HART-IP/FF-HSE traffic seen over UDP is simply skipped here,
-folding into `skipped_packets` like any other unrecognized packet. In
-practice this means FF-HSE will rarely, if ever, show up in an inventory
-report at all, since real FF-HSE traffic is UDP.
+conventionally; FF-HSE almost always, in real deployments), and even though
+`policy validate` *does* now evaluate their UDP form too (see "UDP flow
+evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE)" below) -- that's a
+separate command with its own opt-in zone/conduit model built specifically
+for UDP-based flows; this inventory count is a different, TCP-flow-shaped
+asset/edge model that hasn't been extended to UDP the same way. Unlike
+BACnet and CIP I/O (both UDP-only, still counted here, with an explicit
+"cannot be exercised" note baked into the generated policy YAML, see
+"Closing the loop" below), HART-IP/FF-HSE traffic seen over UDP is simply
+skipped here, folding into `skipped_packets` like any other unrecognized
+packet. In practice this means FF-HSE will rarely, if ever, show up in an
+inventory report at all, since real FF-HSE traffic is UDP.
 
 A bare TCP control segment -- a SYN/SYN-ACK handshake, a pure ACK, or a
 FIN/RST teardown, carrying zero application payload bytes -- also folds
@@ -620,10 +623,12 @@ appears here too, for the BACnet edge -- BACnet's client and server both
 conventionally listen on the same UDP port, so its direction is decided by
 APDU type (request vs. response) instead of a port guess, unlike every
 other edge above. `policy validate` can now reuse this same content-based
-direction for BACnet/IP (and applies the analogous port-heuristic-only
-direction to CIP I/O) when a conduit opts UDP flow evaluation in by naming
-`bacnet`/`enip`/`any` -- see "UDP flow evaluation (BACnet/IP, CIP I/O)"
-below. See docs/DEVELOPMENT.md's ROADMAP item 19 for the full three-tier
+direction for BACnet/IP, HART-IP, and FF-HSE (and applies the analogous
+port-heuristic-only direction to CIP I/O, which has no request/response
+concept at all) when a conduit opts UDP flow evaluation in by naming
+`bacnet`/`enip`/`hartip`/`ffhse`/`any` -- see "UDP flow evaluation
+(BACnet/IP, CIP I/O, HART-IP, FF-HSE)" below. See docs/DEVELOPMENT.md's
+ROADMAP item 19 for the full three-tier
 design record and the industry precedent researched before adding this
 field.
 
@@ -912,17 +917,24 @@ $ conduitscope inventory -r tests/sample_inventory.pcap --policy-out /tmp/inferr
 $ conduitscope policy validate -r tests/sample_inventory.pcap --policy /tmp/inferred.yaml
 Result: COMPLIANT
 ...
-Conduits never exercised by this capture (1):
-  - zone_192_168_1_0_24 -> zone_192_168_1_0_24 (bacnet/47808)
+UDP flows evaluated: 1 (1 allowed, 0 violation(s), 0 unclassified)
+...
+UDP ALLOWED (1):
+  [1] 192.168.1.14 -> 192.168.1.15:47808 (bacnet)  (bacnet, 2 packet(s))
+      zones: zone_192_168_1_0_24 -> zone_192_168_1_0_24, matched conduit "zone_192_168_1_0_24 -> zone_192_168_1_0_24 (bacnet/47808)"
+      direction: content
+...
+Conduits never exercised by this capture (0):
+  (none)
 ```
 
-Every TCP-based conduit round-trips cleanly. The one UDP-based conduit here
-(BACnet/IP) parses and loads into the policy file fine, but `policy
-validate` only ever evaluates TCP flows (see LIMITATIONS), so a UDP-based
-inferred conduit always shows up as "never exercised" no matter how much
-matching UDP traffic the capture actually has -- not a bug in either
-command, just the current, documented edge of `policy validate`'s own
-scope (see docs/DEVELOPMENT.md's ROADMAP item 9).
+Every conduit round-trips cleanly, TCP and UDP alike. The one UDP-based
+conduit here (BACnet/IP) parses into the policy file and, because
+`inventory`'s auto-generated conduit already names the protocol
+(`protocols: [bacnet]`), is automatically eligible for `policy validate`'s
+UDP flow evaluation too -- see "UDP flow evaluation (BACnet/IP, CIP I/O,
+HART-IP, FF-HSE)" below -- so it shows up as exercised and allowed rather
+than "never exercised," with no extra step needed.
 
 If the capture carries no traffic from any of the eleven recognized
 protocols at all, there is nothing to infer even one zone from --
@@ -2437,17 +2449,20 @@ tagged packet and an "s7comm"-tagged one are the same conduit on the wire.
 `enip` here means EtherNet/IP explicit messaging (TCP 44818) for TCP flow
 matching, but naming `enip` (or `any`) on a CIDR/hostname-zone conduit ALSO
 opts that conduit's zone pair into evaluating CIP I/O (implicit messaging,
-UDP 2222) traffic -- see "UDP flow evaluation (BACnet/IP, CIP I/O)" below,
-which covers both this and `bacnet`'s analogous UDP behavior; `bacnet` only
-ever matches over UDP (this decoder only recognizes BACnet/IP over UDP --
-see decoder.cpp), never TCP. The other four newly-widened names (`hartip`,
-`opcua`, `mms`, `mqtt`, `ffhse`) only match TCP traffic -- `hartip`
-specifically only its TCP form, since HART-IP also has a UDP form this
-engine doesn't evaluate at all yet (see "Addressing scope" below), and
-`mms` and `s7comm` share the same TCP port (102) but are still matched as
-two entirely separate conduit protocols, one per flow's own actually-
-decoded `protocol` tag, never conflated the way "cotp" folds into
-`s7comm` above.
+UDP 2222) traffic -- see "UDP flow evaluation (BACnet/IP, CIP I/O, HART-IP,
+FF-HSE)" below, which covers this and `bacnet`'s/`hartip`'s/`ffhse`'s
+analogous UDP behavior; `bacnet` only ever matches over UDP (this decoder
+only recognizes BACnet/IP over UDP -- see decoder.cpp), never TCP.
+`hartip` and `ffhse` are the same two-faced case as `enip`: naming either
+(or `any`) on a CIDR/hostname-zone conduit matches that protocol's TCP form
+for ordinary TCP flow matching AND opts the entire policy into evaluating
+its UDP form too, exactly as `enip` does for CIP I/O -- see that same "UDP
+flow evaluation" section below. `opcua` and `mqtt` are the two remaining
+newly-widened names that only match TCP traffic, with no UDP form this
+engine evaluates; `mms` and `s7comm` share the same TCP port (102) but are
+still matched as two entirely separate conduit protocols, one per flow's
+own actually-decoded `protocol` tag, never conflated the way "cotp" folds
+into `s7comm` above.
 
 `from`/`to` describe a **direction**: which zone(s) initiate the TCP
 connection (`from`) and which zone(s) answer it (`to`) -- not which zone
@@ -2532,57 +2547,109 @@ this capture), all four instead report the Violation shown above. See
 line and the JSON report's `src_mac` field, described below) for how the
 observed source is determined and reported.
 
-### UDP flow evaluation (BACnet/IP, CIP I/O)
+### UDP flow evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE)
 
 `policy validate` normally only evaluates TCP flows against a CIDR/
-hostname-zone conduit (see "Conduits" above and LIMITATIONS) -- BACnet/IP
-and CIP I/O (EtherNet/IP's UDP/2222 implicit messaging) are the two
-exceptions, and only once a policy opts in: naming `bacnet`, `enip`, or
-`any` in ANY conduit's `protocols` turns on UDP flow evaluation for the
-ENTIRE policy, not just that one conduit. Concretely, a policy with two
-conduits -- one naming only `bacnet`, the other only `modbus` -- still
-evaluates CIP I/O traffic once loaded, because `bacnet` alone is enough to
-flip on evaluation for BOTH UDP protocols; if no conduit in the entire
-policy permits the observed CIP I/O flow's zone pair/port, that flow is
-correctly reported a `Violation`, not silently skipped. This is a
-deliberate design choice, not an oversight -- see
-`tests/policies/udp_bacnet_only_violation.yaml` for a pinned regression
-fixture proving it. A policy that never names `bacnet`/`enip`/`any` on any
-conduit is completely unaffected: this traffic is still counted only in
-`skipped_non_tcp`, exactly as before this feature existed.
+hostname-zone conduit (see "Conduits" above and LIMITATIONS) -- BACnet/IP,
+CIP I/O (EtherNet/IP's UDP/2222 implicit messaging), HART-IP's UDP form,
+and FF-HSE's UDP form are the four exceptions, and only once a policy opts
+in: naming `bacnet`, `enip`, `hartip`, `ffhse`, or `any` in ANY conduit's
+`protocols` turns on UDP flow evaluation for the ENTIRE policy, not just
+that one conduit. BACnet/IP and CIP I/O shipped first; HART-IP's and
+FF-HSE's UDP forms were added afterward, widening the same opt-in gate
+(`Policy::has_udp_eligible_conduit()`) rather than introducing a separate
+one. Concretely, a policy with two conduits -- one naming only `bacnet`,
+the other only `modbus` -- still evaluates CIP I/O, HART-IP, and FF-HSE
+traffic once loaded, because `bacnet` alone is enough to flip on evaluation
+for all four UDP protocols; if no conduit in the entire policy permits an
+observed UDP flow's zone pair/port, that flow is correctly reported a
+`Violation`, not silently skipped. This is a deliberate design choice, not
+an oversight -- see `tests/policies/udp_bacnet_only_violation.yaml` and
+`tests/policies/udp_hartip_only_violation.yaml` for pinned regression
+fixtures proving it (one per protocol pair, same idea). A policy that never
+names `bacnet`/`enip`/`hartip`/`ffhse`/`any` on any conduit is completely
+unaffected: this traffic is still counted only in `skipped_non_tcp`,
+exactly as before this feature existed.
 
-Once opted in, a BACnet/IP or CIP I/O flow is matched against the exact
-same CIDR/hostname zones a TCP flow would be (never a VLAN zone -- see
-"VLAN-zone conduits" above), with `ports`/`bidirectional` fully meaningful
-the same way. `functions` is the one exception, and it behaves
-differently per protocol: BACnet/IP has genuine per-message service names
-(`observed_functions` is populated from each decoded APDU's service, e.g.
-`readProperty`), so a `functions:`-restricted conduit works as expected.
-CIP I/O has no per-message operation concept at all -- it's cyclic
-producer/consumer data, not a request/response exchange -- so
-`observed_functions` is always empty for it, and a `functions:`-restricted
-`enip` conduit can never find anything to reject: the CIP I/O flow is
-Allowed/Violation purely on protocol+port+zone, regardless of what the
-restriction names. This is intentional, documented behavior (see
-`tests/policies/udp_cip_io_functions_quirk.yaml`), not a bug to work
-around.
+Once opted in, a BACnet/IP, CIP I/O, HART-IP, or FF-HSE flow is matched
+against the exact same CIDR/hostname zones a TCP flow would be (never a
+VLAN zone -- see "VLAN-zone conduits" above), with `ports`/`bidirectional`
+fully meaningful the same way. `functions` behaves differently per
+protocol: BACnet/IP, HART-IP, and FF-HSE all have genuine per-message
+names (`observed_functions` is populated from each decoded message's own
+name -- BACnet's APDU service, e.g. `readProperty`; HART-IP's
+`message_type_name`, e.g. `Request`/`Response`; FF-HSE's `message_name`,
+e.g. `FMS Status Req`), so a `functions:`-restricted conduit works as
+expected for all three. CIP I/O has no per-message operation concept at
+all -- it's cyclic producer/consumer data, not a request/response exchange
+-- so `observed_functions` is always empty for it, and a
+`functions:`-restricted `enip` conduit can never find anything to reject:
+the CIP I/O flow is Allowed/Violation purely on protocol+port+zone,
+regardless of what the restriction names. This is intentional, documented
+behavior (see `tests/policies/udp_cip_io_functions_quirk.yaml`), not a bug
+to work around; note also that none of `bacnet`/`hartip`/`opcua`/`mms`/
+`mqtt`/`ffhse` support `functions` restriction on their TCP-flow form
+either (`protocol_has_known_function_table()` in policy.cpp names only
+`modbus`/`dnp3`/`s7comm`/`iec104`/`enip`), so this UDP-flow behavior is
+consistent with each protocol's existing TCP-side treatment, not a new
+inconsistency introduced by UDP support.
 
 Client/server direction has no TCP handshake to lean on, so each protocol
-uses its own best-available signal: BACnet/IP reuses the same
-Confirmed-/Unconfirmed-Request-vs-response APDU logic `inventory` already
-uses for its own BACnet edges (see "Passive OT asset discovery" above) --
-`direction_source: "content"` -- falling back to a port-number heuristic
-when no APDU is present; CIP I/O has no request/response concept at all,
-so it's always port-heuristic-only (`direction_source: "port-heuristic"`).
-Both carry the same honestly-low-confidence caveat as every other
-port-heuristic direction call in this tool (see "Direction/initiator
-determination" in LIMITATIONS).
+uses its own best-available signal. BACnet/IP, HART-IP, and FF-HSE each
+reuse their own request-vs-response content signal when it's present and
+authoritative: BACnet/IP the same Confirmed-/Unconfirmed-Request-vs-response
+APDU logic `inventory` already uses for its own BACnet edges (see "Passive
+OT asset discovery" above); HART-IP its `message_type` field (0 = Request
+means the source is the client; 1 = Response, 3 = Error, or 15 = NAK means
+the destination is the client; 2 = Publish is not authoritative and falls
+back, the same "no content signal yet" treatment BACnet gives a malformed
+APDU); FF-HSE its header `type` field (0 = Request means the source is the
+client; 1 = Response or 2 = Error means the destination is the client; any
+other value falls back). All three report `direction_source: "content"`
+when the content signal decided it, falling back to the same port-number
+heuristic as everything else when it didn't. CIP I/O has no request/response
+concept at all, so it's always port-heuristic-only
+(`direction_source: "port-heuristic"`). Every case carries the same
+honestly-low-confidence caveat as every other port-heuristic direction call
+in this tool (see "Direction/initiator determination" in LIMITATIONS).
 
 Matched flows appear in their own "UDP flows evaluated" report section
 (text) / `udp_flows[]` array (JSON), structured like `flows[]`/
 `ethernet_flows[]` -- see "JSON report schema" below for the exact field
 list, and `--summarize-unclassified` groups UDP-flow unclassified entries
 the same way it already groups TCP/Ethernet ones.
+
+**Worked example, HART-IP and FF-HSE.**
+`tests/sample_policy_udp_hartip_ffhse.pcap` carries one HART-IP Pass-Through
+request/response exchange and one FF-HSE FMS Status request/response
+exchange, both between the same HMI/PLC pair. Against
+`tests/policies/udp_hartip_ffhse_compliant.yaml` (one conduit naming both
+`hartip` and `ffhse`):
+
+```sh
+$ conduitscope policy validate -r tests/sample_policy_udp_hartip_ffhse.pcap --policy tests/policies/udp_hartip_ffhse_compliant.yaml
+...
+UDP flows evaluated: 2 (2 allowed, 0 violation(s), 0 unclassified)
+  BACnet/IP, CIP I/O, HART-IP, and/or FF-HSE traffic, classified by CIDR/hostname zone -- see docs/USER_GUIDE.md's POLICY FILE FORMAT section
+
+UDP ALLOWED (2):
+  [1] 192.168.1.50 -> 192.168.1.10:5094 (hart-ip)  (hartip, 2 packet(s))
+      zones: hmi_zone -> plc_zone, matched conduit "HMI reads PLC via HART-IP and FF-HSE"
+      direction: content
+      mac: 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc
+  [2] 192.168.1.50 -> 192.168.1.10:1090 (ff-fms)  (ffhse, 2 packet(s))
+      zones: hmi_zone -> plc_zone, matched conduit "HMI reads PLC via HART-IP and FF-HSE"
+      direction: content
+      mac: 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc
+```
+
+Both flows report `direction: content`, since both HART-IP's `message_type`
+and FF-HSE's header `type` were present and authoritative on every packet in
+this capture. Against `tests/policies/udp_hartip_only_violation.yaml`
+(which names only `hartip`, not `ffhse`, on its one conduit), the HART-IP
+flow still matches, but the FF-HSE flow -- still evaluated, since the gate
+is policy-wide, not per-protocol -- has no conduit that permits it and is
+reported `NON-COMPLIANT` with one `Violation`.
 
 **Worked example.** `tests/policies/multi_from_zones.yaml` declares three
 zones (`corp_zone`, `hmi_zone`, `plc_zone`) and one conduit whose `from` is
@@ -3203,12 +3270,14 @@ ROADMAP item 19) -- which tier decided `client_ip`/`server_ip` above:
 -- authoritative) or `"port-heuristic"` (no handshake was captured, so a
 known-service-port/lower-port-number guess was used instead, which CAN be
 wrong -- see LIMITATIONS' own discussion of exactly when). Never
-`"content"` here -- that tier only applies to BACnet, and `flows[]` is
-TCP-only (BACnet/IP is UDP). `"content"` DOES appear in `udp_flows[]`'s own
-`direction_source`, described in "UDP flow evaluation (BACnet/IP, CIP I/O)"
-below. `ethernet_flows[]` has no `direction_source` of its own: those
-protocols have no client/server concept to begin with (see its own comment
-just below).
+`"content"` here -- that tier only ever applies to BACnet/HART-IP/FF-HSE's
+own content-based signal, and that signal is only ever consulted for their
+UDP form; `flows[]` (TCP-only) always uses handshake/port-heuristic even
+for a HART-IP or FF-HSE TCP flow. `"content"` DOES appear in `udp_flows[]`'s
+own `direction_source`, described in "UDP flow evaluation (BACnet/IP,
+CIP I/O, HART-IP, FF-HSE)" below. `ethernet_flows[]` has no
+`direction_source` of its own: those protocols have no client/server
+concept to begin with (see its own comment just below).
 
 **Resolver annotations** (`--mac-vendor`/`--resolve`/`--hosts`/`--nn`/
 `--services` -- see the option table above and OUTPUT FORMATS' "Name
@@ -3406,9 +3475,11 @@ flow (i.e. it does NOT appear in `unexercised_conduits`), `false` otherwise
 -- see "iDMZ / IT-OT crossing conduits" above for the text-report
 equivalent.
 
-**`udp_flows[]`** (docs/design/policy-engine-zoning.md's Phase 3) -- always
-present, empty when the policy never opted UDP flow evaluation in (see "UDP flow evaluation
-(BACnet/IP, CIP I/O)" above). One entry per BACnet/IP or CIP I/O UDP flow:
+**`udp_flows[]`** (docs/design/policy-engine-zoning.md's Phase 3, later widened
+to also cover HART-IP's and FF-HSE's UDP forms) -- always present, empty when
+the policy never opted UDP flow evaluation in (see "UDP flow evaluation
+(BACnet/IP, CIP I/O, HART-IP, FF-HSE)" above). One entry per BACnet/IP, CIP
+I/O, HART-IP, or FF-HSE UDP flow:
 
 ```json
 {
@@ -3437,13 +3508,15 @@ capture), plus `client_hostname`/`server_hostname` and
 `client_mac_vendor`/`server_mac_vendor` when the relevant resolver flags
 are given, and `client_zone_purdue_level`/`server_zone_purdue_level`
 (omitted when unset) -- exactly like `flows[]`. `direction_source` is
-`"content"` for a BACnet/IP flow whose direction was decided from a
-decoded APDU's request/response type, or `"port-heuristic"` for either
-protocol when it wasn't (CIP I/O is always `"port-heuristic"`, having no
-request/response concept at all -- see "UDP flow evaluation (BACnet/IP,
-CIP I/O)" above). `allowed_count`/`violation_count`/`unclassified_count`
-at the top level fold in `udp_flows[]` too, alongside `flows[]` and
-`ethernet_flows[]`; so does `unexercised_conduits`.
+`"content"` for a BACnet/IP, HART-IP, or FF-HSE flow whose direction was
+decided from its own decoded request/response signal (BACnet's APDU type,
+HART-IP's `message_type`, FF-HSE's header `type`), or `"port-heuristic"`
+for any of the four when it wasn't (CIP I/O is always `"port-heuristic"`,
+having no request/response concept at all -- see "UDP flow evaluation
+(BACnet/IP, CIP I/O, HART-IP, FF-HSE)" above). `allowed_count`/
+`violation_count`/`unclassified_count` at the top level fold in
+`udp_flows[]` too, alongside `flows[]` and `ethernet_flows[]`; so does
+`unexercised_conduits`.
 
 ### Multi-homed assets and jump hosts (JSON)
 
@@ -3563,26 +3636,28 @@ One asterisk survived this widening for a while, since fixed: `bacnet` used
 to parse and validate like any other protocol name, but BACnet/IP itself
 could never actually match a flow, since a conduit was TCP-flow-only and
 BACnet/IP is UDP. docs/design/policy-engine-zoning.md's Phase 3 closed that
-gap -- see the next paragraph and "UDP flow evaluation (BACnet/IP, CIP
-I/O)" above.
+gap for BACnet/IP and CIP I/O; a later pass closed the same gap for
+HART-IP's and FF-HSE's own UDP forms -- see the next paragraph and "UDP
+flow evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE)" above.
 
 **`policy validate` evaluates TCP flows against a CIDR/hostname-zone
-conduit unconditionally, and BACnet/IP + CIP I/O UDP flows too once a
-policy opts in** (see "UDP flow evaluation (BACnet/IP, CIP I/O)" above) --
-every other protocol's UDP traffic (HART-IP's UDP form, FF-HSE) still
-never reaches the policy engine at all; naming it in `protocols` only lets
-a conduit be matched by that protocol's TCP traffic. Concretely, of the
-six protocols item 14 widened `protocols` to include: `hartip`, `opcua`,
-`mms`, `mqtt`, and `ffhse` all carry genuine TCP traffic this decoder
-recognizes, so naming them does real work over TCP (`hartip` specifically
-only matches its own TCP form -- its UDP form still never reaches the
-engine). `bacnet` has no TCP form to fall back on at all: this decoder
-only ever recognizes BACnet/IP over UDP (see `decoder.cpp`), so
-`protocol: bacnet` only ever matches UDP traffic, and only once UDP flow
-evaluation is opted into as described above -- a `bacnet` conduit in a
-policy that never opts in still parses and validates fine, and still
-appears in `unexercised_conduits` (or, once opted in via another conduit
-in the same policy, in `udp_flows[]`'s own accounting instead).
+conduit unconditionally, and BACnet/IP + CIP I/O + HART-IP + FF-HSE UDP
+flows too once a policy opts in** (see "UDP flow evaluation (BACnet/IP,
+CIP I/O, HART-IP, FF-HSE)" above) -- every UDP-capable protocol this tool
+decodes now has a path into `policy validate`, TCP or UDP. Concretely, of
+the six protocols item 14 widened `protocols` to include: `opcua` and
+`mqtt` carry genuine TCP traffic this decoder recognizes and no UDP form
+this engine evaluates, so naming them does real work over TCP only.
+`hartip`, `mms`, and `ffhse` also carry genuine TCP traffic; `hartip` and
+`ffhse` additionally match their own UDP form once opted in, the same way
+`enip` additionally matches CIP I/O. `bacnet` has no TCP form to fall back
+on at all: this decoder only ever recognizes BACnet/IP over UDP (see
+`decoder.cpp`), so `protocol: bacnet` only ever matches UDP traffic, and
+only once UDP flow evaluation is opted into as described above -- a
+`bacnet` (or `hartip`/`ffhse`, for their own UDP form) conduit in a policy
+that never opts in still parses and validates fine, and still appears in
+`unexercised_conduits` (or, once opted in via another conduit in the same
+policy, in `udp_flows[]`'s own accounting instead).
 
 **For the four protocols with no IP layer at all** -- PROFINET RT, IEC
 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT (see PROTOCOL
@@ -3630,9 +3705,9 @@ this tool does with it today:**
   decoded and exposed (`bacnet_npdu_dnet`/`bacnet_npdu_snet`/
   `bacnet_npdu_hop_count`), the closest thing this tool has to a working
   non-IP network-layer address. Not consulted by the zone engine -- BACnet/IP
-  UDP flow evaluation (see "UDP flow evaluation (BACnet/IP, CIP I/O)" above)
-  classifies purely by IPv4 src/dst against a CIDR/hostname zone, the same
-  as every other protocol here, never by DNET/SNET. Separately, I-Am's own device Object Identifier (the actual
+  UDP flow evaluation (see "UDP flow evaluation (BACnet/IP, CIP I/O, HART-IP,
+  FF-HSE)" above) classifies purely by IPv4 src/dst against a CIDR/hostname
+  zone, the same as every other protocol here, never by DNET/SNET. Separately, I-Am's own device Object Identifier (the actual
   "which device is this" answer) is decoded into `bacnet_values` as a
   `device-object=...` string -- readable, but not a structured field a
   policy could reference.
@@ -5864,29 +5939,32 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   header will very likely fail to parse and be reported as a parse-error on
   the fragments after the first.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
-  named but not decoded, with six exceptions (CIP I/O, PROFINET RT, GOOSE,
-  Sampled Values, EtherCAT, and BACnet/IP).** A deliberately small,
-  OT-relevant set of EtherTypes/IP-protocol-numbers is recognized by name
-  (ARP, LLDP, ICMP, and the rest -- see docs/PROTOCOL_COVERAGE.md); nothing outside
-  that set gets more than a bare hex/decimal number, and even a *named* one
-  gets no further parsing of its own framing. The six exceptions are
-  EtherNet/IP's CIP I/O traffic on UDP port 2222, PROFINET RT (EtherType
-  `0x8892`, DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE (EtherType
-  `0x88B8`), IEC 61850-9-2 Sampled Values (EtherType `0x88BA`), EtherCAT
-  (EtherType `0x88A4`), and BACnet/IP (UDP port 47808/0xBAC0), all of which
-  are now decoded, not just named -- see docs/PROTOCOL_COVERAGE.md's EtherNet/IP,
-  PROFINET RT, GOOSE, Sampled Values, EtherCAT, and BACnet/IP sections.
-  `policy validate` can now evaluate CIP I/O and BACnet/IP UDP traffic
-  against a conduit, but only once a policy opts in -- see POLICY FILE
-  FORMAT's "UDP flow evaluation (BACnet/IP, CIP I/O)" section below for the
-  opt-in mechanism, the direction-determination caveat (content-based for
-  BACnet, port-heuristic-only for CIP I/O), and a documented quirk (a
+  named but not decoded, with eight exceptions (CIP I/O, PROFINET RT, GOOSE,
+  Sampled Values, EtherCAT, BACnet/IP, HART-IP, and FF-HSE).** A deliberately
+  small, OT-relevant set of EtherTypes/IP-protocol-numbers is recognized by
+  name (ARP, LLDP, ICMP, and the rest -- see docs/PROTOCOL_COVERAGE.md);
+  nothing outside that set gets more than a bare hex/decimal number, and
+  even a *named* one gets no further parsing of its own framing. The eight
+  exceptions are EtherNet/IP's CIP I/O traffic on UDP port 2222, PROFINET RT
+  (EtherType `0x8892`, DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE
+  (EtherType `0x88B8`), IEC 61850-9-2 Sampled Values (EtherType `0x88BA`),
+  EtherCAT (EtherType `0x88A4`), BACnet/IP (UDP port 47808/0xBAC0), HART-IP
+  (UDP port 5094), and FF-HSE (UDP ports 1089/1090/1091/3622), all of which
+  are decoded, not just named -- see docs/PROTOCOL_COVERAGE.md's EtherNet/IP,
+  PROFINET RT, GOOSE, Sampled Values, EtherCAT, BACnet/IP, HART-IP, and
+  FF-HSE sections. `policy validate` can now evaluate CIP I/O, BACnet/IP,
+  HART-IP, and FF-HSE UDP traffic against a conduit, but only once a policy
+  opts in -- see POLICY FILE FORMAT's "UDP flow evaluation (BACnet/IP,
+  CIP I/O, HART-IP, FF-HSE)" section below for the opt-in mechanism, the
+  direction-determination caveat (content-based for BACnet/HART-IP/FF-HSE,
+  port-heuristic-only for CIP I/O), and a documented quirk (a
   `functions:`-restricted `enip` conduit can't meaningfully restrict CIP I/O,
   since it has no per-message operation concept). A policy that never names
-  `bacnet`/UDP-eligible `enip`/`any` on any conduit is completely unaffected:
-  this traffic is still counted only in `skipped_non_tcp`, exactly as
-  before this feature existed. PROFINET RT, GOOSE, Sampled Values, and
-  EtherCAT are different: all four ride raw Ethernet with no IP/TCP/UDP
+  `bacnet`/UDP-eligible `enip`/`hartip`/`ffhse`/`any` on any conduit is
+  completely unaffected: this traffic is still counted only in
+  `skipped_non_tcp`, exactly as before this feature existed. PROFINET RT,
+  GOOSE, Sampled Values, and EtherCAT are different: all four ride raw
+  Ethernet with no IP/TCP/UDP
   layer at all, so there is no IP-based conduit rule that could ever match
   any of them; docs/DEVELOPMENT.md's ROADMAP item 15 added a
   VLAN-membership-based conduit/zone model specifically for this case -- see
