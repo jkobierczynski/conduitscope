@@ -15899,6 +15899,128 @@ it done as its own patch.
     clean-room extract-rebuild-test cycle, before delivery as a zip of touched/new files via the
     standing no-git-commit convention.
 
+110. **Fix F1: rotating capture could overwrite existing evidence.** Jurgen's direct request,
+    immediately after being pointed at `docs/reviews/2026-09-chatgpt-security-review-patch282.md`:
+    "Check the security review. Can you fix F1 now?" F1 (High severity, the review's own single
+    release-blocking finding) is exactly what its own title says: `RotatingPcapWriter`
+    (`rotating_pcap_writer.hpp`/`.cpp`) built every rotated filename from a second-resolution
+    wall-clock timestamp plus a per-process-instance counter that resets to 0 on every restart
+    (`<prefix>_<YYYYMMDDTHHMMSSZ>_<counter>.pcap`), then handed that generated name straight to
+    `PcapWriter`'s own `std::ios::trunc`-opening constructor -- correct and necessary for `decode
+    -w`'s explicit, user-named output file (tcpdump's own `-w FILE` semantics: overwriting a file
+    you named yourself is expected), but wrong for a name this process merely *generated* and never
+    actually checked was free. A sensor restarting within the same second, or two independent
+    `capture` processes sharing a `--prefix` and starting within the same second, could generate
+    the identical filename -- and the second process's trunc-open would silently destroy the
+    first's already-written evidence, with no warning to anyone.
+
+    **The fix has two parts, matching the review's own recommendation exactly.**
+
+    **1. Richer filenames.** `wall_clock_filename_timestamp()` (`rotating_pcap_writer.cpp`) now
+    reads `std::chrono::system_clock::now()` (microsecond resolution) instead of `std::time(nullptr)`
+    (second resolution), and every generated name also embeds this process's own PID
+    (`current_process_id_string()`, `::getpid()`/`::GetCurrentProcessId()`). The documented shape
+    is now `<prefix>_<YYYYMMDDTHHMMSSffffffZ>_<pid>_<counter>.pcap`. This alone does not close the
+    vulnerability -- even microsecond resolution is finite, and two processes could still,
+    vanishingly rarely, land in the same microsecond -- it exists purely to make an actual
+    collision astronomically unlikely, so the real fix below almost never has to do any retry work.
+
+    **2. Atomic exclusive file creation, with a bounded collision-suffix retry loop -- the actual
+    fix.** `open_writer()` (`rotating_pcap_writer.cpp`, called from both `open_new_file()` and
+    `rotate()`) no longer hands a freshly-built candidate path straight to `PcapWriter`. It first
+    calls a new `try_create_exclusive_file()` helper, which claims the name atomically at the OS
+    level -- POSIX `open(path, O_CREAT | O_EXCL | O_WRONLY, 0644)` (`<fcntl.h>`), Windows
+    `CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_NEW, ...)` (`<windows.h>`, the plain
+    `#ifdef _WIN32`/ANSI-entry-point posture `cli_main.cpp`'s own `stdout_is_terminal()`/
+    `write_raw_color_reset_to_stdout()` already use for their own Windows-vs-POSIX pairs, not a new
+    convention) -- immediately closes the claimed (empty) file, and reports back "created" or
+    "collision." A `std::filesystem::exists()`-then-open() check would have the identical race in
+    the opposite direction (this codebase deliberately has no `<filesystem>` dependency anyway, see
+    `baseline.cpp`'s own comment); the OS's own atomic create-if-absent primitive has no window
+    between "check" and "create" for a second process to land in, because there is no separate
+    check. On a genuine collision, `open_writer()` retries with a `-<N>` suffix appended before the
+    extension (`build_candidate_path(collision_attempt)`), bounded at 1000 attempts (generous
+    headroom over the "one restart, one retry" collisions this fix actually targets, while still
+    guaranteeing `capture` -- meant to run unattended for weeks -- never hangs). Once a name is
+    exclusively claimed this way, nothing else on the system could have written to it first, so the
+    immediately-following `PcapWriter` construction's own `std::ios::trunc` open is safe -- there is
+    nothing there yet to truncate away. If that construction itself then fails (e.g. a permission
+    change in the instant between the claim and the reopen), the claimed-but-now-orphaned empty file
+    is best-effort cleaned up (`std::remove`) before the failure propagates, rather than left as
+    unexplained litter.
+
+    **`PcapWriter` itself is completely untouched** -- `decode -w`'s explicit, user-named output
+    file still truncates on open, exactly as tcpdump's own `-w FILE` does; this fix is entirely
+    contained to `RotatingPcapWriter`'s own generated-filename path, the only place F1 actually
+    applies.
+
+    **A test-only deterministic clock seam, to make the fix's own critical path testable without
+    real-time timing luck.** The actual collision this fix guards against depends on real
+    wall-clock timing (two processes landing in the same microsecond) -- exactly the kind of
+    real-time-dependent condition this codebase's own testing conventions already refuse to depend
+    on elsewhere (see `RotationPolicy::rotate_seconds`'s own comment on being checked against packet
+    timestamps rather than wall-clock, specifically so tests never need real-time sleeping). Rather
+    than write a flaky test that only sometimes exercises the retry path, `RotatingPcapWriter`
+    gained one new, TEST-ONLY, optional constructor parameter -- `now_source`, a
+    `std::function<std::chrono::system_clock::time_point()>` defaulting to `nullptr` (meaning "use
+    the real clock") -- mirroring the existing `on_warning` callback-injection parameter's own
+    precedent in this exact constructor. Giving two writer instances constructed in the same test
+    process (already guaranteed the same PID) an identical fake `now_source` makes their very first
+    generated candidate filename an exact string match: a real, unavoidable, deterministic
+    collision at the OS level, every single run, with zero timing dependency. Every real caller
+    (`capture` itself, `src/cli_main.cpp`) leaves this at its default and is completely unaffected.
+
+    **Tests.** Three new checks (15-17) added directly to `tools/rotating_pcap_writer_selftest.cpp`
+    -- the same vehicle patch257 finding 2's own checks 12-14 already used for this class's
+    exception-safety/disk-exhaustion coverage, and for the identical reason: byte-exact,
+    deterministic proof of this class's own internal behavior belongs in its dedicated selftest
+    tool, not a real-capture CLI smoke test (`CMakeLists.txt`'s own comment on this tool explains
+    why). No new top-level `CMakeLists.txt` test entries were needed -- the existing single
+    `rotating_pcap_writer_rotation_and_retention_self_test` CTest case covers all three, so the
+    total CTest count is unchanged (still 2412 in the default build), matching patch257 finding 2's
+    own precedent of adding checks to this tool without growing the top-level test count either.
+    Check 15 reproduces patch282's own "two simultaneous writers" scenario directly (writer1 kept
+    open while writer2 is constructed with an identical fake clock) and proves not just that they
+    land on different files, but that each file's own content survives completely uncontaminated
+    (writer1's file contains only its own 0xAA-filled packet, never writer2's 0xBB, and vice versa).
+    Check 16 reproduces "restart within the same second" plus "a stale file already present"
+    (writer3 is fully destroyed -- closed and flushed -- before writer4 is even constructed).
+    Check 17 proves the retry loop itself keeps advancing past a single collision: both the
+    plain name and its own "-1" retry are pre-claimed before a third writer is constructed, which
+    must reach "-2". All three checks explicitly `.reset()` (destroy) each writer before reading its
+    file content back through a separate `std::ifstream`, since `std::ofstream` buffers writes
+    in-process and a still-open writer's most recent bytes are not guaranteed visible to an
+    independent reader yet -- the same "only ever decode a file after the whole process, and every
+    writer inside it, has already exited" shape `tests/capture_rotation_smoke.sh` already uses at
+    the CLI level.
+
+    **Scenarios named by the review but not given their own dedicated test, with rationale.**
+    "Counter rollover" isn't a real failure mode: `zero_pad`'s `%0*zu` format simply stops
+    zero-padding past 999999 rather than wrapping or truncating, so there is nothing to break.
+    "Crash/restart immediately after file creation" and "stale files already present" are
+    structurally the identical code path already proven by checks 15/16 -- `try_create_exclusive_
+    file`'s collision check only ever inspects whether the NAME exists, never the completeness or
+    size of whatever content (if any) is already there, so a 0-byte crash-orphaned file and a
+    fully-written previous run's file are handled identically by construction, not by coincidence.
+    "Windows" is covered by this fix's own `build-mingw` cross-compilation verification (below) --
+    the `CreateFileA`/`CREATE_NEW`/`GetCurrentProcessId` branch compiles and links cleanly there,
+    though this sandbox cannot actually execute a Windows binary to prove its runtime behavior.
+
+    **Docs.** `docs/USER_GUIDE.md`'s own `capture` example output updated from the old
+    `lo_20260928T192154Z_000003.pcap` shape to a real, freshly-captured example in the new format.
+    `docs/reviews/2026-09-chatgpt-security-review-patch282.md`'s own intro paragraph updated to
+    mark F1 confirmed accurate and fixed here, cross-referencing this item.
+
+    **Verification.** Same standing bar as items 105-109: the dedicated selftest tool's own new
+    checks (above) plus a full CTest run across all four standing build configs (default GCC
+    `build`; Clang ASan/UBSan `build-fuzz`, including the new checks under ASan/UBSan
+    instrumentation; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile
+    `build-mingw`, build-only, confirming the new Windows-only `CreateFileA`/`GetCurrentProcessId`
+    branch actually compiles), confirming zero regressions anywhere (same 2412/2397/2412/2490 counts
+    as before this item across the four configs respectively), plus a clean-room extract-rebuild-
+    test cycle and a manual real-capture smoke test confirming the new filename format end to end,
+    before delivery as a zip of touched/new files via the standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

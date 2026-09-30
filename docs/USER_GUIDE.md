@@ -2315,8 +2315,17 @@ a retention cap that could never actually take effect.
 $ conduitscope capture --interface lo --directory /tmp/capdemo --prefix lo \
       --max-packets 4 --rotate-bytes 1 --max-files 2 --duration 30
 capturing on 'lo' into '/tmp/capdemo/lo_*.pcap' -- Ctrl+C to stop
-4 packet(s) captured across 4 file(s); most recent: '/tmp/capdemo/lo_20260928T192154Z_000003.pcap' (94 bytes)
+4 packet(s) captured across 4 file(s); most recent: '/tmp/capdemo/lo_20260930T234455259917Z_19389_000003.pcap' (94 bytes)
 ```
+
+(Filename shape as of the patch-282 security review's finding F1 fix -- ROADMAP item 110,
+`docs/DEVELOPMENT.md`: `<prefix>_<YYYYMMDDTHHMMSSffffffZ>_<pid>_<counter>.pcap`, microsecond-
+resolution timestamp plus this process's own PID, so two capture processes sharing a `--prefix`
+and starting within the same second -- or one restarting within the same second -- can never
+generate the identical filename by accident. Even so, every generated name is claimed with an
+atomic, OS-level exclusive file creation before it is ever opened, not merely assumed free:
+`capture` never truncates a rotated file it did not itself just create moments before, whatever
+name collision might still occur in principle.)
 
 (`--rotate-bytes 1` here is deliberately smaller than even one packet record, forcing every file to
 hold exactly one packet -- `RotatingPcapWriter` always writes at least one packet per file

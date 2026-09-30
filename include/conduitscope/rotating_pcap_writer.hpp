@@ -23,10 +23,12 @@
 // a packet onto the wire -- this class, like PcapWriter, only ever writes to a local file.
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "conduitscope/pcap_reader.hpp"
@@ -149,9 +151,28 @@ public:
     //   own comment below for the exact guarantee). May be nullptr (the default) to discard
     //   warnings silently -- unusual for `capture` itself, which always supplies one, but harmless
     //   for e.g. tools/rotating_pcap_writer_selftest.cpp's own simpler checks.
+    // now_source: TEST-ONLY -- overrides the wall-clock instant this writer embeds in every
+    //   filename it generates (build_candidate_path(), rotating_pcap_writer.cpp). Real callers
+    //   (`capture` itself) have no legitimate reason to fake the time a file was actually opened and
+    //   must always leave this nullptr (the default), which uses the real
+    //   std::chrono::system_clock::now(). This exists solely so tests can deterministically
+    //   reproduce patch-282 security review finding F1's exact failure mode ("Rotating capture can
+    //   overwrite existing evidence") -- two RotatingPcapWriter instances racing to open the same
+    //   generated filename -- WITHOUT depending on real callers happening to land in the same
+    //   wall-clock microsecond, which is precisely the kind of real-time timing luck this codebase's
+    //   own testing conventions already refuse to depend on elsewhere (see RotationPolicy::
+    //   rotate_seconds's own comment on being checked against packet timestamps rather than
+    //   wall-clock for the identical reason). Giving two writer instances constructed in the same
+    //   process (so: already guaranteed the same PID) an IDENTICAL now_source makes their very first
+    //   generated filename an exact string match -- a real, unavoidable collision at the OS level --
+    //   so the exclusive-create retry path (open_writer(), rotating_pcap_writer.cpp) can be proven to
+    //   fire and to never let the second writer touch the first's already-written file, on every test
+    //   run, with no timing-dependent flakiness whatsoever. See
+    //   tools/rotating_pcap_writer_selftest.cpp's own F1 checks.
     RotatingPcapWriter(const std::string& directory, const std::string& prefix, uint32_t linktype,
                         uint32_t snaplen, const RotationPolicy& policy,
-                        std::function<void(const std::string&)> on_warning = nullptr);
+                        std::function<void(const std::string&)> on_warning = nullptr,
+                        std::function<std::chrono::system_clock::time_point()> now_source = nullptr);
     ~RotatingPcapWriter();
 
     RotatingPcapWriter(const RotatingPcapWriter&) = delete;
@@ -207,8 +228,37 @@ public:
     size_t uneviction_failed_files() const { return uneviction_failed_files_; }
 
 private:
-    std::string build_new_path();
-    std::unique_ptr<PcapWriter> open_writer(const std::string& path) const;
+    // patch-282 security review finding F1 ("Rotating capture can overwrite existing evidence"):
+    // builds ONE candidate filename for the file this writer is about to open next. `collision_
+    // attempt` is 0 for the normal, expected case and only nonzero when open_writer() below had to
+    // retry because a previous candidate name was already taken on disk (see that function's own
+    // comment for when that can actually happen) -- 0 never appears in the filename itself (so the
+    // overwhelming majority of files keep exactly the documented
+    // "<prefix>_<timestamp>_<pid>_<counter>.pcap" shape), a nonzero value appends "-<attempt>"
+    // before the extension so retried candidates are still trivially distinguishable on disk.
+    std::string build_candidate_path(unsigned collision_attempt) const;
+    // Opens the NEXT file this writer will write into and returns both the path it actually landed
+    // on and the PcapWriter now owning it -- touches no member state at all (same "purely
+    // constructs, caller decides whether to commit" contract the single-path version of this
+    // function used to have), so open_new_file()/rotate() below can freely call this and handle
+    // failure before committing to anything.
+    //
+    // Unlike before this fix, this does NOT simply hand build_new_path()'s one candidate straight to
+    // PcapWriter's own std::ios::trunc-opening constructor -- see this .cpp file's own
+    // try_create_exclusive_file() comment for exactly why a truncating open on a name this process
+    // merely GUESSED was free is the actual vulnerability F1 describes (a second-resolution
+    // timestamp plus a per-process-instance counter that resets to 0 on every restart is not
+    // guaranteed unique across a sensor restarting within the same second, or two independent
+    // capture processes sharing a --prefix and starting within the same second -- either way, the
+    // second process's trunc-open would silently destroy the first process's already-written
+    // evidence). Instead this atomically CLAIMS a candidate name first (OS-level exclusive create --
+    // POSIX O_CREAT|O_EXCL, Windows CREATE_NEW -- which can only ever succeed for exactly one of two
+    // racing processes, unlike any exists-then-open check) and only retries with a different
+    // candidate on an actual collision; once a name is successfully claimed this way, nothing else
+    // on the system could have written to it first, so handing it to PcapWriter's ordinary
+    // trunc-opening constructor immediately afterward is safe -- there is nothing there yet to
+    // truncate away.
+    std::pair<std::string, std::unique_ptr<PcapWriter>> open_writer() const;
     void open_new_file();
     bool needs_rotation(const PcapPacket& pkt) const;
     void rotate();
@@ -220,6 +270,9 @@ private:
     uint32_t snaplen_ = 0;
     RotationPolicy policy_;
     std::function<void(const std::string&)> on_warning_;
+    // TEST-ONLY -- see this class's own constructor doc comment on `now_source` above. Empty
+    // (falsy) for every real, production-constructed writer.
+    std::function<std::chrono::system_clock::time_point()> now_source_;
 
     std::unique_ptr<PcapWriter> writer_;
     std::string current_path_;

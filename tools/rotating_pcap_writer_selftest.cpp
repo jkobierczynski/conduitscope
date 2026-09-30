@@ -41,8 +41,10 @@
 //
 // Prints one PASS/FAIL line per check to stdout and exits 0 only if every check passed, same
 // contract as resource_limits_selftest/protocol_result_selftest/crypto_selftest.
+#include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 #ifndef _WIN32
@@ -79,6 +81,14 @@ conduitscope::PcapPacket make_packet(uint32_t ts_sec, size_t payload_len, uint8_
 bool file_exists(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     return in.good();
+}
+
+// Reads a whole file's raw bytes -- used only by the F1 collision checks below to prove a
+// surviving file's CONTENT (not just its existence/size) is exactly what its own writer put there,
+// never contaminated by a second writer that raced for the same generated name.
+std::vector<char> read_file_bytes(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
 }  // namespace
@@ -511,6 +521,148 @@ int main(int argc, char** argv) {
                    warnings == 0);
     }
 #endif  // !_WIN32
+
+    // 15-17. patch-282 security review finding F1 ("Rotating capture can overwrite existing
+    // evidence"): a second-resolution timestamp plus a per-process-instance counter that resets to
+    // 0 on every restart is not guaranteed unique across a sensor restarting within the same
+    // second, or two independent capture processes sharing a --prefix and starting within the same
+    // second -- and the OLD code handed every generated filename straight to PcapWriter's own
+    // std::ios::trunc-opening constructor, so the second writer would silently destroy the first
+    // writer's already-captured evidence. The fix: an atomic OS-level exclusive-create claim
+    // (O_CREAT|O_EXCL/CREATE_NEW) before ever opening a generated name, retrying with a "-N" suffix
+    // on an actual collision.
+    //
+    // Reproducing that exact collision deterministically -- without depending on real callers
+    // happening to land in the same wall-clock microsecond, which would make this check flaky --
+    // uses the TEST-ONLY now_source constructor parameter (rotating_pcap_writer.hpp) to give two
+    // writer instances, already guaranteed the same PID (same test process) and the same
+    // prefix/directory, an IDENTICAL fake "now": their very first generated candidate filename is
+    // then an EXACT STRING MATCH, a real collision at the OS level, every single run.
+    {
+        // An arbitrary, fixed instant -- its actual value never matters, only that both writers
+        // below are given the identical one.
+        auto fixed_now = []() -> std::chrono::system_clock::time_point {
+            return std::chrono::system_clock::time_point(std::chrono::seconds(1700000000));
+        };
+
+        auto contains_byte = [](const std::vector<char>& bytes, unsigned char needle) {
+            for (char c : bytes) {
+                if (static_cast<unsigned char>(c) == needle) return true;
+            }
+            return false;
+        };
+
+        // 15. "Two simultaneous writers" (patch-282's own named scenario): writer1 is deliberately
+        // kept OPEN (not destroyed) while writer2 is constructed, simulating two capture processes
+        // that are both genuinely running at once, not merely one after the other -- the collision
+        // itself (writer2's construction discovering writer1's file already claimed) genuinely
+        // happens while both are live. Both are held via unique_ptr, not a plain local, purely so
+        // this test can explicitly .reset() (close/flush) them before reading their content back --
+        // std::ofstream buffers writes in-process, so a raw re-read through a second, independent
+        // std::ifstream handle while the writing stream is still open is not guaranteed to see
+        // everything written yet, matching every real caller too (capture_rotation_smoke.sh, the
+        // CLI-level end-to-end test, likewise only ever decodes a rotated file after the whole
+        // `capture` process -- and therefore every PcapWriter inside it -- has already exited).
+        auto writer1 = std::make_unique<RotatingPcapWriter>(scratch_dir, "collision", kLinkType,
+                                                             65535, RotationPolicy{}, nullptr,
+                                                             fixed_now);
+        writer1->write_packet(make_packet(20000, kPayloadLen, 0xAA));  // "writer1's own evidence"
+        std::string path1 = writer1->current_path();
+
+        int warnings2 = 0;
+        auto writer2 = std::make_unique<RotatingPcapWriter>(
+            scratch_dir, "collision", kLinkType, 65535, RotationPolicy{},
+            [&](const std::string&) { ++warnings2; }, fixed_now);
+        writer2->write_packet(make_packet(20001, kPayloadLen, 0xBB));  // "writer2's own evidence"
+        std::string path2 = writer2->current_path();
+
+        check_bool("F1 fix: two writers with identical prefix/pid/timestamp inputs (a real, "
+                   "guaranteed collision on their first candidate name) still land on two "
+                   "DIFFERENT files -- the exclusive-create retry actually fired",
+                   path1 != path2);
+        check_bool("F1 fix: the second writer's own path carries the documented \"-1\" collision "
+                   "suffix, not a silently-different unrelated name",
+                   path2 == path1.substr(0, path1.size() - 5) + "-1.pcap");  // strip ".pcap", add "-1.pcap"
+        check_bool("F1 fix: on_warning is never called for an ordinary, successfully-resolved "
+                   "filename collision -- it is handled entirely internally, not surfaced as a "
+                   "caller-visible problem",
+                   warnings2 == 0);
+
+        writer1.reset();  // close/flush both -- see this check's own comment above on why
+        writer2.reset();
+
+        // The critical assertion -- not just "different paths", but that writer1's own file still
+        // holds EXACTLY writer1's own bytes: never truncated, never contaminated with writer2's.
+        check_bool("F1 fix: writer1's evidence file still contains its OWN packet bytes (0xAA)",
+                   contains_byte(read_file_bytes(path1), 0xAA));
+        check_bool("F1 fix: writer1's evidence file was never contaminated with writer2's packet "
+                   "bytes (0xBB) -- no cross-writer overwrite occurred",
+                   !contains_byte(read_file_bytes(path1), 0xBB));
+        check_bool("F1 fix: writer2's own file likewise holds only its own bytes (0xBB), not "
+                   "writer1's (0xAA) -- both files are fully intact, independent evidence",
+                   contains_byte(read_file_bytes(path2), 0xBB) &&
+                       !contains_byte(read_file_bytes(path2), 0xAA));
+
+        // 16. "Restart within the same second" (patch-282's own other named scenario) plus "a stale
+        // file already present": writer3 is closed BEFORE writer4 is even constructed, simulating
+        // the original process having already fully exited, the way a genuine restart would --
+        // proving the fix holds even with no second live writer racing at the OS level at all, just
+        // an ordinary stale file already sitting on disk from a finished previous run.
+        auto writer3 = std::make_unique<RotatingPcapWriter>(scratch_dir, "restart", kLinkType,
+                                                             65535, RotationPolicy{}, nullptr,
+                                                             fixed_now);
+        writer3->write_packet(make_packet(20002, kPayloadLen, 0xCC));
+        std::string path3 = writer3->current_path();
+        writer3.reset();  // the "original process" has now fully exited
+
+        auto writer4 = std::make_unique<RotatingPcapWriter>(scratch_dir, "restart", kLinkType,
+                                                             65535, RotationPolicy{}, nullptr,
+                                                             fixed_now);
+        writer4->write_packet(make_packet(20003, kPayloadLen, 0xDD));
+        std::string path4 = writer4->current_path();
+        writer4.reset();
+
+        check_bool("F1 fix: a \"restarted\" writer (same prefix/pid/timestamp as a stale previous "
+                   "run's own file) also lands on a different file rather than colliding",
+                   path3 != path4);
+        check_bool("F1 fix: the stale file left by the original run still holds only its own bytes "
+                   "(0xCC), untouched by the restarted process's own write (0xDD)",
+                   contains_byte(read_file_bytes(path3), 0xCC) &&
+                       !contains_byte(read_file_bytes(path3), 0xDD));
+
+        // 17. The retry loop itself, not just its single "-1" fallback: pre-claim BOTH the
+        // attempt-0 and the attempt-1 ("-1") names before ever constructing a writer, proving the
+        // loop keeps advancing (to "-2") rather than only ever handling exactly one collision.
+        auto writer5 = std::make_unique<RotatingPcapWriter>(scratch_dir, "multicollision", kLinkType,
+                                                             65535, RotationPolicy{}, nullptr,
+                                                             fixed_now);
+        writer5->write_packet(make_packet(20004, kPayloadLen, 0xEE));
+        std::string path5 = writer5->current_path();
+        writer5.reset();
+        std::string path5_suffix1 = path5.substr(0, path5.size() - 5) + "-1.pcap";
+        // Manually pre-claim the "-1" candidate too, exactly as if a THIRD racing writer had already
+        // taken it -- plain std::ofstream is fine here, this is test setup, not the code under test.
+        {
+            std::ofstream pre(path5_suffix1, std::ios::binary);
+            pre << "pre-existing-1";
+        }
+
+        auto writer6 = std::make_unique<RotatingPcapWriter>(scratch_dir, "multicollision", kLinkType,
+                                                             65535, RotationPolicy{}, nullptr,
+                                                             fixed_now);
+        writer6->write_packet(make_packet(20005, kPayloadLen, 0xFF));
+        std::string path6 = writer6->current_path();
+        writer6.reset();
+
+        check_bool("F1 fix: with BOTH the plain name and its \"-1\" retry already taken, a third "
+                   "writer advances to \"-2\" rather than failing or looping forever",
+                   path6 == path5.substr(0, path5.size() - 5) + "-2.pcap");
+        check_bool("F1 fix: the manually pre-claimed \"-1\" file (simulating yet another racing "
+                   "writer) was never touched by writer6's own open attempt",
+                   read_file_bytes(path5_suffix1) ==
+                       std::vector<char>{'p', 'r', 'e', '-', 'e', 'x', 'i', 's', 't', 'i', 'n', 'g',
+                                         '-', '1'});
+    }
 
     std::printf("\n%d check(s) failed\n", g_failures);
     return g_failures == 0 ? 0 : 1;
