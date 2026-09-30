@@ -1,0 +1,22 @@
+# ROADMAP item 103: exercises the new 'ethertypes:'/'ethertype:' raw-EtherType allow-list on a
+# VLAN-zone conduit -- a further restriction on top of 'protocols:', letting a conduit govern an
+# EtherType this tool doesn't decode into a friendly name at all (a vendor-proprietary L2
+# protocol, here two IANA-registered "Local Experimental Ethertype" placeholder values this
+# decoder deliberately doesn't recognize). Matched against
+# tests/sample_policy_l2_ethertype_powerlink.pcap: the EtherType 0x88b5 flow (2 packets) matches
+# both 'protocols: [any]' and this conduit's own 'ethertypes: [0x88b5]', so it's Allowed; the
+# EtherType 0x88b6 flow still matches 'protocols: [any]' but not the ethertypes restriction, so
+# it's a Violation naming the observed/permitted EtherTypes; the POWERLINK flow (EtherType 0x88ab)
+# is a Violation for the exact same reason -- proving 'ethertypes:' restricts ANY matched
+# protocol, named or synthetic, not just undecoded ones.
+zones:
+  ot_vlan:
+    description: "OT segment, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "Only EtherType 0x88b5 permitted on ot_vlan"
+    from: ot_vlan
+    to: ot_vlan
+    protocols: [any]
+    ethertypes: [0x88b5]

@@ -1,0 +1,16 @@
+# Regression fixture: 'to_macs' given on a CIDR-zone conduit (ROADMAP item 103, sibling to
+# from_macs -- see bad_conduit_from_macs_on_ip_zone.yaml, the direct template this mirrors).
+# Destination-MAC restriction only has a meaning on a VLAN-zone conduit; a CIDR-/hostname-zone
+# conduit already has a client/server IP pair to restrict by instead (see policy.hpp's
+# Conduit::to_macs comment).
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+conduits:
+  - name: c1
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    to_macs: [00:0c:29:aa:bb:cc]

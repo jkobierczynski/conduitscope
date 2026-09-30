@@ -1,0 +1,58 @@
+# ROADMAP item 103: exercises the seven TCP-capable OT protocols added to PolicyEngine's TCP
+# dispatch chain (twincat, ge-srtp, fox, foxs, s7comm-plus, plus melsec/fins on their TCP forms --
+# bsap/cclink-ie/codesys/melsec/fins's UDP forms are covered separately, see
+# udp_new_protocols_allowed.yaml) -- before this feature, every flow carrying one of these was
+# always reported generically Unclassified ("no recognized OT protocol traffic was found"), now
+# each is named and matched by a conduit like any other named protocol. One conduit per protocol,
+# each reused against that protocol's own existing decode-test sample capture (all on the same
+# HMI_IP/PLC_IP pair every other fixture in this project uses) -- see docs/USER_GUIDE.md's POLICY
+# FILE FORMAT section for the full closed protocol enum this widens.
+#
+# s7comm-plus's own conduit names BOTH "s7comm" and "s7comm-plus": tests/sample_s7commplus.pcap's
+# single TCP session opens with a COTP Connection Request/Confirm (dp.protocol == "cotp", which
+# this engine has always folded into the "s7comm" conduit-protocol name, not a separate one -- see
+# policy_engine.cpp's own comment on that) before any S7comm-Plus message is decoded, so the flow's
+# observed protocol set is {s7comm, s7comm-plus}, not {s7comm-plus} alone -- a conduit matches only
+# when it names every protocol actually observed on the flow (see PolicyEngine::finish's own
+# all_of check).
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks: [192.168.1.50/32]
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "TwinCAT/ADS engineering session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [twincat]
+  - name: "GE SRTP session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [ge-srtp]
+  - name: "Niagara Fox session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [fox]
+  - name: "Niagara FoxS (Fox-over-TLS) session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [foxs]
+  - name: "S7comm-Plus (TIA Portal) session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [s7comm, s7comm-plus]
+  - name: "MELSEC/SLMP TCP session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [melsec]
+  - name: "FINS TCP session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [fins]
+  - name: "CODESYS TCP session"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [codesys]

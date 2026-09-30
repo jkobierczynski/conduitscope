@@ -1,0 +1,20 @@
+# ROADMAP item 103: the violation counterpart to udp_generic_port_allowed.yaml -- same zones and
+# 'protocols: [udp]', but restricted to a different port (8888, not 9999) than
+# tests/sample_policy_generic_udp.pcap actually uses, so the flow is correctly named "udp" but
+# rejected on port, same "a conduit exists ... but none permits ... traffic on port ..." reason
+# shape any other port-mismatched conduit produces.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks: [192.168.1.50/32]
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "Generic UDP port 8888 permitted, HMI <-> PLC"
+    from: hmi_zone
+    to: plc_zone
+    bidirectional: true
+    protocols: [udp]
+    ports: [8888]

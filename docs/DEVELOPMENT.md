@@ -15097,6 +15097,126 @@ it done as its own patch.
     build-only per this sandbox's established precedent), plus a clean-room extract-rebuild-test
     cycle, before delivery.
 
+103. **Policy coverage for L2 and UDP industrial traffic (MAC/VLAN/EtherType/UDP rules).** Jurgen's
+    request: "Can you implement policy over L2 / UDP industrial traffic? Extending the policy model
+    with MAC/VLAN/EtherType/UDP rules would close the largest hole in the product's own thesis."
+    Research (reading `policy.hpp`/`policy.cpp`/`policy_engine.hpp`/`policy_engine.cpp` in full and
+    cross-checking every OT/ICS protocol `decode` recognizes against what `PolicyEngine` actually
+    tracked) found the gap was real and larger than it first looked: raw-Ethernet/VLAN-zone traffic
+    was recognized by only four hardcoded protocol names (`is_vlan_zone_eligible_protocol`) --
+    Ethernet POWERLINK was decoded by name but excluded, and there was no way to write a conduit for
+    an EtherType this tool doesn't decode into a friendly name at all; UDP traffic was tracked for
+    only four hardcoded names (`bacnet`/`enip`/`hartip`/`ffhse`) -- five more UDP-capable protocols
+    already decoded by name (MELSEC/UDP, FINS/UDP, CODESYS/UDP, BSAP, CC-Link IE Field Network
+    Basic) fell straight to `skipped_non_tcp_`, and there was no "any UDP port" primitive for an
+    undecoded UDP protocol either; separately (not L2/UDP, but the same blind-spot theme, folded
+    into this same pass per Jurgen's own choice when asked whether to scope it separately), seven
+    more TCP-capable protocols this tool decodes -- TwinCAT/ADS, GE SRTP, Niagara Fox/FoxS,
+    S7comm-Plus, and the TCP forms of MELSEC/FINS/CODESYS -- never appeared in
+    `PolicyEngine::observe`'s TCP dispatch chain, so a flow carrying any of them was always reported
+    generically `Unclassified`, indistinguishable from actual junk traffic, and could never be named
+    in a conduit's `protocols` list at all; and `from_macs` (a VLAN-conduit source-MAC allow-list,
+    Phase 5) had no destination-MAC counterpart, so a conduit couldn't assert "GOOSE on this VLAN
+    must target multicast group 01:0c:cd:01:00:01." Net effect: someone could stand up a rogue
+    TwinCAT/ADS engineering session, a CODESYS runtime connection, or an unlisted vendor L2 protocol
+    straight into a locked-down PLC zone, and `policy validate` would report either a misleading
+    generic `Unclassified` or nothing at all -- never a `Violation`.
+
+    **Two new general-purpose matching primitives, so any undecoded protocol stays governable.**
+    `DecodedPacket` gained `uint16_t ethertype`, populated for every Ethernet-linktype frame at the
+    same site `src_mac`/`dst_mac`/`has_vlan_tag`/`vlan_id` already are (`decoder.cpp`) -- previously
+    no EtherType value reached `DecodedPacket` at all. `Conduit` gained `ethertypes`
+    (`ethertypes:`/`ethertype:`, `0x0600`-`0xffff`, the same scalar-or-list convention every other
+    conduit field uses), VLAN-zone-conduit-only, composing with `protocols` as a FURTHER restriction
+    rather than a replacement: `protocols: [any]` with `ethertypes: [0x88f7]` is how an undecoded L2
+    protocol becomes governable at all, since `protocols: [any]` alone already matches an undecoded
+    `"non-ip"` frame once it's tracked as a flow (a new opt-in gate,
+    `Policy::has_ethertype_eligible_conduit()`/`PolicyEngine::any_ethertype_eligible_conduit_`,
+    mirrors `has_udp_eligible_conduit()`'s own backward-compatibility shape: only once a policy
+    declares a non-empty `ethertypes` on some VLAN conduit does a `"non-ip"` frame get tracked as an
+    L2 flow at all, keyed by a synthetic `"ethertype:0x...."` string -- not `dp.protocol`, which is
+    always literally `"non-ip"` -- so distinct undecoded EtherTypes between the same MAC pair don't
+    collide into one flow). The generic `udp` pseudo-protocol name does the UDP-side equivalent: it
+    matches `decoder.cpp`'s own existing "recognized UDP transport, no app-layer match" fallback
+    (`dp.protocol == "udp"`), combined with the *existing* `ports:` field to write firewall-style
+    "this UDP port between these zones is permitted" rules with zero code changes needed to
+    `finish()`'s UDP matching (it already generically checks `c.ports`/`c.protocols`).
+
+    **`to_macs`, sibling to `from_macs`.** Identical parsing/validation/canonicalization
+    (`parse_mac_address` unchanged), same VLAN-zone-conduit-only rejection, same
+    further-restriction-not-replacement semantics: an allow-list of DESTINATION MAC addresses a
+    VLAN conduit's traffic may target. `EthernetFlowState`/`EthernetFlowReport` both gained a
+    `dst_mac` field, fixed from the first packet exactly like `src_mac` already is. `finish()`'s
+    VLAN-conduit matching gained a fixed-order three-way check (`ethertype_ok`, then `from_mac_ok`,
+    then `to_mac_ok`) so the reported violation reason is deterministic when more than one
+    restriction would fail at once.
+
+    **UDP opt-in widened from four names to ten, TCP dispatch chain widened by seven names, and
+    POWERLINK joins the VLAN-only protocol set.** `Policy::has_udp_eligible_conduit()` and
+    `PolicyEngine::observe`'s UDP-branch gate (previously both hardcoded to exactly
+    `bacnet`/`enip`/`hartip`/`ffhse`) now share one `is_udp_zone_eligible_protocol()` helper naming
+    ten: those four, plus `melsec`/`fins`/`codesys` (their UDP forms specifically -- `decoder.cpp`
+    already sets these exact `out.protocol` strings for UDP MELSEC/CODESYS/FINS), `bsap`,
+    `cclink-ie`, and `udp`. `melsec`/`fins`/`codesys` needed no separate UDP-vs-TCP split: a packet
+    is routed to at most one of `dp.has_tcp`/`dp.has_udp`, so naming one of these three matches both
+    its transports automatically. Eight names (the seven TCP-capable protocols above, deliberately
+    grouped since `melsec`/`fins`/`codesys` also needed the TCP-side fix) gained an
+    `else if (dp.protocol == "...") { fs.protocols.insert(dp.protocol); }` arm in `observe()`'s TCP
+    dispatch chain, following the exact existing pattern for `hartip`/`opcua`/`mms`/`mqtt`/`ffhse`.
+    Deliberately OUT OF SCOPE: `functions:`-list restriction support for any of these eight -- none
+    currently mirrors a function/command-name field onto `DecodedPacket` the way
+    modbus/dnp3/s7comm/iec104/enip do (confirmed by grep), so wiring that up is a distinctly-sized
+    follow-on, not a blocker for fixing the classification gap itself -- matches the existing
+    precedent that hartip/opcua/mms/mqtt/ffhse also lack `functions:` support despite being named.
+    `is_vlan_zone_eligible_protocol()` gained `"powerlink"` as a fifth name, scoped narrowly to
+    POWERLINK's raw-Ethernet form; its separate, rarer UDP SDO sub-protocol (same `out.protocol`
+    string) is a genuinely dual-transport case that doesn't fit the current binary
+    VLAN-only/IP-only split cleanly, called out explicitly in docs/USER_GUIDE.md as a known, narrow
+    follow-up rather than quietly mishandled. All eleven new IP-riding names (`twincat`, `ge-srtp`,
+    `fox`, `foxs`, `s7comm-plus`, `melsec`, `fins`, `codesys`, `bsap`, `cclink-ie`, `udp`) and
+    `powerlink` were added to the closed protocol whitelist in `policy.cpp`'s `parse_policy_text`
+    (rewritten as two static arrays, `kVlanOnlyProtocols`/`kIpRidingProtocols`, replacing a long
+    if-chain), so they validate correctly with no new special-casing.
+
+    **No new CLI flags, no new resource-limit knobs.** Every new tracking path reuses an existing
+    bounded container and its existing cap: EtherType-keyed undecoded flows share `ethernet_flows_`/
+    `--max-policy-ethernet-flows`; the six new UDP names share `udp_flows_`/`--max-policy-udp-flows`.
+
+    **JSON output.** `ethernet_flows[]` gained `dst_mac`/`dst_mac_vendor` (mirroring
+    `src_mac`/`src_mac_vendor`) and `ethertype` (always present, `"0x"`-prefixed hex, e.g.
+    `"0x88f7"`) as new true-last fields. `conduits[]` gained `to_macs`/`ethertypes` immediately
+    after `from_macs`, same empty-array-means-unrestricted convention. The text report's UDP
+    section header was widened from "BACnet/IP, CIP I/O, HART-IP, and/or FF-HSE traffic" to name
+    all ten UDP-eligible names.
+
+    **Verification.** New fixtures: `tests/sample_policy_l2_ethertype_powerlink.pcap` (two
+    undecoded EtherTypes on VLAN 100, one POWERLINK PReq frame) and
+    `tests/sample_policy_generic_udp.pcap` (plain UDP on port 9999), plus ten new
+    `tests/policies/*.yaml` files (ethertype matching, POWERLINK, `to_macs` allowed/violation,
+    generic `udp` allowed/violation, five new `bad_conduit_*` validation-error regressions for
+    `to_macs`/`ethertypes`). The seven newly-dispatched TCP protocols plus the five newly-eligible
+    UDP protocols were verified by reuse against each protocol's own existing decode-test sample
+    capture (`sample_twincat.pcap`, `sample_ge_srtp.pcap`, `sample_fox.pcap` -- which already
+    carries a `foxs`/Fox-over-TLS packet -- `sample_s7commplus.pcap`, `sample_melsec.pcap`,
+    `sample_fins.pcap`, `sample_codesys.pcap`, `sample_bsap.pcap`, `sample_cclink_ie.pcap`) under
+    two new minimal policies (`tcp_new_protocols_allowed.yaml`, `udp_new_protocols_allowed.yaml`),
+    asserting via `PASS_REGULAR_EXPRESSION` that each protocol's flow is now named and Allowed
+    rather than falling through to generic `Unclassified` -- not full-capture COMPLIANT, since
+    several of these sample captures deliberately carry other edge-case flows (non-standard ports,
+    negative controls) unrelated to this feature. Two pre-existing regression tests
+    (`policy_error_unknown_protocol_lists_full_widened_set`,
+    `policy_error_conduit_tcp_protocol_on_vlan_zone`) needed their `PASS_REGULAR_EXPRESSION`
+    updated to match the widened protocol-enum error text -- both are load-time validation-error
+    fixtures asserting the FULL enum is listed, so widening the enum was expected to require
+    updating them, not a regression. Twenty-three new `add_test`/`set_tests_properties` entries in
+    `CMakeLists.txt`. Full CTest across all four standing build configs (default GCC `build`;
+    Clang ASan/UBSan `build-fuzz`, plus a fresh ~390K-execution `fuzz_packet_decode` campaign
+    against its existing corpus specifically watching for a finding in the new
+    MAC/EtherType-parsing byte-level code path -- none found;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile `build-mingw`,
+    build-only), plus a clean-room extract-rebuild-test cycle, before delivery as a zip of
+    touched/new files via the standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
@@ -207,6 +208,35 @@ std::optional<std::string> parse_mac_address(const std::string& text) {
     return out;
 }
 
+// Parses a raw EtherType (ROADMAP item 103, Conduit::ethertypes) -- "0x" followed by 1-4 hex
+// digits, case-insensitive. Rejects anything below 0x0600: per IEEE 802.3, a value there is a
+// frame-length field, not an EtherType at all, so it could never be a real value to match against
+// (link_layer.cpp's own parse_ethernet never produces one). Deliberately strict (requires the "0x"
+// prefix) so a policy author can't write an ambiguous bare decimal/hex number -- every EtherType
+// this codebase already prints anywhere (docs, summaries, error text) is hex-with-0x-prefix, e.g.
+// "0x8892", so this matches that convention rather than inventing a new one.
+std::optional<uint16_t> parse_ethertype(const std::string& text) {
+    if (text.size() < 3 || text.size() > 6) return std::nullopt;
+    if (text[0] != '0' || (text[1] != 'x' && text[1] != 'X')) return std::nullopt;
+    uint32_t value = 0;
+    for (size_t i = 2; i < text.size(); ++i) {
+        char c = text[i];
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            digit = c - 'A' + 10;
+        } else {
+            return std::nullopt;
+        }
+        value = (value << 4) | static_cast<uint32_t>(digit);
+    }
+    if (value < 0x0600 || value > 0xFFFF) return std::nullopt;
+    return static_cast<uint16_t>(value);
+}
+
 }  // namespace
 
 bool cidr_contains(const CidrBlock& block, uint32_t ip) {
@@ -284,13 +314,26 @@ bool Policy::has_hostname_zone() const {
 }
 
 bool Policy::has_udp_eligible_conduit() const {
+    // ROADMAP item 103 widened this name list from the original four (bacnet/enip/hartip/ffhse)
+    // to also include melsec/fins/codesys's own UDP forms, bsap, cclink-ie, and the generic "udp"
+    // pseudo-protocol name -- see Conduit's own header comment and PolicyEngine::observe's UDP
+    // branch (policy_engine.cpp) for the matching, mirrored gate.
+    static const char* const kUdpEligibleProtocols[] = {
+        "bacnet", "enip", "hartip", "ffhse", "melsec", "fins", "codesys", "bsap", "cclink-ie", "udp",
+    };
     return std::any_of(conduits.begin(), conduits.end(), [](const Conduit& c) {
         if (c.kind == ZoneKind::Vlan) return false;
-        return std::find(c.protocols.begin(), c.protocols.end(), "bacnet") != c.protocols.end() ||
-               std::find(c.protocols.begin(), c.protocols.end(), "enip") != c.protocols.end() ||
-               std::find(c.protocols.begin(), c.protocols.end(), "hartip") != c.protocols.end() ||
-               std::find(c.protocols.begin(), c.protocols.end(), "ffhse") != c.protocols.end() ||
-               std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
+        if (std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end()) return true;
+        for (const char* name : kUdpEligibleProtocols) {
+            if (std::find(c.protocols.begin(), c.protocols.end(), name) != c.protocols.end()) return true;
+        }
+        return false;
+    });
+}
+
+bool Policy::has_ethertype_eligible_conduit() const {
+    return std::any_of(conduits.begin(), conduits.end(), [](const Conduit& c) {
+        return c.kind == ZoneKind::Vlan && !c.ethertypes.empty();
     });
 }
 
@@ -570,24 +613,44 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
         if (proto_list.empty()) {
             fail(source_name, protos->line, "conduit '" + c.name + "' declares no protocols");
         }
+        // The closed protocol-name whitelist. ROADMAP item 103 widened this twice over: `powerlink`
+        // joined the VLAN-only (raw-Ethernet) set alongside profinet/goose/sv/ethercat; `twincat`,
+        // `ge-srtp`, `fox`, `foxs`, `s7comm-plus`, `melsec`, `fins`, `codesys`, `bsap`, `cclink-ie`,
+        // and the generic `udp` pseudo-protocol joined the IP-riding set (see Conduit's own header
+        // comment for what each new IP-riding name means, and PolicyEngine::observe's TCP dispatch
+        // chain / UDP opt-in gate for how each is actually recognized against real traffic).
+        static const char* const kVlanOnlyProtocols[] = {"profinet", "goose", "sv", "ethercat", "powerlink"};
+        static const char* const kIpRidingProtocols[] = {
+            "modbus", "dnp3", "s7comm", "iec104", "enip", "bacnet", "hartip", "opcua", "mms", "mqtt",
+            "ffhse", "twincat", "ge-srtp", "fox", "foxs", "s7comm-plus", "melsec", "fins", "codesys",
+            "bsap", "cclink-ie", "udp",
+        };
+        auto contains_name = [](const char* const* names, size_t count, const std::string& v) {
+            for (size_t i = 0; i < count; ++i) {
+                if (v == names[i]) return true;
+            }
+            return false;
+        };
         for (const auto& p : proto_list) {
             std::string lower = to_lower(p.text);
-            if (lower != "modbus" && lower != "dnp3" && lower != "s7comm" && lower != "iec104" &&
-                lower != "enip" && lower != "bacnet" && lower != "hartip" && lower != "opcua" &&
-                lower != "mms" && lower != "mqtt" && lower != "ffhse" && lower != "profinet" &&
-                lower != "goose" && lower != "sv" && lower != "ethercat" && lower != "any") {
+            bool is_vlan_only_protocol =
+                contains_name(kVlanOnlyProtocols, std::size(kVlanOnlyProtocols), lower);
+            bool is_ip_riding_protocol =
+                contains_name(kIpRidingProtocols, std::size(kIpRidingProtocols), lower);
+            if (lower != "any" && !is_vlan_only_protocol && !is_ip_riding_protocol) {
                 fail(source_name, p.line,
                      "conduit '" + c.name + "': unknown protocol '" + p.text +
                          "' (expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, "
-                         "opcua, mms, mqtt, ffhse, profinet, goose, sv, ethercat, any)");
+                         "opcua, mms, mqtt, ffhse, twincat, ge-srtp, fox, foxs, s7comm-plus, melsec, "
+                         "fins, codesys, bsap, cclink-ie, udp, profinet, goose, sv, ethercat, "
+                         "powerlink, any)");
             }
-            bool is_vlan_only_protocol =
-                lower == "profinet" || lower == "goose" || lower == "sv" || lower == "ethercat";
             if (is_vlan_conduit && lower != "any" && !is_vlan_only_protocol) {
                 fail(source_name, p.line,
                      "conduit '" + c.name + "': protocol '" + p.text +
-                         "' rides IPv4/TCP, not raw Ethernet, so it can never appear on a VLAN-zone "
-                         "conduit -- only profinet, goose, sv, ethercat, or 'any' can");
+                         "' rides IPv4/TCP/UDP, not raw Ethernet, so it can never appear on a "
+                         "VLAN-zone conduit -- only profinet, goose, sv, ethercat, powerlink, or "
+                         "'any' can");
             }
             if (!is_vlan_conduit && is_vlan_only_protocol) {
                 fail(source_name, p.line,
@@ -759,6 +822,62 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
             }
         }  // absent/empty 'from_macs'/'from_mac' means "unrestricted" -- c.from_macs stays empty,
            // see policy_engine.cpp
+
+        // Sibling to from_macs above (ROADMAP item 103) -- same VLAN-only restriction, same
+        // parsing/canonicalization/dedup via parse_mac_address, restricting the DESTINATION MAC
+        // instead of the source. See Conduit::to_macs' own comment (policy.hpp).
+        if (!is_vlan_conduit && (item.find("to_macs") || item.find("to_mac"))) {
+            fail(source_name, item.line,
+                 "conduit '" + c.name +
+                     "': 'to_macs'/'to_mac' has no meaning on a CIDR- or hostname-zone conduit "
+                     "-- destination-MAC restriction only applies to a VLAN-zone conduit, which "
+                     "has no client/server IP pair to restrict by the way a CIDR-/hostname-zone "
+                     "conduit already can (see docs/USER_GUIDE.md's POLICY FILE FORMAT section)");
+        }
+
+        if (const yaml_mini::Node* macs = item.find("to_macs") ? item.find("to_macs") : item.find("to_mac")) {
+            for (const auto& m : as_scalar_list(*macs, source_name, "conduit '" + c.name + "'s 'to_macs'")) {
+                auto parsed = parse_mac_address(m.text);
+                if (!parsed) {
+                    fail(source_name, m.line,
+                         "conduit '" + c.name + "': '" + m.text +
+                             "' is not a valid MAC address (expected six colon-separated hex "
+                             "octets, e.g. '01:0c:cd:01:00:01')");
+                }
+                if (std::find(c.to_macs.begin(), c.to_macs.end(), *parsed) == c.to_macs.end()) {
+                    c.to_macs.push_back(*parsed);
+                }
+            }
+        }  // absent/empty 'to_macs'/'to_mac' means "unrestricted" -- c.to_macs stays empty,
+           // see policy_engine.cpp
+
+        // ROADMAP item 103 -- raw EtherType allow-list, VLAN-only, same restriction shape as
+        // from_macs/to_macs above. See Conduit::ethertypes' own comment (policy.hpp).
+        if (!is_vlan_conduit && (item.find("ethertypes") || item.find("ethertype"))) {
+            fail(source_name, item.line,
+                 "conduit '" + c.name +
+                     "': 'ethertypes'/'ethertype' has no meaning on a CIDR- or hostname-zone "
+                     "conduit -- raw EtherType restriction only applies to a VLAN-zone conduit "
+                     "(see docs/USER_GUIDE.md's POLICY FILE FORMAT section)");
+        }
+
+        if (const yaml_mini::Node* ethertypes_node =
+                item.find("ethertypes") ? item.find("ethertypes") : item.find("ethertype")) {
+            for (const auto& e :
+                 as_scalar_list(*ethertypes_node, source_name, "conduit '" + c.name + "'s 'ethertypes'")) {
+                auto parsed = parse_ethertype(e.text);
+                if (!parsed) {
+                    fail(source_name, e.line,
+                         "conduit '" + c.name + "': '" + e.text +
+                             "' is not a valid EtherType (expected '0x' followed by 1-4 hex "
+                             "digits, in the range 0x0600-0xffff, e.g. '0x88f7')");
+                }
+                if (std::find(c.ethertypes.begin(), c.ethertypes.end(), *parsed) == c.ethertypes.end()) {
+                    c.ethertypes.push_back(*parsed);
+                }
+            }
+        }  // absent/empty 'ethertypes'/'ethertype' means "unrestricted" -- c.ethertypes stays
+           // empty, see policy_engine.cpp
 
         if (const auto* type_node = item.find("type")) {
             if (type_node->type != NodeType::Scalar) {

@@ -28,19 +28,46 @@ std::string session_key(const std::string& ip_a, uint16_t port_a, const std::str
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
-// True for exactly the four protocols with no IP layer at all that PolicyEngine can classify by
-// VLAN zone -- see policy.hpp's own header comment and PolicyEngine::observe's comment.
+// True for exactly the five protocols with no IP layer at all that PolicyEngine can classify by
+// VLAN zone -- see policy.hpp's own header comment and PolicyEngine::observe's comment. ROADMAP
+// item 103 added "powerlink" (Ethernet POWERLINK's raw-Ethernet form -- its separate, rarer UDP
+// SDO sub-protocol still isn't policy-eligible, see docs/USER_GUIDE.md's Addressing scope
+// section).
 bool is_vlan_zone_eligible_protocol(const std::string& protocol) {
-    return protocol == "profinet" || protocol == "goose" || protocol == "sv" || protocol == "ethercat";
+    return protocol == "profinet" || protocol == "goose" || protocol == "sv" || protocol == "ethercat" ||
+           protocol == "powerlink";
+}
+
+// The ten UDP-based, IP-addressed protocol names PolicyEngine can classify against a CIDR-/
+// hostname-zone conduit once the policy opts in (Policy::has_udp_eligible_conduit) -- see
+// policy.hpp's own Conduit header comment for what each means, and PolicyEngine::observe's own
+// comment for the opt-in gating. Shared between Policy::has_udp_eligible_conduit's own name check
+// and observe()'s UDP-branch gate below, so the two can never drift apart.
+bool is_udp_zone_eligible_protocol(const std::string& protocol) {
+    return protocol == "bacnet" || protocol == "enip" || protocol == "hartip" || protocol == "ffhse" ||
+           protocol == "melsec" || protocol == "fins" || protocol == "codesys" || protocol == "bsap" ||
+           protocol == "cclink-ie" || protocol == "udp";
+}
+
+// Formats a raw EtherType as this codebase's own established "0x" + lowercase hex convention (see
+// e.g. decoder.cpp's "Ethernet frame with ethertype 0x..." text) -- used both for the synthetic L2
+// flow key below and for report/reason text (ROADMAP item 103).
+std::string format_ethertype_hex(uint16_t ethertype) {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "0x%04x", ethertype);
+    return std::string(buf);
 }
 
 // Canonical (undirected) key for an L2 flow -- protocol plus a MAC pair in a fixed order, so
 // traffic seen from either direction between the same two MACs folds into one EthernetFlowState,
 // the same "canonicalize so direction doesn't fragment the flow" idea session_key uses for a TCP
 // 4-tuple above (mirrored here at the MAC-address layer since these protocols have no port/session
-// concept to canonicalize instead).
-std::string ethernet_flow_key(const std::string& protocol, const std::string& mac_a, const std::string& mac_b) {
-    return protocol + ":" + ((mac_a < mac_b) ? (mac_a + "<->" + mac_b) : (mac_b + "<->" + mac_a));
+// concept to canonicalize instead). `key_protocol` is normally just the packet's own decoded
+// protocol name, but for an undecoded "non-ip" frame (ROADMAP item 103) the caller passes a
+// synthetic "ethertype:0x...." string instead, so distinct undecoded EtherTypes between the same
+// MAC pair don't collide into one flow (dp.protocol is the same literal "non-ip" for all of them).
+std::string ethernet_flow_key(const std::string& key_protocol, const std::string& mac_a, const std::string& mac_b) {
+    return key_protocol + ":" + ((mac_a < mac_b) ? (mac_a + "<->" + mac_b) : (mac_b + "<->" + mac_a));
 }
 
 bool is_known_service_port(uint16_t port) {
@@ -259,11 +286,18 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         }
     }
 
-    if (is_vlan_zone_eligible_protocol(dp.protocol) && any_vlan_zone_) {
+    // ROADMAP item 103: an undecoded EtherType ("non-ip") is eligible for L2-flow tracking only
+    // once the policy opts in with a non-empty `ethertypes` on some VLAN conduit -- see this
+    // function's own doc comment and Policy::has_ethertype_eligible_conduit's own comment.
+    bool is_undecoded_ethertype_eligible =
+        dp.has_ethernet && dp.protocol == "non-ip" && any_ethertype_eligible_conduit_;
+    if ((is_vlan_zone_eligible_protocol(dp.protocol) || is_undecoded_ethertype_eligible) && any_vlan_zone_) {
         // See this function's own doc comment (policy_engine.hpp) for why this branch only exists
         // once the policy has opted in by declaring at least one VLAN zone -- backward
         // compatibility for every policy file written before this feature existed.
-        std::string key = ethernet_flow_key(dp.protocol, dp.src_mac, dp.dst_mac);
+        std::string key_protocol =
+            dp.protocol == "non-ip" ? ("ethertype:" + format_ethertype_hex(dp.ethertype)) : dp.protocol;
+        std::string key = ethernet_flow_key(key_protocol, dp.src_mac, dp.dst_mac);
         auto it = ethernet_flows_.find(key);
         if (!admit_tracked_key(it != ethernet_flows_.end(), ethernet_flows_.size(), limits_.max_ethernet_flows,
                                 "ethernet_flows_", "--max-policy-ethernet-flows")) {
@@ -276,6 +310,8 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             es.mac_a = (dp.src_mac < dp.dst_mac) ? dp.src_mac : dp.dst_mac;
             es.mac_b = (dp.src_mac < dp.dst_mac) ? dp.dst_mac : dp.src_mac;
             es.src_mac = dp.src_mac;  // fixed here, at first-insert -- never updated by a later packet
+            es.dst_mac = dp.dst_mac;  // ditto (ROADMAP item 103)
+            es.ethertype = dp.ethertype;  // ditto (ROADMAP item 103)
             es.has_vlan_tag = dp.has_vlan_tag;
             es.vlan_id = dp.vlan_id;
             ethernet_flow_order_.push_back(key);
@@ -285,14 +321,14 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         return;
     }
 
-    if (dp.has_udp && any_udp_ip_eligible_conduit_ &&
-        (dp.protocol == "bacnet" || dp.protocol == "enip" || dp.protocol == "hartip" || dp.protocol == "ffhse")) {
+    if (dp.has_udp && any_udp_ip_eligible_conduit_ && is_udp_zone_eligible_protocol(dp.protocol)) {
         // See this function's own doc comment (policy_engine.hpp) for why this branch only exists
-        // once the policy has opted in by naming "bacnet"/"enip"/"hartip"/"ffhse"/"any" on a CIDR- or
-        // hostname-zone conduit -- backward compatibility for every policy file written before this
-        // feature existed. Keyed by the same canonical, order-independent session_key() a TCP flow
-        // uses (see UdpFlowState's own comment for why), prefixed with the protocol so flows of
-        // different UDP-based protocols between coincidentally-overlapping endpoints never collide.
+        // once the policy has opted in by naming one of is_udp_zone_eligible_protocol's own ten
+        // names (or "any") on a CIDR- or hostname-zone conduit -- backward compatibility for every
+        // policy file written before this feature existed. Keyed by the same canonical,
+        // order-independent session_key() a TCP flow uses (see UdpFlowState's own comment for why),
+        // prefixed with the protocol so flows of different UDP-based protocols between
+        // coincidentally-overlapping endpoints never collide.
         std::string key = dp.protocol + ":" + session_key(dp.src_ip, dp.src_port, dp.dst_ip, dp.dst_port);
 
         // Direction: BACnet decides authoritatively from its own decoded APDU type when one is
@@ -622,6 +658,23 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
             const std::string& name = dp.result->as<FfhseResult>().first.message_name;
             if (!name.empty()) fs.functions.insert(name);
         }
+    } else if (dp.protocol == "twincat" || dp.protocol == "ge-srtp" || dp.protocol == "fox" ||
+               dp.protocol == "foxs" || dp.protocol == "s7comm-plus" || dp.protocol == "melsec" ||
+               dp.protocol == "fins" || dp.protocol == "codesys") {
+        // ROADMAP item 103: seven more TCP-capable OT protocols this tool already decodes by name,
+        // previously invisible to policy_validate (a flow carrying one of these always fell through
+        // every branch above with fs.protocols left empty, reported generically Unclassified --
+        // "no recognized OT protocol traffic was found," indistinguishable from actual junk
+        // traffic). melsec/fins/codesys also reach this branch on their TCP forms specifically --
+        // their UDP forms are handled by the widened UDP opt-in gate above (see
+        // is_udp_zone_eligible_protocol), the two are mutually exclusive per packet
+        // (dp.has_tcp/dp.has_udp). Deliberately no fs.functions capture here (unlike every branch
+        // above): none of these seven mirror a function/command-name field onto DecodedPacket the
+        // way modbus/dnp3/s7comm/iec104/enip do, so there's nothing to insert yet, and `functions:`
+        // conduit restriction support for them is an explicit, distinctly-sized follow-on (same
+        // position hartip/opcua/mms/mqtt/ffhse are already in -- see
+        // protocol_has_known_function_table, policy.cpp).
+        fs.protocols.insert(dp.protocol);
     }
 }
 
@@ -759,6 +812,8 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         er.mac_a = es.mac_a;
         er.mac_b = es.mac_b;
         er.src_mac = es.src_mac;
+        er.dst_mac = es.dst_mac;
+        er.ethertype = es.ethertype;
         er.has_vlan_tag = es.has_vlan_tag;
         er.vlan_id = es.vlan_id;
         er.packet_count = es.packet_count;
@@ -784,21 +839,45 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
                 break;
             }
             if (matched) {
-                // A matched conduit's own 'from_macs' allow-list (Phase 5, see policy.hpp's
-                // Conduit::from_macs comment) is a further restriction on top of the
-                // protocol/VLAN-zone match already found above: only a source MAC in that list may
-                // publish, mirroring the same "matched, then a further allow-list check can still
-                // turn it into a Violation" shape the TCP-flow 'functions' restriction above uses.
-                // An empty 'from_macs' (the common case) means no restriction at all, exactly the
-                // behavior before this field existed.
-                bool mac_ok = matched->from_macs.empty() ||
-                              std::find(matched->from_macs.begin(), matched->from_macs.end(), er.src_mac) !=
-                                  matched->from_macs.end();
-                if (!mac_ok) {
+                // A matched conduit's own 'from_macs'/'to_macs'/'ethertypes' allow-lists (Phase 5
+                // for from_macs; ROADMAP item 103 for to_macs/ethertypes -- see each field's own
+                // comment on Conduit, policy.hpp) are each a further restriction on top of the
+                // protocol/VLAN-zone match already found above, mirroring the same "matched, then a
+                // further allow-list check can still turn it into a Violation" shape the TCP-flow
+                // 'functions' restriction above uses. An empty list (the common case, and the
+                // behavior before each field existed) means no restriction at all. Checked in a
+                // fixed order (ethertype, then source MAC, then destination MAC) so the reported
+                // reason is deterministic when more than one restriction would fail at once.
+                bool ethertype_ok = matched->ethertypes.empty() ||
+                                     std::find(matched->ethertypes.begin(), matched->ethertypes.end(),
+                                               er.ethertype) != matched->ethertypes.end();
+                bool from_mac_ok = matched->from_macs.empty() ||
+                                    std::find(matched->from_macs.begin(), matched->from_macs.end(), er.src_mac) !=
+                                        matched->from_macs.end();
+                bool to_mac_ok = matched->to_macs.empty() ||
+                                 std::find(matched->to_macs.begin(), matched->to_macs.end(), er.dst_mac) !=
+                                     matched->to_macs.end();
+                if (!ethertype_ok) {
+                    er.verdict = FlowVerdict::Violation;
+                    std::ostringstream reason;
+                    reason << "ethertype " << format_ethertype_hex(er.ethertype) << " observed; conduit '"
+                           << matched->name << "' permits only: ";
+                    for (size_t i = 0; i < matched->ethertypes.size(); ++i) {
+                        if (i != 0) reason << ", ";
+                        reason << format_ethertype_hex(matched->ethertypes[i]);
+                    }
+                    er.reason = reason.str();
+                } else if (!from_mac_ok) {
                     er.verdict = FlowVerdict::Violation;
                     std::ostringstream reason;
                     reason << "source MAC '" << er.src_mac << "' observed; conduit '" << matched->name
                            << "' permits only: " << join_comma(matched->from_macs);
+                    er.reason = reason.str();
+                } else if (!to_mac_ok) {
+                    er.verdict = FlowVerdict::Violation;
+                    std::ostringstream reason;
+                    reason << "destination MAC '" << er.dst_mac << "' observed; conduit '" << matched->name
+                           << "' permits only: " << join_comma(matched->to_macs);
                     er.reason = reason.str();
                 } else {
                     er.verdict = FlowVerdict::Allowed;
@@ -807,7 +886,14 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
                 }
             } else {
                 er.verdict = FlowVerdict::Violation;
-                er.reason = "no conduit permits " + er.protocol + " traffic on VLAN zone '" + er.vlan_zone + "'";
+                // A "non-ip" flow (ROADMAP item 103 -- an EtherType none of this tool's decoders
+                // recognize by name) gets its raw EtherType named in the reason too, since
+                // "no conduit permits non-ip traffic" alone would be true of every such flow and
+                // wouldn't tell an auditor which wire value was actually seen.
+                std::string protocol_text =
+                    er.protocol == "non-ip" ? ("non-ip traffic with ethertype " + format_ethertype_hex(er.ethertype))
+                                             : (er.protocol + " traffic");
+                er.reason = "no conduit permits " + protocol_text + " on VLAN zone '" + er.vlan_zone + "'";
             }
         }
         report.ethernet_flows.push_back(std::move(er));
@@ -1661,8 +1747,9 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
             [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
         out << "UDP flows evaluated: " << report.udp_flows.size() << " (" << udp_allowed << " allowed, "
             << udp_violation << " violation(s), " << udp_unclassified << " unclassified)\n";
-        out << "  BACnet/IP, CIP I/O, HART-IP, and/or FF-HSE traffic, classified by CIDR/hostname "
-               "zone -- see docs/USER_GUIDE.md's POLICY FILE FORMAT section\n\n";
+        out << "  BACnet/IP, CIP I/O, HART-IP, FF-HSE, MELSEC, FINS, CODESYS, BSAP, CC-Link IE, "
+               "and/or generic UDP traffic, classified by CIDR/hostname zone -- see "
+               "docs/USER_GUIDE.md's POLICY FILE FORMAT section\n\n";
 
         std::vector<const UdpFlowReport*> udp_violations, udp_unclassified_list, udp_allowed_list;
         for (const auto& f : report.udp_flows) {
@@ -1753,6 +1840,20 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         for (size_t j = 0; j < c.from_macs.size(); ++j) {
             if (j) out << ", ";
             out << "\"" << json_escape(c.from_macs[j]) << "\"";
+        }
+        out << "],\n";
+        // ROADMAP item 103's own new true-last fields, same empty-array-means-unrestricted
+        // convention 'functions'/'from_macs' above already use for their own empty case.
+        out << "      \"to_macs\": [";
+        for (size_t j = 0; j < c.to_macs.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(c.to_macs[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"ethertypes\": [";
+        for (size_t j = 0; j < c.ethertypes.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << format_ethertype_hex(c.ethertypes[j]) << "\"";
         }
         out << "]\n";
         out << "    }" << (i + 1 < policy.conduits.size() ? "," : "") << "\n";
@@ -1887,6 +1988,17 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         if (auto v = resolver.oui_vendor(f.src_mac)) {
             out << ",\n      \"src_mac_vendor\": \"" << json_escape(*v) << "\"";
         }
+        // ROADMAP item 103's own new true-last fields: dst_mac mirrors src_mac exactly (always
+        // present, what Conduit::to_macs is checked against; OUI vendor annotation omitted on a
+        // lookup miss like every other *_vendor field above), and ethertype is this flow's raw
+        // EtherType as the same "0x" + lowercase-hex string format_ethertype_hex uses everywhere
+        // else in this file (always present -- every EthernetFlowReport has a real ethertype by
+        // construction, whether from a named protocol like "goose" or a synthetic "non-ip" one).
+        out << ",\n      \"dst_mac\": \"" << json_escape(f.dst_mac) << "\"";
+        if (auto v = resolver.oui_vendor(f.dst_mac)) {
+            out << ",\n      \"dst_mac_vendor\": \"" << json_escape(*v) << "\"";
+        }
+        out << ",\n      \"ethertype\": \"" << format_ethertype_hex(f.ethertype) << "\"";
         out << "\n";
         out << "    }" << (i + 1 < report.ethernet_flows.size() ? "," : "") << "\n";
     }

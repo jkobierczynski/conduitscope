@@ -1,0 +1,12 @@
+# Regression fixture: an 'ethertypes' entry that isn't a valid EtherType (ROADMAP item 103) --
+# parse_ethertype requires "0x" + 1-4 hex digits in [0x0600, 0xFFFF] (below 0x0600 is an 802.3
+# length field, never a real EtherType). Mirrors bad_conduit_from_macs_invalid_format.yaml.
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    ethertypes: [not-an-ethertype]

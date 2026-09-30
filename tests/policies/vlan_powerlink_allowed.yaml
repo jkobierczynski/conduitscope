@@ -1,0 +1,16 @@
+# ROADMAP item 103: exercises 'powerlink' joining the VLAN-zone-eligible protocol set (previously
+# only profinet/goose/sv/ethercat). Matched against
+# tests/sample_policy_l2_ethertype_powerlink.pcap: the POWERLINK flow is Allowed; the two
+# undecoded-EtherType flows (0x88b5, 0x88b6) are Violations, since this conduit only names
+# 'powerlink' -- proving POWERLINK is now governable exactly like the four pre-existing VLAN-only
+# protocols, independent of the new ethertypes: primitive.
+zones:
+  ot_vlan:
+    description: "OT segment, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "POWERLINK permitted on ot_vlan"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: powerlink

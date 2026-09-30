@@ -1,0 +1,14 @@
+# Regression fixture: 'ethertypes' given on a CIDR-zone conduit (ROADMAP item 103) -- raw-EtherType
+# restriction only has a meaning on a VLAN-zone conduit (see policy.hpp's Conduit::ethertypes
+# comment); mirrors bad_conduit_from_macs_on_ip_zone.yaml/bad_conduit_to_macs_on_ip_zone.yaml.
+zones:
+  hmi_zone:
+    networks: [192.168.1.50/32]
+  plc_zone:
+    networks: [192.168.1.10/32]
+conduits:
+  - name: c1
+    from: hmi_zone
+    to: plc_zone
+    protocol: modbus
+    ethertypes: [0x88b5]

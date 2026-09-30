@@ -1,0 +1,20 @@
+# ROADMAP item 103: exercises the new 'to_macs'/'to_mac' destination-MAC allow-list on a VLAN-zone
+# conduit -- sibling to the existing 'from_macs' source-MAC allow-list (see
+# vlan_from_macs_allowed.yaml/vlan_from_macs_violation.yaml, the direct template this pair
+# mirrors). Matched against tests/sample_vlan_zones.pcap: the four VLAN-100 flows
+# (profinet/goose/sv/ethercat, all destined for PLC_MAC) match this conduit's
+# 'to_macs: [00:0c:29:aa:bb:cc]', so this must report the same "4 allowed, 0 violation(s), 2
+# unclassified" shape vlan_zone_single_segment.yaml itself produces -- restricting to the ACTUAL
+# observed destination changes nothing. Compare against vlan_to_macs_violation.yaml, which
+# restricts to a MAC nothing on this capture ever targets.
+zones:
+  ot_vlan:
+    description: "OT segment -- PROFINET RT/GOOSE/SV/EtherCAT, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "OT protocols permitted on ot_vlan, destined for the PLC only"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    to_macs: [00:0c:29:aa:bb:cc]

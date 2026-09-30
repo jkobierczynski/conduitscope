@@ -1,0 +1,13 @@
+# Regression fixture: a 'to_macs' entry that isn't a valid MAC address (ROADMAP item 103 -- see
+# bad_conduit_from_macs_invalid_format.yaml, the direct template this mirrors). Exactly six
+# colon-separated hex octets are required, the same strict-input posture from_macs/parse_cidr
+# already take toward malformed input.
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    to_macs: [not-a-mac-address]

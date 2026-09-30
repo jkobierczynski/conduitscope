@@ -1,0 +1,15 @@
+# ROADMAP item 103: the violation counterpart to vlan_to_macs_allowed.yaml -- restricts to a
+# destination MAC (ff:ff:ff:ff:ff:ff) nothing in tests/sample_vlan_zones.pcap's VLAN-100 traffic
+# ever targets, so all four VLAN-100 flows (profinet/goose/sv/ethercat) must report a Violation
+# naming the observed destination MAC and the conduit's own permitted list.
+zones:
+  ot_vlan:
+    description: "OT segment -- PROFINET RT/GOOSE/SV/EtherCAT, tagged VLAN 100"
+    vlans: [100]
+
+conduits:
+  - name: "OT protocols permitted on ot_vlan, destined for a MAC that never appears"
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    to_macs: [ff:ff:ff:ff:ff:ff]

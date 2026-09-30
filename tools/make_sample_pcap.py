@@ -21766,6 +21766,75 @@ def build_display_filter_mixed_sample():
     (TESTS_DIR / "sample_display_filter_mixed.pcap").write_bytes(data)
 
 
+def build_policy_l2_ethertype_powerlink_sample():
+    """ROADMAP item 103: exercises PolicyEngine's two newest raw-Ethernet/VLAN-zone matching
+    primitives that build_vlan_zones_sample's own fixture (PROFINET/GOOSE/SV/EtherCAT only)
+    doesn't cover -- an undecoded EtherType ("non-ip") tracked as its own flow once a policy opts
+    in with a non-empty `ethertypes:`, and Ethernet POWERLINK (EtherType 0x88AB) joining the
+    VLAN-only protocol set. All three frames are tagged VLAN 100 and use the same HMI_MAC/PLC_MAC
+    pair build_vlan_zones_sample's own VLAN-100 traffic uses, so the same vlan_100 zone declaration
+    (from ot_vlan/vlan_zone_single_segment.yaml's own convention) applies unchanged.
+
+    1) EtherType 0x88B5 ("IEEE Std 802 - Local Experimental Ethertype 1", a real IANA-registered
+       value no decoder in this codebase recognizes by name) -- 2 packets on the SAME flow, to
+       prove packet_count accumulates normally for a synthetic ethertype-keyed flow just like it
+       does for a named-protocol one.
+    2) EtherType 0x88B6 ("...Ethertype 2"), same VLAN, same MAC pair as (1) -- proves distinct
+       undecoded EtherTypes between the same MAC pair are tracked as SEPARATE flows (the synthetic
+       "ethertype:0x...." key component -- see ethernet_flow_key's own comment, policy_engine.cpp),
+       not folded together under the shared literal "non-ip" protocol.
+    3) A POWERLINK PReq frame (MN->CN1, the same shape build_powerlink_sample's own packet #2
+       uses) -- proves 'protocol: powerlink' is now VLAN-zone-conduit-eligible, closing the same
+       kind of gap PROFINET/GOOSE/SV/EtherCAT already had covered.
+    """
+    packets = []
+
+    def vlan_frame(ethertype: int, payload: bytes, dst: bytes = None, src: bytes = None) -> bytes:
+        dst = dst if dst is not None else PLC_MAC
+        src = src if src is not None else HMI_MAC
+        return struct.pack("!6s6sHH", dst, src, 0x8100, 100) + struct.pack("!H", ethertype) + payload
+
+    LOCAL_EXPERIMENTAL_ETHERTYPE_1 = 0x88B5
+    LOCAL_EXPERIMENTAL_ETHERTYPE_2 = 0x88B6
+
+    # 1) & 2) Two packets on the same undecoded-EtherType flow (0x88B5).
+    packets.append(vlan_frame(LOCAL_EXPERIMENTAL_ETHERTYPE_1, b"\xDE\xAD\xBE\xEF"))
+    packets.append(vlan_frame(LOCAL_EXPERIMENTAL_ETHERTYPE_1, b"\xDE\xAD\xBE\xEF\x00\x01"))
+
+    # 3) A distinct undecoded EtherType (0x88B6), same MAC pair -- must be its own flow.
+    packets.append(vlan_frame(LOCAL_EXPERIMENTAL_ETHERTYPE_2, b"\xCA\xFE"))
+
+    # 4) POWERLINK PReq, MN (HMI_MAC, NodeID 240) -> CN1 (PLC_MAC, NodeID 1), tagged VLAN 100.
+    preq_payload = struct.pack("BBB", 0x03, 1, POWERLINK_MN_NODE_ID) + epl_preq_body(
+        rd=True, fls=True, payload=b"\xDE\xAD\xBE\xEF")
+    packets.append(vlan_frame(POWERLINK_ETHERTYPE, preq_payload))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_030_000 + i, i * 1000)
+    (TESTS_DIR / "sample_policy_l2_ethertype_powerlink.pcap").write_bytes(data)
+
+
+def build_policy_generic_udp_sample():
+    """ROADMAP item 103: exercises the generic `udp` pseudo-protocol (`protocols: [udp]` plus
+    `ports: [N]` on a CIDR-zone conduit) -- a deliberately blunt "this UDP port between these zones
+    is permitted, whatever's on it" rule for a UDP OT protocol this tool doesn't decode by name at
+    all. Two plain UDP packets, same HMI_IP/PLC_IP pair every other policy fixture in this file
+    uses, on UDP port 9999 -- a port none of this decoder's named UDP protocols (BACnet/CIP-I-O/
+    HART-IP/FF-HSE/MELSEC/FINS/CODESYS/BSAP/CC-Link IE) claim, so it always falls through to the
+    decoder's own generic "recognized transport, no app-layer match" `dp.protocol == "udp"`
+    fallback (decoder.cpp)."""
+    packets = []
+    GENERIC_UDP_PORT = 9999
+    packets.append(udp_ip_eth_frame(b"\x01\x02\x03\x04", 55000, GENERIC_UDP_PORT, HMI_IP, PLC_IP, HMI_MAC, PLC_MAC))
+    packets.append(udp_ip_eth_frame(b"\x05\x06", GENERIC_UDP_PORT, 55000, PLC_IP, HMI_IP, PLC_MAC, HMI_MAC))
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_031_000 + i, i * 1000)
+    (TESTS_DIR / "sample_policy_generic_udp.pcap").write_bytes(data)
+
+
 if __name__ == "__main__":
     TESTS_DIR.mkdir(exist_ok=True)
     build_modbus_sample()
@@ -21902,4 +21971,6 @@ if __name__ == "__main__":
     build_ip_fragment_reassembly_sample()
     build_ip_fragment_resource_exhaustion_sample()
     build_ip_fragment_max_active_fragment_groups_sample()
+    build_policy_l2_ethertype_powerlink_sample()
+    build_policy_generic_udp_sample()
     print("wrote sample fixtures to", TESTS_DIR)

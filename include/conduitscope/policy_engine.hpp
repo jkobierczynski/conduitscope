@@ -103,27 +103,42 @@ struct FlowReport {
     std::string client_mac, server_mac;
 };
 
-// One observed raw-Ethernet "L2 flow" -- PROFINET RT, GOOSE, Sampled Values, or EtherCAT traffic
-// between one pair of MAC addresses, aggregated the same way FlowReport aggregates a TCP 4-tuple,
-// but keyed and evaluated completely differently: there is no port, no client/server distinction
-// (no SYN, no session -- these protocols are cyclic/multicast publish traffic, not a connection),
-// and the "zone" question is VLAN membership, not IP CIDR membership -- see policy.hpp's own
-// header comment for the full "why" and PolicyEngine::observe's comment for exactly when this
-// report is even populated at all (only once the policy declares at least one VLAN zone).
+// One observed raw-Ethernet "L2 flow" -- PROFINET RT, GOOSE, Sampled Values, EtherCAT, or
+// POWERLINK traffic between one pair of MAC addresses, aggregated the same way FlowReport
+// aggregates a TCP 4-tuple, but keyed and evaluated completely differently: there is no port, no
+// client/server distinction (no SYN, no session -- these protocols are cyclic/multicast publish
+// traffic, not a connection), and the "zone" question is VLAN membership, not IP CIDR membership
+// -- see policy.hpp's own header comment for the full "why" and PolicyEngine::observe's comment
+// for exactly when this report is even populated at all (only once the policy declares at least
+// one VLAN zone). ROADMAP item 103 widened this beyond the five named protocols: once a policy
+// also declares a VLAN conduit with a non-empty `ethertypes` (Policy::has_ethertype_eligible_conduit),
+// a frame this tool's own decoders don't recognize by name at all (protocol == "non-ip") is
+// tracked here too, identified by its raw `ethertype` (below) rather than a protocol name.
 struct EthernetFlowReport {
-    std::string protocol;         // "profinet"/"goose"/"sv"/"ethercat"
+    // "profinet"/"goose"/"sv"/"ethercat"/"powerlink" for a named protocol; "non-ip" for an
+    // EtherType this tool's own decoders don't recognize by name -- see `ethertype` below for the
+    // field that actually identifies which wire value a "non-ip" flow carries (ROADMAP item 103).
+    std::string protocol;
     std::string mac_a, mac_b;     // canonical order (mac_a < mac_b) -- no "source"/"destination"
                                    // distinction is tracked for zone-membership purposes, since
                                    // neither MAC decides VLAN zone membership (see vlan_zone below)
     // The actual transmitting MAC, fixed from the FIRST packet that created this flow's aggregated
     // state (never re-derived per packet) -- unlike a bidirectional TCP session, these are
-    // one-directional cyclic publish streams (GOOSE/SV/PROFINET-RT/EtherCAT all work this way), so
-    // "the" source is stable and unambiguous for the whole flow, not something that needs a
-    // handshake to pin down the way FlowReport::client_ip/server_ip does. Purely additive --
+    // one-directional cyclic publish streams (GOOSE/SV/PROFINET-RT/EtherCAT/POWERLINK all work this
+    // way), so "the" source is stable and unambiguous for the whole flow, not something that needs
+    // a handshake to pin down the way FlowReport::client_ip/server_ip does. Purely additive --
     // doesn't change what mac_a/mac_b already mean (the canonicalized, order-independent pair used
     // for the flow's identity/key); this is the field Conduit::from_macs (Phase 5, see
     // docs/design/policy-engine-zoning.md) is actually checked against in PolicyEngine::finish.
     std::string src_mac;
+    // Sibling to src_mac above (ROADMAP item 103): the actual receiving MAC, fixed from the same
+    // first packet -- what Conduit::to_macs is checked against in PolicyEngine::finish.
+    std::string dst_mac;
+    // The frame's own EtherType (DecodedPacket::ethertype), fixed from the first packet -- always
+    // populated, including for a named protocol (where it's redundant with `protocol`, e.g. GOOSE
+    // is always 0x88b8), but it's what makes a "non-ip" flow's identity meaningful at all, and
+    // what Conduit::ethertypes is checked against in PolicyEngine::finish (ROADMAP item 103).
+    uint16_t ethertype = 0;
     bool has_vlan_tag = false;
     uint16_t vlan_id = 0;         // meaningful only when has_vlan_tag
     std::string vlan_zone;        // "unclassified" when has_vlan_tag is false, or no declared VLAN
@@ -407,7 +422,8 @@ class PolicyEngine {
 public:
     explicit PolicyEngine(const Policy& policy, PolicyEngineLimits limits = PolicyEngineLimits{})
         : policy_(policy), any_vlan_zone_(policy.has_vlan_zone()),
-          any_udp_ip_eligible_conduit_(policy.has_udp_eligible_conduit()), limits_(limits) {}
+          any_udp_ip_eligible_conduit_(policy.has_udp_eligible_conduit()),
+          any_ethertype_eligible_conduit_(policy.has_ethertype_eligible_conduit()), limits_(limits) {}
 
     // True once at least one of limits_'s four growth ceilings refused to track something new at
     // least once -- see PolicyEngineLimits' own comment for why refusal, never eviction. Callers
@@ -421,9 +437,9 @@ public:
     // Folds one already-decoded packet into this engine's per-flow state. Call once per packet, in
     // capture order (same discipline as Decoder::decode).
     //
-    // Packets with protocol == "profinet"/"goose"/"sv"/"ethercat" are folded into an L2 flow
-    // (PolicyReport::ethernet_flows) instead of the TCP-flow path below, but ONLY when the policy
-    // declares at least one VLAN zone (`any_vlan_zone_`, cached from Policy::has_vlan_zone at
+    // Packets with protocol == "profinet"/"goose"/"sv"/"ethercat"/"powerlink" are folded into an L2
+    // flow (PolicyReport::ethernet_flows) instead of the TCP-flow path below, but ONLY when the
+    // policy declares at least one VLAN zone (`any_vlan_zone_`, cached from Policy::has_vlan_zone at
     // construction) -- when it doesn't, this traffic is left in PolicyReport::skipped_non_tcp
     // exactly as it was before VLAN zones existed (ROADMAP item 15), so a policy file written
     // before this feature existed can never have its compliance verdict change just because a
@@ -431,12 +447,19 @@ public:
     // wrote a single conduit to address (see policy.hpp's Policy::has_vlan_zone comment). An L2
     // flow is keyed by (protocol, canonical MAC pair) -- there is no port, and no client/server
     // concept (no SYN, no session; see EthernetFlowReport's own comment) -- and classified by
-    // whether its VLAN tag (if any) falls in a declared VLAN zone, not by IP.
+    // whether its VLAN tag (if any) falls in a declared VLAN zone, not by IP. ROADMAP item 103
+    // widens this once more: a packet with protocol == "non-ip" (an EtherType this tool's own
+    // decoders don't recognize by name at all) is ALSO folded into an L2 flow, but only when the
+    // policy additionally opts in with a non-empty `ethertypes` on some VLAN conduit
+    // (`any_ethertype_eligible_conduit_`, cached from Policy::has_ethertype_eligible_conduit) --
+    // same backward-compatibility posture as every other opt-in gate here. Such a flow is keyed by
+    // its raw EtherType (`"ethertype:0x" + hex value`) instead of a protocol name, since "non-ip" is
+    // the same string for every distinct undecoded EtherType.
     //
-    // A packet with protocol == "bacnet"/"enip"/"hartip"/"ffhse" and has_udp (BACnet/IP, CIP I/O,
-    // HART-IP, or FF-HSE) is folded into a UDP flow (PolicyReport::udp_flows) instead, but ONLY when
-    // the policy opts in by naming "bacnet"/"enip"/"hartip"/"ffhse"/"any" on at least one CIDR- or
-    // hostname-zone conduit (`any_udp_ip_eligible_conduit_`, cached from
+    // A packet with protocol == "bacnet"/"enip"/"hartip"/"ffhse"/"melsec"/"fins"/"codesys"/"bsap"/
+    // "cclink-ie"/"udp" and has_udp is folded into a UDP flow (PolicyReport::udp_flows) instead, but
+    // ONLY when the policy opts in by naming one of those ten names (or "any") on at least one CIDR-
+    // or hostname-zone conduit (`any_udp_ip_eligible_conduit_`, cached from
     // Policy::has_udp_eligible_conduit at construction) -- when it doesn't, this traffic is left in
     // PolicyReport::skipped_non_tcp exactly as it was before this feature existed, so a policy file
     // written before it existed can never have its compliance verdict change just because a capture
@@ -582,6 +605,12 @@ private:
         // EthernetFlowReport::src_mac's own comment for why a one-directional cyclic publish
         // stream has one stable, unambiguous source unlike a bidirectional TCP session.
         std::string src_mac;
+        // Sibling to src_mac above (ROADMAP item 103), same "fixed from the first packet" rule --
+        // see EthernetFlowReport::dst_mac's own comment.
+        std::string dst_mac;
+        // Sibling to src_mac/dst_mac above, same "fixed from the first packet" rule -- see
+        // EthernetFlowReport::ethertype's own comment (ROADMAP item 103).
+        uint16_t ethertype = 0;
         bool has_vlan_tag = false;
         uint16_t vlan_id = 0;
         size_t packet_count = 0;
@@ -628,6 +657,8 @@ private:
     bool any_vlan_zone_;  // cached Policy::has_vlan_zone() -- see observe()'s own comment
     bool any_udp_ip_eligible_conduit_;  // cached Policy::has_udp_eligible_conduit() -- see
                                           // observe()'s own comment
+    bool any_ethertype_eligible_conduit_;  // cached Policy::has_ethertype_eligible_conduit() --
+                                             // see observe()'s own comment (ROADMAP item 103)
     PolicyEngineLimits limits_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;

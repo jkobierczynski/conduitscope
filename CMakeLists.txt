@@ -9597,7 +9597,7 @@ set_tests_properties(policy_error_functions_unsupported_protocol_rejected PROPER
 add_test(NAME policy_error_unknown_protocol_lists_full_widened_set
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_unknown_protocol.yaml")
 set_tests_properties(policy_error_unknown_protocol_lists_full_widened_set PROPERTIES
-  PASS_REGULAR_EXPRESSION "unknown protocol 'profibus' \\(expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms, mqtt, ffhse, profinet, goose, sv, ethercat, any\\)")
+  PASS_REGULAR_EXPRESSION "unknown protocol 'profibus' \\(expected one of: modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms, mqtt, ffhse, twincat, ge-srtp, fox, foxs, s7comm-plus, melsec, fins, codesys, bsap, cclink-ie, udp, profinet, goose, sv, ethercat, powerlink, any\\)")
 
 # --------------------------------------------------------------------------
 # VLAN-membership-based conduit/zone model (ROADMAP item 15): an alternative to the IPv4-CIDR zone
@@ -9637,7 +9637,7 @@ set_tests_properties(policy_error_conduit_mixed_zone_kinds PROPERTIES
 add_test(NAME policy_error_conduit_tcp_protocol_on_vlan_zone
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_tcp_protocol_on_vlan_zone.yaml")
 set_tests_properties(policy_error_conduit_tcp_protocol_on_vlan_zone PROPERTIES
-  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'modbus' rides IPv4/TCP, not raw Ethernet, so it can never appear on a VLAN-zone conduit -- only profinet, goose, sv, ethercat, or 'any' can")
+  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'modbus' rides IPv4/TCP/UDP, not raw Ethernet, so it can never appear on a VLAN-zone conduit -- only profinet, goose, sv, ethercat, powerlink, or 'any' can")
 
 add_test(NAME policy_error_conduit_vlan_protocol_on_ip_zone
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_vlan_protocol_on_ip_zone.yaml")
@@ -9713,6 +9713,146 @@ add_test(NAME policy_error_from_macs_invalid_format_rejected
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_from_macs_invalid_format.yaml")
 set_tests_properties(policy_error_from_macs_invalid_format_rejected PROPERTIES
   PASS_REGULAR_EXPRESSION "conduit 'c1': 'not-a-mac-address' is not a valid MAC address \\(expected six colon-separated hex octets, e\\.g\\. '00:0c:29:11:22:33'\\)")
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 103: policy coverage for L2 and UDP industrial traffic (MAC/VLAN/EtherType/UDP
+# rules) -- raw EtherType matching + 'to_macs' on a VLAN-zone conduit, POWERLINK joining the
+# VLAN-only protocol set, the generic 'udp' pseudo-protocol + widened named-UDP-protocol set, and
+# seven more TCP-capable protocols in the dispatch chain (previously always Unclassified). See
+# docs/DEVELOPMENT.md's own ROADMAP item 103 writeup and tests/policies/*.yaml's own comments.
+# ---------------------------------------------------------------------------------------------
+
+# tests/sample_policy_l2_ethertype_powerlink.pcap: two undecoded EtherTypes (0x88b5 x2 packets,
+# 0x88b6 x1 packet) plus one POWERLINK PReq, all tagged VLAN 100, all HMI_MAC<->PLC_MAC (see
+# build_policy_l2_ethertype_powerlink_sample's own comment).
+
+add_test(NAME policy_vlan_ethertype_matching_allowed_and_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_l2_ethertype_powerlink.pcap" --policy "${POLICY_DIR}/vlan_ethertype_matching.yaml")
+set_tests_properties(policy_vlan_ethertype_matching_allowed_and_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 3 \\(1 allowed, 2 violation\\(s\\), 0 unclassified\\).*ethertype 0x88b6 observed; conduit 'Only EtherType 0x88b5 permitted on ot_vlan' permits only: 0x88b5.*ethertype 0x88ab observed; conduit 'Only EtherType 0x88b5 permitted on ot_vlan' permits only: 0x88b5")
+
+add_test(NAME policy_vlan_ethertype_matching_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_l2_ethertype_powerlink.pcap" --policy "${POLICY_DIR}/vlan_ethertype_matching.yaml" --format json)
+set_tests_properties(policy_vlan_ethertype_matching_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ethertypes\": \\[\"0x88b5\"\\].*\"dst_mac\": \"00:0c:29:aa:bb:cc\",\n *\"ethertype\": \"0x88b5\"")
+
+add_test(NAME policy_vlan_powerlink_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_l2_ethertype_powerlink.pcap" --policy "${POLICY_DIR}/vlan_powerlink_allowed.yaml")
+set_tests_properties(policy_vlan_powerlink_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 1 \\(1 allowed, 0 violation\\(s\\), 0 unclassified\\).*\\(powerlink, 1 packet\\(s\\)\\).*matched conduit \"POWERLINK permitted on ot_vlan\"")
+
+add_test(NAME policy_vlan_to_macs_allowed_when_destination_matches
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_to_macs_allowed.yaml")
+set_tests_properties(policy_vlan_to_macs_allowed_when_destination_matches PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 6 \\(4 allowed, 0 violation\\(s\\), 2 unclassified\\).*matched conduit \"OT protocols permitted on ot_vlan, destined for the PLC only\"")
+
+add_test(NAME policy_vlan_to_macs_violation_when_destination_differs
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vlan_zones.pcap" --policy "${POLICY_DIR}/vlan_to_macs_violation.yaml")
+set_tests_properties(policy_vlan_to_macs_violation_when_destination_differs PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet flows evaluated: 6 \\(0 allowed, 4 violation\\(s\\), 2 unclassified\\).*destination MAC '00:0c:29:aa:bb:cc' observed\; conduit 'OT protocols permitted on ot_vlan, destined for a MAC that never appears' permits only: ff:ff:ff:ff:ff:ff")
+
+add_test(NAME policy_error_to_macs_on_ip_zone_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_to_macs_on_ip_zone.yaml")
+set_tests_properties(policy_error_to_macs_on_ip_zone_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'to_macs'/'to_mac' has no meaning on a CIDR- or hostname-zone conduit")
+
+add_test(NAME policy_error_to_macs_invalid_format_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_to_macs_invalid_format.yaml")
+set_tests_properties(policy_error_to_macs_invalid_format_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'not-a-mac-address' is not a valid MAC address \\(expected six colon-separated hex octets, e\\.g\\. '01:0c:cd:01:00:01'\\)")
+
+add_test(NAME policy_error_ethertypes_on_ip_zone_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_ethertypes_on_ip_zone.yaml")
+set_tests_properties(policy_error_ethertypes_on_ip_zone_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'ethertypes'/'ethertype' has no meaning on a CIDR- or hostname-zone conduit")
+
+add_test(NAME policy_error_ethertypes_invalid_format_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_ethertypes_invalid_format.yaml")
+set_tests_properties(policy_error_ethertypes_invalid_format_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': 'not-an-ethertype' is not a valid EtherType \\(expected '0x' followed by 1-4 hex digits, in the range 0x0600-0xffff, e\\.g\\. '0x88f7'\\)")
+
+add_test(NAME policy_error_ethertypes_out_of_range_rejected
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_ethertypes_out_of_range.yaml")
+set_tests_properties(policy_error_ethertypes_out_of_range_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': '0x0100' is not a valid EtherType \\(expected '0x' followed by 1-4 hex digits, in the range 0x0600-0xffff, e\\.g\\. '0x88f7'\\)")
+
+# tests/sample_policy_generic_udp.pcap: plain UDP traffic on port 9999 (no named protocol),
+# HMI_IP<->PLC_IP -- exercises the generic 'udp' pseudo-protocol + 'ports:'.
+
+add_test(NAME policy_udp_generic_port_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_generic_udp.pcap" --policy "${POLICY_DIR}/udp_generic_port_allowed.yaml")
+set_tests_properties(policy_udp_generic_port_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*UDP flows evaluated: 1 \\(1 allowed, 0 violation\\(s\\), 0 unclassified\\).*\\(udp, 2 packet\\(s\\)\\).*matched conduit \"Generic UDP port 9999 permitted, HMI <-> PLC\"")
+
+add_test(NAME policy_udp_generic_port_violation
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_generic_udp.pcap" --policy "${POLICY_DIR}/udp_generic_port_violation.yaml")
+set_tests_properties(policy_udp_generic_port_violation PROPERTIES
+  PASS_REGULAR_EXPRESSION "UDP flows evaluated: 1 \\(0 allowed, 1 violation\\(s\\), 0 unclassified\\).*but none permits udp traffic on port 9999")
+
+# Seven newly-named TCP-capable protocols (twincat/ge-srtp/fox/foxs/s7comm-plus, plus melsec/fins
+# on their TCP forms), each reused against its own existing decode-test sample capture -- every
+# one of these previously fell through PolicyEngine::observe's TCP dispatch chain entirely and was
+# always reported generically Unclassified.
+
+add_test(NAME policy_twincat_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_twincat_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: COMPLIANT.*\\(twincat, 28 packet\\(s\\)\\).*matched conduit \"TwinCAT/ADS engineering session\"")
+
+add_test(NAME policy_ge_srtp_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_ge_srtp_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(ge-srtp, 24 packet\\(s\\)\\).*matched conduit \"GE SRTP session\"")
+
+add_test(NAME policy_fox_and_foxs_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_fox_and_foxs_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "Flows evaluated: 7 \\(5 allowed, 0 violation\\(s\\), 2 unclassified\\).*matched conduit \"Niagara Fox session\".*\\(foxs, 1 packet\\(s\\)\\).*matched conduit \"Niagara FoxS \\(Fox-over-TLS\\) session\"")
+
+add_test(NAME policy_s7comm_plus_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_s7comm_plus_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(s7comm\\+s7comm-plus, 23 packet\\(s\\)\\).*matched conduit \"S7comm-Plus \\(TIA Portal\\) session\"")
+
+add_test(NAME policy_melsec_tcp_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_melsec_tcp_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(melsec, 35 packet\\(s\\)\\).*matched conduit \"MELSEC/SLMP TCP session\"")
+
+add_test(NAME policy_fins_tcp_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_fins_tcp_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(fins, 50 packet\\(s\\)\\).*matched conduit \"FINS TCP session\"")
+
+add_test(NAME policy_codesys_tcp_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_codesys_tcp_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(codesys, 6 packet\\(s\\)\\).*matched conduit \"CODESYS TCP session\"")
+
+# Widened named-UDP-protocol set: melsec/fins/codesys's own UDP forms are exercised incidentally
+# above (tcp_new_protocols_allowed.yaml names all three, and each sample pcap carries both
+# transports -- see build_melsec_sample/build_fins_sample/build_codesys_sample's own comments).
+# bsap and cclink-ie have no TCP form at all, so they get their own dedicated policy file.
+
+add_test(NAME policy_melsec_udp_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_melsec_udp_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "UDP ALLOWED \\(2\\):.*\\(melsec, 2 packet\\(s\\)\\).*matched conduit \"MELSEC/SLMP TCP session\"")
+
+add_test(NAME policy_fins_udp_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap" --policy "${POLICY_DIR}/tcp_new_protocols_allowed.yaml")
+set_tests_properties(policy_fins_udp_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "UDP ALLOWED \\(1\\):.*\\(fins, 2 packet\\(s\\)\\).*matched conduit \"FINS TCP session\"")
+
+add_test(NAME policy_bsap_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --policy "${POLICY_DIR}/udp_new_protocols_allowed.yaml")
+set_tests_properties(policy_bsap_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\(bsap, 5 packet\\(s\\)\\).*matched conduit \"BSAP session\"")
+
+add_test(NAME policy_cclink_ie_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --policy "${POLICY_DIR}/udp_new_protocols_allowed.yaml")
+set_tests_properties(policy_cclink_ie_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "UDP ALLOWED \\(3\\):.*\\(cclink-ie, 4 packet\\(s\\)\\).*matched conduit \"CC-Link IE Field Basic session\"")
 
 # ---------------------------------------------------------------------------------------------
 # "Match how plants are zoned" (Grok gap #1, docs/DEVELOPMENT.md) -- Purdue-level zone labels,

@@ -1195,6 +1195,7 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
             out.dst_mac = format_mac(eth.dst_mac);
             out.has_vlan_tag = eth.has_vlan_tag;
             out.vlan_id = eth.vlan_id;
+            out.ethertype = eth.ethertype;
 
             // IPv6 addition (docs/DEVELOPMENT.md ROADMAP item 24): ETHERTYPE_IPV6 joins
             // ETHERTYPE_IPV4 here rather than getting its own branch -- both just hand

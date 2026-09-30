@@ -1,0 +1,25 @@
+# ROADMAP item 103: exercises the two UDP-only OT protocol names added to
+# Policy::has_udp_eligible_conduit's/PolicyEngine's widened UDP opt-in set that have no TCP form at
+# all (bsap, cclink-ie) -- melsec/fins/codesys's own UDP forms are covered incidentally by
+# tcp_new_protocols_allowed.yaml (those three names are shared between their TCP and UDP forms).
+# Reused against each protocol's own existing decode-test sample capture, same HMI_IP/PLC_IP pair
+# every other fixture in this project uses.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks: [192.168.1.50/32]
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "BSAP session"
+    from: hmi_zone
+    to: plc_zone
+    bidirectional: true
+    protocols: [bsap]
+  - name: "CC-Link IE Field Basic session"
+    from: hmi_zone
+    to: plc_zone
+    bidirectional: true
+    protocols: [cclink-ie]

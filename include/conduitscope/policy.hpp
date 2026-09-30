@@ -150,28 +150,34 @@ struct Zone {
 // written as one conduit, instead of one conduit per zone pair. `protocols`
 // holds lowercased values from {"modbus", "dnp3", "s7comm", "iec104", "enip",
 // "bacnet", "hartip", "opcua", "mms", "mqtt", "ffhse", "profinet", "goose",
-// "sv", "ethercat", "any"} (parse_policy_text rejects anything else) -- "any"
-// matches every protocol reachable through this conduit's own zone kind (see
-// below), not literally every protocol conduitscope recognizes. Of the six
-// named after "enip", only hartip/opcua/mms/mqtt/ffhse can ever actually
-// match a flow today: `policy validate` only ever evaluates TCP flows (see
-// PolicyEngine::observe), and "bacnet" names BACnet/IP, which this decoder
-// only ever recognizes over UDP (see decoder.cpp) -- so a conduit naming
-// "bacnet" parses and validates fine but can never be exercised by real
-// traffic yet; see docs/MANUAL.md's POLICY FILE FORMAT "Addressing scope"
-// section. The four newest names (profinet/goose/sv/ethercat -- ROADMAP item
-// 15) are a DIFFERENT kind of protocol entirely: they ride raw Ethernet with
-// no IP layer at all, so they can only ever appear in a conduit whose
-// `from_zones`/`to_zones` are ALL VLAN zones (Zone::kind == ZoneKind::Vlan), never
-// mixed with a CIDR or hostname zone, and never alongside any of the TCP-only protocol
-// names above (parse_policy_text rejects both combinations) -- see
-// policy.hpp's own header comment and Zone's comment for the full VLAN-zone
-// model. `ports` is the set of TCP ports this conduit
-// covers on the RESPONDING (server) side of the connection; empty means "any
-// port" (parse_policy_text allows omitting the field entirely for that) --
-// meaningless for a VLAN-zone conduit (there is no TCP/UDP layer to have a
-// port at all), so parse_policy_text rejects `ports` there outright rather
-// than silently ignoring it.
+// "sv", "ethercat", "powerlink", "twincat", "ge-srtp", "fox", "foxs",
+// "s7comm-plus", "melsec", "fins", "codesys", "bsap", "cclink-ie", "udp",
+// "any"} (parse_policy_text rejects anything else) -- "any" matches every
+// protocol reachable through this conduit's own zone kind (see below), not
+// literally every protocol conduitscope recognizes. "bacnet" names BACnet/IP,
+// which this decoder only ever recognizes over UDP (see decoder.cpp), so a
+// conduit naming "bacnet" only ever matches once UDP flow evaluation is
+// opted into (see Policy::has_udp_eligible_conduit); see docs/USER_GUIDE.md's
+// POLICY FILE FORMAT "Addressing scope" section. "udp" (ROADMAP item 103) is
+// a generic pseudo-protocol name, not a real decoded protocol: it matches
+// UDP traffic this tool's own decoders never assign a specific protocol name
+// to at all (DecodedPacket::protocol == "udp", the decoder's own "recognized
+// transport, no app-layer match" fallback) -- combine it with `ports` to
+// write a firewall-style "this UDP port between these zones is permitted,
+// whatever's actually on it" rule for a UDP OT protocol this tool doesn't
+// decode by name. `profinet`/`goose`/`sv`/`ethercat`/`powerlink` (ROADMAP
+// items 15 and 103) are a DIFFERENT kind of protocol entirely: they ride raw
+// Ethernet with no IP layer at all, so they can only ever appear in a
+// conduit whose `from_zones`/`to_zones` are ALL VLAN zones (Zone::kind ==
+// ZoneKind::Vlan), never mixed with a CIDR or hostname zone, and never
+// alongside any of the IP-riding protocol names above (parse_policy_text
+// rejects both combinations) -- see policy.hpp's own header comment and
+// Zone's comment for the full VLAN-zone model. `ports` is the set of
+// TCP/UDP ports this conduit covers on the RESPONDING (server) side of the
+// connection; empty means "any port" (parse_policy_text allows omitting the
+// field entirely for that) -- meaningless for a VLAN-zone conduit (there is
+// no TCP/UDP layer to have a port at all), so parse_policy_text rejects
+// `ports` there outright rather than silently ignoring it.
 // `bidirectional` additionally allows the same protocol/port set initiated
 // the opposite way (a `to_zones` member -> a `from_zones` member) -- most
 // real OT conduits are one-directional (an HMI/engineering zone reaching
@@ -189,8 +195,11 @@ struct Zone {
 // server IP to classify separately. Requiring from==to makes what the
 // conduit actually means explicit in the policy file itself: "this
 // protocol is permitted on this VLAN zone," not a directional flow between
-// two zones (which no capture could ever exercise for these four protocols
-// -- see policy.hpp's own header comment).
+// two zones (which no capture could ever exercise for these protocols
+// -- see policy.hpp's own header comment). A VLAN-zone conduit can further
+// restrict who/what it permits via `from_macs`/`to_macs` (source/destination
+// MAC allow-lists) and `ethertypes` (raw EtherType allow-list, ROADMAP item
+// 103) -- see each field's own comment on Conduit below for the full design.
 struct Conduit {
     std::string name;
     std::string description;
@@ -277,6 +286,43 @@ struct Conduit {
     // policy_engine.hpp) for how the observed source is determined, and `PolicyEngine::finish` for
     // exactly how it's checked against this list.
     std::vector<std::string> from_macs;
+
+    // Sibling to from_macs above (ROADMAP item 103): an optional allow-list of DESTINATION MAC
+    // addresses this VLAN-zone conduit permits -- from an optional `to_macs:` key (singular alias
+    // `to_mac:`). Same parsing/canonicalization/VLAN-only restriction as from_macs, same "empty
+    // means unrestricted" default. Where from_macs restricts WHO may publish, to_macs restricts
+    // WHERE it may go -- e.g. "GOOSE on this VLAN must target multicast group 01:0c:cd:01:00:01,"
+    // catching a stray unicast publish or a publish to the wrong multicast group. See
+    // `EthernetFlowReport::dst_mac` (policy_engine.hpp) for how the observed destination is
+    // determined (fixed from the flow's first packet, same as src_mac), and `PolicyEngine::finish`
+    // for exactly how it's checked against this list.
+    std::vector<std::string> to_macs;
+
+    // Optional allow-list of raw EtherType values this VLAN-zone conduit permits -- from an
+    // optional `ethertypes:` key (singular alias `ethertype:`), ROADMAP item 103. Each entry is a
+    // "0x" + 1-4 hex digits string (e.g. "0x88f7"), parsed by parse_ethertype (policy.cpp) and
+    // validated to the real EtherType range [0x0600, 0xFFFF] (below 0x0600 is an 802.3 length
+    // field, never a real EtherType). Empty (the default) means unrestricted by EtherType --
+    // exactly the behavior before this field existed.
+    //
+    // Unlike `protocols`, this is NOT how a VLAN-zone conduit becomes eligible to match traffic in
+    // the first place -- it's a FURTHER restriction on top of an already-protocol-matched conduit,
+    // the same relationship from_macs/to_macs already have to protocols. What makes ethertypes
+    // actually useful is that `protocols: [any]` already matches ANY traffic PolicyEngine tracks as
+    // an Ethernet flow at all -- including a frame whose EtherType this tool's own decoders don't
+    // recognize by name (`DecodedPacket::protocol == "non-ip"`, tracked as an Ethernet flow only
+    // once some conduit in the policy declares a non-empty `ethertypes` -- see
+    // Policy::has_ethertype_eligible_conduit and PolicyEngine::observe's own comment). So
+    // `protocols: [any]` + `ethertypes: [0x88f7]` is how a policy governs a vendor-proprietary or
+    // otherwise-undecoded L2 protocol this tool has no dedicated decoder for at all: without
+    // `ethertypes` narrowing it, `protocols: [any]` on its own would indiscriminately allow every
+    // undecoded EtherType on the VLAN zone, which defeats the point. A named-protocol conduit (e.g.
+    // `protocols: [goose]`) can also declare `ethertypes` redundantly (GOOSE's own EtherType is
+    // already fixed at 0x88b8) -- harmless, just an explicit self-documenting restriction. See
+    // `EthernetFlowReport::ethertype` (policy_engine.hpp) for how the observed value is determined
+    // (fixed from the flow's first packet), and `PolicyEngine::finish` for exactly how it's checked
+    // against this list.
+    std::vector<uint16_t> ethertypes;
 
     int line = 0;
 };
@@ -365,21 +411,34 @@ struct Policy {
     bool has_hostname_zone() const;
 
     // True if at least one CIDR- or hostname-zone conduit (never a VLAN-zone conduit -- see below)
-    // names "bacnet", "enip", "hartip", "ffhse", or "any" in its `protocols:` -- the opt-in gate for
-    // evaluating BACnet/IP, CIP I/O, HART-IP, and FF-HSE traffic (all UDP, all IP-addressed) against
-    // a conduit at all, instead of leaving them in PolicyReport::skipped_non_tcp exactly as before
-    // this feature existed (see PolicyEngine::observe's own comment, and
-    // docs/design/policy-engine-zoning.md's Phase 3; HART-IP and FF-HSE were added afterward,
-    // widening the same opt-in gate rather than introducing a separate one, since both already ride
-    // UDP too and this gate's whole point is "does the policy care about any UDP-based IP-addressed
-    // OT protocol at all"). This mirrors has_vlan_zone/has_hostname_zone's own "cached once, at
+    // names "bacnet", "enip", "hartip", "ffhse", "melsec", "fins", "codesys", "bsap", "cclink-ie",
+    // "udp", or "any" in its `protocols:` -- the opt-in gate for evaluating UDP traffic (all
+    // IP-addressed) against a conduit at all, instead of leaving them in
+    // PolicyReport::skipped_non_tcp exactly as before this feature existed (see
+    // PolicyEngine::observe's own comment, and docs/design/policy-engine-zoning.md's Phase 3;
+    // HART-IP and FF-HSE were added afterward, widening the same opt-in gate rather than
+    // introducing a separate one, since both already ride UDP too and this gate's whole point is
+    // "does the policy care about any UDP-based IP-addressed OT protocol at all"; ROADMAP item 103
+    // widened it again for MELSEC/FINS/CODESYS's own UDP forms, BSAP, CC-Link IE Field Network
+    // Basic, and the generic "udp" pseudo-protocol name -- see Conduit's own header comment for
+    // what "udp" means). This mirrors has_vlan_zone/has_hostname_zone's own "cached once, at
     // PolicyEngine construction" backward-compatibility posture: a policy that never names these
     // protocols on a CIDR/hostname conduit is byte-for-byte unaffected by this feature's existence.
-    // A VLAN-zone conduit naming "enip" or "any" doesn't count here -- it can only ever mean
-    // PROFINET RT/GOOSE/SV/EtherCAT (see parse_policy_text's own protocol-vs-zone-kind validation),
-    // never BACnet/IP, CIP I/O, HART-IP, or FF-HSE, all of which are ordinary IP traffic that could
-    // never reach a VLAN-zone conduit's matching logic.
+    // A VLAN-zone conduit naming one of these (or "any") doesn't count here -- it can only ever mean
+    // PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK (see parse_policy_text's own protocol-vs-zone-kind
+    // validation), never a UDP-based IP protocol, which could never reach a VLAN-zone conduit's
+    // matching logic.
     bool has_udp_eligible_conduit() const;
+
+    // True if at least one VLAN-zone conduit declares a non-empty `ethertypes:` (ROADMAP item 103)
+    // -- the opt-in gate for tracking an Ethernet flow whose EtherType this tool's own decoders
+    // don't recognize by name (DecodedPacket::protocol == "non-ip") as an Ethernet flow at all,
+    // instead of leaving it in PolicyReport::skipped_non_tcp. Mirrors has_udp_eligible_conduit's
+    // own backward-compatibility posture: a policy that never declares `ethertypes:` is byte-for-
+    // byte unaffected by this feature's existence -- every already-named VLAN-eligible protocol
+    // (PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK) is tracked exactly as it was before, gated only by
+    // has_vlan_zone as always. See Conduit::ethertypes' own comment for the full design.
+    bool has_ethertype_eligible_conduit() const;
 };
 
 struct PolicyError : std::runtime_error {
@@ -417,12 +476,14 @@ struct PolicyError : std::runtime_error {
 //   - a conduit's 'from'/'to' zones mixing zones of different kinds -- every
 //     zone a conduit references, on either side, must be the same kind
 //   - a conduit's protocol not in {modbus, dnp3, s7comm, iec104, enip, bacnet, hartip, opcua, mms,
-//     mqtt, ffhse, profinet, goose, sv, ethercat, any}
-//   - a CIDR- or hostname-zone conduit naming 'profinet'/'goose'/'sv'/'ethercat' (they have no IP
-//     layer and can never appear on anything but a VLAN-zone conduit), or a VLAN-zone conduit
-//     naming any of the eleven TCP-only protocol names above (they have no VLAN-only wire presence
-//     a VLAN-zone conduit could ever match) -- 'any' is accepted on any kind, scoped to whichever
-//     protocols that zone kind can actually match
+//     mqtt, ffhse, twincat, ge-srtp, fox, foxs, s7comm-plus, melsec, fins, codesys, bsap, cclink-ie,
+//     udp, profinet, goose, sv, ethercat, powerlink, any} (ROADMAP item 103 added twincat through
+//     udp, and powerlink, to this list -- see Conduit's own header comment for what each means)
+//   - a CIDR- or hostname-zone conduit naming 'profinet'/'goose'/'sv'/'ethercat'/'powerlink' (they
+//     have no IP layer and can never appear on anything but a VLAN-zone conduit), or a VLAN-zone
+//     conduit naming any of the IP-riding protocol names above (they have no VLAN-only wire
+//     presence a VLAN-zone conduit could ever match) -- 'any' is accepted on any kind, scoped to
+//     whichever protocols that zone kind can actually match
 //   - a conduit whose 'type' isn't 'idmz' (the only recognized value so far), or an 'idmz'-typed
 //     conduit whose 'protocols' resolves to 'any' while 'functions' is empty/omitted -- an "any
 //     protocol, no functions restriction" conduit at a declared IT-OT/iDMZ boundary is rejected,
@@ -440,6 +501,17 @@ struct PolicyError : std::runtime_error {
 //   - a conduit's 'from_macs'/'from_mac' entry that isn't a valid MAC address (exactly six
 //     colon-separated hex octets, e.g. '00:0c:29:11:22:33'; hex digits case-insensitive on input,
 //     canonicalized to lowercase in Conduit::from_macs)
+//   - a CIDR- or hostname-zone conduit giving 'to_macs'/'to_mac' at all -- ROADMAP item 103, same
+//     VLAN-only restriction and same validation as 'from_macs'/'from_mac' above, just restricting
+//     the destination MAC instead of the source (see policy.hpp's Conduit::to_macs comment)
+//   - a conduit's 'to_macs'/'to_mac' entry that isn't a valid MAC address (same format as
+//     'from_macs'/'from_mac' above)
+//   - a CIDR- or hostname-zone conduit giving 'ethertypes'/'ethertype' at all -- ROADMAP item 103,
+//     raw-EtherType restriction only has a meaning on a VLAN-zone conduit (see policy.hpp's
+//     Conduit::ethertypes comment)
+//   - a conduit's 'ethertypes'/'ethertype' entry that isn't a valid EtherType ('0x' followed by 1-4
+//     hex digits, case-insensitive, in the range [0x0600, 0xffff] -- below 0x0600 is an 802.3
+//     length field, never a real EtherType)
 //   - a conduit's port outside [1, 65535]
 //   - a conduit's 'bidirectional' value that isn't a recognizable boolean
 //   - a conduit's 'functions'/'function' given while 'protocols'/'protocol' resolves to anything

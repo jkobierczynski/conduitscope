@@ -2545,11 +2545,13 @@ conduits:
     from: <zone name or [zone name, ...]>
     to: <zone name or [zone name, ...]>     # VLAN-zone conduit: must be the exact
                                              # same zone(s) as 'from' -- see "Conduits" below
-    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | profinet | goose | sv | ethercat | any>, <...>]
+    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | twincat | ge-srtp | fox | foxs | s7comm-plus | melsec | fins | codesys | bsap | cclink-ie | udp | profinet | goose | sv | ethercat | powerlink | any>, <...>]
     ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4/hostname-zone conduits only
     bidirectional: <true | false>           # default: false; IPv4/hostname-zone conduits only
     functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
     from_macs: [<MAC address>, <...>]       # optional; see "from_macs" below; VLAN-zone conduits only
+    to_macs: [<MAC address>, <...>]         # optional; see "to_macs" below; VLAN-zone conduits only
+    ethertypes: [<0x0600-0xffff>, <...>]    # optional; see "ethertypes" below; VLAN-zone conduits only
 
 assets:                                     # optional; see "Multi-homed assets and jump hosts" below
   - name: "<asset name>"
@@ -2569,10 +2571,11 @@ kind a zone is drives which protocols a conduit referencing it can name (see
 modbus/dnp3/s7comm/iec104/enip/bacnet/hartip/opcua/mms/mqtt/ffhse traffic by
 IPv4 address (a `hostnames` zone just identifies that address by a name
 instead of a CIDR block -- see "Hostname zones" below for exactly how);
-`vlans` zones classify profinet/goose/sv/ethercat traffic -- the four
-protocols with no IP layer at all -- by which VLAN the frame was tagged with
-instead (docs/DEVELOPMENT.md's ROADMAP item 15; see "Addressing scope" below
-for the full rationale). At least one zone is required. **No two zones of
+`vlans` zones classify profinet/goose/sv/ethercat/powerlink traffic -- the
+five protocols with no IP layer at all -- by which VLAN the frame was tagged
+with instead (docs/DEVELOPMENT.md's ROADMAP items 15 and 103; see
+"Addressing scope" below for the full rationale). At least one zone is
+required. **No two zones of
 the same kind may claim the same address, VLAN, or hostname** --
 `policy validate` needs to say definitively which single zone a packet
 belongs to, so overlap within a kind is rejected at load time, not silently
@@ -2685,19 +2688,26 @@ outright rather than silently accepted as an implicit deny-all.
 
 `protocols` uses the same protocol names conduitscope's own decoded output
 uses: `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`,
-`opcua`, `mms`, `mqtt`, `ffhse`, `profinet`, `goose`, `sv`, `ethercat`, plus
-the wildcard `any` (docs/DEVELOPMENT.md's ROADMAP item 14 widened this from the original six --
+`opcua`, `mms`, `mqtt`, `ffhse`, `twincat`, `ge-srtp`, `fox`, `foxs`,
+`s7comm-plus`, `melsec`, `fins`, `codesys`, `bsap`, `cclink-ie`, `udp`,
+`profinet`, `goose`, `sv`, `ethercat`, `powerlink`, plus the wildcard `any`
+(docs/DEVELOPMENT.md's ROADMAP item 14 widened this from the original six --
 `modbus`/`dnp3`/`s7comm`/`iec104`/`enip`/`any` -- to name every TCP-capable
 protocol `decode` recognizes individually; item 15 then added the four
 raw-Ethernet, no-IP-layer protocols -- `profinet`/`goose`/`sv`/`ethercat` --
-alongside the new VLAN-zone model below). Every zone a conduit references,
+alongside the new VLAN-zone model below; item 103 widened it again, adding
+seven more TCP-capable protocols previously invisible to `policy validate`
+entirely -- `twincat`, `ge-srtp`, `fox`, `foxs`, `s7comm-plus`, plus
+`melsec`/`fins`/`codesys` on their TCP forms -- the generic `udp`
+pseudo-protocol (see "UDP flow evaluation" below), and `powerlink` as a
+fifth VLAN-only protocol). Every zone a conduit references,
 on either side, must be the same kind -- a conduit can't mix an IPv4 zone
 and a VLAN zone, since there's no shared addressing scheme to classify a
 packet against. That kind, in turn, restricts which protocol names the
-conduit can use: `profinet`/`goose`/`sv`/`ethercat` (or `any`) only on a
-conduit whose zones are all VLAN zones, and every other protocol name (or
-`any`) only on a conduit whose zones are all IPv4 zones -- naming a TCP
-protocol on a VLAN-zone conduit, or a VLAN-only protocol on an IPv4-zone
+conduit can use: `profinet`/`goose`/`sv`/`ethercat`/`powerlink` (or `any`)
+only on a conduit whose zones are all VLAN zones, and every other protocol
+name (or `any`) only on a conduit whose zones are all IPv4 zones -- naming a
+TCP protocol on a VLAN-zone conduit, or a VLAN-only protocol on an IPv4-zone
 conduit, is a load-time `PolicyError` either way (see "Validation errors"
 below). A COTP session
 that never carries a full S7comm message (e.g. only a connection
@@ -2716,11 +2726,30 @@ only recognizes BACnet/IP over UDP -- see decoder.cpp), never TCP.
 for ordinary TCP flow matching AND opts the entire policy into evaluating
 its UDP form too, exactly as `enip` does for CIP I/O -- see that same "UDP
 flow evaluation" section below. `opcua` and `mqtt` are the two remaining
-newly-widened names that only match TCP traffic, with no UDP form this
-engine evaluates; `mms` and `s7comm` share the same TCP port (102) but are
+item-14 names that only match TCP traffic, with no UDP form this engine
+evaluates; `mms` and `s7comm` share the same TCP port (102) but are
 still matched as two entirely separate conduit protocols, one per flow's
 own actually-decoded `protocol` tag, never conflated the way "cotp" folds
-into `s7comm` above.
+into `s7comm` above. `melsec`, `fins`, and `codesys` are three more
+two-faced names (ROADMAP item 103): each names a single decoded protocol
+that rides EITHER TCP or UDP depending on the flow, decoded and matched the
+same way on either transport, no separate opt-in needed for the TCP
+side -- naming one of them on a conduit matches that protocol's TCP form
+for ordinary TCP flow matching AND opts the entire policy into evaluating
+its UDP form too, same as `hartip`/`ffhse` above. `twincat`, `ge-srtp`,
+`fox`, `foxs`, and `s7comm-plus` are TCP-only, with no UDP form at all.
+`bsap` and `cclink-ie` are UDP-only, with no TCP form at all -- naming
+either (or `any`) on a CIDR/hostname-zone conduit opts the entire policy
+into UDP flow evaluation exactly like `bacnet` does, since neither has a
+TCP form to also match ordinarily. None of these eight new names support
+`functions` restriction yet (see "Function-level restrictions" below).
+Finally, `udp` is not a decoded protocol name at all -- it's a generic
+pseudo-protocol matching `decoder.cpp`'s own "recognized UDP transport, no
+app-layer match" fallback, for writing a deliberately blunt firewall-style
+"this UDP port between these zones is permitted, whatever's on it" rule
+(`protocols: [udp]` plus the existing `ports:` field) for a UDP OT protocol
+this tool doesn't decode by name at all -- naming it also opts the entire
+policy into UDP flow evaluation, same as every other UDP-capable name here.
 
 `from`/`to` describe a **direction**: which zone(s) initiate the TCP
 connection (`from`) and which zone(s) answer it (`to`) -- not which zone
@@ -2737,19 +2766,22 @@ symmetrically against the same zone lists: client in `to`, server in
 there is no client/server session to have a direction at all.
 
 **VLAN-zone conduits mean something different.** A single raw-Ethernet
-PROFINET RT/GOOSE/SV/EtherCAT frame carries at most one 802.1Q VLAN tag --
-unlike a TCP flow, there's no separate "source VLAN" and "destination VLAN"
-the way there's a client IP and a server IP. So a VLAN-zone conduit's
-`from` and `to` are required to name the **exact same set** of VLAN
-zone(s) -- violating this is a load-time `PolicyError` (see "Validation
-errors" below). Its meaning is "this protocol is permitted on this VLAN
-zone," not a directional flow between two zones. Following from that,
-three fields that only make sense for a directional, session-based TCP
-flow are rejected outright on a VLAN-zone conduit, also as load-time
-errors: `ports` (profinet/goose/sv/ethercat have no TCP/UDP layer at all),
+PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK frame carries at most one 802.1Q
+VLAN tag -- unlike a TCP flow, there's no separate "source VLAN" and
+"destination VLAN" the way there's a client IP and a server IP. So a
+VLAN-zone conduit's `from` and `to` are required to name the **exact same
+set** of VLAN zone(s) -- violating this is a load-time `PolicyError` (see
+"Validation errors" below). Its meaning is "this protocol is permitted on
+this VLAN zone," not a directional flow between two zones. Following from
+that, three fields that only make sense for a directional, session-based
+TCP flow are rejected outright on a VLAN-zone conduit, also as load-time
+errors: `ports` (these five protocols have no TCP/UDP layer at all),
 `bidirectional: true` (there's no client/server session to reverse -- `to`
-already equals `from`), and `functions`/`function` (these four protocols
-have no per-flow function/service name this engine tracks yet).
+already equals `from`), and `functions`/`function` (none of these five
+protocols has a per-flow function/service name this engine tracks yet). Two
+fields go the other way -- accepted ONLY on a VLAN-zone conduit, rejected on
+a CIDR-/hostname-zone one -- `from_macs`/`to_macs` and `ethertypes`, all
+three covered in their own subsections below.
 
 `ports` restricts which TCP port on the **responding** (server) side of the
 connection this conduit covers; omit it to allow any port. A `protocol`
@@ -2805,29 +2837,143 @@ this capture), all four instead report the Violation shown above. See
 line and the JSON report's `src_mac` field, described below) for how the
 observed source is determined and reported.
 
-### UDP flow evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE)
+**`to_macs`: restricting WHO may be targeted on a VLAN-zone conduit**
+(ROADMAP item 103). Sibling to `from_macs` above, with the identical shape
+and parsing (singular alias `to_mac`, same six-colon-separated-hex-octet
+format, same lowercase canonicalization, same "further restriction on an
+otherwise-matching conduit" semantics, same VLAN-zone-conduit-only
+rejection): an allow-list of DESTINATION MAC addresses this conduit's
+traffic may target. Omitted or empty (the default) means unrestricted. This
+is what lets a conduit assert something `from_macs` alone can't -- not just
+who may publish, but who the traffic must actually be addressed to, e.g.
+"GOOSE on this VLAN must target multicast group 01:0c:cd:01:00:01," catching
+a stray unicast publish or a publish to the wrong multicast group. A flow
+that matches on protocol and VLAN zone (and, if declared, `from_macs`) but
+whose observed destination isn't in the `to_macs` allow-list is a
+`Violation` naming the observed destination and the conduit's permitted
+list:
+
+```
+destination MAC '00:0c:29:aa:bb:cc' observed; conduit 'OT protocols permitted on ot_vlan, destined for a MAC that never appears' permits only: ff:ff:ff:ff:ff:ff
+```
+
+**Worked example.** Against `tests/policies/vlan_to_macs_allowed.yaml`
+(restricted to `00:0c:29:aa:bb:cc`, the actual destination every VLAN-100
+flow in `tests/sample_vlan_zones.pcap` targets), all four remain Allowed.
+Against `tests/policies/vlan_to_macs_violation.yaml` (restricted to
+`ff:ff:ff:ff:ff:ff`, which nothing in this capture ever targets), all four
+instead report the Violation shown above. See `EthernetFlowReport::dst_mac`
+(the JSON report's `dst_mac` field, described below) for how the observed
+destination is determined and reported.
+
+**`ethertypes`: matching a raw EtherType, decoded or not** (ROADMAP item
+103). The other new VLAN-zone-conduit-only field (singular alias
+`ethertype`, for a one-EtherType conduit): an allow-list of EtherType
+values, written as `0x` followed by 1-4 hex digits (e.g. `0x88f7`), in the
+range `0x0600`-`0xffff` (below `0x0600` is reserved for an 802.3 frame's own
+length field, never a real EtherType). Omitted or empty (the default) means
+unrestricted. Like `from_macs`/`to_macs`, this is a FURTHER restriction on
+top of `protocols` -- not a replacement for it -- so it composes with
+`protocols: [any]` to do something genuinely new: govern a VLAN segment's
+traffic even when this tool doesn't decode that protocol into a friendly
+name at all. Write `protocols: [any]` with `ethertypes: [0x88f7]` to mean
+"any protocol reachable on this VLAN zone, but only this EtherType" -- for
+an undecoded frame, `protocols: [any]` alone already matches (see below),
+so `ethertypes` is what actually narrows that down to one specific wire
+value instead of catching every unrecognized EtherType indiscriminately.
+
+An undecoded EtherType (reported as protocol `"non-ip"` in `decode`'s own
+output) is only ever tracked as its own L2 flow at all -- and so only ever
+appears in a report, Allowed/Violation/otherwise -- once a policy opts in by
+declaring a non-empty `ethertypes` on at least one VLAN conduit; a policy
+that never does is completely unaffected, and such traffic is still counted
+only in `skipped_non_tcp`, exactly as before this feature existed (the same
+backward-compatible opt-in shape `any_vlan_zone_`/`has_udp_eligible_conduit`
+already use elsewhere in this file). Once opted in, distinct undecoded
+EtherTypes between the same MAC pair are tracked as SEPARATE flows (keyed
+internally by a synthetic `"ethertype:0x...."` string, since the decoder
+itself reports the same literal `"non-ip"` protocol name for all of them) --
+a policy permitting one unrecognized vendor EtherType on a VLAN doesn't
+blanket-permit every other one alongside it. `ethertypes` also restricts an
+ALREADY-NAMED protocol's traffic (`profinet`/`goose`/`sv`/`ethercat`/
+`powerlink`) exactly the same way `from_macs`/`to_macs` do -- it isn't
+limited to undecoded frames. A flow that matches on protocol and VLAN zone
+(and, if declared, `from_macs`/`to_macs`) but whose observed EtherType isn't
+in the `ethertypes` allow-list is a `Violation` naming the observed
+EtherType and the conduit's permitted list:
+
+```
+ethertype 0x88b6 observed; conduit 'Only EtherType 0x88b5 permitted on ot_vlan' permits only: 0x88b5
+```
+
+**Worked example.** `tests/sample_policy_l2_ethertype_powerlink.pcap`
+carries two undecoded EtherTypes (`0x88b5`, two packets; `0x88b6`, one
+packet -- both IANA-registered "Local Experimental Ethertype" placeholder
+values this decoder deliberately doesn't recognize) plus one POWERLINK
+frame, all tagged VLAN 100, all `00:0c:29:11:22:33` <-> `00:0c:29:aa:bb:cc`.
+Against `tests/policies/vlan_ethertype_matching.yaml`
+(`protocols: [any]`, `ethertypes: [0x88b5]`): the `0x88b5` flow is Allowed;
+the `0x88b6` flow and the POWERLINK flow are both Violations, since neither
+EtherType is in the allow-list -- proving `ethertypes` restricts ANY matched
+protocol, named or synthetic, not just undecoded ones. See also
+`tests/policies/vlan_powerlink_allowed.yaml`, which instead names
+`protocol: powerlink` with no `ethertypes` restriction at all: the POWERLINK
+flow is Allowed, the two undecoded-EtherType flows are Violations (this
+conduit's `protocols` doesn't name `"non-ip"`) -- proving POWERLINK is now
+governable exactly like the four pre-existing VLAN-only protocols.
+
+### UDP flow evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE, MELSEC, FINS, CODESYS, BSAP, CC-Link IE, and generic UDP)
 
 `policy validate` normally only evaluates TCP flows against a CIDR/
 hostname-zone conduit (see "Conduits" above and LIMITATIONS) -- BACnet/IP,
 CIP I/O (EtherNet/IP's UDP/2222 implicit messaging), HART-IP's UDP form,
-and FF-HSE's UDP form are the four exceptions, and only once a policy opts
-in: naming `bacnet`, `enip`, `hartip`, `ffhse`, or `any` in ANY conduit's
-`protocols` turns on UDP flow evaluation for the ENTIRE policy, not just
-that one conduit. BACnet/IP and CIP I/O shipped first; HART-IP's and
-FF-HSE's UDP forms were added afterward, widening the same opt-in gate
-(`Policy::has_udp_eligible_conduit()`) rather than introducing a separate
-one. Concretely, a policy with two conduits -- one naming only `bacnet`,
-the other only `modbus` -- still evaluates CIP I/O, HART-IP, and FF-HSE
-traffic once loaded, because `bacnet` alone is enough to flip on evaluation
-for all four UDP protocols; if no conduit in the entire policy permits an
-observed UDP flow's zone pair/port, that flow is correctly reported a
-`Violation`, not silently skipped. This is a deliberate design choice, not
-an oversight -- see `tests/policies/udp_bacnet_only_violation.yaml` and
-`tests/policies/udp_hartip_only_violation.yaml` for pinned regression
+FF-HSE's UDP form, MELSEC's UDP form, FINS's UDP form, CODESYS's UDP form,
+BSAP, CC-Link IE Field Network Basic, and the generic `udp` pseudo-protocol
+are the ten exceptions, and only once a policy opts in: naming `bacnet`,
+`enip`, `hartip`, `ffhse`, `melsec`, `fins`, `codesys`, `bsap`, `cclink-ie`,
+`udp`, or `any` in ANY conduit's `protocols` turns on UDP flow evaluation
+for the ENTIRE policy, not just that one conduit. BACnet/IP and CIP I/O
+shipped first; HART-IP's and FF-HSE's UDP forms were added next, widening
+the same opt-in gate (`Policy::has_udp_eligible_conduit()`) rather than
+introducing a separate one; ROADMAP item 103 widened it again to the full
+ten-name set above. Concretely, a policy with two conduits -- one naming
+only `bacnet`, the other only `modbus` -- still evaluates every one of the
+other nine UDP-capable names once loaded, because `bacnet` alone is enough
+to flip on evaluation for all of them; if no conduit in the entire policy
+permits an observed UDP flow's zone pair/port, that flow is correctly
+reported a `Violation`, not silently skipped. This is a deliberate design
+choice, not an oversight -- see `tests/policies/udp_bacnet_only_violation.yaml`
+and `tests/policies/udp_hartip_only_violation.yaml` for pinned regression
 fixtures proving it (one per protocol pair, same idea). A policy that never
-names `bacnet`/`enip`/`hartip`/`ffhse`/`any` on any conduit is completely
-unaffected: this traffic is still counted only in `skipped_non_tcp`,
-exactly as before this feature existed.
+names one of the ten UDP-eligible names (or `any`) on any conduit is
+completely unaffected: this traffic is still counted only in
+`skipped_non_tcp`, exactly as before this feature existed.
+
+MELSEC, FINS, and CODESYS are each a single decoded protocol with both a
+TCP and a UDP wire form (see "Conduits" above); naming one of them matches
+BOTH forms directly, no separate `functions`-style split needed. BSAP and
+CC-Link IE Field Network Basic have no TCP form at all -- this decoder only
+ever recognizes them over UDP. `udp` is not a decoded protocol name at all:
+it matches `decoder.cpp`'s own generic "recognized UDP transport, no
+app-layer match" fallback (the same fallback a plain, unclassified UDP
+packet already gets in `decode`'s own output), for writing a deliberately
+blunt firewall-style "this UDP port between these zones is permitted,
+whatever's on it" rule -- `protocols: [udp]` plus the existing `ports:`
+field, no application-layer visibility, no `functions:` support, meant to
+complement the protocol-aware conduits above rather than replace them. None
+of MELSEC/FINS/CODESYS/BSAP/CC-Link IE/`udp` support `functions` restriction
+yet either (see "Function-level restrictions" below).
+
+**Worked example, generic `udp`.** `tests/sample_policy_generic_udp.pcap`
+carries plain UDP traffic on port 9999 (no app-layer protocol this decoder
+names), HMI_IP <-> PLC_IP. Against `tests/policies/udp_generic_port_allowed.yaml`
+(`protocols: [udp]`, `ports: [9999]`, `bidirectional: true`), both directions
+match and the flow is Allowed. Against
+`tests/policies/udp_generic_port_violation.yaml` (same shape, but
+`ports: [8888]`), the flow is correctly named `udp` but rejected on port --
+a `Violation` reading "a conduit exists ... but none permits udp traffic on
+port 9999," the same reason shape any other port-mismatched conduit
+produces.
 
 Once opted in, a BACnet/IP, CIP I/O, HART-IP, or FF-HSE flow is matched
 against the exact same CIDR/hostname zones a TCP flow would be (never a
@@ -2888,7 +3034,7 @@ exchange, both between the same HMI/PLC pair. Against
 $ conduitscope policy validate -r tests/sample_policy_udp_hartip_ffhse.pcap --policy tests/policies/udp_hartip_ffhse_compliant.yaml
 ...
 UDP flows evaluated: 2 (2 allowed, 0 violation(s), 0 unclassified)
-  BACnet/IP, CIP I/O, HART-IP, and/or FF-HSE traffic, classified by CIDR/hostname zone -- see docs/USER_GUIDE.md's POLICY FILE FORMAT section
+  BACnet/IP, CIP I/O, HART-IP, FF-HSE, MELSEC, FINS, CODESYS, BSAP, CC-Link IE, and/or generic UDP traffic, classified by CIDR/hostname zone -- see docs/USER_GUIDE.md's POLICY FILE FORMAT section
 
 UDP ALLOWED (2):
   [1] 192.168.1.50 -> 192.168.1.10:5094 (hart-ip)  (hartip, 2 packet(s))
@@ -3399,25 +3545,35 @@ error (see EXIT STATUS):
   just the first
 - a conduit's `from`/`to` list being empty (e.g. `from: []`)
 - a conduit protocol outside `{modbus, dnp3, s7comm, iec104, enip, bacnet,
-  hartip, opcua, mms, mqtt, ffhse, profinet, goose, sv, ethercat, any}`
-  (docs/DEVELOPMENT.md's ROADMAP items 14 and 15)
+  hartip, opcua, mms, mqtt, ffhse, twincat, ge-srtp, fox, foxs, s7comm-plus,
+  melsec, fins, codesys, bsap, cclink-ie, udp, profinet, goose, sv, ethercat,
+  powerlink, any}` (docs/DEVELOPMENT.md's ROADMAP items 14, 15, and 103)
 - a conduit's `from`/`to` referencing both an IPv4 zone and a VLAN zone
   (every zone a conduit references must be the same kind -- docs/DEVELOPMENT.md's ROADMAP item 15)
 - a conduit naming a TCP/IP protocol (e.g. `modbus`) while its zones are
   VLAN zones, or naming a VLAN-only protocol (`profinet`/`goose`/`sv`/
-  `ethercat`) while its zones are IPv4 zones (docs/DEVELOPMENT.md's ROADMAP item 15)
+  `ethercat`/`powerlink`) while its zones are IPv4 zones (docs/DEVELOPMENT.md's
+  ROADMAP items 15 and 103)
 - a VLAN-zone conduit whose `from` and `to` don't name the exact same set
   of VLAN zone(s) (docs/DEVELOPMENT.md's ROADMAP item 15 -- see "Conduits" above for why)
 - a VLAN-zone conduit giving `ports`, `bidirectional: true`, or
   `functions`/`function` -- none of these three has a meaning on a
   VLAN-zone conduit (docs/DEVELOPMENT.md's ROADMAP item 15 -- see "Conduits" above)
-- a CIDR- or hostname-zone conduit giving `from_macs`/`from_mac` -- source-MAC
-  restriction only has a meaning on a VLAN-zone conduit, which has no
-  client/server IP pair to restrict by the way a CIDR-/hostname-zone conduit
-  already can (see "Conduits" above)
-- a conduit's `from_macs`/`from_mac` entry that isn't a valid MAC address
-  (exactly six colon-separated hex octets, e.g. `00:0c:29:11:22:33`; hex
-  digits are case-insensitive on input, canonicalized to lowercase on output)
+- a CIDR- or hostname-zone conduit giving `from_macs`/`from_mac`,
+  `to_macs`/`to_mac`, or `ethertypes`/`ethertype` -- source-MAC,
+  destination-MAC, and raw-EtherType restriction only have a meaning on a
+  VLAN-zone conduit, which has no client/server IP pair to restrict by the
+  way a CIDR-/hostname-zone conduit already can (see "Conduits" above;
+  ROADMAP item 103 added `to_macs`/`ethertypes` alongside the pre-existing
+  `from_macs`)
+- a conduit's `from_macs`/`from_mac` or `to_macs`/`to_mac` entry that isn't
+  a valid MAC address (exactly six colon-separated hex octets, e.g.
+  `00:0c:29:11:22:33`; hex digits are case-insensitive on input,
+  canonicalized to lowercase on output)
+- a conduit's `ethertypes`/`ethertype` entry that isn't a valid EtherType
+  (`0x` followed by 1-4 hex digits, in the range `0x0600`-`0xffff` -- below
+  `0x0600` is reserved for an 802.3 frame's own length field, never a real
+  EtherType)
 - a conduit port outside `[1, 65535]`
 - a conduit's `bidirectional` value that isn't a recognizable boolean
   (`true`/`false`/`yes`/`no`)
@@ -3561,13 +3717,17 @@ IPv4 zone (a conduit can never mix the two -- see "Conduits" above).
 **`from_macs`** (per conduit, Phase 5, see "Conduits" above) -- the source-MAC allow-list, as an
 array of lowercase, colon-separated MAC strings; empty array (never omitted or `null`) when the
 conduit doesn't restrict by source MAC, the same convention `functions` above already uses for its
-own empty case.
+own empty case. **`to_macs`** and **`ethertypes`** (ROADMAP item 103, see "Conduits" above) follow
+immediately after `from_macs`, same empty-array-means-unrestricted convention: `to_macs` an array
+of lowercase, colon-separated MAC strings (the destination-MAC allow-list), `ethertypes` an array
+of `"0x"`-prefixed lowercase hex strings (e.g. `"0x88f7"`).
 
-**`ethernet_flows[]`** (docs/DEVELOPMENT.md's ROADMAP item 15) -- always present, empty on a
+**`ethernet_flows[]`** (docs/DEVELOPMENT.md's ROADMAP items 15 and 103) -- always present, empty on a
 policy that declares no VLAN zones (see "Addressing scope" below), one
-entry per "L2 flow": PROFINET RT/GOOSE/Sampled Values/EtherCAT traffic
-aggregated by protocol + MAC pair (no port, no client/server distinction --
-these protocols have neither):
+entry per "L2 flow": PROFINET RT/GOOSE/Sampled Values/EtherCAT/POWERLINK
+traffic, or an undecoded EtherType once a policy opts in (see "ethertypes"
+above), aggregated by protocol + MAC pair (no port, no client/server
+distinction -- these protocols have neither):
 
 ```json
 {
@@ -3583,7 +3743,9 @@ these protocols have neither):
   "verdict": "allowed",
   "matched_conduit": "OT protocols permitted on ot_vlan",
   "reason": null,
-  "src_mac": "00:0c:29:11:22:33"
+  "src_mac": "00:0c:29:11:22:33",
+  "dst_mac": "00:0c:29:aa:bb:cc",
+  "ethertype": "0x88b8"
 }
 ```
 
@@ -3601,15 +3763,24 @@ carries no 802.1Q VLAN tag at all"). `allowed_count`/`violation_count`/
 `unclassified_count` at the top level are the combined totals across both
 `flows[]` and `ethernet_flows[]`.
 
-**`src_mac`** (Phase 5, see "Conduits" above) -- the true-last field in this object, always
-present (never omitted): the actual transmitting MAC this flow was first observed from, fixed from
-the first packet (never re-derived per packet, since these are one-directional cyclic publish
-streams with exactly one stable source, unlike `mac_a`/`mac_b`'s order-independent identity pair
-above). This is what a matched conduit's own `from_macs` allow-list is checked against; a
-`from_macs`-restricted conduit whose match fails on source turns an otherwise-Allowed verdict into
-a `Violation` naming the observed `src_mac` and the conduit's permitted list. `src_mac_vendor`
-follows immediately after it under the same `--mac-vendor` gating as `mac_a_vendor`/`mac_b_vendor`
-above (omitted entirely on a lookup miss or when `--mac-vendor` wasn't given).
+**`src_mac`** (Phase 5, see "Conduits" above) -- the actual transmitting MAC this flow was first
+observed from, fixed from the first packet (never re-derived per packet, since these are
+one-directional cyclic publish streams with exactly one stable source, unlike `mac_a`/`mac_b`'s
+order-independent identity pair above). This is what a matched conduit's own `from_macs` allow-list
+is checked against; a `from_macs`-restricted conduit whose match fails on source turns an
+otherwise-Allowed verdict into a `Violation` naming the observed `src_mac` and the conduit's
+permitted list. `src_mac_vendor` follows immediately after it under the same `--mac-vendor` gating
+as `mac_a_vendor`/`mac_b_vendor` above (omitted entirely on a lookup miss or when `--mac-vendor`
+wasn't given).
+
+**`dst_mac`/`dst_mac_vendor`** (ROADMAP item 103) -- the true-last fields in this object, mirroring
+`src_mac`/`src_mac_vendor` exactly (always present; the OUI-vendor annotation omitted on a lookup
+miss or when `--mac-vendor` wasn't given): the actual destination MAC this flow was first observed
+targeting, what a matched conduit's own `to_macs` allow-list is checked against. **`ethertype`**
+(ROADMAP item 103) is this flow's raw EtherType, always present (a `"0x"`-prefixed lowercase hex
+string) whether the protocol is a named one (e.g. `"goose"`, EtherType `0x88b8`) or the synthetic
+`"non-ip"` (an undecoded EtherType, once opted into -- see "ethertypes" above) -- what a matched
+conduit's own `ethertypes` allow-list is checked against.
 
 Two fields are additive since function-level restrictions were introduced
 and appear on every report regardless of whether any conduit actually uses
@@ -3875,54 +4046,69 @@ recognizes but a zone can't classify by, and for the protocols a conduit
 can't yet name at all -- worth reading before assuming a conduit covers
 more than it actually does.
 
-**The `protocols` enum names twelve values** (docs/DEVELOPMENT.md's ROADMAP item 14, done):
-`modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`, `opcua`,
-`mms`, `mqtt`, `ffhse`, `any` -- see "Validation errors" below. This was
-previously closed to the first five (plus `any`); `decode` recognized
-BACnet/IP, HART-IP, OPC UA, MMS, MQTT, and FOUNDATION Fieldbus HSE
-considerably before any of them could be named in a conduit's
-`protocols`/`protocol` field -- the closest a conduit could get to
-covering their traffic was `any`, which matches every protocol
-indiscriminately and can't be scoped down to just one of them. That gap
-is closed for all six now: a conduit CAN say "only OPC UA is allowed
-here" (`protocol: opcua`), and PolicyEngine's own flow-classification
-dispatch (`PolicyEngine::observe`) genuinely recognizes each of them, not
-just the policy-file parser -- see the "Widened `protocols` enum" tests
-in `CMakeLists.txt` and `tests/policies/widened_protocols.yaml` for
-end-to-end confirmation against each protocol's own real sample capture.
-One asterisk survived this widening for a while, since fixed: `bacnet` used
+**The `protocols` enum names twenty-six values** (docs/DEVELOPMENT.md's ROADMAP items 14 and 103,
+done): `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`, `opcua`,
+`mms`, `mqtt`, `ffhse`, `twincat`, `ge-srtp`, `fox`, `foxs`, `s7comm-plus`,
+`melsec`, `fins`, `codesys`, `bsap`, `cclink-ie`, `udp`, `profinet`,
+`goose`, `sv`, `ethercat`, `powerlink`, plus `any` -- see "Validation
+errors" below. This was originally closed to five (plus `any`); item 14
+first widened it to eleven -- `decode` recognized BACnet/IP, HART-IP, OPC
+UA, MMS, MQTT, and FOUNDATION Fieldbus HSE considerably before any of them
+could be named in a conduit's `protocols`/`protocol` field, the closest a
+conduit could get to covering their traffic being `any`, which matches
+every protocol indiscriminately and can't be scoped down to just one of
+them. That gap was closed for all six then: a conduit CAN say "only OPC UA
+is allowed here" (`protocol: opcua`), and PolicyEngine's own
+flow-classification dispatch (`PolicyEngine::observe`) genuinely recognizes
+each of them, not just the policy-file parser -- see the "Widened
+`protocols` enum" tests in `CMakeLists.txt` and
+`tests/policies/widened_protocols.yaml` for end-to-end confirmation against
+each protocol's own real sample capture. One asterisk survived that
+widening for a while, since fixed: `bacnet` used
 to parse and validate like any other protocol name, but BACnet/IP itself
 could never actually match a flow, since a conduit was TCP-flow-only and
 BACnet/IP is UDP. docs/design/policy-engine-zoning.md's Phase 3 closed that
 gap for BACnet/IP and CIP I/O; a later pass closed the same gap for
 HART-IP's and FF-HSE's own UDP forms -- see the next paragraph and "UDP
-flow evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE)" above.
+flow evaluation" above. ROADMAP item 103 then closed a different, larger
+gap: seven more TCP-capable protocols this tool already decoded by name
+(`twincat`, `ge-srtp`, `fox`, `foxs`, `s7comm-plus`, plus `melsec`/`fins`/
+`codesys` on their TCP forms) had never been wired into
+`PolicyEngine::observe`'s TCP dispatch chain at all, so a flow carrying any
+of them was always reported generically `Unclassified`
+("no recognized OT protocol traffic was found") -- indistinguishable from
+actual junk traffic, and impossible to name in a conduit either way. Item
+103 also widened the UDP-eligible set from four names to ten (adding
+`melsec`/`fins`/`codesys`'s own UDP forms, `bsap`, `cclink-ie`, and the
+generic `udp` pseudo-protocol -- see "UDP flow evaluation" above), and added
+`powerlink` as a fifth VLAN-only protocol.
 
 **`policy validate` evaluates TCP flows against a CIDR/hostname-zone
-conduit unconditionally, and BACnet/IP + CIP I/O + HART-IP + FF-HSE UDP
-flows too once a policy opts in** (see "UDP flow evaluation (BACnet/IP,
-CIP I/O, HART-IP, FF-HSE)" above) -- every UDP-capable protocol this tool
-decodes now has a path into `policy validate`, TCP or UDP. Concretely, of
-the six protocols item 14 widened `protocols` to include: `opcua` and
-`mqtt` carry genuine TCP traffic this decoder recognizes and no UDP form
-this engine evaluates, so naming them does real work over TCP only.
-`hartip`, `mms`, and `ffhse` also carry genuine TCP traffic; `hartip` and
-`ffhse` additionally match their own UDP form once opted in, the same way
-`enip` additionally matches CIP I/O. `bacnet` has no TCP form to fall back
-on at all: this decoder only ever recognizes BACnet/IP over UDP (see
-`decoder.cpp`), so `protocol: bacnet` only ever matches UDP traffic, and
-only once UDP flow evaluation is opted into as described above -- a
-`bacnet` (or `hartip`/`ffhse`, for their own UDP form) conduit in a policy
-that never opts in still parses and validates fine, and still appears in
-`unexercised_conduits` (or, once opted in via another conduit in the same
-policy, in `udp_flows[]`'s own accounting instead).
+conduit unconditionally, and ten UDP-capable protocols' UDP flows too once
+a policy opts in** (see "UDP flow evaluation" above) -- every UDP-capable
+protocol this tool decodes now has a path into `policy validate`, TCP or
+UDP. Concretely, of the protocols items 14 and 103 widened `protocols` to
+include: `opcua` and `mqtt` carry genuine TCP traffic this decoder
+recognizes and no UDP form this engine evaluates, so naming them does real
+work over TCP only. `hartip`, `mms`, and `ffhse` also carry genuine TCP
+traffic; `hartip` and `ffhse` additionally match their own UDP form once
+opted in, the same way `enip` additionally matches CIP I/O. `melsec`,
+`fins`, and `codesys` are genuinely dual-transport: naming one matches both
+its TCP and UDP forms directly. `twincat`, `ge-srtp`, `fox`, and `foxs` are
+TCP-only, with no UDP form at all. `bacnet`, `bsap`, and `cclink-ie` have no
+TCP form to fall back on at all: this decoder only ever recognizes them
+over UDP, so naming one of them only ever matches UDP traffic, and only
+once UDP flow evaluation is opted into as described above -- such a conduit
+in a policy that never opts in still parses and validates fine, and still
+appears in `unexercised_conduits` (or, once opted in via another conduit in
+the same policy, in `udp_flows[]`'s own accounting instead).
 
-**For the four protocols with no IP layer at all** -- PROFINET RT, IEC
-61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, and EtherCAT (see PROTOCOL
-COVERAGE) -- a CIDR-based zone model doesn't apply, and isn't really the
-right tool anyway: none of these four can leave the Ethernet segment/VLAN
-they were transmitted on, by construction, since there's no IP header for
-a router to act on. That's a physical/topological guarantee, not
+**For the five protocols with no IP layer at all** -- PROFINET RT, IEC
+61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, and Ethernet
+POWERLINK (see PROTOCOL COVERAGE) -- a CIDR-based zone model doesn't apply,
+and isn't really the right tool anyway: none of these five can leave the
+Ethernet segment/VLAN they were transmitted on, by construction, since
+there's no IP header for a router to act on. That's a physical/topological guarantee, not
 something `policy validate` needs to verify the way it verifies an IP
 conduit. The question worth asking about these four instead is whether
 the traffic is on the segment/VLAN it's supposed to be on AT ALL (a
@@ -3997,20 +4183,37 @@ this tool does with it today:**
   `called_tsap_hex`) -- rack/slot are never decoded out of it.
 - **GOOSE/Sampled Values** use IEC 61850's own logical addressing --
   APPID (scopes a stream to a VLAN/segment) plus a GoCB reference or
-  `svID` (the actual publisher identity) -- and **EtherCAT** uses ADP/ADO
+  `svID` (the actual publisher identity) -- **EtherCAT** uses ADP/ADO
   (station address + memory offset) to address one slave within a
-  segment. Both are decoded and exposed; neither is IP-like, and neither
-  reaches the zone engine (this is still true after docs/DEVELOPMENT.md's ROADMAP item 15: a
-  VLAN-zone conduit classifies these four protocols' traffic by their
-  802.1Q tag alone, never by APPID/GoCB/`svID`/ADP/ADO -- those remain
-  informational, decoded-and-exposed-but-not-zone-classified fields, the
-  same as every other application-layer address in this list).
+  segment, and **POWERLINK** (ROADMAP item 103) uses a 1-byte NodeID
+  (`POWERLINK_MN_NODE_ID`/`POWERLINK_BROADCAST_NODE_ID` for the Managing
+  Node/broadcast cases, an ordinary Controlled Node ID otherwise) to
+  address one node on the ring. All are decoded and exposed; none is
+  IP-like, and none reaches the zone engine (this is still true after
+  docs/DEVELOPMENT.md's ROADMAP items 15 and 103: a
+  VLAN-zone conduit classifies these five protocols' traffic by their
+  802.1Q tag alone, never by APPID/GoCB/`svID`/ADP/ADO/NodeID -- those
+  remain informational, decoded-and-exposed-but-not-zone-classified
+  fields, the same as every other application-layer address in this
+  list).
 
-None of this changes what's Allowed/Violation/Unclassified today, item 15
-excepted -- every other item above describes information `decode` already
-surfaces (or, for DNP3's link address, doesn't yet) that `PolicyEngine`
-still doesn't use for zone classification. See docs/DEVELOPMENT.md's ROADMAP for what's actually
-planned.
+**Raw EtherType and destination MAC** (ROADMAP item 103) are the two
+exceptions to "decoded and exposed but not zone-classified" above: unlike
+every application-layer address in the list, `ethertypes`/`to_macs` (see
+"Conduits" above) ARE consulted by the zone engine, on a VLAN-zone conduit.
+This is what makes an undecoded EtherType governable at all: `decode`
+already exposes the raw wire value for a `"non-ip"` frame (folded into
+`out.summary`'s free text before item 103, now also a first-class
+`DecodedPacket::ethertype` field), but there was previously no way to write
+a policy rule against it -- `ethertypes` closes that, and `to_macs` gives
+the same "consulted by the zone engine" treatment to a VLAN frame's
+destination, not just its source (`from_macs`, Phase 5).
+
+None of this changes what's Allowed/Violation/Unclassified today, items 15
+and 103 excepted -- every other item above describes information `decode`
+already surfaces (or, for DNP3's link address, doesn't yet) that
+`PolicyEngine` still doesn't use for zone classification. See
+docs/DEVELOPMENT.md's ROADMAP for what's actually planned.
 
 ## OUTPUT FORMATS
 

@@ -1,0 +1,13 @@
+# Regression fixture: an 'ethertypes' entry below 0x0600 (ROADMAP item 103) -- that range is
+# reserved for an 802.3 frame's own length field, never a real EtherType, so parse_ethertype
+# rejects it exactly like parse_vlan_id rejects a VLAN ID out of its own valid range (see
+# bad_vlan_id_out_of_range.yaml).
+zones:
+  ot_vlan:
+    vlans: [100]
+conduits:
+  - name: c1
+    from: ot_vlan
+    to: ot_vlan
+    protocol: any
+    ethertypes: [0x0100]

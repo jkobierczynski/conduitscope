@@ -1,0 +1,21 @@
+# ROADMAP item 103: exercises the generic 'udp' pseudo-protocol name -- 'protocols: [udp]' plus
+# the existing 'ports:' field, a deliberately blunt firewall-style "this UDP port between these
+# zones is permitted, whatever's on it" rule for traffic this decoder doesn't recognize by name at
+# all. Matched against tests/sample_policy_generic_udp.pcap (plain UDP traffic on port 9999, no
+# app-layer protocol this decoder names -- always falls to decoder.cpp's own generic
+# dp.protocol == "udp" fallback): both directions match, so this reports COMPLIANT.
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP)"
+    networks: [192.168.1.50/32]
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP)"
+    networks: [192.168.1.10/32]
+
+conduits:
+  - name: "Generic UDP port 9999 permitted, HMI <-> PLC"
+    from: hmi_zone
+    to: plc_zone
+    bidirectional: true
+    protocols: [udp]
+    ports: [9999]

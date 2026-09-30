@@ -763,6 +763,17 @@ struct DecodedPacket {
     std::string src_mac, dst_mac;
     bool has_vlan_tag = false;
     uint16_t vlan_id = 0;
+    // The frame's own EtherType (link_layer.hpp's EthernetFrame::ethertype -- already unwrapped
+    // past one 802.1Q tag if present), populated for EVERY Ethernet-linktype frame regardless of
+    // protocol (an IPv4 frame gets 0x0800, IPv6 0x86dd, and so on) -- see PolicyEngine's own
+    // raw-EtherType conduit matching (policy_engine.cpp, ROADMAP item 103) for the one consumer
+    // that actually reads this today, specifically for a frame this tool's own decoders don't
+    // recognize (protocol == "non-ip"), where this is otherwise the only structured way to know
+    // what was actually on the wire -- previously this value only ever appeared baked into
+    // out.summary's free text (decoder.cpp's "Ethernet frame with ethertype 0x..." fallback).
+    // 0 (the default) only for a non-Ethernet link type (has_ethernet == false), never for a real
+    // Ethernet frame -- 0x0000 is not a valid EtherType (below the 802.3 length-field boundary).
+    uint16_t ethertype = 0;
 
     bool has_ip = false;
     std::string src_ip, dst_ip;
