@@ -13550,6 +13550,89 @@ add_test(NAME hex_dump_dash_x_ignored_under_json_format
 set_tests_properties(hex_dump_dash_x_ignored_under_json_format PROPERTIES
   FAIL_REGULAR_EXPRESSION "^0000  ")
 
+# ---------------------------------------------------------------------------------------------
+# -V,--details -- the layer-by-layer packet-details view (tshark's own -V), ROADMAP item 106.
+# One short, non-repeating literal per test rather than one big regex chaining multiple `(.*\n)*`
+# skip-groups -- see this file's own CANOPEN_STATS catastrophic-backtracking comment (search
+# "catastrophic backtracking" above) for exactly why that idiom is fragile at scale and why this
+# file now prefers several small, targeted tests instead. sample_modbus.pcap packet #1 is the
+# same 3-packet Modbus fixture already used throughout this file (well-known contents: request
+# from 192.168.1.50:51000 to 192.168.1.10:502, reading 10 holding registers starting at address
+# 0), narrowed to just that one packet via -c 1 for a deterministic, single-packet assertion.
+
+add_test(NAME decode_details_shows_frame_layer
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_shows_frame_layer PROPERTIES
+  PASS_REGULAR_EXPRESSION "^#1  Frame: 66 byte\\(s\\) captured, 66 byte\\(s\\) on wire, 0\\.000000")
+
+add_test(NAME decode_details_shows_ethernet_layer
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_shows_ethernet_layer PROPERTIES
+  PASS_REGULAR_EXPRESSION "Ethernet II: 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc")
+
+add_test(NAME decode_details_shows_ip_layer
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_shows_ip_layer PROPERTIES
+  PASS_REGULAR_EXPRESSION "Internet Protocol: 192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10")
+
+add_test(NAME decode_details_shows_transport_layer
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_shows_transport_layer PROPERTIES
+  PASS_REGULAR_EXPRESSION "Transmission Control Protocol: 51000 -> 502 \\(modbus\\)")
+
+# Every field --format json would show for this packet, reused via the same one-shot-JsonWriter
+# trick FieldsWriter's own -T fields already relies on (see DetailWriter::write_packet's own
+# comment, output.cpp) -- proven here by a concrete protocol-specific field, not just the summary.
+add_test(NAME decode_details_shows_protocol_specific_fields
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_shows_protocol_specific_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "        modbus_start_address: 0")
+
+# -V has no verbose_ gate of its own (unlike TextWriter's -v/--verbose) -- notes are always shown,
+# since completeness is this flag's whole point. No -v given here at all.
+add_test(NAME decode_details_shows_notes_without_dash_v
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_shows_notes_without_dash_v PROPERTIES
+  PASS_REGULAR_EXPRESSION "        note: classified as a request")
+
+# Same "text output only" posture -x/--hex already has: -V is silently ignored (not an error) once
+# --format selects json/csv/fields/zeek, so scripts combining flags loosely don't break.
+add_test(NAME decode_details_ignored_under_json_format
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' decode -V --format json --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' decode --format json --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+set_tests_properties(decode_details_ignored_under_json_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^$")
+
+add_test(NAME decode_details_flag_present_in_decode_help
+  COMMAND conduitscope decode --help)
+set_tests_properties(decode_details_flag_present_in_decode_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "-V,--details")
+
+# A raw-L2 fixture with no IP layer at all (PROFINET DCP, EtherType 0x8892) -- the Internet
+# Protocol/Transmission Control Protocol/User Datagram Protocol sections must be omitted outright,
+# not printed empty, the same "only shown when the layer is actually present" contract every other
+# layer already has (has_ethernet/has_ip/has_tcp/has_udp).
+add_test(NAME decode_details_no_ip_layer_fixture_skips_ip_and_transport_sections
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap")
+set_tests_properties(decode_details_no_ip_layer_fixture_skips_ip_and_transport_sections PROPERTIES
+  FAIL_REGULAR_EXPRESSION "Internet Protocol:|Transmission Control Protocol:|User Datagram Protocol:")
+
+# Known, documented limitation (DetailWriter's own header comment, output.hpp): SMB/DCE-RPC-over-
+# SMB's own nested "X_messages"/"X_calls" JSON arrays aren't reconstructed by parse_flat_json_object
+# (same pre-existing gap -T fields already has) -- this is a smoke test that -V still runs cleanly
+# and renders the base layers/application-layer header for an SMB packet, not a correctness proof
+# of every nested field.
+add_test(NAME decode_details_smb_fixture_does_not_crash
+  COMMAND conduitscope decode -c 1 -V --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap")
+set_tests_properties(decode_details_smb_fixture_does_not_crash PROPERTIES
+  PASS_REGULAR_EXPRESSION "smb:")
+
+# -x/--hex's own dump still appears below -V's own layer breakdown -- the two compose, neither
+# excludes the other (see -V's own help text, cli_main.cpp).
+add_test(NAME decode_details_composes_with_hex_dump
+  COMMAND conduitscope decode -c 1 -V -x --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(decode_details_composes_with_hex_dump PROPERTIES
+  PASS_REGULAR_EXPRESSION "0000  ")
+
 # -w writes every packet reaching this run to a new classic-pcap file, raw and unmodified --
 # proven end to end by round-tripping: write sample_arp.pcap's own 6 packets out through -w, then
 # read the written file straight back in and diff its --format json output against the

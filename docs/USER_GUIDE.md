@@ -254,6 +254,7 @@ flag on `decode`; see `info` below.
 | `-e, --field FIELD` | *(none)* | With `-T fields`, print this field's value (repeatable, printed in the order given, tab-separated). Mirrors tshark's own `-e`. The field name is whatever key appears in this tool's own `--format json` output for that packet (e.g. `src_ip`, `dst_port`, `modbus_function_code`); a field absent for a given packet (wrong protocol, or an optional field not present) prints as an empty column rather than an error. Requires `-T fields` -- given without it, a one-line advisory note is printed and the field selection is ignored, not treated as an error. See OUTPUT FORMATS' "Field selection (`-T fields`)" subsection below. |
 | `-w, --write FILE` | *(none)* | Write every packet that reaches this run (after `-f`/`--filter`, if given) to this path as a new classic-pcap capture file, raw and unmodified -- mirrors tshark/tcpdump's own `-w`. Works identically whether packets come from a live capture (`-i`) or an offline read (`-r`); does not change or replace the normal `--format` output, which continues to stdout/`-o` exactly as without `-w`. |
 | `-x, --hex` | off | Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- mirrors tshark's own `-x`. Text output only (`-T text`, the default); ignored under `-T json`/`csv`/`fields`. |
+| `-V, --details` | off | Print the complete protocol breakdown of each packet, layer by layer, instead of the default one-line summary -- mirrors tshark's own `-V` (Wireshark's "Packet Details" pane). Every field this tool's own `--format json` output would show for the packet is shown here too, grouped under the layer it belongs to (Frame, Ethernet II, Internet Protocol, Transmission Control Protocol/User Datagram Protocol, then the recognized application protocol's own fields) rather than flattened into one JSON object -- nothing is held back for `-V` specifically: notes and any detect/attack finding are always shown, regardless of `-v`/`--verbose`, since completeness is this flag's whole point. Text output only (`-T text`, the default); ignored under `-T json`/`csv`/`fields`, the same posture `-x`/`--hex` already has. Composes with `-x`: the hex dump, when also given, still appears below this packet's own layer breakdown. |
 | `--mac-vendor` | off (i.e. OUI/MAC-vendor resolution off by default, to keep output compact) | Enable OUI (MAC vendor) resolution against the built-in table, and show it next to each MAC address. Implies `--ether`. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--resolve` | off | Enable hostname resolution from an explicitly-supplied `--hosts` file. **Never performs live DNS, under any circumstance** -- file-only. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
@@ -5948,6 +5949,46 @@ $ conduitscope decode -r capture.pcap -c 1 -x
 0010  08 00 06 04 00 01 00 0c  29 11 22 33 c0 a8 01 32  ........)."3...2
 0020  00 00 00 00 00 00 c0 a8  01 0a                    ..........
 ```
+
+### Packet details (`-V`)
+
+`-V` (equivalently `--details`) replaces `decode`'s normal one-line-per-packet
+summary with a complete, layer-by-layer breakdown of each packet --
+mirroring tshark's own `-V` (what the Wireshark GUI calls the "Packet
+Details" pane). Every field this tool's own `--format json` output would
+show for the packet is shown here too -- nothing is held back for `-V`
+specifically, including notes and any detect/attack finding, which are
+always shown regardless of `-v`/`--verbose` -- but grouped under the layer
+it belongs to (Frame, Ethernet II, Internet Protocol, Transmission Control
+Protocol/User Datagram Protocol, then the recognized application protocol's
+own fields) instead of flattened into one JSON object. A layer is omitted
+outright, not printed empty, when the packet doesn't have it (no Ethernet
+II section for a capture with no link layer, no Internet Protocol/transport
+sections for a non-IP packet such as PROFINET RT or GOOSE).
+
+```
+$ conduitscope decode -r capture.pcap -c 1 -V
+#1  Frame: 66 byte(s) captured, 66 byte(s) on wire, 0.000000
+Ethernet II: 00:0c:29:11:22:33 -> 00:0c:29:aa:bb:cc
+Internet Protocol: 192.168.1.50 -> 192.168.1.10
+        ttl: 64
+Transmission Control Protocol: 51000 -> 502 (modbus)
+        flags: ACK,PSH
+        direction: client 192.168.1.50 (port-heuristic)
+modbus:
+        summary: Read Holding Registers: request: read 10 holding register(s) starting at address 0
+        modbus_is_request: true
+        modbus_quantity: 10
+        modbus_start_address: 0
+        note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking
+```
+
+Like `-x`/`--hex`, `-V` is text-output only (`-T text`, the default): it's
+silently ignored (not an error) under `-T json`/`csv`/`fields`, so a script
+combining flags loosely doesn't break. `-V` and `-x` compose freely -- when
+both are given, `-x`'s own hex+ASCII dump still appears below `-V`'s layer
+breakdown for that packet, exactly where it would appear below the normal
+one-line summary.
 
 ### Timestamps
 

@@ -15454,6 +15454,105 @@ it done as its own patch.
     `build-mingw`, build-only), plus a clean-room extract-rebuild-test cycle, before delivery as a
     zip of touched/new files via the standing no-git-commit convention.
 
+106. **`decode -V,--details`: a layer-by-layer per-packet breakdown (tshark's own `-V`).** Jurgen's
+    direct request: "add -V to add a shows the complete protocol breakdown of each packet, layer by
+    layer" -- the text-mode equivalent of tshark's own `-V` ("packet details", what the Wireshark
+    GUI calls the "Packet Details" pane), as opposed to `decode`'s existing one-line-per-packet
+    default. Confirmed as genuinely new (grepped this file/USER_GUIDE.md/MANUAL.md for `-V`/"packet
+    details"/"layer by layer"/"protocol tree" first -- no prior mention anywhere), not a follow-up
+    to item 105's CLI-ergonomics round.
+
+    **Design: reusing the existing per-packet field computation, not writing new decode logic.**
+    `JsonWriter::write_packet` (`output.cpp`) already computes, for every packet, a flat set of
+    named fields covering every layer -- base fields before any protocol dispatch, then one of ~65
+    `write_X_json_fields` functions for the matched protocol, then trailer fields common to every
+    packet (notes, time, direction, detect/attack findings). Re-deriving that a second time for `-V`
+    would be a ~65-function duplication effort and a permanent second place for every future protocol
+    to go out of sync. `FieldsWriter::write_packet` (same file) had already established the reuse
+    pattern for exactly this problem (`decode -T fields -e <field>`): construct a one-shot
+    `JsonWriter` into an `std::ostringstream`, then parse the resulting flat JSON text back into a
+    `std::map<std::string, std::string>` via the file-local `parse_flat_json_object`/
+    `render_field_value` helpers. The new `DetailWriter` follows the identical pattern rather than
+    inventing a second one.
+
+    **Known, pre-existing limitation this inherits, not introduces.** `parse_flat_json_object`
+    already depends on `JsonWriter`'s output being non-nested -- but SMB and the DCE/RPC-over-SMB
+    families (`write_smb_json_fields`, `write_netlogon_call_json_fields`, `write_samr_call_json_fields`,
+    `write_lsarpc_call_json_fields`, `write_srvsvc_call_json_fields`, `write_wkssvc_call_json_fields`,
+    `write_drsuapi_call_json_fields`, `write_dcom_call_json_fields`) emit genuinely nested
+    `"X_messages"/"X_calls": [ {...}, {...} ]` arrays-of-objects with unprefixed inner keys. The
+    flat-line parser already silently mis-flattens these for `-T fields` today (last inner object's
+    keys win, array structure lost); `-V` inherits the exact same gap for this one protocol family,
+    since fixing it properly means a real JSON tree parser -- well out of scope for "add a `-V`
+    flag." Documented explicitly in `DetailWriter`'s own header comment (`output.hpp`) rather than
+    left to be rediscovered, and covered by a smoke test
+    (`decode_details_smb_fixture_does_not_crash`) confirming `-V` against an SMB fixture still runs
+    cleanly and shows the base layers/protocol header/summary, not a correctness proof of every
+    nested field.
+
+    **`DetailWriter` (`output.hpp`/`output.cpp`).** Same constructor shape as `TextWriter` (ostream&,
+    color, resolver, show_vlan, time_format, time_offset, show_direction) -- `decode`'s existing
+    `--no-vlan`/`-t`/`--time-format`/`--time-offset`/`--no-direction` flags wire into it exactly as
+    they already do for `TextWriter`. Unlike `TextWriter`'s compact line, `-V` always shows every
+    layer unconditionally -- no `verbose_` gate of its own, since completeness is the whole point; no
+    `-e/--ether`/`--mac-vendor` gate either, unlike the compact line's own Ethernet-layer opt-in.
+    Per packet, in order: **Frame** (reusing the `"#" << p.index` marker this codebase's tests
+    already key off of, plus `captured_len`/`original_len`/formatted timestamp); **Ethernet II**
+    (only if `has_ethernet`: MAC addresses with OUI vendor annotations, VLAN ID gated the same way
+    `TextWriter` gates it); **Internet Protocol** (only if `has_ip`; no "Version 4/6" in the header,
+    since `has_ip`/`src_ip`/`dst_ip` are shared between v4 and v6 in `DecodedPacket` with no separate
+    flag to branch on): IPs with hostname annotations, TTL, fragment/reassembly info when present;
+    **Transmission Control Protocol**/**User Datagram Protocol** (only if `has_tcp`/`has_udp`): ports
+    with service-name annotations, TCP flags, direction; the **application layer**, always shown
+    (even for `protocol == "tcp"`/`"parse-error"`/`"ip-fragment"` pseudo-values, so the section is
+    never empty/confusing) -- `summary:` first, then every remaining field from the parsed map that
+    isn't one of two `static const std::set<std::string>` exclusion lists (26 base-field names, 8
+    trailer-field names, read directly off `JsonWriter::write_packet`), full field name printed as-is
+    (not prefix-stripped, so UMAS-inside-Modbus's differently-prefixed `umas_*` fields correctly land
+    in the same section as `modbus_*`'s own -- UMAS genuinely rides inside Modbus/TCP); finally
+    **notes and detect/attack findings**, reusing `TextWriter::write_packet`'s own rendering
+    verbatim in pattern (color conventions included: `kDim` for notes, `kBoldRed` for detect/attack,
+    `protocol_tag_color` for the app-layer header) -- `TextWriter::write_packet` is monolithic, so
+    this is duplicated/adapted inline rather than called directly, following this codebase's existing
+    per-writer convention.
+
+    **CLI wiring (`cli_main.cpp`).** `decode_cmd->add_flag("-V,--details", decode_details, ...)`;
+    `run_decode`'s writer-selection dispatch gains one more branch, building a `DetailWriter` instead
+    of `TextWriter` when `details` is set and `format` is the default text. Combined with
+    `--format json/csv/fields/zeek`, `-V` is simply ignored (a no-op) -- the exact same posture
+    `-x/--hex` already has ("Text output only ...; ignored under -T json/csv/fields"), so existing
+    scripts combining flags loosely don't break. `-x/--hex`'s own hex dump still appends below `-V`'s
+    tree exactly as it does below the compact line today -- the two compose, no exclusion needed.
+
+    **Tests.** 11 new `CMakeLists.txt` entries (`decode_details_shows_frame_layer`,
+    `_shows_ethernet_layer`, `_shows_ip_layer`, `_shows_transport_layer`,
+    `_shows_protocol_specific_fields`, `_shows_notes_without_dash_v`, `_ignored_under_json_format`
+    (`diff <(-V --format json ...) <(--format json ...)`, this file's own established
+    byte-identical idiom), `_flag_present_in_decode_help`,
+    `_no_ip_layer_fixture_skips_ip_and_transport_sections` (PROFINET fixture, `FAIL_REGULAR_EXPRESSION`
+    proving the layers are omitted rather than printed empty), `_smb_fixture_does_not_crash`, and
+    `_composes_with_hex_dump`. **A second instance of item 105's own CMake-regex lesson, distinct
+    from the catastrophic-backtracking one:** the first draft of several of these anchored a
+    mid-output line with both `^` and `$` (e.g. `PASS_REGULAR_EXPRESSION
+    "^Ethernet II: ... -> ...$"`) and failed even though the exact text was present, because CMake/
+    CTest's regex engine anchors `^`/`$` to the start/end of the ENTIRE captured output, not to line
+    boundaries -- there is no multiline mode. `^` is only safe on a pattern matching output's true
+    first line; `$` is only safe on a pattern matching output's true last line (or the whole output,
+    as `decode_details_ignored_under_json_format`'s `"^$"` does); every other line-anchored pattern in
+    this file that appears to "match a line" is actually either anchored at a genuine start/end of the
+    full output or, more commonly, simply unanchored and relying on substring search. Fixed by
+    dropping the anchor on whichever side isn't the true edge of the full output, matching the
+    unanchored-substring convention the rest of this file's single-line assertions already use.
+
+    **Verification.** Same standing bar as items 104/105: full CTest across all four standing build
+    configs (default GCC `build`; Clang ASan/UBSan `build-fuzz`; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`; MinGW cross-compile `build-mingw`, build-only), plus a clean-room extract-rebuild-
+    test cycle, before delivery as a zip of touched/new files via the standing no-git-commit
+    convention. A fresh standalone libFuzzer campaign was judged unnecessary for `build-fuzz` beyond
+    the full ASan/UBSan CTest run -- `-V` is a pure output-writer addition reusing an already-fuzzed
+    field-computation path (`JsonWriter::write_packet`), touching no protocol-decoder parsing code
+    itself, matching the precedent set for item 105's CLI-argv-only changes.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

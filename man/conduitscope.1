@@ -1516,6 +1516,22 @@ line \-\- mirrors tshark's own \fB\-x\fR. Text output only
 (\fB\-T text\fR, the default); ignored under \fB\-T json\fR/\fBcsv\fR/
 \fBfields\fR.
 .TP
+.BR \-V ", " \-\-details
+Print the complete protocol breakdown of each packet, layer by layer,
+instead of the default one\-line summary \-\- mirrors tshark's own
+\fB\-V\fR (Wireshark's "Packet Details" pane). Every field this tool's own
+\fB\-\-format json\fR output would show for the packet is shown here too,
+grouped under the layer it belongs to (Frame, Ethernet II, Internet
+Protocol, Transmission Control Protocol/User Datagram Protocol, then the
+recognized application protocol's own fields) rather than flattened into
+one JSON object \-\- nothing is held back for \fB\-V\fR specifically: notes
+and any detect/attack finding are always shown here regardless of
+\fB\-v\fR/\fB\-\-verbose\fR, since completeness is this flag's whole point.
+Text output only (\fB\-T text\fR, the default); ignored under
+\fB\-T json\fR/\fBcsv\fR/\fBfields\fR, the same posture \fB\-x\fR/
+\fB\-\-hex\fR already has. Composes with \fB\-x\fR: the hex dump, when also
+given, still appears below this packet's own layer breakdown.
+.TP
 .B \-\-mac\-vendor
 Enable OUI (MAC vendor) resolution against the built-in table (IEEE MA-L/
 MA-M/MA-S registry data via nmap's nmap-mac-prefixes redistribution, see

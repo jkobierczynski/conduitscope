@@ -5671,6 +5671,155 @@ void FieldsWriter::write_packet(const DecodedPacket& packet) {
     out_ << "\n";
 }
 
+// `decode -V,--details` -- see this class's own header comment (output.hpp) for the design
+// (reusing JsonWriter via the same one-shot-plus-parse_flat_json_object trick FieldsWriter uses
+// just above, grouped by layer rather than flattened). The two field-name sets below are exactly
+// every field name JsonWriter::write_packet emits BEFORE/AFTER its protocol-specific dispatch --
+// anything NOT in either set is, by construction, one of the ~65 write_X_json_fields functions'
+// own protocol-specific output, which is exactly what belongs in the application-layer section.
+// Kept as function-local statics (not class members) since they're pure data, never mutated, and
+// only this one function needs them.
+void DetailWriter::write_packet(const DecodedPacket& p) {
+    static const std::set<std::string> kBaseFields = {
+        "index", "timestamp", "captured_len", "original_len", "src_mac", "dst_mac",
+        "src_mac_vendor", "dst_mac_vendor", "has_vlan_tag", "vlan_id", "src_hostname",
+        "dst_hostname", "src_port_service", "dst_port_service", "src_ip", "dst_ip",
+        "is_ip_fragment", "ip_fragment_id", "ip_fragment_offset", "ip_more_fragments",
+        "ip_reassembled", "ip_reassembled_fragment_count", "src_port", "dst_port", "tcp_flags",
+        "protocol", "summary",
+    };
+    static const std::set<std::string> kTrailerFields = {
+        "notes", "time", "direction_source", "direction_client_ip", "has_detect_finding",
+        "detect_finding_kind", "detect_finding_technique", "detect_finding_description",
+    };
+
+    out_ << "#" << p.index << "  Frame: " << p.captured_len << " byte(s) captured, " << p.original_len
+         << " byte(s) on wire, " << time_.format(p.timestamp) << "\n";
+
+    if (p.has_ethernet) {
+        out_ << "Ethernet II: " << p.src_mac;
+        if (auto v = resolver_.oui_vendor(p.src_mac)) out_ << " (" << *v << ")";
+        out_ << " -> " << p.dst_mac;
+        if (auto v = resolver_.oui_vendor(p.dst_mac)) out_ << " (" << *v << ")";
+        out_ << "\n";
+        if (show_vlan_ && p.has_vlan_tag) {
+            out_ << "        ";
+            if (color_) out_ << kDim;
+            out_ << "vlan: " << p.vlan_id;
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
+    }
+
+    if (p.has_ip) {
+        out_ << "Internet Protocol: " << p.src_ip;
+        if (auto h = resolver_.hostname(p.src_ip)) out_ << " (" << *h << ")";
+        out_ << " -> " << p.dst_ip;
+        if (auto h = resolver_.hostname(p.dst_ip)) out_ << " (" << *h << ")";
+        out_ << "\n";
+        out_ << "        ";
+        if (color_) out_ << kDim;
+        out_ << "ttl: " << static_cast<unsigned>(p.ttl);
+        if (color_) out_ << kReset;
+        out_ << "\n";
+        if (p.is_ip_fragment) {
+            out_ << "        ";
+            if (color_) out_ << kDim;
+            out_ << "fragment: id=" << p.ip_fragment_id << " offset=" << p.ip_fragment_offset
+                 << " more_fragments=" << (p.ip_more_fragments ? "true" : "false");
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
+        if (p.ip_reassembled) {
+            out_ << "        ";
+            if (color_) out_ << kDim;
+            out_ << "reassembled: from " << p.ip_reassembled_fragment_count << " fragment(s)";
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
+    }
+
+    if (p.has_tcp || p.has_udp) {
+        out_ << (p.has_tcp ? "Transmission Control Protocol: " : "User Datagram Protocol: ") << p.src_port;
+        if (auto s = resolver_.service_name(p.src_port, p.has_tcp ? "tcp" : "udp")) out_ << " (" << *s << ")";
+        out_ << " -> " << p.dst_port;
+        if (auto s = resolver_.service_name(p.dst_port, p.has_tcp ? "tcp" : "udp")) out_ << " (" << *s << ")";
+        out_ << "\n";
+        if (p.has_tcp && !p.tcp_flags.empty()) {
+            out_ << "        ";
+            if (color_) out_ << kDim;
+            out_ << "flags: " << p.tcp_flags;
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
+        // Same "(client X -- tier)" fact TextWriter's own -v/--verbose folds into its head line --
+        // shown here unconditionally (no verbose_ gate exists on this class at all): completeness
+        // is -V's whole point, not an opt-in extra. --no-direction (show_direction_) still
+        // suppresses it outright, same meaning as everywhere else this flag is checked.
+        if (show_direction_ && p.has_direction) {
+            bool uncertain = p.direction_source == DirectionSource::PortHeuristic;
+            out_ << "        ";
+            if (color_) out_ << (uncertain ? kYellow : kDim);
+            out_ << "direction: client " << (p.direction_client_is_src ? p.src_ip : p.dst_ip) << " ("
+                 << direction_source_name(p.direction_source) << ")";
+            if (color_) out_ << kReset;
+            out_ << "\n";
+        }
+    }
+
+    // The application-layer section: a one-shot JsonWriter harvests every field this packet's own
+    // protocol dispatch (and every trailer -- notes, detect/attack) would produce, exactly as
+    // FieldsWriter does just above -- see this function's own header comment. `show_vlan_`/
+    // `show_direction_` are passed through for hygiene/consistency with FieldsWriter's own call,
+    // though neither actually changes anything this function reads back out of `values` (VLAN and
+    // direction are both rendered straight from `p` above instead); the time format/offset simply
+    // don't matter here since `values["time"]` is never consumed (this writer renders the Frame
+    // layer's own timestamp straight from `p.timestamp` via `time_` above instead).
+    std::ostringstream capture;
+    JsonWriter one_shot(capture, resolver_, show_vlan_, TimeFormat::Epoch, TimeOffset{}, show_direction_);
+    one_shot.write_packet(p);
+    std::map<std::string, std::string> values = parse_flat_json_object(capture.str());
+
+    if (color_) out_ << protocol_tag_color(p.protocol);
+    out_ << p.protocol << ":";
+    if (color_) out_ << kReset;
+    out_ << "\n";
+    out_ << "        summary: " << terminal_escape(p.summary) << "\n";  // finding 4, see
+                                                                          // FieldsWriter's own
+                                                                          // comment just above
+    for (const auto& [key, value] : values) {
+        if (kBaseFields.count(key) != 0 || kTrailerFields.count(key) != 0) continue;
+        out_ << "        " << key << ": " << terminal_escape(value) << "\n";
+    }
+
+    // Notes and any detect/attack finding, always shown -- same rendering TextWriter's own
+    // -v/--verbose block uses (output.cpp, above), reused verbatim rather than a second copy: see
+    // this class's own header comment (output.hpp) for why -V has no verbose_ gate of its own.
+    for (const auto& note : p.notes) {
+        out_ << "        ";
+        if (color_) out_ << kDim;
+        out_ << "note: " << terminal_escape(note);
+        if (color_) out_ << kReset;
+        out_ << "\n";
+    }
+    if (p.has_attack_signature) {
+        out_ << "        ";
+        if (color_) out_ << kBoldRed;
+        out_ << "attack: " << terminal_escape(p.attack_signature_kind);
+        if (color_) out_ << kReset;
+        out_ << "\n";
+    }
+    if (p.has_detect_finding) {
+        out_ << "        ";
+        if (color_) out_ << kBoldRed;
+        out_ << "detect: " << terminal_escape(p.detect_finding_kind) << " -- "
+             << terminal_escape(p.detect_finding_technique) << " -- "
+             << terminal_escape(p.detect_finding_description);
+        if (color_) out_ << kReset;
+        out_ << "\n";
+    }
+}
+
 namespace {
 // TSV-safe rendering for a Zeek log field -- every string this writer emits (IP-address strings,
 // the synthesized uid, protocol/service names) is drawn from this codebase's own controlled

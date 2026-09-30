@@ -174,6 +174,46 @@ private:
     bool show_direction_;
 };
 
+// `decode -V,--details` -- the text-mode equivalent of tshark's own -V ("packet details"; the
+// Wireshark GUI calls the same view the "Packet Details" pane), as opposed to TextWriter's
+// default one-line-per-packet summary. Same "reuse JsonWriter, don't re-derive ~65 protocols'
+// worth of field logic a second time" trick FieldsWriter uses just above (see that class's own
+// comment and output.cpp's write_packet for exactly how): a one-shot JsonWriter renders the
+// packet into a flat JSON object, parsed back via parse_flat_json_object (output.cpp, private to
+// that file), then every field is printed grouped under the layer it belongs to (Frame, Ethernet
+// II, Internet Protocol, Transmission Control Protocol/User Datagram Protocol, then the
+// recognized application protocol's own fields, by full field name, unprefix-stripped) instead of
+// flattened into one object. Unlike -v/--verbose (TextWriter's own show_mac_-adjacent toggle),
+// there is no way to make -V less verbose -- completeness is the entire point, so notes and any
+// detect/attack finding are always shown, and every layer is always shown regardless of
+// -e/--ether/--mac-vendor (which exist only to keep TextWriter's own default line compact).
+//
+// Known, pre-existing limitation inherited from parse_flat_json_object (see its own comment,
+// output.cpp): SMB and the DCE/RPC-over-SMB families (netlogon/samr/lsarpc/srvsvc/wkssvc/drsuapi
+// calls, and DCOM) emit genuinely nested "X_messages"/"X_calls" JSON arrays-of-objects with
+// unprefixed inner keys -- the flat-line parser already can't reconstruct that nesting for
+// `-T fields` today, and this writer inherits the identical gap (last inner object's keys win,
+// per-message granularity lost) rather than fixing it, which would need a real JSON tree parser,
+// out of scope here. The base layers and `summary` line still render correctly for these packets
+// either way.
+class DetailWriter : public OutputWriter {
+public:
+    explicit DetailWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true,
+                           TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
+                           bool show_direction = true)
+        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan),
+          time_(time_format, time_offset), show_direction_(show_direction) {}
+    void write_packet(const DecodedPacket& packet) override;
+
+private:
+    std::ostream& out_;
+    bool color_;
+    const Resolver& resolver_;
+    bool show_vlan_;
+    TimeFormatter time_;
+    bool show_direction_;
+};
+
 // `decode --format zeek` -- Grok review item 8's "optional Zeek/Malcolm exporter or Zeek-style
 // TSV" bullet (docs/reviews/2026-09-grok-ics-ot-improvement-areas.md), scoped (per an
 // AskUserQuestion decision with Jurgen) to a foundation-first phase: Zeek's own real conn.log

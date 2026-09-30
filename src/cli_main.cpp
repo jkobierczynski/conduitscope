@@ -958,7 +958,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag, bool show_direction, bool show_mac,
                 const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump,
-                bool verbose, bool redact, bool detect_highlight,
+                bool verbose, bool details, bool redact, bool detect_highlight,
                 const std::optional<CompiledDisplayFilter>& display_filter) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
@@ -1190,6 +1190,12 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                                                       *parsed_time_offset, show_direction);
         } else if (format == "zeek") {
             writer = std::make_unique<ZeekWriter>(*out);
+        } else if (details) {
+            // -V/--details: only meaningful for the default text output -- see its own help text
+            // ("ignored under --format json/csv/fields/zeek"), the same posture -x/--hex already
+            // has, so this branch only exists inside the `format` "else" (text) case.
+            writer = std::make_unique<DetailWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
+                                                      *parsed_time_offset, show_direction);
         } else {
             writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
                                                     *parsed_time_offset, show_direction, show_mac, verbose);
@@ -2477,6 +2483,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> decode_fields;
     std::string decode_write;
     bool decode_hex = false;
+    bool decode_details = false;
 
     auto* decode_input_opt =
         decode_cmd->add_option("-r,--read", decode_input,
@@ -2922,6 +2929,19 @@ int main(int argc, char** argv) {
         "Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- "
         "mirrors tshark's own -x. Text output only (--format text, the default); ignored under "
         "--format json/csv/fields");
+    decode_cmd->add_flag(
+        "-V,--details", decode_details,
+        "Print the complete protocol breakdown of each packet, layer by layer, instead of the "
+        "default one-line summary -- mirrors tshark's own -V (Wireshark's 'Packet Details' "
+        "pane). Every field this tool's own --format json output would show for the packet is "
+        "shown here too, grouped under the layer it belongs to (Frame, Ethernet II, Internet "
+        "Protocol, Transmission Control Protocol/User Datagram Protocol, then the recognized "
+        "application protocol's own fields) rather than flattened into one JSON object -- "
+        "nothing is held back for -V specifically: notes and any detect/attack finding are "
+        "always shown here regardless of -v/--verbose, since completeness is this flag's whole "
+        "point. Text output only (--format text, the default); ignored under --format "
+        "json/csv/fields/zeek, the same posture -x/--hex already has. Composes with -x: the hex "
+        "dump, when also given, still appears below this packet's own layer breakdown");
     decode_cmd->add_flag("--mac-vendor", decode_mac_vendor,
                           "Enable OUI (MAC vendor) resolution and show it next to each MAC "
                           "address; off by default to keep output compact. Implies --ether -- "
@@ -3747,7 +3767,7 @@ int main(int argc, char** argv) {
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac, decode_fields, decode_write, decode_hex,
-                           decode_verbose, decode_redact, decode_detect_highlight,
+                           decode_verbose, decode_details, decode_redact, decode_detect_highlight,
                            decode_display_filter_compiled);
     }
     if (info_cmd->parsed()) {
