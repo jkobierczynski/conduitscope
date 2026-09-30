@@ -721,7 +721,7 @@ set_tests_properties(dnp3_reassembly_sequence_mismatch_discarded PROPERTIES
   PASS_REGULAR_EXPRESSION "continuation DNP3 data-link frame's sequence number \\(35\\) does not follow the previous frame's \\(expected 11\\)")
 
 add_test(NAME stats_mode_dnp3
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap")
 set_tests_properties(stats_mode_dnp3 PROPERTIES
   PASS_REGULAR_EXPRESSION "dnp3 function codes:")
 
@@ -1499,7 +1499,7 @@ set_tests_properties(enip_cip_io_json_fields_populated PROPERTIES
   PASS_REGULAR_EXPRESSION "\"protocol\": \"enip\",\n    \"summary\": \"CIP I/O \\(implicit messaging\\): connection_id=0xABCD1234 sequence=1 data=4 byte\\(s\\)\",\n    \"enip_io_connection_id\": \"0xABCD1234\",\n    \"enip_io_sequence_number\": 1,\n    \"enip_io_data_length\": 4,\n    \"enip_io_data_hex\": \"deadbeef\"")
 
 add_test(NAME enip_cip_io_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enip_cip_io.pcap")
 set_tests_properties(enip_cip_io_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "enip cip i/o \\(implicit messaging\\) datagrams: 4")
 
@@ -1630,7 +1630,7 @@ set_tests_properties(profinet_reserved_frame_id_falls_back_to_non_ip PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x8892 \\(PROFINET RT\\) \\(not IPv4\\)")
 
 add_test(NAME profinet_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_profinet.pcap")
 set_tests_properties(profinet_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "profinet dcp messages: 4\nprofinet cyclic rt io datagrams: 3")
 
@@ -1772,7 +1772,7 @@ set_tests_properties(goose_truncated_apdu_partial_decode_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "GOOSE IED5/LLN0\\$GO\\$gcb14[^\n]*\n *note: GOOSE APDU declares 200 byte\\(s\\) but only 20 remain -- decoding what's present")
 
 add_test(NAME goose_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap")
 set_tests_properties(goose_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "goose pdus: 11\ngoose gse management pdus \\(not decoded further\\): 1\ngoose simulated \\(S-bit or simulation field set\\): 2")
 
@@ -1816,7 +1816,7 @@ set_tests_properties(real_goose_sample_file_bulk_zero_notes PROPERTIES
   FAIL_REGULAR_EXPRESSION "\"notes\": \\[\"")
 
 add_test(NAME real_goose_mms_and_goose_mixed_protocols_decoded
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/sample_file_mms_and_goose.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/goose/sample_file_mms_and_goose.pcap")
 set_tests_properties(real_goose_mms_and_goose_mixed_protocols_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "cotp[^\n]*\n *goose +34")
 
@@ -1931,7 +1931,7 @@ set_tests_properties(sv_unrecognized_sav_pdu_field_tag_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "SV IED7/MSVCB01 smpCnt=1 confRev=1[^\n]*\n *note: unrecognized SavPdu field tag=0x81 len=1 -- skipped, raw hex: 00")
 
 add_test(NAME sv_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_sv.pcap")
 set_tests_properties(sv_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "sv frames: 14\nsv asdus \\(summed across every frame\\): 14")
 
@@ -2052,7 +2052,7 @@ set_tests_properties(ethercat_safety_cap_stops_at_200_datagrams PROPERTIES
   PASS_REGULAR_EXPRESSION "ECAT NOP idx=0 adp=0x0000 ado=0x0000 len=0 wkc=0 \\(\\+199 more datagram\\(s\\)\\)[^\n]*\n *note: frame header Length \\(0\\) is implausible[^\n]*\n *note: EtherCAT datagram chain: stopped after 200 datagram\\(s\\) \\(safety cap\\)")
 
 add_test(NAME ethercat_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ethercat.pcap")
 set_tests_properties(ethercat_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "ethercat frame types:\n *ADS +1\n *EtherCAT command +21\n *Mailbox +1\n *NV +1\n *RAW-IO +1\nethercat datagrams \\(summed across every frame\\): 223")
 
@@ -2147,7 +2147,7 @@ set_tests_properties(powerlink_truncated_header_falls_back_to_non_ip PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x88ab \\(not IPv4\\)")
 
 add_test(NAME powerlink_message_type_counts_in_stats
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
 set_tests_properties(powerlink_message_type_counts_in_stats PROPERTIES
   PASS_REGULAR_EXPRESSION "powerlink message types:\n *AInv +1\n *AMNI +1\n *ASnd +12\n *PReq +1\n *PRes +1\n *SoA +1\n *SoC +1\n *unrecognized +1")
 
@@ -2156,14 +2156,14 @@ set_tests_properties(powerlink_message_type_counts_in_stats PROPERTIES
 # command targeting CN2, never observed Operational) is this same finding's NEGATIVE control,
 # asserted here by the count staying exactly 1, not 2.
 add_test(NAME powerlink_stats_anomalous_nmt_command_against_operational_node
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
 set_tests_properties(powerlink_stats_anomalous_nmt_command_against_operational_node PROPERTIES
   PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK disruptive NMTCommand targeting a node observed Operational earlier in this capture: 1 \\*\\*\\*")
 
 # Curated finding (3): SDO WriteByIndex operations observed -- 4 total across this capture
 # (packets #9/#10/#13/#19: request, response, abort, and the standalone UDP:3819 request).
 add_test(NAME powerlink_stats_sdo_write_by_index_count
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
 set_tests_properties(powerlink_stats_sdo_write_by_index_count PROPERTIES
   PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK SDO WriteByIndex operations observed: 4 \\*\\*\\*")
 
@@ -2172,7 +2172,7 @@ set_tests_properties(powerlink_stats_sdo_write_by_index_count PROPERTIES
 # the ordinary, non-anomalous NMTRequest instead) is this finding's own implicit negative control
 # -- confirmed via powerlink_nmt_request_decoded above, and by this count staying exactly 1.
 add_test(NAME powerlink_stats_cn_sourced_nmt_command
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
 set_tests_properties(powerlink_stats_cn_sourced_nmt_command PROPERTIES
   PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK NMTCommand sourced by a Controlled Node \\(only the Managing Node should issue NMTCommand\\): 1 \\*\\*\\*")
 
@@ -2183,12 +2183,12 @@ set_tests_properties(powerlink_stats_cn_sourced_nmt_command PROPERTIES
 # text that isn't asserted, so this is instead confirmed positively below on the dedicated
 # rogue-MN fixture, which never mixes in this main fixture's own single legitimate identity).
 add_test(NAME powerlink_stats_rogue_mn_positive_control
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink_rogue_mn.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink_rogue_mn.pcap")
 set_tests_properties(powerlink_stats_rogue_mn_positive_control PROPERTIES
   PASS_REGULAR_EXPRESSION "\\*\\*\\* POWERLINK rogue Managing Node suspected -- 2 distinct \\(MAC, NodeID\\) identities observed sourcing SoC/PReq/SoA \\(MN-only message types\\): 00:0c:29:11:22:33 \\(NodeID 240\\)\; 00:0c:29:ba:ad:00 \\(NodeID 240\\) \\*\\*\\*")
 
 add_test(NAME powerlink_stats_rogue_mn_negative_control_single_identity_silent
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_powerlink.pcap")
 set_tests_properties(powerlink_stats_rogue_mn_negative_control_single_identity_silent PROPERTIES
   FAIL_REGULAR_EXPRESSION "rogue Managing Node")
 
@@ -2239,7 +2239,7 @@ set_tests_properties(real_ethercat_frame_zero_matches_synthetic_baseline PROPERT
 # vs-actual-chained-bytes mismatches (see ethercat.hpp's "declared Length" paragraph and
 # ATTRIBUTION.md), zero Reserved-bit warnings, zero truncated-chain warnings.
 add_test(NAME real_ethercat_stats_all_type1_zero_notes
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/ethercat/ICS-Ethercat-001.pcap")
 set_tests_properties(real_ethercat_stats_all_type1_zero_notes PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +986[^\n]*\n[^\n]*\nprotocols:\n *ethercat +986\n(.*\n)*ethercat frame types:\n *EtherCAT command +986\nethercat datagrams \\(summed across every frame\\): 8140")
 
@@ -2482,7 +2482,7 @@ set_tests_properties(stp_length_field_exceeds_captured_bytes_still_decodes PROPE
 
 # Stats accumulation across the whole synthetic fixture.
 add_test(NAME stp_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_stp.pcap")
 set_tests_properties(stp_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "stp bpdu types:\n *Configuration +4\n *Rapid/Multiple Spanning Tree +16\n *Topology Change Notification +4\nstp protocol versions:\n *MSTP \\(802.1s\\) +8\n *RSTP \\(802.1w\\) +8\n *SPB \\(802.1aq\\) +1\n *STP \\(802.1D\\) +7\nstp mst bpdus \\(full mst extension decoded\\): 6\nstp msti configuration messages \\(summed across every mst bpdu\\): 6\nstp topology change flag set: 2")
 
@@ -2502,7 +2502,7 @@ set_tests_properties(real_stp_plant1_config_bpdu_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[stp\\]  STP Configuration: Root=32768/80/64:a0:e7:9a:05:80 Cost=4 Bridge=32768/80/64:ae:0c:34:a3:80 Port=0x8083")
 
 add_test(NAME real_stp_plant1_all_42_frames_decoded_as_stp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/plant1_stp_only.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/plant1_stp_only.pcap")
 set_tests_properties(real_stp_plant1_all_42_frames_decoded_as_stp PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +42.*protocols:\n *stp +42.*stp bpdu types:\n *Configuration +42")
 
@@ -2529,7 +2529,7 @@ set_tests_properties(real_stp_mms_and_goose_rst_bpdu_port_8013_decoded PROPERTIE
   PASS_REGULAR_EXPRESSION "\\[stp\\]  RSTP BPDU: Root=28672/4095/00:40:15:18:1d:7c Cost=1100 Bridge=32768/0/00:0a:dc:06:19:5c Port=0x8013 Role=Designated \\[Learning\\] \\[Forwarding\\]")
 
 add_test(NAME real_stp_mms_and_goose_exactly_12_stp_frames
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/stp/sample_file_mms_and_goose.pcap")
 set_tests_properties(real_stp_mms_and_goose_exactly_12_stp_frames PROPERTIES
   PASS_REGULAR_EXPRESSION "stp +12.*stp bpdu types:\n *Rapid/Multiple Spanning Tree +12")
 
@@ -2786,7 +2786,7 @@ set_tests_properties(devicenet_protocol_filter_does_not_affect_ethernet_capture 
 
 # Stats accumulation across the whole synthetic fixture.
 add_test(NAME devicenet_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_devicenet.pcap")
 set_tests_properties(devicenet_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "devicenet message groups:\n *Group 1 +7\n *Group 2 +6\n *Group 3 +9\n *Group 4 +6\n *Unclassified \\(0x07F0-0x07FF\\) +1\ndevicenet message types:.*devicenet fragmented group 3 messages: 1\ndevicenet can fd frames: 1")
 
@@ -2995,11 +2995,34 @@ add_test(NAME canopen_rtr_frame_rejected
 set_tests_properties(canopen_rtr_frame_rejected PROPERTIES
   PASS_REGULAR_EXPRESSION "#26  .*\\[non-ip\\]  CAN frame, id=0x80 \\[RTR -- remote transmission request\\] \\(not a valid DeviceNet/CANopen frame shape\\)")
 
-# --------------------------------------- CANopen: --stats ---------------------------------------
+# --------------------------------------- CANopen: --protocol -------------------------------------
+# `--protocol canopen` can't become `info` here: Auto mode (info has no --protocol of its own)
+# labels this fixture's CAN frames "devicenet", not "canopen" (see the devicenet/canopen ambiguity
+# this decoder resolves via --protocol, canopen.hpp) -- only an explicit `--protocol canopen`
+# relabels and decodes them as CANopen, exactly what this test needs to exist at all. With
+# --stats gone from decode (docs/DEVELOPMENT.md ROADMAP item 105), this now asserts directly
+# against decode's own per-packet text output instead of the old aggregate message-type
+# breakdown -- arguably more direct: it confirms CANopen frames actually decode as CANopen AND
+# that this fixture's J1939 frames are correctly excluded ("not decoded -- J1939 decoding
+# disabled by --protocol"), which --protocol canopen's whole point is.
+#
+# Deliberately a single, un-skip-grouped literal per test (matching every OTHER --protocol
+# canopen test on this same fixture just above/below, none of which use "(.*\n)*"), not one
+# combined regex spanning from packet #1 to packet #27 via "(.*\n)*" -- an earlier version of
+# this test tried that and it hung ctest itself (not the test binary, which exits fine): CMake's
+# own backtracking regex engine blows up catastrophically on a multi-line skip-group when, as
+# here, the literal on either side of it also recurs elsewhere in the ~38-line output (e.g.
+# "CANopen NMT" appears on both #1 and #2, "id=0xCF00400" on #27/#33/#36), multiplying the
+# number of backtracking paths it tries -- confirmed by reproducing the hang and then removing it.
 add_test(NAME canopen_stats_message_type_breakdown
-  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --stats)
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
 set_tests_properties(canopen_stats_message_type_breakdown PROPERTIES
-  PASS_REGULAR_EXPRESSION "canopen function-code/message types:\n *Default-SDO \\(rx\\) +6\n *Default-SDO \\(tx\\) +3\n *EMCY +1\n *LSS \\(Master\\) +1\n *NMT +2\n *NMT Error Control +3\n *PDO1 \\(rx\\) +1\n *PDO1 \\(tx\\) +1\n *SYNC +3\n *TIME STAMP +1\n *Unknown +1")
+  PASS_REGULAR_EXPRESSION "\\[canopen\\]  CANopen NMT \\(COB-ID=0x0000 FC=0x0000 Node=0\\): Start remote node \\[Node 5\\]")
+
+add_test(NAME canopen_protocol_filter_excludes_j1939
+  COMMAND conduitscope decode --protocol canopen --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
+set_tests_properties(canopen_protocol_filter_excludes_j1939 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[non-ip\\]  CAN frame, id=0xCF00400 \\[EFF -- extended 29-bit id\\] \\(not decoded -- J1939 decoding disabled by --protocol\\)")
 
 # ============================================= J1939 =============================================
 # All J1939 IDs are EFF (Extended, 29-bit) -- see j1939.hpp's own file header comment for why this
@@ -3106,11 +3129,16 @@ add_test(NAME j1939_frame_not_decoded_under_protocol_devicenet_filter
 set_tests_properties(j1939_frame_not_decoded_under_protocol_devicenet_filter PROPERTIES
   PASS_REGULAR_EXPRESSION "#27  .*\\[non-ip\\]  CAN frame, id=0xCF00400 \\[EFF -- extended 29-bit id\\] \\(not decoded -- J1939 decoding disabled by --protocol\\)")
 
-# --------------------------------------- J1939: --stats -----------------------------------------
+# --------------------------------------- J1939: info ---------------------------------------------
 # CRITICALLY includes the "never buried" DM1 active-DTC headline count, matching the task's own
-# explicit ask (same treatment as IPMI's own Cipher-Suite-0 headline finding).
+# explicit ask (same treatment as IPMI's own Cipher-Suite-0 headline finding). Unlike the CANopen
+# test just above, `--protocol j1939` isn't needed here to get this content -- Auto mode (`info`
+# has no --protocol of its own) already recognizes this fixture's J1939 frames as j1939 by
+# structural signature alone (see j1939.hpp's own file header comment on why J1939's all-EFF ID
+# space is structurally disjoint from DeviceNet/CANopen's, and so safe under Auto) -- so `info`
+# reproduces this section identically, confirmed against this build's actual output.
 add_test(NAME j1939_stats_pgn_counts_and_dm1_headline
-  COMMAND conduitscope decode --protocol j1939 --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
 set_tests_properties(j1939_stats_pgn_counts_and_dm1_headline PROPERTIES
   PASS_REGULAR_EXPRESSION "j1939 pgn counts:\n *59904 \\(Request\\) +1\n *61444 \\(EEC1\\) +3\n *65226 \\(DM1\\) +2\n *65262 \\(ET1\\) +1\n *65265 \\(CCVS\\) +1\n *65535 +1\n\\*\\*\\* J1939 DM1 active diagnostic trouble codes observed: 2 \\*\\*\\*")
 
@@ -3118,7 +3146,7 @@ set_tests_properties(j1939_stats_pgn_counts_and_dm1_headline PROPERTIES
 # breakdown does NOT, since it never joins Auto) -- the same collision-resolution policy visible
 # in --stats form, not just per-packet text.
 add_test(NAME canopen_j1939_auto_mode_stats_shows_devicenet_and_j1939_not_canopen
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_canopen_j1939.pcap")
 set_tests_properties(canopen_j1939_auto_mode_stats_shows_devicenet_and_j1939_not_canopen PROPERTIES
   PASS_REGULAR_EXPRESSION "devicenet message groups:.*j1939 pgn counts:")
 set_tests_properties(canopen_j1939_auto_mode_stats_shows_devicenet_and_j1939_not_canopen PROPERTIES
@@ -3535,7 +3563,7 @@ set_tests_properties(bacnet_segment_reassembly_json_fields_on_abandonment PROPER
   PASS_REGULAR_EXPRESSION "\"bacnet_invoke_id\": 62,\n *\"bacnet_segmented\": true,\n *\"bacnet_reassembly_completed\": false,\n *\"bacnet_has_device_identity\": false,")
 
 add_test(NAME bacnet_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap")
 set_tests_properties(bacnet_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +68[^\n]*\n[^\n]*\nprotocols:\n *bacnet +64\n *udp +4\n(.*\n)*bacnet bvlc functions:\n *BVLC-Result +1\n.*bacnet apdu services:\n *i-Am +2\n.*readPropertyMultiple +17\n")
 
@@ -3552,7 +3580,7 @@ add_test(NAME real_bacnet_ics_ot_network_001_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --format json)
 
 add_test(NAME real_bacnet_stats_all_original_unicast_readproperty
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap")
 set_tests_properties(real_bacnet_stats_all_original_unicast_readproperty PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +54[^\n]*\n[^\n]*\nprotocols:\n *bacnet +54\n(.*\n)*bacnet bvlc functions:\n *Original-Unicast-NPDU +54\nbacnet apdu services:\n *readProperty +54")
 
@@ -3950,7 +3978,7 @@ set_tests_properties(hartip_tcp_coalesced_keep_alive_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive[^\n]*\n *note: additional HART-IP message 2 found in the same TCP payload at byte offset 8 \\(coalesced by the sender/OS\\): Request Keep Alive")
 
 add_test(NAME hartip_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hartip.pcap")
 set_tests_properties(hartip_stats_counted PROPERTIES
   # tcp is 4, not 3: packet #68's own fabricated TLS Application Data record (see
   # hartip_tls_record_not_misdetected_as_hartip below) correctly falls through to the generic
@@ -3986,7 +4014,7 @@ add_test(NAME real_hartip_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --format json)
 
 add_test(NAME real_hartip_stats_summary
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng")
 set_tests_properties(real_hartip_stats_summary PROPERTIES
   # This capture's one non-TCP/non-modbus/non-hartip packet is a genuine ICMP Destination
   # Unreachable -- previously shown only as an opaque "non-tcp" count before try_parse_icmp
@@ -4009,7 +4037,7 @@ set_tests_properties(real_hartip_stats_summary PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +116[^\n]*\n[^\n]*\nprotocols:\n *arp +4\n *hartip +46\n *https +1\n *icmp +1\n *modbus +2\n *smb +1\n *tcp +61\n.*hartip message types:\n *Request +23\n *Response +23\nhartip pass-through commands:\n.*icmp types:\n *Destination Unreachable +1")
 
 add_test(NAME real_hartip_command_coverage_json
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/hartip/hart_ip.pcapng")
 set_tests_properties(real_hartip_command_coverage_json PROPERTIES
   PASS_REGULAR_EXPRESSION "0 \\(Read Unique Identifier\\) +4\n *1 \\(Read Primary Variable\\) +4\n *12 \\(Read Message\\) +4\n *13 \\(Read Tag, Descriptor, Date\\) +4\n *2 \\(Read Loop Current and Percent of Range\\) +4\n *20 \\(Read Long Tag\\) +4\n *3 \\(Read Dynamic Variables and Loop Current\\) +4\n *48 \\(Read Additional Device Status\\) +4\n *9 \\(Read Device Variables with Status\\) +4")
 
@@ -4284,7 +4312,7 @@ set_tests_properties(opcua_protocol_filter_excludes_other_protocols PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[modbus\\]")
 
 add_test(NAME opcua_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
 set_tests_properties(opcua_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +33[^\n]*\n[^\n]*\nprotocols:\n *opcua +32\n *tcp +1.*\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +1\n *Hello +3\n *Message +23\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CallRequest +1\n *CallResponse +1\n")
 
@@ -4303,7 +4331,7 @@ add_test(NAME real_opcua_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format json)
 
 add_test(NAME real_opcua_stats_summary
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap")
 set_tests_properties(real_opcua_stats_summary PROPERTIES
   # Both sessions' CallRequest (TypeId 712) no longer appear under "opcua services" now that Call is
   # Tier 1: their own bodies are genuinely malformed (Achilles Satellite fuzz-test payloads -- see
@@ -4532,7 +4560,7 @@ add_test(NAME mms_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
 
 add_test(NAME mms_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap")
 set_tests_properties(mms_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +69[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +61\n *tcp +1.*\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +22\n *confirmed-ResponsePDU +23\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *fileClose +2\n *fileDelete +2\n *fileDirectory +2\n *fileOpen +2\n *fileRead +2\n *fileRename +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *obtainFile +2\n *read +3\n *status +2\n *takeControl +2\n *write +2")
 
@@ -4793,7 +4821,7 @@ set_tests_properties(real_mms_cancelrequest_bare_sequence PROPERTIES
 # section for the full methodology and the tshark 4.2.2 recursion-depth assertion failure this
 # traffic also found (motivating kMaxDataRecursionDepth).
 add_test(NAME real_mms_libiec61850_loopback_stats
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mms/libiec61850_loopback_capture.pcap")
 set_tests_properties(real_mms_libiec61850_loopback_stats PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +224[^\n]*\n[^\n]*\nprotocols:\n *cotp +16\n *mms +117\n *tcp +91.*\nmms pdu types:\n *confirmed-RequestPDU +42\n *confirmed-ResponsePDU +42\n *initiate-RequestPDU +8\n *initiate-ResponsePDU +8\n *unconfirmed-PDU \\(informationReport\\) +17\nmms services:\n *getNameList +6\n *getVariableAccessAttributes +8\n *identify +2\n *informationReport +17\n *read +44\n *write +24")
 
@@ -4813,7 +4841,7 @@ add_test(NAME mqtt_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format json)
 
 add_test(NAME mqtt_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(mqtt_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +56[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *mqtts +1\n *tcp +3.*\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
 
@@ -5025,9 +5053,11 @@ add_test(NAME mqtt_unexpected_port_note
 set_tests_properties(mqtt_unexpected_port_note PROPERTIES
   PASS_REGULAR_EXPRESSION "\"summary\": \"PINGREQ\",.*\"mqtt_packet_type\": \"PINGREQ\",.*\"mqtt_remaining_length\": 0,.*\"mqtt_is_sparkplug\": false,.*\"notes\": \\[\"seen on TCP port 52000->52001, which is not a configured/standard MQTT port \\(1883\\)\"\\]")
 
-# --protocol mqtt / --mqtt-port CLI plumbing.
+# --protocol mqtt / --mqtt-port CLI plumbing. sample_mqtt.pcap is MQTT-only, so `--protocol mqtt`
+# (decode-only, no longer combinable with --stats) doesn't change what `info` (Auto mode) already
+# reports here -- confirmed against this build's actual output identical to the below.
 add_test(NAME mqtt_protocol_filter_only_decodes_mqtt
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --protocol mqtt --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(mqtt_protocol_filter_only_decodes_mqtt PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *mqtt +52\n *mqtts +1\n *tcp +3")
 
@@ -5474,7 +5504,7 @@ add_test(NAME s7comm_pi_control_sample_csv_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --format csv)
 
 add_test(NAME s7comm_pi_control_sample_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm_pi_control.pcap")
 set_tests_properties(s7comm_pi_control_sample_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "s7comm function codes:\n *PLC Control +[0-9]+\n *PLC Stop +[0-9]+")
 
@@ -5702,7 +5732,7 @@ add_test(NAME s7commplus_csv_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format csv)
 
 add_test(NAME s7commplus_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap")
 set_tests_properties(s7commplus_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "s7comm-plus")
 
@@ -5710,8 +5740,12 @@ set_tests_properties(s7commplus_stats_counted PROPERTIES
 # accepted, and --stats confirms the full PDU-type/function/Tier-1 breakdown this fixture is meant
 # to exercise (note: the COTP Connection Request/Confirm frames still show up as their own "cotp"
 # protocol -- COTP-level framing is always surfaced, matching classic S7comm/MMS's own filters).
+# sample_s7commplus.pcap is s7comm-plus-only (plus its own COTP connection framing, always
+# surfaced regardless of --protocol), so `--protocol s7comm-plus` (decode-only, no longer
+# combinable with --stats) doesn't change what `info` (Auto mode) already reports here --
+# confirmed against this build's actual output identical to the below.
 add_test(NAME s7commplus_protocol_filter
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --protocol s7comm-plus --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap")
 set_tests_properties(s7commplus_protocol_filter PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23.*\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +7\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 13")
 
@@ -5809,12 +5843,12 @@ set_tests_properties(info_modbus_sample PROPERTIES
   PASS_REGULAR_EXPRESSION "packets:")
 
 add_test(NAME stats_mode
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
 set_tests_properties(stats_mode PROPERTIES
   PASS_REGULAR_EXPRESSION "modbus function codes:")
 
 add_test(NAME stats_mode_s7comm
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap")
 set_tests_properties(stats_mode_s7comm PROPERTIES
   PASS_REGULAR_EXPRESSION "s7comm function codes:")
 
@@ -6061,7 +6095,7 @@ set_tests_properties(ffhse_tcp_coalesced_pdus PROPERTIES
 
 # --stats accumulation: sub-protocol counts, per-message counts, and the Tier-1-decoded total.
 add_test(NAME stats_mode_ffhse
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ffhse.pcap")
 set_tests_properties(stats_mode_ffhse PROPERTIES
   PASS_REGULAR_EXPRESSION "ffhse sub-protocols:.*FDA Session Management.*FMS.*LAN Redundancy.*SM.*ffhse messages:.*ffhse message bodies fully decoded \\(Tier 1\\): [0-9]+")
 
@@ -6164,7 +6198,7 @@ set_tests_properties(twincat_tcp_segment_split_reassembly_still_pairs PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[tcp\\]  buffering a AMS/TCP \\(TwinCAT/ADS\\) PDU/frame split across TCP segments 48898->53000: 40 of 54 declared byte\\(s\\) seen so far across 1 segment\\(s\\) on this flow, waiting for more.*\\[twincat\\]  Read response: result=0x0, 8 byte\\(s\\) of data[^\n]*\n *note: reassembled a AMS/TCP \\(TwinCAT/ADS\\) PDU/frame from 54 byte\\(s\\) spanning 2 TCP segments on this flow\n *note: authoritative pairing: response to Invoke ID 15")
 
 add_test(NAME twincat_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_twincat.pcap")
 set_tests_properties(twincat_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *tcp +4\n *twincat +25.*twincat/ads command ids:\n *AddDeviceNotification +2\n *DeleteDeviceNotification +2\n *DeviceNotification +1\n *Read +8\n *ReadDeviceInfo +3\n *ReadState +3\n *ReadWrite +2\n *Write +2\n *WriteControl +2\ntwincat responses authoritatively paired \\(invoke id, not heuristic\\): 10")
 
@@ -6323,7 +6357,7 @@ set_tests_properties(melsec_udp_declared_length_mismatch_not_misdetected PROPERT
   PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:53502 -> 192\\.168\\.1\\.10:5000  \\[udp\\]  UDP payload of 21 byte\\(s\\) on port 53502->5000")
 
 add_test(NAME melsec_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_melsec.pcap")
 set_tests_properties(melsec_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *melsec +37\n *tcp +2\n *udp +1.*melsec/mc protocol command names:\n *Batch Read +13\n *Batch Write +2\n *Echo/Loopback Test +2\n *Random Read +2\n *Read CPU Type +2\n *Remote LATCH CLEAR +2\n *Remote PAUSE +2\n *Remote Password UNLOCK +2\n *Remote RESET +2\n *Remote RUN +2\n *Remote STOP +4\n *Unknown command 0x9999/0x0000 +2\nmelsec responses matched to their own session's outstanding request \\(not authoritative -- no unique transaction ID on the wire\\): 18")
 
@@ -6505,7 +6539,7 @@ set_tests_properties(fins_udp_gate_rejects_nonzero_rsv PROPERTIES
   PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:53604 -> 192\\.168\\.1\\.10:9600  \\[udp\\]  UDP payload of 12 byte\\(s\\) on port 53604->9600")
 
 add_test(NAME fins_stats_counted
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fins.pcap")
 set_tests_properties(fins_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *fins +53\n *tcp +1\n *udp +3.*fins \\(omron\\) command names:\n *Access Right Acquire +4\n *Access Right Forced Acquire +2\n *Access Right Release +2\n *Clock Read +2\n *Clock Write +2\n *Connection Confirmation +1\n *Controller Data Read +2\n *Controller Status Read +2\n *Cycle Time Read +4\n *Error Clear +2\n *Forced Set/Reset +2\n *Forced Set/Reset Cancel +2\n *Frame Send Error Notification +1\n *LOOP-BACK Test +2\n *Memory Area Fill +2\n *Memory Area Read +8\n *Memory Area Write +2\n *Multiple Memory Area Read +2\n *Node Address Data Send \\(Client to Server\\) *1\n *Node Address Data Send \\(Server to Client\\) *1\n *Run +2\n *Stop +4\n *Unknown command 0x9999 +1\nfins responses matched to their own session's outstanding request \\(not authoritative -- no unique transaction ID on the wire\\): 24")
 
@@ -6617,7 +6651,7 @@ set_tests_properties(kerberos_json_fields_krb_error PROPERTIES
   PASS_REGULAR_EXPRESSION "\"kerberos_message_type\": \"KRB-ERROR\",.*\"kerberos_error_code\": 25,\n *\"kerberos_error_name\": \"KDC_ERR_PREAUTH_REQUIRED\",")
 
 add_test(NAME kerberos_stats_krb_error_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_kerberos.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_kerberos.pcap")
 set_tests_properties(kerberos_stats_krb_error_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *kerberos +15\n(.*\n)*kerberos krb-error codes:\n *KDC_ERR_C_PRINCIPAL_UNKNOWN +1\n *KDC_ERR_PREAUTH_REQUIRED +1")
 
@@ -6816,7 +6850,7 @@ set_tests_properties(ldap_structural_only_ops_decoded PROPERTIES
 # invalidCredentials across distinct bind DNs is the password-spray signature), no per-request
 # correlation needed. Counts captured from the actual built binary's output against the fixture.
 add_test(NAME ldap_stats_resultcode_counts_note6
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ldap.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ldap.pcap")
 set_tests_properties(ldap_stats_resultcode_counts_note6 PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *ldap +62.*ldap resultcode counts:\n *compareFalse +1\n *compareTrue +1\n *invalidCredentials +4\n *referral +1\n *saslBindInProgress +1\n *success +15")
 
@@ -6943,7 +6977,7 @@ set_tests_properties(smb_ntlm_handshake_failed_note6 PROPERTIES
   PASS_REGULAR_EXPRESSION "SMB2 SESSION_SETUP Response \\[STATUS_LOGON_FAILURE\\][^\n]*\n *note: NTLM handshake for CORP, failed \\(STATUS_LOGON_FAILURE\\)")
 
 add_test(NAME smb_stats_status_counts_note6
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_smb.pcap")
 set_tests_properties(smb_stats_status_counts_note6 PROPERTIES
   PASS_REGULAR_EXPRESSION "protocols:\n *smb +26.*smb session_setup status counts:\n *STATUS_LOGON_FAILURE +1\n *STATUS_MORE_PROCESSING_REQUIRED +3\n *STATUS_SUCCESS +2")
 
@@ -7225,7 +7259,7 @@ set_tests_properties(netlogon_ioctl_pipe_transceive_transport_note1_positive PRO
 # cleartext opnum in the DCE/RPC request header regardless of sealing), NetrServerReqChallenge=3
 # (flows A/B/I).
 add_test(NAME netlogon_stats_opnum_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_netlogon.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_netlogon.pcap")
 set_tests_properties(netlogon_stats_opnum_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "netlogon opnum counts:\n *NetrServerAuthenticate2 +1\n *NetrServerAuthenticate3 +4\n *NetrServerPasswordSet2 +2\n *NetrServerReqChallenge +3")
 
@@ -7429,7 +7463,7 @@ set_tests_properties(samr_non_samr_interface_bind_never_samr_calls_json PROPERTI
 
 # --stats samr/lsarpc opnum counts.
 add_test(NAME samr_lsarpc_stats_opnum_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_samr_lsarpc.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_samr_lsarpc.pcap")
 set_tests_properties(samr_lsarpc_stats_opnum_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "samr opnum counts:\n *SamrChangePasswordUser +1\n *SamrConnect2 +1\n *SamrEnumerateAliasesInDomain +1\n *SamrEnumerateUsersInDomain +2\n *SamrGetAliasMembership +1\n *SamrLookupIdsInDomain +1\n *SamrLookupNamesInDomain +2\n *SamrOpenDomain +1\n *SamrOpenUser +2\n *SamrSetInformationUser +1\nlsarpc opnum counts:\n *LsarClose +1\n *LsarEnumerateAccounts +1\n *LsarEnumerateTrustedDomains +1\n *LsarLookupNames +2\n *LsarLookupSids +1\n *LsarOpenPolicy2 +1")
 
@@ -7606,7 +7640,7 @@ set_tests_properties(srvsvc_non_srvsvc_interface_bind_never_srvsvc_calls_json PR
 
 # --stats srvsvc/wkssvc opnum counts.
 add_test(NAME srvsvc_wkssvc_stats_opnum_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_srvsvc_wkssvc.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_srvsvc_wkssvc.pcap")
 set_tests_properties(srvsvc_wkssvc_stats_opnum_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "srvsvc opnum counts:\n *NetrConnectionEnum +1\n *NetrFileEnum +1\n *NetrSessionEnum +1\n *NetrShareAdd +1\n *NetrShareDel +1\n *NetrShareEnum +1\n *NetrShareGetInfo +2\nwkssvc opnum counts:\n *NetrJoinDomain2 +1\n *NetrUnjoinDomain2 +1\n *NetrWkstaGetInfo +1\n *NetrWkstaTransportEnum +1\n *NetrWkstaUserEnum +1")
 
@@ -7725,7 +7759,7 @@ set_tests_properties(drsuapi_non_drsuapi_interface_bind_never_drsuapi_calls_json
 # the one sealed occurrence in flow B, since opnum-count aggregation, like the curated note above,
 # keys off the request's own visible opnum regardless of sealing).
 add_test(NAME drsuapi_stats_opnum_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_drsuapi.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_drsuapi.pcap")
 set_tests_properties(drsuapi_stats_opnum_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "drsuapi opnum counts:\n *DRSBind +2\n *DRSCrackNames +1\n *DRSGetNCChanges +3\n *DRSUnbind +1")
 
@@ -7935,7 +7969,7 @@ set_tests_properties(quic_protocol_filter_isolates_family PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[hartip\\]")
 
 add_test(NAME quic_stats_counted_in_lateral_movement_tier
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_quic.pcap")
 set_tests_properties(quic_stats_counted_in_lateral_movement_tier PROPERTIES
   # quic +8 (packet #13, round two's positive truncated-capture control, is the 8th quic match);
   # udp +5, not +3, now that packets #11/#12 (round two's own negative-control regression fixtures)
@@ -7993,7 +8027,7 @@ set_tests_properties(protocol_filter_dns_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[dns\\]  DNS query")
 
 add_test(NAME stats_mode_dns_family_and_nbns_and_doh
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dns.pcap")
 set_tests_properties(stats_mode_dns_family_and_nbns_and_doh PROPERTIES
   PASS_REGULAR_EXPRESSION "dns/mdns/llmnr opcodes:.*dns Query")
 
@@ -8039,7 +8073,7 @@ set_tests_properties(protocol_filter_rip_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[rip\\]  RIPv2 Request")
 
 add_test(NAME stats_mode_rip
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_rip.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_rip.pcap")
 set_tests_properties(stats_mode_rip PROPERTIES
   PASS_REGULAR_EXPRESSION "rip commands:.*Request .*1\n.*Response .*6")
 
@@ -8074,7 +8108,7 @@ set_tests_properties(protocol_filter_igmp_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[igmp\\]  IGMPv1 Membership Query")
 
 add_test(NAME stats_mode_igmp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_igmp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_igmp.pcap")
 set_tests_properties(stats_mode_igmp PROPERTIES
   PASS_REGULAR_EXPRESSION "igmp types:.*Membership Query")
 
@@ -8166,7 +8200,7 @@ set_tests_properties(protocol_filter_icmp_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[icmp\\]  ICMP Echo Request")
 
 add_test(NAME stats_mode_icmp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmp.pcap")
 set_tests_properties(stats_mode_icmp PROPERTIES
   PASS_REGULAR_EXPRESSION "icmp types:\n *Address Mask Reply +1\n *Address Mask Request +1\n *Destination Unreachable +3\n *Echo Reply +1\n *Echo Request +2\n *Parameter Problem +1\n *Redirect +1\n *Router Advertisement +1\n *Router Solicitation +1\n *Time Exceeded +1\n *Timestamp Reply +1\n *Timestamp Request +1\n *Unknown \\(40\\) +1")
 
@@ -8199,7 +8233,7 @@ set_tests_properties(real_igmp_plant1_router_alert_padding_note_present PROPERTI
   PASS_REGULAR_EXPRESSION "note: 6 trailing byte\\(s\\) after the IP header's declared total length were trimmed")
 
 add_test(NAME real_igmp_plant1_all_12_frames_decoded_as_igmp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/igmp/plant1_igmp_only.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/igmp/plant1_igmp_only.pcap")
 set_tests_properties(real_igmp_plant1_all_12_frames_decoded_as_igmp PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +12.*protocols:\n *igmp +12.*igmp types:\n *Version 3 Membership Report +12")
 
@@ -8234,7 +8268,7 @@ set_tests_properties(protocol_filter_vrrp_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[vrrp\\]  VRRPv2 Advertisement")
 
 add_test(NAME stats_mode_vrrp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vrrp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vrrp.pcap")
 set_tests_properties(stats_mode_vrrp PROPERTIES
   PASS_REGULAR_EXPRESSION "vrrp versions:.*VRRPv2 .*4\n.*VRRPv3 .*1")
 
@@ -8273,7 +8307,7 @@ set_tests_properties(protocol_filter_hsrp_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[hsrp\\]  HSRPv1 Hello")
 
 add_test(NAME stats_mode_hsrp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap")
 set_tests_properties(stats_mode_hsrp PROPERTIES
   PASS_REGULAR_EXPRESSION "hsrp versions:.*HSRPv1 .*3\n.*HSRPv2 .*1")
 
@@ -8310,7 +8344,7 @@ set_tests_properties(protocol_filter_igrp_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[igrp\\]  IGRP Response")
 
 add_test(NAME stats_mode_igrp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_igrp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_igrp.pcap")
 set_tests_properties(stats_mode_igrp PROPERTIES
   PASS_REGULAR_EXPRESSION "igrp opcodes:.*Request .*1\n.*Response .*2")
 
@@ -8360,7 +8394,7 @@ set_tests_properties(protocol_filter_pim_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[pim\\]  PIMv2 Hello")
 
 add_test(NAME stats_mode_pim
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pim.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pim.pcap")
 set_tests_properties(stats_mode_pim PROPERTIES
   PASS_REGULAR_EXPRESSION "pim types:.*Assert .*1")
 
@@ -8395,7 +8429,7 @@ set_tests_properties(protocol_filter_eigrp_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[eigrp\\]  EIGRP Hello")
 
 add_test(NAME stats_mode_eigrp
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_eigrp.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_eigrp.pcap")
 set_tests_properties(stats_mode_eigrp PROPERTIES
   PASS_REGULAR_EXPRESSION "eigrp opcodes:.*Hello .*1\n.*Hello \\(Ack\\) .*1\n.*Update .*2")
 
@@ -8435,7 +8469,7 @@ set_tests_properties(protocol_filter_ospf_only PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[ospf\\]  OSPFv2 Hello")
 
 add_test(NAME stats_mode_ospf
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ospf.pcap" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ospf.pcap")
 set_tests_properties(stats_mode_ospf PROPERTIES
   PASS_REGULAR_EXPRESSION "ospf types:.*DB Description .*1")
 
@@ -8463,7 +8497,7 @@ set_tests_properties(rejects_pcapng_truncated_immediately_after_shb PROPERTIES
   PASS_REGULAR_EXPRESSION "ends with a truncated pcapng block header")
 
 add_test(NAME pcapng_basic_decodes_same_as_classic_pcap
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcapng" --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcapng")
 set_tests_properties(pcapng_basic_decodes_same_as_classic_pcap PROPERTIES
   PASS_REGULAR_EXPRESSION "modbus exception responses: 1")
 
@@ -10730,7 +10764,7 @@ set_tests_properties(remote_access_zoom_stun_port_range_recognized_as_shared PRO
   PASS_REGULAR_EXPRESSION "\\[zoom\\]  Zoom \\(UDP port 3478-3479 STUN range\\) -- port match only\; this range is a shared STUN convention, not exclusive to Zoom")
 
 add_test(NAME remote_access_stats_counted
-  COMMAND conduitscope decode --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_remote_access.pcap")
 set_tests_properties(remote_access_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "anydesk +1\n *rdp +2\n *teamviewer +1\n *vnc +2\n *zoom +2")
 
@@ -10918,7 +10952,7 @@ set_tests_properties(lateral_movement_tftp_port_only_fallback PROPERTIES
 # under "tcp" here instead, one of the reasons this test no longer tries to assert every line's own
 # protocol tag (that's lateral_movement_protocol_filter_isolates_family's job, immediately below).
 add_test(NAME lateral_movement_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lateral_movement.pcap")
 # "tcp +1" appears between ssh and telnet because packet #1 (port 52400->445, no genuine SMB2
 # Direct-TCP/NBSS 4-byte prefix -- see this fixture's own updated packet-1 comment above) falls
 # through to generic tcp under the new, stricter smb.hpp gate rather than being counted as smb.
@@ -11145,7 +11179,7 @@ set_tests_properties(enterprise_trust_eapol_logoff_recognized PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[eapol\\]  EAPOL v2 \\(802\\.1X-2004\\) EAPOL-Logoff \\(length=0\\)")
 
 add_test(NAME enterprise_trust_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_enterprise_trust.pcap")
 set_tests_properties(enterprise_trust_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "dhcp +3\n *eapol +5\n *https +1\n *ldap +2\n *ldaps +3\n *ntp +3\n *radius +4\n *tacacs-plus +3\n *tcp +2")
 
@@ -11334,7 +11368,7 @@ set_tests_properties(wireless_backhaul_pppoe_malformed_falls_to_non_ip_ethertype
   PASS_REGULAR_EXPRESSION "\\[non-ip\\]  Ethernet frame with ethertype 0x8864 \\(PPPoE Session\\) \\(not IPv4\\)")
 
 add_test(NAME wireless_backhaul_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wireless_backhaul.pcap")
 set_tests_properties(wireless_backhaul_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "capwap-control +4\n *capwap-data +3\n *gtp-u +3\n *lwapp-control +1\n *lwapp-data +1\n *non-ip +1\n *pppoe +9\n *udp +1")
 
@@ -11525,7 +11559,7 @@ set_tests_properties(tunnel_vpn_mpls_truncated_stack_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[mpls\\]  MPLS, 1 label \\(top: label=777 exp=0 ttl=100\\) -- truncated, no Bottom-of-Stack label found")
 
 add_test(NAME tunnel_vpn_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
 set_tests_properties(tunnel_vpn_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "6in4 +1\n *ah +1\n *dtls-tunnel +1\n *eoip +1\n *esp +2\n *geneve +1\n *gre +1\n *ike +2\n *ip-in-ip +1\n *l2tp +3\n *mpls +4\n *non-tcp +2\n *nvgre +1\n *openvpn +2\n *stt +1\n *udp +1\n *vxlan +1\n *wireguard +2")
 
@@ -12551,7 +12585,7 @@ set_tests_properties(arp_protocol_filter_isolates_arp_only PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[non-ip\\]|\\[parse-error\\]")
 
 add_test(NAME arp_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_arp.pcap")
 set_tests_properties(arp_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +6[^\n]*\n.*protocols:\n *arp +6")
 
@@ -12620,7 +12654,7 @@ set_tests_properties(lldp_protocol_filter_isolates_lldp_only PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[parse-error\\]")
 
 add_test(NAME lldp_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_lldp.pcap")
 set_tests_properties(lldp_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +7[^\n]*\n.*protocols:\n *lldp +6\n *non-ip +1")
 
@@ -12722,7 +12756,7 @@ set_tests_properties(cdp_protocol_filter_isolates_cdp_only PROPERTIES
   FAIL_REGULAR_EXPRESSION "\\[parse-error\\]")
 
 add_test(NAME cdp_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cdp.pcap")
 set_tests_properties(cdp_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +9[^\n]*\n.*protocols:\n *cdp +5\n *non-ip +4.*cdp device ids:\n *hp-ap-guest-03 +1\n *pinning-fixture-cdp +1\n *router-edge-01 +1\n *switch-core-01.plant.local +1\n *truncated-switch +1.*cdp platforms:\n *HP MSM430 Access Point +1\n *cisco 2621XM +1\n *cisco WS-C2960-24TT-L +1.*cdp capabilities seen:\n *Host +1\n *Router +1\n *Switch +1.*cdp native vlans:\n *100 +1")
 
@@ -12828,7 +12862,7 @@ set_tests_properties(bgp_negative_control_non_marker_payload_falls_back_to_tcp P
   FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.10:56000 -> 192\\.168\\.1\\.50:179  \\[bgp\\]")
 
 add_test(NAME bgp_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bgp.pcap")
 set_tests_properties(bgp_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +10[^\n]*\n.*protocols:\n *bgp +8\n *tcp +2")
 
@@ -12931,7 +12965,7 @@ set_tests_properties(slow_protocols_unsupported_subtype_falls_back_to_non_ip PRO
   PASS_REGULAR_EXPRESSION "#9  8\\.008000.*\\[non-ip\\]  Ethernet frame with ethertype 0x8809 \\(IEEE 802\\.3 Slow Protocols \\(LACP/Marker/OAM\\)\\) \\(not IPv4\\)")
 
 add_test(NAME slow_protocols_stats_counted
-  COMMAND conduitscope decode --format text --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_slow_protocols.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_slow_protocols.pcap")
 set_tests_properties(slow_protocols_stats_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: +9[^\n]*\n.*protocols:\n *non-ip +2\n *slow-protocols +7")
 
@@ -13129,7 +13163,7 @@ set_tests_properties(winrm_command_not_misdetected_as_generic_http PROPERTIES
 # winrm_action_counts_'s own comment in output.hpp): Command/Create each appear twice (main flow
 # plus the Basic-auth/PSRP flows), every other action once.
 add_test(NAME winrm_stats_action_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap")
 set_tests_properties(winrm_stats_action_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "winrm action counts:\n *Command +2\n *Create +2\n *Delete +1\n *Enumerate +1\n *Receive +1\n *Send +1\n *Signal +1")
 
@@ -13265,7 +13299,7 @@ set_tests_properties(dcom_protocol_filter_excludes_other_protocols PROPERTIES
 # exactly once except the unbound-context request (#21, opnum 99), which is never counted at all
 # since it never produced a DcomCall in the first place.
 add_test(NAME dcom_stats_activation_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_wmi_dcom_activation.pcap")
 set_tests_properties(dcom_stats_activation_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "dcom activation counts:\n *IActivation RemoteActivation *1\n *IObjectExporter ComplexPing *1\n *IObjectExporter ResolveOxid2 *1\n *IObjectExporter ServerAlive2 *1\n *IObjectExporter SimplePing *1\n *IRemoteSCMActivator RemoteCreateInstance *1\n *IRemoteSCMActivator RemoteGetClassObject *1")
 
@@ -13879,7 +13913,7 @@ set_tests_properties(ge_srtp_forced_protocol_decodes_non_standard_port PROPERTIE
 
 # --stats aggregation: per-service-name request counts and the authoritative-pairing count.
 add_test(NAME ge_srtp_stats_service_names_and_paired_response_count
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ge_srtp.pcap")
 set_tests_properties(ge_srtp_stats_service_names_and_paired_response_count PROPERTIES
   PASS_REGULAR_EXPRESSION "ge srtp service request names:\n *Unknown service request code 0x99 *1\n *get controller type and id information *1\n *program store \\(upload from PLC\\) *1\n *read system memory *3\n *set PLC \\(run vs\\. stop\\) *1\n *write system memory *1\n *write task memory *1\nge srtp responses authoritatively paired \\(sequence number, not heuristic\\): 9")
 
@@ -13970,7 +14004,7 @@ set_tests_properties(bsap_forced_protocol_decodes_non_standard_port PROPERTIES
 
 # --stats aggregation: serial-tunneled vs. BSAP-IP-native message counts, and the NAK counter.
 add_test(NAME bsap_stats_framing_counts_and_nak_counter
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bsap.pcap")
 set_tests_properties(bsap_stats_framing_counts_and_nak_counter PROPERTIES
   PASS_REGULAR_EXPRESSION "bsap serial-tunneled messages: 4\nbsap-ip-native messages: 1\nbsap link-layer NAKs observed: 1")
 
@@ -14056,7 +14090,7 @@ set_tests_properties(cclink_ie_gate_rejects_too_short_payload PROPERTIES
   FAIL_REGULAR_EXPRESSION "#13[^\n]*\\[(cclink-ie|melsec)\\]")
 
 add_test(NAME cclink_ie_stats_message_kind_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_cclink_ie.pcap")
 set_tests_properties(cclink_ie_stats_message_kind_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "cclink-ie cyclic requests: 3\ncclink-ie cyclic responses: 3\ncclink-ie cyclic responses with non-success end code: 1\ncclink-ie node search messages: 2\ncclink-ie set IP address messages: 2")
 
@@ -14275,7 +14309,7 @@ set_tests_properties(codesys_udp_negative_control_falls_through PROPERTIES
   FAIL_REGULAR_EXPRESSION "#12[^\n]*\\[codesys\\]")
 
 add_test(NAME codesys_stats_channel_command_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_codesys.pcap")
 set_tests_properties(codesys_stats_channel_command_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "codesys channel command ids:\n *BLK  *4\n *GET_INFO  *2\n *OPEN_CHANNEL  *2\n *OPEN_CHANNEL response  *1\ncodesys login/auth exchanges with a decoded username: 1")
 
@@ -14389,7 +14423,7 @@ set_tests_properties(coap_forced_protocol_negative_control_still_falls_through P
   FAIL_REGULAR_EXPRESSION "#10[^\n]*\\[coap\\]")
 
 add_test(NAME coap_stats_message_type_and_code_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_coap.pcap")
 set_tests_properties(coap_stats_message_type_and_code_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "coap message types:\n *ACK  *2\n *CON  *5\n *NON  *1\ncoap codes:\n *Content  *3\n *GET  *5")
 
@@ -14559,7 +14593,7 @@ set_tests_properties(rmcp_ack_protocol_filter_isolates_generic_decoder PROPERTIE
   FAIL_REGULAR_EXPRESSION "\\[(asf|ipmi)\\]")
 
 add_test(NAME ipmi_stats_netfn_command_and_cipher_suite_zero_headline
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipmi.pcap")
 set_tests_properties(ipmi_stats_netfn_command_and_cipher_suite_zero_headline PROPERTIES
   # Bug fix: "Application / Get Channel Authentication Capabilities" is 54 characters -- longer
   # than this column's 40-char std::setw field -- so the count used to run directly into the name
@@ -14708,7 +14742,7 @@ set_tests_properties(zigbee_json_fields_encrypted_payload_length PROPERTIES
   PASS_REGULAR_EXPRESSION "\"zigbee_nwk_security\": true,[^}]*\"zigbee_nwk_payload_encrypted\": true,\n *\"zigbee_nwk_encrypted_payload_length\": 20,")
 
 add_test(NAME zigbee_stats_nwk_aps_zdp_and_encrypted_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap")
 set_tests_properties(zigbee_stats_nwk_aps_zdp_and_encrypted_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "zigbee nwk frame types:\n *Data *29\n *NWK Command *1\nzigbee aps frame types:\n *Command *1\n *Data *27\nzigbee zdp clusters:\n *Active_EP *2\n.*zigbee nwk-layer-encrypted frames: 1\nzigbee aps-layer-encrypted frames: 1")
 
@@ -15711,7 +15745,7 @@ set_tests_properties(amqp091_non_standard_port_forced_via_protocol_filter PROPER
 
 # --stats aggregation: per-method counts and all three curated headline findings.
 add_test(NAME amqp091_stats_method_counts_and_curated_findings
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp091.pcap")
 set_tests_properties(amqp091_stats_method_counts_and_curated_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "amqp 0-9-1 class\\.method counts:\n *Basic\\.Ack *1[^\n]*\n[^\n]*Basic\\.Cancel *1[^\\*]*\\*\\*\\* AMQP 0-9-1 cleartext credential exchanges \\(PLAIN/AMQPLAIN\\) observed: 1 \\*\\*\\*\namqp 0-9-1 connection/channel closes with reply-code >= 400: 1\namqp 0-9-1 Basic\\.Publish with immediate=true: 1"
   FAIL_REGULAR_EXPRESSION "S3cr3tPLC!99")
@@ -15830,7 +15864,7 @@ set_tests_properties(amqp10_array_huge_count_zero_width_element_does_not_crash P
 
 # --stats aggregation: per-performative counts and all three curated headline findings.
 add_test(NAME amqp10_stats_performative_counts_and_curated_findings
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_amqp10.pcap")
 set_tests_properties(amqp10_stats_performative_counts_and_curated_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "amqp 1\\.0 performative counts:\n *attach *2[^\\*]*\\*\\*\\* AMQP 1\\.0 cleartext credential exchanges \\(SASL PLAIN\\) observed: 2 \\*\\*\\*\namqp 1\\.0 detach/end/close frames carrying an error condition: 2\namqp 1\\.0 SASL negotiation failures: 1"
   FAIL_REGULAR_EXPRESSION "Op3nPLC\\$99")
@@ -16003,13 +16037,13 @@ set_tests_properties(dicom_non_standard_port_forced_via_protocol_filter PROPERTI
 # transfer syntax compressed/plain split, RJ reason counts, and abort source counts -- plus the
 # redaction proof once more, since --stats renders its own summary text independently of --format.
 add_test(NAME dicom_stats_pdu_type_counts_and_curated_findings
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap")
 set_tests_properties(dicom_stats_pdu_type_counts_and_curated_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "dicom pdu type counts:\n *A-ABORT *1[^\n]*\n *A-ASSOCIATE-AC *4[^\n]*\n *A-ASSOCIATE-RJ *1[^\n]*\n *A-ASSOCIATE-RQ *5[^\n]*\n *A-RELEASE-RP *2[^\n]*\n *A-RELEASE-RQ *2[^\n]*\n *P-DATA-TF *12[^\\*]*\\*\\*\\* DICOM associations with no identity negotiation \\(AE-title-only, unauthenticated trust\\) observed: 4 \\*\\*\\*\ndicom user identity negotiations with cleartext passcode \\(type=2\\) observed: 1"
   FAIL_REGULAR_EXPRESSION "S3cr3tDicomPass!42|Doe.John|Doe\\^John|MRN-778899|MRN-FRAG-SPLIT|19800101")
 
 add_test(NAME dicom_stats_command_field_and_transfer_syntax_and_rj_abort_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dicom.pcap")
 set_tests_properties(dicom_stats_command_field_and_transfer_syntax_and_rj_abort_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "dicom command field counts:\n *C-ECHO-RQ *2[^\n]*\n *C-ECHO-RSP *1[^\n]*\n *C-FIND-RQ *1[^\n]*\n *C-FIND-RSP *2[^\n]*\n *C-STORE-RQ *2[^\n]*\n *C-STORE-RSP *2\ndicom presentation context result counts:\n *Acceptance *6\ndicom accepted transfer syntaxes: 6 plain, 0 compressed\ndicom A-ASSOCIATE-RJ reason counts:\n *calling-AE-title-not-recognized *1\ndicom A-ABORT source counts:\n *DICOM-UL-service-user *1")
 
@@ -16125,7 +16159,7 @@ set_tests_properties(foxs_tls_clienthello_port_4911_detected PROPERTIES
 # non-standard-port session #8/#9 is NOT counted here since Auto mode never claims it as fox at all,
 # proving this isn't a blind total-packet count), and the secondary hostAddress-mismatch finding (1).
 add_test(NAME fox_stats_frame_type_counts_and_curated_findings
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_fox.pcap")
 set_tests_properties(fox_stats_frame_type_counts_and_curated_findings PROPERTIES
   PASS_REGULAR_EXPRESSION "fox frame type counts:\n *Asynchronous *3[^\n]*\n *Keep-alive *1[^\n]*\n *Reply *2[^\\*]*\\*\\*\\* Fox hello exchanges observed \\(unauthenticated system-identity disclosure\\) 4 \\*\\*\\*\nfox hello exchanges with hostAddress differing from the observed TCP peer IP \\(internal-topology leakage signal\\) observed: 1")
 
@@ -16216,7 +16250,7 @@ set_tests_properties(icmpv6_protocol_filter_excludes_other_protocols PROPERTIES
 
 # --stats: icmpv6 type counts.
 add_test(NAME icmpv6_stats_type_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_icmpv6_ndp.pcap")
 set_tests_properties(icmpv6_stats_type_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "icmpv6 types:\n *Destination Unreachable *1[^\n]*\n *Echo Reply *1[^\n]*\n *Echo Request *2[^\n]*\n *Neighbor Advertisement *1[^\n]*\n *Neighbor Solicitation *1[^\n]*\n *Redirect *1[^\n]*\n *Router Advertisement *1[^\n]*\n *Router Solicitation *3")
 
@@ -16277,7 +16311,7 @@ set_tests_properties(dhcpv6_protocol_filter_excludes_other_protocols PROPERTIES
 
 # --stats: dhcpv6 message type counts.
 add_test(NAME dhcpv6_stats_msg_type_counts
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap" --format text --stats)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dhcpv6.pcap")
 set_tests_properties(dhcpv6_stats_msg_type_counts PROPERTIES
   PASS_REGULAR_EXPRESSION "dhcpv6 message types:\n *ADVERTISE *1[^\n]*\n *RELAY-FORW *1[^\n]*\n *REPLY *3[^\n]*\n *REQUEST *1[^\n]*\n *SOLICIT *1")
 
@@ -16449,7 +16483,7 @@ set_tests_properties(homeplug_av_protocol_filter_excludes_other_protocols PROPER
   PASS_REGULAR_EXPRESSION "\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\].*\\[homeplug-av\\]")
 
 add_test(NAME homeplug_av_stats_protocol_count
-  COMMAND conduitscope decode --stats --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_homeplug_av.pcap")
 set_tests_properties(homeplug_av_stats_protocol_count PROPERTIES
   PASS_REGULAR_EXPRESSION "homeplug-av +7")
 
@@ -17249,18 +17283,22 @@ set_tests_properties(detect_umas_fields_absent_for_ordinary_modbus PROPERTIES
 # ---------------------------------------------------------------------------------------------
 
 add_test(NAME decode_display_filter_modbus_func_code_match
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == 3" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == 3")
 set_tests_properties(decode_display_filter_modbus_func_code_match PROPERTIES
   # Only #1/#2 -- #3 is packet 3's OWN exception response, whose function_code on the wire carries
   # the 0x80 exception bit (function_code == 0x83, "as seen on the wire" -- see ModbusFrame's own
-  # comment, modbus.hpp), so it does not match a plain == 3.
-  PASS_REGULAR_EXPRESSION "packets: *2")
+  # comment, modbus.hpp), so it does not match a plain == 3. No --stats any more (decode lost it --
+  # see docs/DEVELOPMENT.md ROADMAP item 105), so this asserts directly against decode's own
+  # default per-packet `#N ` index markers instead -- same technique as
+  # decode_display_filter_max_packets_counts_post_filter below.
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#2 "
+  FAIL_REGULAR_EXPRESSION "#3 ")
 
 add_test(NAME decode_display_filter_modbus_func_code_no_match
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == 99" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_code == 99")
 set_tests_properties(decode_display_filter_modbus_func_code_no_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *0"
-  FAIL_REGULAR_EXPRESSION "modbus +[1-9]")
+  # No packet matches -- decode prints nothing at all (no `#N ` marker for any of the 3 packets).
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#3 ")
 
 # && combines a numeric field match with an ip.src match -- only packet #1 (the request) has
 # src_ip 192.168.1.50; #2/#3 are the PLC's own responses, src_ip 192.168.1.10.
@@ -17273,9 +17311,12 @@ set_tests_properties(decode_display_filter_and_operator PROPERTIES
 
 add_test(NAME decode_display_filter_or_operator
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.exception == true || ip.src == 192.168.1.50" --stats)
+    -Y "modbus.exception == true || ip.src == 192.168.1.50")
 set_tests_properties(decode_display_filter_or_operator PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *2")
+  # #1 (ip.src==.50) and #3 (exception==true) match; #2 (the PLC's own non-exception response) is
+  # the only one of the three that satisfies neither side of the ||.
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#3 "
+  FAIL_REGULAR_EXPRESSION "#2 ")
 
 # A bare boolean field name (e.g. `modbus.exception` alone) is a field-EXISTENCE test --
 # present-and-non-null, not "value is true" -- see display_filter.hpp's own file header comment.
@@ -17284,15 +17325,16 @@ set_tests_properties(decode_display_filter_or_operator PROPERTIES
 # the value, matching #1/#2 (non-exception) and excluding #3 (the exception response).
 add_test(NAME decode_display_filter_not_operator_is_existence_not_value
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "!modbus.exception" --stats)
+    -Y "!modbus.exception")
 set_tests_properties(decode_display_filter_not_operator_is_existence_not_value PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *0")
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#3 ")
 
 add_test(NAME decode_display_filter_bool_equality
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.exception == false" --stats)
+    -Y "modbus.exception == false")
 set_tests_properties(decode_display_filter_bool_equality PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *2")
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#2 "
+  FAIL_REGULAR_EXPRESSION "#3 ")
 
 # Parentheses genuinely change which packets match: `!` > comparisons > && > ||, so
 # "A || B && C" groups as "A || (B && C)", giving #1 (via B&&C) and #3 (via A) -- but
@@ -17307,35 +17349,36 @@ set_tests_properties(decode_display_filter_parens_change_grouping PROPERTIES
 
 add_test(NAME decode_display_filter_in_set_match
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.func_code in {3,4,16}" --stats)
+    -Y "modbus.func_code in {3,4,16}")
 set_tests_properties(decode_display_filter_in_set_match PROPERTIES
   # Same 0x80-exception-bit caveat as decode_display_filter_modbus_func_code_match above -- #3's
   # own function_code is 0x83, not 3, so only #1/#2 are in {3,4,16}.
-  PASS_REGULAR_EXPRESSION "packets: *2")
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#2 "
+  FAIL_REGULAR_EXPRESSION "#3 ")
 
 add_test(NAME decode_display_filter_in_set_no_match
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.func_code in {4,16}" --stats)
+    -Y "modbus.func_code in {4,16}")
 set_tests_properties(decode_display_filter_in_set_no_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *0")
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#3 ")
 
 add_test(NAME decode_display_filter_contains
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.func_name contains \"Read\"" --stats)
+    -Y "modbus.func_name contains \"Read\"")
 set_tests_properties(decode_display_filter_contains PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *3")
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#2 (.*\n)*#3 ")
 
 add_test(NAME decode_display_filter_contains_no_match
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.func_name contains \"Write\"" --stats)
+    -Y "modbus.func_name contains \"Write\"")
 set_tests_properties(decode_display_filter_contains_no_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *0")
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#3 ")
 
 add_test(NAME decode_display_filter_matches_regex
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.func_name matches \"^Read\"" --stats)
+    -Y "modbus.func_name matches \"^Read\"")
 set_tests_properties(decode_display_filter_matches_regex PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *3")
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#2 (.*\n)*#3 ")
 
 # Bare protocol-name existence tests genuinely exclude other protocols' packets -- the point of
 # sample_display_filter_mixed.pcap's own three-different-protocols shape.
@@ -17389,9 +17432,10 @@ set_tests_properties(decode_display_filter_s7comm_param_func_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"s7comm_function_code\": 4")
 
 add_test(NAME decode_display_filter_s7comm_param_func_match
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" -Y "s7comm.param.func == 0x04" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap" -Y "s7comm.param.func == 0x04")
 set_tests_properties(decode_display_filter_s7comm_param_func_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *2")
+  # #5 (Job: Read Var) / #6 (Ack_Data: Read Var) -- confirmed against this build's actual output.
+  PASS_REGULAR_EXPRESSION "^#5 (.*\n)*#6 ")
 
 add_test(NAME decode_display_filter_dnp3_function_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" --format json)
@@ -17399,9 +17443,12 @@ set_tests_properties(decode_display_filter_dnp3_function_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"dnp3_function_code\": 1")
 
 add_test(NAME decode_display_filter_dnp3_function_match
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" -Y "dnp3.function == 1" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap" -Y "dnp3.function == 1")
 set_tests_properties(decode_display_filter_dnp3_function_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "dnp3 +[1-9]")
+  # #2/#5/#7/#13/#15 are function=Read (0x01) -- confirmed against this build's actual output;
+  # checking the first and last of that set is enough to prove the field mirrors correctly (same
+  # "weak positive check" intent the old --stats-histogram assertion had).
+  PASS_REGULAR_EXPRESSION "^#2 (.*\n)*#15 ")
 
 add_test(NAME decode_display_filter_iec104_type_id_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" --format json)
@@ -17409,9 +17456,11 @@ set_tests_properties(decode_display_filter_iec104_type_id_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"iec104_asdu_type_id\": 100")
 
 add_test(NAME decode_display_filter_iec104_type_id_match
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" -Y "iec104.type_id == 100" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_iec104.pcap" -Y "iec104.type_id == 100")
 set_tests_properties(decode_display_filter_iec104_type_id_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "iec104 +[1-9]")
+  # #3/#4 (the C_IC_NA_1 interrogation command and its confirmation) -- confirmed against this
+  # build's actual output.
+  PASS_REGULAR_EXPRESSION "^#3 (.*\n)*#4 ")
 
 add_test(NAME decode_display_filter_mms_service_tag_json
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
@@ -17419,17 +17468,23 @@ set_tests_properties(decode_display_filter_mms_service_tag_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"mms_service_tag\": [0-9]+")
 
 add_test(NAME decode_display_filter_mms_service_tag_match
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" -Y "mms.service_tag == 4" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" -Y "mms.service_tag == 4")
 set_tests_properties(decode_display_filter_mms_service_tag_match PROPERTIES
-  PASS_REGULAR_EXPRESSION "mms +[1-9]")
+  # #5/#6/#42 -- confirmed against this build's actual output; checking the first and last of that
+  # set is enough to prove the field mirrors correctly (same "weak positive check" intent the old
+  # --stats-histogram assertion had).
+  PASS_REGULAR_EXPRESSION "^#5 (.*\n)*#42 ")
 
 # UMAS is nested under Modbus (ModbusFrame::umas), not its own top-level protocol -- see
 # display_filter_fields.cpp's own file header comment -- so `umas.function_code` (a dotted
 # field-existence test) is the correct way to select UMAS traffic, not a bare `umas`.
 add_test(NAME decode_display_filter_umas_function_code
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" -Y "umas.function_code" --stats)
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_umas.pcap" -Y "umas.function_code")
 set_tests_properties(decode_display_filter_umas_function_code PROPERTIES
-  PASS_REGULAR_EXPRESSION "modbus +1[0-9]")
+  # #1 (the file's first UMAS request) through #15 (its last) both match -- every UMAS request
+  # carries function_code; only the PLC's own responses (#2/#4/#6, no umas.function_code field at
+  # all) don't -- confirmed against this build's actual output.
+  PASS_REGULAR_EXPRESSION "^#1 (.*\n)*#15 ")
 
 # --max-packets counts only filter-MATCHING packets -- matches Wireshark's own display-filter
 # semantics, where a non-matching packet is invisible to every downstream consumer including a
@@ -17450,7 +17505,7 @@ add_test(NAME decode_display_filter_write_unaffected_by_filter
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap' && \
     '$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' \
       -Y 'modbus.exception == false' --write '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap' --format json >/dev/null && \
-    '$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap' --stats")
+    '$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_BINARY_DIR}/display_filter_write_test.pcap'")
 set_tests_properties(decode_display_filter_write_unaffected_by_filter PROPERTIES
   PASS_REGULAR_EXPRESSION "packets: *3")
 
@@ -17458,45 +17513,53 @@ set_tests_properties(decode_display_filter_write_unaffected_by_filter PROPERTIES
 # parse and evaluate without error (regression guard against the exact syntax he asked for).
 add_test(NAME decode_display_filter_literal_example_modbus_and_ip
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
-    -Y "modbus.func_code == 16 && ip.src == 10.1.2.3" --stats)
+    -Y "modbus.func_code == 16 && ip.src == 10.1.2.3")
 set_tests_properties(decode_display_filter_literal_example_modbus_and_ip PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *0")
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#3 ")
 
 add_test(NAME decode_display_filter_literal_example_s7comm_hex
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7comm.pcap"
-    -Y "s7comm.param.func == 0x05" --stats)
+    -Y "s7comm.param.func == 0x05")
 set_tests_properties(decode_display_filter_literal_example_s7comm_hex PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *[0-9]+")
+  # #7 (Job: Write Var) / #8 (Ack_Data: Write Var) -- confirmed against this build's actual output.
+  PASS_REGULAR_EXPRESSION "^#7 (.*\n)*#8 ")
 
 add_test(NAME decode_display_filter_literal_example_goose_simulation
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_goose.pcap"
-    -Y "goose.simulation == 1" --stats)
+    -Y "goose.simulation == 1")
 set_tests_properties(decode_display_filter_literal_example_goose_simulation PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: *1")
+  # sample_goose.pcap has 14 packets; only #4 is marked [SIMULATED] -- confirmed against this
+  # build's actual output. Exhaustively excluding every other index (rather than just relying on
+  # ^#4 anchoring the first line) pins "exactly one match", matching the original test's own
+  # exact-count intent ("packets: *1").
+  PASS_REGULAR_EXPRESSION "^#4 "
+  FAIL_REGULAR_EXPRESSION "#1 |#2 |#3 |#5 |#6 |#7 |#8 |#9 |#10 |#11 |#12 |#13 |#14 ")
 
 # ---------------------------------------------------------------------------------------------
-# Conversations/Endpoints tables (tshark's own `-z conv,ip`/`-z endpoints,ip` as design precedent)
-# -- see StatsWriter's own file-header comment (output.hpp) and print_conversations'/
-# print_endpoints' comments (output.cpp) for the A/B-assignment, byte-counting, sort-order, and
-# truncation conventions this section exercises. `info` and `decode --stats` share the exact same
-# StatsWriter code path, so most cases below only test `info`; one test confirms `decode --stats`
-# renders the identical tables from the same underlying accumulation.
+# Conversations/Endpoints tables (tshark's own `-z conv,ip`/`-z endpoints,ip`/`-z conv,eth`/
+# `-z endpoints,eth` as design precedent) -- see StatsWriter's own file-header comment
+# (output.hpp) and print_conversations'/print_endpoints' comments (output.cpp) for the
+# A/B-assignment, byte-counting, sort-order, and truncation conventions this section exercises.
+# `-z` is `info`-only now, and explicit opt-in (docs/DEVELOPMENT.md ROADMAP item 105) -- none of
+# the four tables are tracked OR printed unless its own `-z` value is given -- so every case below
+# passes the specific `-z` value(s) it needs, and a new test just below confirms a table is
+# genuinely absent (not just unprinted) when its `-z` value isn't given at all.
 
 # sample_modbus.pcap (3 packets: 1 request 192.168.1.50->192.168.1.10, 2 responses the other way --
 # see the pre-existing bacnet_stats_counted-style tests above for this fixture's own shape) gives
 # an exact, hand-verifiable A->B/B->A split for both the IPv4 and (same two hosts) Ethernet tables.
 add_test(NAME info_ipv4_conversations_both_directions_counted
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z conv,ip)
 set_tests_properties(info_ipv4_conversations_both_directions_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "ipv4 conversations \\(1, ranked by total bytes\\):\n *192\\.168\\.1\\.50 <-> 192\\.168\\.1\\.10 +3 frame\\(s\\), 212 byte\\(s\\) total +\\(A->B: 1 frame\\(s\\)/66 byte\\(s\\), B->A: 2 frame\\(s\\)/146 byte\\(s\\), duration [0-9.]+s\\)")
 
 add_test(NAME info_ipv4_endpoints_tx_rx_split
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z endpoints,ip)
 set_tests_properties(info_ipv4_endpoints_tx_rx_split PROPERTIES
   PASS_REGULAR_EXPRESSION "ipv4 endpoints \\(2, ranked by total bytes\\):\n *192\\.168\\.1\\.50 +3 frame\\(s\\), 212 byte\\(s\\) total +\\(tx: 1 frame\\(s\\)/66 byte\\(s\\), rx: 2 frame\\(s\\)/146 byte\\(s\\)\\)\n *192\\.168\\.1\\.10 +3 frame\\(s\\), 212 byte\\(s\\) total +\\(tx: 2 frame\\(s\\)/146 byte\\(s\\), rx: 1 frame\\(s\\)/66 byte\\(s\\)\\)")
 
 add_test(NAME info_ethernet_conversations_and_endpoints_counted
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z conv,eth -z endpoints,eth)
 set_tests_properties(info_ethernet_conversations_and_endpoints_counted PROPERTIES
   PASS_REGULAR_EXPRESSION "ethernet conversations \\(1, ranked by total bytes\\):\n *00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc +3 frame\\(s\\), 212 byte\\(s\\) total.*\nethernet endpoints \\(2, ranked by total bytes\\):")
 
@@ -17504,51 +17567,174 @@ set_tests_properties(info_ethernet_conversations_and_endpoints_counted PROPERTIE
 # VLAN, ROADMAP item 103's own fixture) has no IP layer at all, so it's invisible to an IPv4-only
 # table by construction. Confirms the Ethernet/MAC table sees it (proving the L2 blind spot an
 # IP-only conversations table would have is actually closed) AND that no "ipv4 conversations"
-# section is printed at all for a capture with zero has_ip packets (every section is a no-op when
-# its own map is empty, matching every other conditional block in print_summary).
+# section is printed even when BOTH conv,ip and conv,eth are requested together (every section is
+# a no-op when its own map is empty, matching every other conditional block in print_summary).
 add_test(NAME info_ethernet_only_traffic_visible_with_no_ip_layer
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_l2_ethertype_powerlink.pcap")
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_l2_ethertype_powerlink.pcap" -z conv,ip -z conv,eth)
 set_tests_properties(info_ethernet_only_traffic_visible_with_no_ip_layer PROPERTIES
   PASS_REGULAR_EXPRESSION "ethernet conversations \\(1, ranked by total bytes\\):\n *00:0c:29:11:22:33 <-> 00:0c:29:aa:bb:cc +4 frame\\(s\\)"
   FAIL_REGULAR_EXPRESSION "ipv4 conversations")
 
-# `decode --stats` shares StatsWriter's exact same code path as `info` -- confirms it renders the
-# identical tables, not just `info`.
-add_test(NAME decode_stats_shows_conversations_and_endpoints
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --stats)
-set_tests_properties(decode_stats_shows_conversations_and_endpoints PROPERTIES
-  PASS_REGULAR_EXPRESSION "ipv4 conversations \\(1, ranked by total bytes\\):.*\nipv4 endpoints \\(2, ranked by total bytes\\):")
+# The default-off behavior itself: none of the four tables are tracked, let alone printed, when
+# `-z` isn't given at all -- not just "info doesn't show them", but genuinely never accumulated
+# (see StatsWriter::write_packet's own per-table tables_ gate, output.cpp) -- this fixture has
+# traffic that WOULD populate all four tables if any -z value were given (see the tests just
+# above), so their total absence here is a real behavioral check, not a vacuous one.
+add_test(NAME info_no_conversations_or_endpoints_tables_without_z
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(info_no_conversations_or_endpoints_tables_without_z PROPERTIES
+  FAIL_REGULAR_EXPRESSION "ipv4 conversations|ipv4 endpoints|ethernet conversations|ethernet endpoints")
+
+# -z value validation: an unrecognized stat name is rejected up front by CLI11's own IsMember
+# check, the same "reject before any packet is read" posture every other validated-enum option in
+# this tool already has (-T/--format, --decode-as's own protocol names, etc).
+add_test(NAME info_z_rejects_unrecognized_value
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -z bogus)
+set_tests_properties(info_z_rejects_unrecognized_value PROPERTIES
+  PASS_REGULAR_EXPRESSION "bogus not in \\{conv,ip,endpoints,ip,conv,eth,endpoints,eth\\}")
 
 # --max-conversations/--max-endpoints: sample_bacnet.pcap has 2 distinct IPv4 conversations and 4
 # distinct IPv4 endpoints (see bacnet_stats_counted's own fixture above), so capping each at 1
 # forces the truncation path -- confirms the table is capped at exactly that many rows and the
 # warning line names the flag and the limit that was hit.
 add_test(NAME info_max_conversations_caps_table_and_warns
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --max-conversations 1)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" -z conv,ip --max-conversations 1)
 set_tests_properties(info_max_conversations_caps_table_and_warns PROPERTIES
   PASS_REGULAR_EXPRESSION "ipv4 conversations \\(1, ranked by total bytes\\):\n(.*\n){1} *\\(--max-conversations limit of 1 reached; some conversations are not shown -- rerun with a higher --max-conversations to see them all\\)")
 
 add_test(NAME info_max_endpoints_caps_table_and_warns
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --max-endpoints 1)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" -z endpoints,ip --max-endpoints 1)
 set_tests_properties(info_max_endpoints_caps_table_and_warns PROPERTIES
   PASS_REGULAR_EXPRESSION "ipv4 endpoints \\(1, ranked by total bytes\\):\n(.*\n){1} *\\(--max-endpoints limit of 1 reached; some endpoints are not shown -- rerun with a higher --max-endpoints to see them all\\)")
 
 # Not reaching the cap: no warning line at all, on the same fixture with a generous limit --
 # guards against the warning firing unconditionally regardless of whether the cap was actually hit.
 add_test(NAME info_conversations_no_warning_when_cap_not_reached
-  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" --max-conversations 200)
+  COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_bacnet.pcap" -z conv,ip --max-conversations 200)
 set_tests_properties(info_conversations_no_warning_when_cap_not_reached PROPERTIES
   FAIL_REGULAR_EXPRESSION "limit of [0-9]+ reached")
 
-# --max-conversations/--max-endpoints are documented in both `info --help` and `decode --help`,
-# same "flags are discoverable from --help" regression guard as
-# resource_limit_flags_present_in_decode_help above.
+# --max-conversations/--max-endpoints are `info`-only now (decode lost --stats and everything that
+# went with it, ROADMAP item 105) -- documented in `info --help`, same "flags are discoverable
+# from --help" regression guard as resource_limit_flags_present_in_decode_help above -- and
+# confirmed genuinely GONE from `decode --help` (there is no longer a decode-side counterpart of
+# this test).
 add_test(NAME conversation_stats_flags_present_in_info_help
   COMMAND conduitscope info --help)
 set_tests_properties(conversation_stats_flags_present_in_info_help PROPERTIES
   PASS_REGULAR_EXPRESSION "--max-conversations(.*\n)*.*--max-endpoints")
 
-add_test(NAME conversation_stats_flags_present_in_decode_help
+add_test(NAME conversation_stats_flags_absent_from_decode_help
   COMMAND conduitscope decode --help)
-set_tests_properties(conversation_stats_flags_present_in_decode_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-conversations(.*\n)*.*--max-endpoints")
+set_tests_properties(conversation_stats_flags_absent_from_decode_help PROPERTIES
+  FAIL_REGULAR_EXPRESSION "--max-conversations|--max-endpoints|-z,--stat|--stats")
+
+# ---------------------------------------------------------------------------------------------
+# Subcommand-alias flags (--decode/--info/--interfaces/--policy/--inventory/--detect/--baseline/
+# --capture/--merge, each selectable as a double-dashed flag of the subcommand's own name,
+# ROADMAP item 105) -- rewrite_subcommand_alias's own comment (cli_main.cpp) has the full
+# position-aware, single-substitution design. `diff <(...) <(...)` is this file's own established
+# idiom for "these two invocations must produce byte-identical output" (see e.g.
+# dash_w_roundtrip's own test above) -- no PASS/FAIL_REGULAR_EXPRESSION needed, ctest already
+# fails a test whose COMMAND exits nonzero, and diff exits nonzero on any difference.
+
+add_test(NAME decode_alias_flag_matches_classic_subcommand
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+add_test(NAME info_alias_flag_matches_classic_subcommand
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+add_test(NAME interfaces_alias_flag_matches_classic_subcommand
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --interfaces) <('$<TARGET_FILE:conduitscope>' interfaces)")
+
+add_test(NAME detect_alias_flag_matches_classic_subcommand
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# A global flag (-q here) legally precedes the subcommand-position token -- rewrite_subcommand_
+# alias must skip over it, not mistake -q for the subcommand candidate, and still resolve --info
+# right after it.
+add_test(NAME info_alias_flag_after_global_quiet_flag
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' -q --info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' -q info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# --version already behaves like the `version` subcommand via CLI11's own set_version_flag -- not
+# part of rewrite_subcommand_alias's own rewrite table (see that function's own comment) -- so this
+# confirms the two remain byte-identical (including the "conduitscope " prefix both now share).
+add_test(NAME version_flag_matches_version_subcommand
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --version) <('$<TARGET_FILE:conduitscope>' version)")
+
+# The critical collision-safety case: --policy is ALSO a real option name inside `policy
+# validate`/`detect`/`baseline check` (--policy FILE) -- rewrite_subcommand_alias must resolve only
+# the FIRST (subcommand-position) --policy token and stop, leaving this second, option-position
+# --policy completely untouched. Confirms `conduitscope --policy validate --policy FILE ...`
+# behaves identically to `conduitscope policy validate --policy FILE ...`, not corrupted into
+# `policy validate policy FILE ...`.
+add_test(NAME policy_alias_flag_collision_safe_with_policy_option
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --policy validate --policy '${POLICY_DIR}/compliant.yaml' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' policy validate --policy '${POLICY_DIR}/compliant.yaml' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# Same collision-safety proof for `detect --policy FILE` and `baseline check --policy FILE`, the
+# other two subcommands with their own unrelated --policy option.
+add_test(NAME detect_alias_flag_collision_safe_with_policy_option
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --detect --policy '${POLICY_DIR}/compliant.yaml' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' detect --policy '${POLICY_DIR}/compliant.yaml' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+add_test(NAME baseline_check_alias_flag_collision_safe_with_policy_option
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_alias_check.json' && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_alias_check.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && \
+    diff <('$<TARGET_FILE:conduitscope>' --baseline check --policy '${POLICY_DIR}/compliant.yaml' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_alias_check.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' baseline check --policy '${POLICY_DIR}/compliant.yaml' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_alias_check.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# Order independence (Jurgen's own direct follow-up: these flags were meant to be usable like any
+# other flag, not only as a same-position substitute for the bare subcommand word): an alias flag
+# appearing AFTER other subcommand-specific tokens -- not just leading the line -- still resolves
+# and produces identical output to the classic form. Eight of the nine aliases (every one except
+# --policy, which stays candidate-position-only -- see the collision-safety tests above and
+# rewrite_subcommand_alias's own comment) support this.
+add_test(NAME decode_alias_flag_order_independent_after_options
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --decode) <('$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+add_test(NAME info_alias_flag_order_independent_after_options
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --info) <('$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# Combines a leading global flag (-q, which must still lead) with an alias resolved from several
+# tokens further down the line -- proves the two mechanisms compose rather than only one at a time.
+add_test(NAME detect_alias_flag_order_independent_after_global_and_options
+  COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' -q --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --detect) <('$<TARGET_FILE:conduitscope>' -q detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# --policy specifically does NOT gain order independence (see the comment above) -- confirms it
+# still falls back to CLI11's own honest \"subcommand required\" error rather than silently
+# misparsing when it appears anywhere but the candidate position, exactly as before this round.
+add_test(NAME policy_alias_flag_still_requires_leading_position
+  COMMAND conduitscope --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy validate)
+set_tests_properties(policy_alias_flag_still_requires_leading_position PROPERTIES
+  WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------------------------
+# -r/--read for `baseline learn`/`baseline check` (ROADMAP item 105) -- additive: the pre-existing
+# bare-positional form keeps working unchanged alongside the new -r/--read spelling, matching
+# every other file-reading subcommand's own -r/--read convention.
+
+add_test(NAME baseline_learn_dash_r_matches_positional_form
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_r_positional.json' '${CMAKE_CURRENT_BINARY_DIR}/baseline_r_flag.json' && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_r_positional.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_r_flag.json' -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && \
+    diff '${CMAKE_CURRENT_BINARY_DIR}/baseline_r_positional.json' '${CMAKE_CURRENT_BINARY_DIR}/baseline_r_flag.json'")
+
+# -r is repeatable, same as the positional form accepts multiple files -- confirms both spellings
+# learn from the same two-file set and produce the same baseline.
+add_test(NAME baseline_learn_dash_r_repeatable_matches_positional_multi_file
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_multi_positional.json' '${CMAKE_CURRENT_BINARY_DIR}/baseline_multi_flag.json' && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_multi_positional.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap' >/dev/null && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_multi_flag.json' -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3.pcap' >/dev/null && \
+    diff '${CMAKE_CURRENT_BINARY_DIR}/baseline_multi_positional.json' '${CMAKE_CURRENT_BINARY_DIR}/baseline_multi_flag.json'")
+
+add_test(NAME baseline_check_dash_r_matches_positional_form
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_r.json' && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_r.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && \
+    diff <('$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_r.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_r.json' -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")
+
+# --read (long form) works for baseline learn/check too, not just -r -- same as -r,--read,captures/
+# -r,--read,capture's own name string offers both spellings. Self-contained (creates its own
+# baseline file) rather than depending on file state another test left behind -- ctest test order
+# is not guaranteed, especially under -j.
+add_test(NAME baseline_check_dash_dash_read_matches_positional_form
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' && \
+    '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && \
+    diff <('$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap') <('$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_check_read.json' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap')")

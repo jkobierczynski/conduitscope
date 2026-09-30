@@ -12,13 +12,16 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -706,7 +709,8 @@ PolicyEngineLimits resolve_policy_engine_limits(size_t max_tcp_flows, size_t max
     return limits;
 }
 
-// Shared by `info` and `decode --stats` -- both hand these straight to StatsWriter's own
+// `info`-only now (its `-z conv,ip`/`-z endpoints,ip`/`-z conv,eth`/`-z endpoints,eth` -- see that
+// option's own help text just above its registration) -- hands these straight to StatsWriter's own
 // constructor (output.hpp/output.cpp), which resolves 0 into kDefaultMaxConversationEntries/
 // kDefaultMaxEndpointEntries the same "0 = leave it at its own default" convention as
 // add_policy_engine_limit_options above. Conversations/Endpoints tables (tshark's own
@@ -720,8 +724,8 @@ void add_conversation_stats_options(CLI::App* cmd, size_t& max_conversations, si
            "Cap the number of distinct address-pair conversations tracked for the "
            "Conversations tables (IPv4 and Ethernet, each capped independently; default "
            "200,000). 0 = leave it at its own default; past this, a packet between a new, "
-           "not-yet-seen address pair is dropped from these tables only (every other --stats/"
-           "info counter is unaffected), and a warning line is printed")
+           "not-yet-seen address pair is dropped from these tables only (every other -z/info "
+           "counter is unaffected), and a warning line is printed")
         ->capture_default_str();
     cmd->add_option(
            "--max-endpoints", max_endpoints,
@@ -947,8 +951,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 size_t max_packets,
                 const std::string& range_text,
                 const ResourceLimitCliVars& limit_vars,
-                bool stats, bool strict, bool quiet,
-                size_t max_conversations, size_t max_endpoints,
+                bool strict, bool quiet,
                 bool no_color, bool force_color,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path, bool show_vlan,
@@ -1176,25 +1179,22 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         Decoder decoder(options);
 
         std::unique_ptr<OutputWriter> writer;
-        StatsWriter stats_writer(max_conversations, max_endpoints);
-        if (!stats) {
-            if (format == "json") {
-                writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan, *parsed_time_format,
-                                                        *parsed_time_offset, show_direction);
-            } else if (format == "csv") {
-                writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan, *parsed_time_format,
-                                                       *parsed_time_offset, show_direction);
-            } else if (format == "fields") {
-                writer = std::make_unique<FieldsWriter>(*out, resolver, fields, show_vlan, *parsed_time_format,
-                                                          *parsed_time_offset, show_direction);
-            } else if (format == "zeek") {
-                writer = std::make_unique<ZeekWriter>(*out);
-            } else {
-                writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
-                                                        *parsed_time_offset, show_direction, show_mac, verbose);
-            }
-            writer->begin();
+        if (format == "json") {
+            writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan, *parsed_time_format,
+                                                    *parsed_time_offset, show_direction);
+        } else if (format == "csv") {
+            writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan, *parsed_time_format,
+                                                   *parsed_time_offset, show_direction);
+        } else if (format == "fields") {
+            writer = std::make_unique<FieldsWriter>(*out, resolver, fields, show_vlan, *parsed_time_format,
+                                                      *parsed_time_offset, show_direction);
+        } else if (format == "zeek") {
+            writer = std::make_unique<ZeekWriter>(*out);
+        } else {
+            writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
+                                                    *parsed_time_offset, show_direction, show_mac, verbose);
         }
+        writer->begin();
 
         // -w (mirrors tshark/tcpdump's own -w): a real, reopenable classic-pcap file of every raw
         // packet that reaches this loop -- for a live capture (-i) that's everything seen on the
@@ -1261,8 +1261,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 if (pcap_writer) pcap_writer->write_packet(pkt);
                 DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
                 // -Y/--display-filter gate: a non-matching packet is invisible to everything below
-                // -- direction tracking, detect-highlighting, stats, the output writer, -x hex dump,
-                // and (via `continue`, before ++decoded_count) --max-packets counting -- matching
+                // -- direction tracking, detect-highlighting, the output writer, -x hex dump, and
+                // (via `continue`, before ++decoded_count) --max-packets counting -- matching
                 // Wireshark's own display-filter semantics. A parse-error packet always still counts
                 // as a warning below, regardless of the filter (a decode-quality signal, orthogonal
                 // to whatever the filter is selecting FOR -- see docs/USER_GUIDE.md's Display
@@ -1287,13 +1287,11 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                     ++warnings;
                     if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
                 }
-                if (stats) stats_writer.write_packet(dp);
-                else writer->write_packet(dp);
+                writer->write_packet(dp);
                 // -x (mirrors tshark's own -x): a hex+ASCII dump of this packet's raw bytes, printed
                 // alongside the normal decode -- text format only (matching tshark, whose -x is a
-                // human-reading aid, not a structured field), and never under --stats, which has no
-                // per-packet output stream to interleave into.
-                if (hex_dump && !stats && format != "json" && format != "csv" && format != "fields") {
+                // human-reading aid, not a structured field).
+                if (hex_dump && format != "json" && format != "csv" && format != "fields") {
                     write_hex_ascii_dump(*out, ByteSpan(pkt.data.data(), pkt.data.size()));
                 }
                 ++decoded_count;
@@ -1314,8 +1312,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             // own version of the same scenario went untested. Finish the output the same way the
             // success path below does, THEN report the error and exit nonzero -- the error
             // message itself is unchanged, only well-formedness of whatever came before it.
-            if (stats) stats_writer.print_summary(*out);
-            else if (writer) writer->end();
+            if (writer) writer->end();
             if (color) {
                 out->flush();
                 if (writing_to_stdout) {
@@ -1334,8 +1331,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             // it exists so that IF a future decoder migration ever gets a protocol_id<->T
             // association wrong, the failure is this clean, immediate, reportable error instead of
             // undefined behavior with no useful diagnostic.
-            if (stats) stats_writer.print_summary(*out);
-            else if (writer) writer->end();
+            if (writer) writer->end();
             if (color) {
                 out->flush();
                 if (writing_to_stdout) {
@@ -1349,8 +1345,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             return 1;
         }
 
-        if (stats) stats_writer.print_summary(*out);
-        else writer->end();
+        writer->end();
 
         // Authoritative color reset -- belt-and-braces alongside run_sigint_cleanup's own
         // immediate raw-fd write (see its comment above). That handler-thread write is a
@@ -1411,11 +1406,23 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     return 0;
 }
 
-int run_info(const std::string& input, std::ostream& out, size_t max_conversations, size_t max_endpoints) {
+int run_info(const std::string& input, std::ostream& out, const std::vector<std::string>& stat_values,
+             size_t max_conversations, size_t max_endpoints) {
     try {
+        // -z conv,ip / -z endpoints,ip / -z conv,eth / -z endpoints,eth (tshark's own `-z` as
+        // design precedent) -- repeatable, explicit opt-in; info_cmd's own CLI::IsMember check
+        // (below, main()) already rejects anything else, so stat_values here only ever holds these
+        // four exact spellings, each at most whatever multiplicity the user repeated it.
+        RequestedStatsTables tables;
+        for (const auto& value : stat_values) {
+            if (value == "conv,ip") tables.ip_conversations = true;
+            else if (value == "endpoints,ip") tables.ip_endpoints = true;
+            else if (value == "conv,eth") tables.eth_conversations = true;
+            else if (value == "endpoints,eth") tables.eth_endpoints = true;
+        }
         PcapReader reader(input);
         Decoder decoder(DecodeOptions{});
-        StatsWriter stats_writer(max_conversations, max_endpoints);
+        StatsWriter stats_writer(tables, max_conversations, max_endpoints);
 
         PcapPacket pkt;
         size_t index = 0;
@@ -2296,6 +2303,103 @@ int run_merge_inventory(const std::vector<std::string>& inputs, const std::strin
     }
 }
 
+// Lets every top-level subcommand also be selected via a double-dashed flag of the same name
+// (--decode, --info, --interfaces, --policy, --inventory, --detect, --baseline, --capture,
+// --merge), usable like any other flag rather than only as a same-position substitute for the
+// bare subcommand word -- so `conduitscope -r file.pcap --decode` and `conduitscope --decode -r
+// file.pcap` both work, not just the latter, and editing a previous command line (e.g. swapping
+// `decode` for `info`) never requires hunting for where the subcommand word is or moving anything
+// else around: drop `--x` in wherever's convenient. CLI11 subcommands are positional tokens with
+// no native "a flag becomes a subcommand, from anywhere on the line" mechanism, so this is a small
+// argv-preprocessing pass, run once from main() right before CLI11_PARSE -- NOT a real CLI11
+// option.
+//
+// Scans left to right past any leading global flags (-q/--quiet, --no-color/--color, --version,
+// -h/--help, --log-file FILE -- kept in sync with the globals registered in main() just below),
+// which may only ever lead the line, exactly as they do today. The first token after that leading
+// run is the "candidate" position -- normally where a bare subcommand word belongs. If a bare
+// subcommand word (`decode`, `info`, ...) turns up anywhere from there on, the line is already
+// using the classic form and nothing is touched. Otherwise, the scan keeps going token by token --
+// an ordinary option/value token (`-r`, a filename, ...) is passed over unchanged -- until it
+// either runs out or finds one of the nine alias flags above. Once found, that token's own text is
+// rewritten in place to its bare-word target, and then rotated up to the candidate position (a
+// sequence of adjacent swaps, preserving the relative order of every token that was in between) --
+// CLI11 needs the subcommand word leading its own arguments, so simply overwriting the token's
+// text without relocating it would otherwise stew that leading argument (or the leading run of
+// them) as an ordinary token, alone in the leading prefix (rejected). Every alias spelling is
+// textually longer than its target (the "--" prefix on an otherwise-identical word), so
+// overwriting the found token's own buffer in place is always safe -- no reallocation, no overrun.
+// Uses memcpy (copying the target's own length, including its trailing NUL) rather than strcpy:
+// functionally identical here since the copy always shrinks the string, but strcpy trips MSVC's
+// C4996 "unsafe function" deprecation warning (it can't see that this particular call is bounded)
+// -- memcpy isn't on that deprecated-function list, and passing the exact byte count makes the
+// safety argument explicit at the call site instead of just in this comment.
+//
+// `--policy` is the one alias that collides with a real, differently-scoped option of the same
+// spelling (`--policy FILE`, accepted by `policy validate`/`detect`/`baseline check` once already
+// inside one of those three subcommands) -- so unlike the other eight, `--policy` is only ever
+// resolved as the alias when it sits exactly at the candidate position (matching every prior
+// release's behavior); found later in the scan, it's left untouched and scanning continues,
+// leaving `policy validate --policy zones.yaml`, `detect --policy zones.yaml`, and `baseline check
+// --policy zones.yaml` all working unchanged whether the subcommand itself was written as `policy`
+// or `--policy`. This costs `--policy` alone the same order-independence the other eight aliases
+// gain; there's no way around that without risking a real, silent misparse, given `--policy` in
+// isolation cannot otherwise be told apart from its unrelated same-spelled option.
+//
+// `--version` is deliberately not in this table: app.set_version_flag("--version", ...) (main(),
+// below) already prints the identical text the `version` subcommand's own fallthrough prints --
+// confirmed by comparing both call sites -- so `--version` already IS "a double-dashed flag that
+// does what the `version` subcommand does," just via CLI11's own built-in mechanism (immediate
+// exit, no require_subcommand(1) involved). Nothing to rewrite there.
+void rewrite_subcommand_alias(int argc, char** argv) {
+    static const std::map<std::string, std::string> kAliases = {
+        {"--decode", "decode"},     {"--info", "info"},         {"--interfaces", "interfaces"},
+        {"--policy", "policy"},     {"--inventory", "inventory"}, {"--detect", "detect"},
+        {"--baseline", "baseline"}, {"--capture", "capture"},   {"--merge", "merge"},
+    };
+    static const std::set<std::string> kBareSubcommands = {
+        "decode", "info", "interfaces", "policy",  "inventory",
+        "detect",  "baseline", "capture", "merge", "version",
+    };
+
+    int candidate_start = -1;  // index a resolved alias is rotated up to; -1 while still skipping
+                                // the leading run of global flags.
+    for (int i = 1; i < argc; ++i) {
+        const std::string token = argv[i];
+        if (candidate_start == -1) {
+            if (token == "-q" || token == "--quiet" || token == "--no-color" ||
+                token == "--color" || token == "--version" || token == "-h" ||
+                token == "--help") {
+                continue;
+            }
+            if (token == "--log-file") {
+                ++i;  // also skip its value token, if one was given (a missing value is a CLI11
+                      // usage error either way, reported exactly as it is today)
+                continue;
+            }
+            candidate_start = i;
+        }
+        if (kBareSubcommands.count(token) != 0) {
+            return;  // already the classic form from here on -- nothing to rewrite.
+        }
+        auto it = kAliases.find(token);
+        if (it == kAliases.end()) {
+            continue;  // an ordinary option/value token -- keep scanning for an alias later on
+                       // the line; unlike a bare subcommand word, this doesn't resolve anything
+                       // by itself.
+        }
+        if (token == "--policy" && i != candidate_start) {
+            continue;  // ambiguous anywhere but the candidate position -- see the collision note
+                       // above; leave it for CLI11 to parse as-is and keep scanning.
+        }
+        std::memcpy(argv[i], it->second.c_str(), it->second.size() + 1);
+        for (int j = i; j > candidate_start; --j) {
+            std::swap(argv[j], argv[j - 1]);
+        }
+        return;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2303,7 +2407,10 @@ int main(int argc, char** argv) {
                   "pcapng captures, as a building block for OT/ICS conduit and zone auditing (IEC 62443 / "
                   "NIS2 workflows).",
                   "conduitscope"};
-    app.set_version_flag("--version", version_string());
+    // "conduitscope " + version_string(), not version_string() alone -- matches the `version`
+    // subcommand's own fallthrough exactly (see its "conduitscope " << version_string() print,
+    // below), so --version and `version` are truly interchangeable, not just close.
+    app.set_version_flag("--version", "conduitscope " + version_string());
     app.require_subcommand(1);
     app.footer(
         "Run 'conduitscope <command> --help' for command-specific options, or see docs/MANUAL.md\n"
@@ -2357,8 +2464,7 @@ int main(int argc, char** argv) {
     size_t decode_max_packets = 0;
     std::string decode_range;  // empty means "not given" -- see packet_range.hpp
     ResourceLimitCliVars decode_limit_vars;
-    size_t decode_max_conversations = 0, decode_max_endpoints = 0;
-    bool decode_stats = false, decode_strict = false;
+    bool decode_strict = false;
     bool decode_mac_vendor = false, decode_resolve = false, decode_service_names = true;
     bool decode_show_vlan = true;
     bool decode_show_direction = true;
@@ -2740,10 +2846,6 @@ int main(int argc, char** argv) {
     decode_range_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_range_opt);
     add_resource_limit_options(decode_cmd, decode_limit_vars);
-    add_conversation_stats_options(decode_cmd, decode_max_conversations, decode_max_endpoints);
-    decode_cmd->add_flag("--stats", decode_stats,
-                          "Print an aggregate summary (protocol/function-code histogram) instead of "
-                          "one line per packet; ignores --format");
     decode_cmd->add_flag("--strict", decode_strict,
                           "Abort on the first malformed packet instead of reporting it and continuing");
     decode_cmd->add_flag("!--no-vlan", decode_show_vlan,
@@ -2753,8 +2855,7 @@ int main(int argc, char** argv) {
         "!--no-direction", decode_show_direction,
         "Disable display of per-packet TCP flow direction (client/server determination and which "
         "tier decided it -- handshake/content/port-heuristic), on by default -- see docs/MANUAL.md's "
-        "OUTPUT FORMATS section and ROADMAP item 19. Does not affect `decode --stats`'s own "
-        "direction-tier breakdown, which has no display toggles of its own");
+        "OUTPUT FORMATS section and ROADMAP item 19");
     decode_cmd->add_flag(
         "--ether", decode_show_mac,
         "For a packet with an IP layer, show its Ethernet header (source/destination MAC "
@@ -2820,7 +2921,7 @@ int main(int argc, char** argv) {
         "-x,--hex", decode_hex,
         "Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- "
         "mirrors tshark's own -x. Text output only (--format text, the default); ignored under "
-        "--format json/csv/fields and under --stats, which have no per-packet line to attach it to");
+        "--format json/csv/fields");
     decode_cmd->add_flag("--mac-vendor", decode_mac_vendor,
                           "Enable OUI (MAC vendor) resolution and show it next to each MAC "
                           "address; off by default to keep output compact. Implies --ether -- "
@@ -2854,6 +2955,17 @@ int main(int argc, char** argv) {
     info_cmd->add_option("-r,--read", info_input, "Input capture file (classic pcap or pcapng, auto-detected)")
         ->required()
         ->check(CLI::ExistingFile);
+    std::vector<std::string> info_stat_values;
+    info_cmd
+        ->add_option(
+            "-z,--stat", info_stat_values,
+            "Print an aggregate Conversations/Endpoints table (mirrors tshark's own -z; repeatable "
+            "-- each occurrence adds one table, and none are shown, or even tracked, unless "
+            "requested here): 'conv,ip' (IPv4 address-pair conversations), 'endpoints,ip' "
+            "(per-address IPv4 traffic), 'conv,eth' / 'endpoints,eth' (the same two views over raw "
+            "Ethernet/MAC traffic -- also covers non-IP OT L2 traffic with no IP layer at all, such "
+            "as PROFINET RT/GOOSE/SV/EtherCAT/POWERLINK/unrecognized EtherTypes)")
+        ->transform(CLI::IsMember({"conv,ip", "endpoints,ip", "conv,eth", "endpoints,eth"}));
     size_t info_max_conversations = 0, info_max_endpoints = 0;
     add_conversation_stats_options(info_cmd, info_max_conversations, info_max_endpoints);
 
@@ -3250,9 +3362,11 @@ int main(int argc, char** argv) {
                                         baseline_learn_max_conduits, baseline_learn_max_operations_per_conduit,
                                         baseline_learn_max_ranges_per_operation);
     baseline_learn_cmd
-        ->add_option("captures", baseline_learn_inputs,
+        ->add_option("-r,--read,captures", baseline_learn_inputs,
                       "One or more pcap/pcapng capture files to learn from, in order (classic "
-                      "pcap or pcapng, auto-detected)")
+                      "pcap or pcapng, auto-detected) -- repeatable (-r a.pcap -r b.pcap) or "
+                      "positional (a.pcap b.pcap), matching every other file-reading subcommand's "
+                      "own -r/--read spelling")
         ->required()
         ->check(CLI::ExistingFile);
     baseline_learn_cmd->add_flag("--strict", baseline_learn_strict,
@@ -3287,8 +3401,10 @@ int main(int argc, char** argv) {
                                         baseline_check_max_conduits, baseline_check_max_operations_per_conduit,
                                         baseline_check_max_ranges_per_operation);
     baseline_check_cmd
-        ->add_option("capture", baseline_check_input,
-                      "The pcap/pcapng capture file to check (classic pcap or pcapng, auto-detected)")
+        ->add_option("-r,--read,capture", baseline_check_input,
+                      "The pcap/pcapng capture file to check (classic pcap or pcapng, "
+                      "auto-detected) -- -r/--read or positional, matching every other "
+                      "file-reading subcommand's own -r/--read spelling")
         ->required()
         ->check(CLI::ExistingFile);
     baseline_check_cmd->add_option(
@@ -3505,6 +3621,12 @@ int main(int argc, char** argv) {
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
 
+    // --decode/--info/--interfaces/--policy/--inventory/--detect/--baseline/--capture/--merge:
+    // every subcommand above is also selectable via a double-dashed flag of its own name -- see
+    // rewrite_subcommand_alias's own comment for why this is a pre-parse argv rewrite rather than
+    // a CLI11 option.
+    rewrite_subcommand_alias(argc, argv);
+
     CLI11_PARSE(app, argc, argv);
 
     // -r/-i are mutually exclusive (enforced above via ->excludes()) but neither is individually
@@ -3619,8 +3741,8 @@ int main(int argc, char** argv) {
                            decode_dhcpv6_ports,
                            decode_as_rules,
                            decode_flood_threshold,
-                           decode_max_packets, decode_range, decode_limit_vars, decode_stats, decode_strict,
-                           quiet, decode_max_conversations, decode_max_endpoints,
+                           decode_max_packets, decode_range, decode_limit_vars, decode_strict,
+                           quiet,
                            no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
@@ -3629,7 +3751,7 @@ int main(int argc, char** argv) {
                            decode_display_filter_compiled);
     }
     if (info_cmd->parsed()) {
-        return run_info(info_input, std::cout, info_max_conversations, info_max_endpoints);
+        return run_info(info_input, std::cout, info_stat_values, info_max_conversations, info_max_endpoints);
     }
     if (interfaces_cmd->parsed()) {
         return run_interfaces(std::cout);
