@@ -239,37 +239,19 @@ private:
 inline constexpr size_t kDefaultMaxConversationEntries = 200000;
 inline constexpr size_t kDefaultMaxEndpointEntries = 200000;
 
-// Which of the four Conversations/Endpoints tables `info`'s own `-z conv,ip`/`-z endpoints,ip`/
-// `-z conv,eth`/`-z endpoints,eth` (cli_main.cpp) asked for -- tshark's own `-z` is explicit,
-// repeatable opt-in, not an always-on aggregate dump, so a table nobody asked for is never even
-// accumulated (not just never printed): each flag below individually gates the matching pair of
-// update_conversation/update_endpoint calls in StatsWriter::write_packet. All-false (the default)
-// is a perfectly ordinary StatsWriter that tracks none of the four -- used by every StatsWriter
-// that only wants the protocol histogram/direction-source breakdown/per-protocol sections below.
-struct RequestedStatsTables {
-    bool ip_conversations = false;
-    bool ip_endpoints = false;
-    bool eth_conversations = false;
-    bool eth_endpoints = false;
-};
-
 // Accumulates counts instead of printing per packet; call begin()/write_packet()
 // as usual, then print_summary(out) once at the end (that's separate from
-// OutputWriter::end() so callers building a StatsWriter for different reasons -- currently just
-// `info` -- can share this class while formatting their own headers differently).
+// OutputWriter::end() so `info` and `decode --stats` can share this class
+// while formatting their headers differently).
 class StatsWriter : public OutputWriter {
 public:
-    // tables: which of the four Conversations/Endpoints tables to track -- see
-    // RequestedStatsTables' own comment above. max_conversations/max_endpoints: 0 means "use the
-    // default" (kDefaultMaxConversationEntries/kDefaultMaxEndpointEntries above) -- 0 is never
-    // itself a usable cap (an all-zero cap would silently produce permanently-empty tables), so it
-    // doubles as "not explicitly set," the same "0 means use the built-in default" sentinel several
-    // existing --max-* options already use (see cli_main.cpp's build_resource_limits). Every
-    // existing call site that builds a StatsWriter with no arguments keeps compiling unchanged and
-    // gets a writer that tracks none of the four tables, with the default caps ready for whenever
-    // one is requested.
-    explicit StatsWriter(RequestedStatsTables tables = RequestedStatsTables{},
-                          size_t max_conversations = 0, size_t max_endpoints = 0);
+    // max_conversations/max_endpoints: 0 means "use the default" (kDefaultMaxConversationEntries/
+    // kDefaultMaxEndpointEntries above) -- 0 is never itself a usable cap (an all-zero cap would
+    // silently produce permanently-empty tables), so it doubles as "not explicitly set," the same
+    // "0 means use the built-in default" sentinel several existing --max-* options already use
+    // (see cli_main.cpp's build_resource_limits). Every existing call site that builds a
+    // StatsWriter with no arguments keeps compiling unchanged and gets the default caps.
+    explicit StatsWriter(size_t max_conversations = 0, size_t max_endpoints = 0);
     void write_packet(const DecodedPacket& packet) override;
     void print_summary(std::ostream& out) const;
 
@@ -330,7 +312,6 @@ private:
                                  const std::vector<std::string>& order, bool truncated,
                                  size_t max_entries);
 
-    RequestedStatsTables tables_;  // which of the four tables write_packet actually accumulates
     size_t max_conversations_;  // resolved (never 0) in the constructor -- see output.cpp
     size_t max_endpoints_;
 

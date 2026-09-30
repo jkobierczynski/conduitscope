@@ -5840,9 +5840,8 @@ void ZeekWriter::end() {
     out_ << "#close\t" << open_time << "\n";
 }
 
-StatsWriter::StatsWriter(RequestedStatsTables tables, size_t max_conversations, size_t max_endpoints)
-    : tables_(tables),
-      max_conversations_(max_conversations != 0 ? max_conversations : kDefaultMaxConversationEntries),
+StatsWriter::StatsWriter(size_t max_conversations, size_t max_endpoints)
+    : max_conversations_(max_conversations != 0 ? max_conversations : kDefaultMaxConversationEntries),
       max_endpoints_(max_endpoints != 0 ? max_endpoints : kDefaultMaxEndpointEntries) {}
 
 // Shared by ip_conversations_/eth_conversations_ -- see output.hpp's own comment on this method
@@ -5911,28 +5910,21 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
         direction_source_counts_[direction_source_name(p.direction_source)]++;
     }
     // Conversations/Endpoints tables (tshark's `-z conv,ip`/`-z endpoints,ip` as design precedent
-    // -- see output.hpp's own comment on these four maps and on RequestedStatsTables). Two
-    // independent layers: an IPv4 packet updates BOTH the IP tables (address-keyed) and the
-    // Ethernet tables (MAC-keyed) below, since has_ip and has_ethernet are independent facts about
-    // the same frame -- not gated on p.protocol, matching direction_source_counts_'s own
-    // cross-protocol posture just above. Each pair is additionally gated on tables_ -- `info`'s own
-    // `-z` is explicit opt-in (see cli_main.cpp), so a table nobody asked for is never accumulated
-    // here at all, not just hidden from print_summary.
-    if (p.has_ip && tables_.ip_conversations) {
+    // -- see output.hpp's own comment on these four maps). Two independent layers: an IPv4 packet
+    // updates BOTH the IP tables (address-keyed) and the Ethernet tables (MAC-keyed) below, since
+    // has_ip and has_ethernet are independent facts about the same frame -- not gated on
+    // p.protocol, matching direction_source_counts_'s own cross-protocol posture just above.
+    if (p.has_ip) {
         update_conversation(ip_conversations_, ip_conversation_order_, ip_conversations_truncated_,
                              max_conversations_, p.src_ip, p.dst_ip, p.original_len, p.timestamp);
-    }
-    if (p.has_ip && tables_.ip_endpoints) {
         update_endpoint(ip_endpoints_, ip_endpoint_order_, ip_endpoints_truncated_, max_endpoints_,
                          p.src_ip, /*is_tx=*/true, p.original_len);
         update_endpoint(ip_endpoints_, ip_endpoint_order_, ip_endpoints_truncated_, max_endpoints_,
                          p.dst_ip, /*is_tx=*/false, p.original_len);
     }
-    if (p.has_ethernet && tables_.eth_conversations) {
+    if (p.has_ethernet) {
         update_conversation(eth_conversations_, eth_conversation_order_, eth_conversations_truncated_,
                              max_conversations_, p.src_mac, p.dst_mac, p.original_len, p.timestamp);
-    }
-    if (p.has_ethernet && tables_.eth_endpoints) {
         update_endpoint(eth_endpoints_, eth_endpoint_order_, eth_endpoints_truncated_, max_endpoints_,
                          p.src_mac, /*is_tx=*/true, p.original_len);
         update_endpoint(eth_endpoints_, eth_endpoint_order_, eth_endpoints_truncated_, max_endpoints_,
