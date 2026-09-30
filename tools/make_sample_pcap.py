@@ -166,6 +166,19 @@ def ipv6_extension_header(next_header: int, option_data: bytes) -> bytes:
     return struct.pack("!BB", next_header, hdr_ext_len) + body
 
 
+def ipv6_fragment_header(next_header: int, offset8: int, more: bool, identification: int) -> bytes:
+    """RFC 8200 S4.5 Fragment extension header -- a fixed 8-byte layout (unlike
+    ipv6_extension_header's Hdr-Ext-Len-in-8-byte-units shape, which doesn't fit here): Next
+    Header(1) + Reserved(1, zero) + [Fragment Offset(13 bits)|Reserved(2 bits)|M flag(1 bit)](2,
+    big-endian) + Identification(4, big-endian). `offset8` is in 8-byte units, same convention as
+    Ipv4Header::fragment_offset/this file's own ipv4_header_ex `flags_and_offset` parameter (multiply
+    a byte offset by 8 to get this). Built for build_ip_fragment_reassembly_sample below (ROADMAP
+    item 102) -- see decoder.hpp's Ipv6Header::fragment_offset/fragment_more/fragment_identification
+    for what each field feeds."""
+    off_res_m = ((offset8 & 0x1FFF) << 3) | (0x1 if more else 0x0)
+    return struct.pack("!BBHI", next_header, 0, off_res_m, identification)
+
+
 def tcp_header(src_port: int, dst_port: int, seq: int, ack: int, flags: int, payload_len: int) -> bytes:
     return struct.pack(
         "!HHIIBBHHH",
@@ -6699,6 +6712,181 @@ def build_resource_exhaustion_flow_state_sample():
     (TESTS_DIR / "sample_resource_exhaustion_flow_state.pcap").write_bytes(data)
 
 
+def build_ip_fragment_reassembly_sample():
+    """Exercises Decoder::reassemble_ip_fragment (ROADMAP item 102) -- IPv4/IPv6 fragment
+    reassembly, run BEFORE transport-layer parsing, a different layer from
+    sample_tcp_reassembly.pcap's own TCP-segment reassembly of an already-unfragmented payload.
+    Every scenario below uses its own identification/fragment-id (and, for the TCP-payload-bearing
+    ones, its own port pair) so groups can't interact with each other or with any other sample
+    file's fixtures -- mirroring build_tcp_reassembly_sample's own per-scenario isolation
+    discipline. The three resource-cap scenarios (byte cap, fragment-count cap, active-group-count
+    cap) are deliberately NOT here -- each needs its own tiny CLI override to actually trigger, and
+    every scenario below uses a similarly-sized (~24-49 byte) datagram, so a single global override
+    small enough to trip one would trip them all. They're their own dedicated fixture instead
+    (build_ip_fragment_resource_exhaustion_sample, sample_ip_fragment_resource_exhaustion.pcap),
+    mirroring sample_resource_exhaustion_active_flows.pcap/sample_resource_exhaustion_flow_state.pcap's
+    own identical reasoning for TCP reassembly's caps."""
+    packets = []
+
+    def add_v4(payload, ident, flags_and_offset):
+        # All scenarios below run PLC(502) -> HMI, one direction, since only the IP layer (not
+        # direction/session tracking) is under test here.
+        ip = ipv4_header_ex(PLC_IP, HMI_IP, 6, len(payload), ident, flags_and_offset=flags_and_offset) + payload
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    HMI6, PLC6 = "2001:db8::50", "2001:db8::10"
+
+    def add_v6(frag_hdr, body):
+        plen = len(frag_hdr) + len(body)
+        pkt = ipv6_header(PLC6, HMI6, IPV6_FRAGMENT, plen) + frag_hdr + body
+        packets.append(eth_header(HMI_MAC, PLC_MAC, ETHERTYPE_IPV6) + pkt)
+
+    reg_data = b"".join(struct.pack("!H", v) for v in range(10))
+
+    def modbus_response_adu(xid):
+        return struct.pack("!HHHBBB", xid, 0, 1 + 2 + len(reg_data), 1, 0x03, len(reg_data)) + reg_data
+
+    # --- A) IPv4, in-order: a real Modbus response ADU split into two fragments. -----------------
+    adu_a = modbus_response_adu(0xA000)
+    tcp_a = tcp_header(502, 55000, 100000, 1, TCP_PSH | TCP_ACK, len(adu_a)) + adu_a
+    split_a = 24
+    add_v4(tcp_a[:split_a], 0xA001, 0x2000)                    # offset 0, MF=1
+    add_v4(tcp_a[split_a:], 0xA001, 0x0000 | (split_a // 8))   # offset split_a, MF=0
+
+    # --- B) IPv4, out-of-order: the MF=0 (last) fragment arrives before the offset-0 one. --------
+    adu_b = modbus_response_adu(0xB000)
+    tcp_b = tcp_header(502, 55001, 100000, 1, TCP_PSH | TCP_ACK, len(adu_b)) + adu_b
+    split_b = 24
+    add_v4(tcp_b[split_b:], 0xB001, 0x0000 | (split_b // 8))   # last fragment, sent first
+    add_v4(tcp_b[:split_b], 0xB001, 0x2000)                    # offset-0 fragment, sent second
+
+    # --- C) IPv4, overlap: fragment 2 re-sends the last 8 bytes fragment 1 already covered, with
+    #     different (corrupted) content -- must be discarded in favor of fragment 1's own bytes
+    #     (first-write-wins). Also incidentally exercises attack_detect.cpp's own, separate,
+    #     unconditional Teardrop detection (a real overlapping fragment is exactly that shape) --
+    #     this scenario proves the two features coexist without conflict.
+    adu_c = modbus_response_adu(0xC000)
+    tcp_c = tcp_header(502, 55002, 100000, 1, TCP_PSH | TCP_ACK, len(adu_c)) + adu_c
+    split_c, overlap_c = 24, 8
+    frag2_c_true = tcp_c[split_c - overlap_c:]
+    frag2_c = b"\xff" * overlap_c + frag2_c_true[overlap_c:]
+    add_v4(tcp_c[:split_c], 0xC001, 0x2000)
+    add_v4(frag2_c, 0xC001, 0x0000 | ((split_c - overlap_c) // 8))
+
+    # --- D) IPv4 conflict (a): a second "last" fragment disagreeing with an already-established
+    #     total length -- abandon and retry fresh from that fragment.
+    add_v4(b"A" * 8, 0xD001, 0x2000 | 0)             # offset 0, MF=1
+    add_v4(b"B" * 8, 0xD001, 0x0000 | (16 // 8))      # offset 16, MF=0 -> total=24 (gap, not complete)
+    add_v4(b"C" * 8, 0xD001, 0x0000 | (32 // 8))      # offset 32, MF=0 -> implied total=40 != 24: CONFLICT
+
+    # --- E) IPv4 conflict (b): a fragment whose own span reaches past an already-established total
+    #     length -- same abandon-and-retry-fresh handling.
+    add_v4(b"D" * 8, 0xE001, 0x2000 | 0)              # offset 0, MF=1
+    add_v4(b"E" * 8, 0xE001, 0x0000 | (16 // 8))      # offset 16, MF=0 -> total=24 (gap, not complete)
+    add_v4(b"F" * 16, 0xE001, 0x2000 | (20 // 8))     # offset 20, MF=1, end=36 > 24: CONFLICT
+
+    # --- F) IPv6, clean in-order: a plain UDP payload (no extension headers at all) split into two
+    #     fragments -- the common case, no Destination Options involved.
+    udp_payload_i = bytes(range(40))
+    udp_i = udp_header(40010, 40011, udp_payload_i)
+    split_i = 16
+    ident_i = 0x61000001
+    add_v6(ipv6_fragment_header(17, 0, True, ident_i), udp_i[:split_i])
+    add_v6(ipv6_fragment_header(17, split_i // 8, False, ident_i), udp_i[split_i:])
+
+    # --- G) IPv6, the extension-header-walk-fix case: a Destination Options header sits between
+    #     Fragment and the real upper-layer (UDP) header on the offset-0 fragment. Per RFC 8200,
+    #     ALL fragments' own Fragment-header "next header" byte must read Destination Options
+    #     (60) -- it's invariant, a property of the datagram, not of any one fragment -- while only
+    #     the offset-0 fragment's parse ever walks past it to resolve the true upper-layer
+    #     protocol (UDP). Fragment 2's own raw continuation bytes are deliberately crafted to begin
+    #     with what WOULD be misread as another Destination-Options header (type 60, Hdr Ext Len 0)
+    #     if the (fixed) walk-past-offset-0-only bug were still present -- this is real UDP payload
+    #     content, not a header, and must survive untouched.
+    destopts_j = ipv6_extension_header(17, b"")  # next_header=UDP, minimal 8-byte header
+    assert len(destopts_j) == 8
+    payload_j = bytearray(b"HELLOWORLDHELLOWORLDHELLOWORLD!!")
+    assert len(payload_j) == 32
+    payload_j[8] = IPV6_DESTINATION_OPTIONS  # 60 -- the "fake header" trap, at fragment 2's offset 0
+    payload_j[9] = 0x00
+    payload_j = bytes(payload_j)
+    udp_hdr_j = struct.pack("!HHHH", 40020, 40021, 8 + len(payload_j), 0)  # checksum 0 (disabled)
+    fragmentable_j = destopts_j + udp_hdr_j + payload_j
+    assert len(fragmentable_j) == 48
+    split_j = 24
+    ident_j = 0x62000002
+    add_v6(ipv6_fragment_header(IPV6_DESTINATION_OPTIONS, 0, True, ident_j), fragmentable_j[:split_j])
+    add_v6(ipv6_fragment_header(IPV6_DESTINATION_OPTIONS, split_j // 8, False, ident_j), fragmentable_j[split_j:])
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_010_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ip_fragment_reassembly.pcap").write_bytes(data)
+
+
+def build_ip_fragment_resource_exhaustion_sample():
+    """The two per-datagram IP-fragment-reassembly cap scenarios (byte cap, fragment-count cap;
+    ROADMAP item 102), deliberately kept OUT of sample_ip_fragment_reassembly.pcap -- see that
+    function's own docstring for why: a tiny override small enough to trip one of these would also
+    trip that file's own ~24-49-byte scenarios. Mirrors --max-reassembly-bytes'/
+    --max-reassembly-segments' own existing CTest convention (reusing sample_tcp_reassembly.pcap
+    under a tiny override, asserting on just the one scenario under test) rather than needing
+    separate files per flag -- each CTest entry below applies only ONE tiny override at a time,
+    leaving the OTHER scenario in this same file at its own generous compiled-in default, so it
+    doesn't interfere with the assertion under test. The THIRD cap scenario
+    (--max-active-fragment-groups eviction) is its own separate file, build_ip_fragment_
+    max_active_fragment_groups_sample/sample_ip_fragment_max_active_fragment_groups.pcap: it needs
+    a clean baseline of exactly zero pre-existing active groups for its own eviction arithmetic to
+    be unambiguous, which the two scenarios below can't guarantee for it (whichever cap ISN'T
+    overridden in a given test run leaves its own scenario's group active/buffering, silently
+    changing how many groups are already active by the time an eviction scenario would run)."""
+    packets = []
+
+    def add_v4(payload, ident, flags_and_offset):
+        ip = ipv4_header_ex(PLC_IP, HMI_IP, 6, len(payload), ident, flags_and_offset=flags_and_offset) + payload
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    # --- F) Byte-cap hit: needs a tiny --max-reassembly-bytes override (its CTest entry passes
+    #     one) to actually trigger -- with the compiled-in 65535-byte default this datagram is
+    #     nowhere near large enough.
+    add_v4(b"F" * 8, 0xF001, 0x2000 | 0)              # offset 0, MF=1
+    add_v4(b"F" * 8, 0xF001, 0x2000 | (32 // 8))      # offset 32, MF=1, end=40 -- exceeds a tiny cap
+
+    # --- G) Fragment-count-cap hit: needs a tiny --max-reassembly-segments override.
+    add_v4(b"G" * 8, 0xF101, 0x2000 | 0)
+    add_v4(b"G" * 8, 0xF101, 0x2000 | (16 // 8))
+    add_v4(b"G" * 8, 0xF101, 0x2000 | (32 // 8))      # 3rd fragment -- exceeds a tiny cap of 2
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_011_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ip_fragment_resource_exhaustion.pcap").write_bytes(data)
+
+
+def build_ip_fragment_max_active_fragment_groups_sample():
+    """--max-active-fragment-groups eviction (ROADMAP item 102): three distinct, never-completing
+    fragment groups (each MF=1, so none of them ever completes or self-abandons via the byte/
+    fragment-count caps -- see build_ip_fragment_resource_exhaustion_sample's own docstring for why
+    those two scenarios don't share this file, and sample_resource_exhaustion_active_flows.pcap's
+    own identical reasoning for TCP reassembly's own --max-active-flows cap). Alone in its own
+    file, so the active-group count by the time the 3rd group arrives is unambiguous: exactly 2
+    (the first two groups), triggering eviction under a cap of 2."""
+    packets = []
+
+    def add_v4(payload, ident, flags_and_offset):
+        ip = ipv4_header_ex(PLC_IP, HMI_IP, 6, len(payload), ident, flags_and_offset=flags_and_offset) + payload
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+
+    add_v4(b"H" * 8, 0xF201, 0x2000 | 0)
+    add_v4(b"H" * 8, 0xF202, 0x2000 | 0)
+    add_v4(b"H" * 8, 0xF203, 0x2000 | 0)  # 3rd group -- evicts one of the first two under a cap of 2
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_012_000 + i, i * 1000)
+    (TESTS_DIR / "sample_ip_fragment_max_active_fragment_groups.pcap").write_bytes(data)
+
+
 def ipv6_packet(src: str, dst: str, upper_protocol: int, upper_payload: bytes, extensions: list = None) -> bytes:
     """Builds a full IPv6 packet (base header + optional extension-header chain + upper-layer
     payload). `extensions` is a list of (header_type_const, option_data_bytes) tuples, walked in
@@ -6717,6 +6905,7 @@ def ipv6_packet(src: str, dst: str, upper_protocol: int, upper_payload: bytes, e
 
 
 IPV6_HOP_BY_HOP, IPV6_ROUTING, IPV6_DESTINATION_OPTIONS, IPV6_ESP = 0, 43, 60, 50
+IPV6_FRAGMENT = 44  # used by build_ip_fragment_reassembly_sample (ROADMAP item 102)
 
 
 def build_ipv6_sample():
@@ -21710,4 +21899,7 @@ if __name__ == "__main__":
     build_homeplug_av_sample()
     build_decode_as_sample()
     build_display_filter_mixed_sample()
+    build_ip_fragment_reassembly_sample()
+    build_ip_fragment_resource_exhaustion_sample()
+    build_ip_fragment_max_active_fragment_groups_sample()
     print("wrote sample fixtures to", TESTS_DIR)

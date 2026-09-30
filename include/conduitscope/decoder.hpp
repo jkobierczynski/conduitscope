@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "conduitscope/amqp_common.hpp"
@@ -768,6 +769,27 @@ struct DecodedPacket {
     uint8_t ip_protocol = 0;
     uint8_t ttl = 0;
 
+    // IP fragment reassembly (Decoder::reassemble_ip_fragment, decoder.cpp; ROADMAP item 102).
+    // is_ip_fragment is true for EVERY packet that was (or is) one fragment of a larger IP
+    // datagram -- including a still-buffering fragment (protocol == "ip-fragment"), an abandoned
+    // one (also "ip-fragment", with an explanatory note), and the one fragment whose arrival
+    // completed the group (which proceeds to a normal full protocol decode, ip_reassembled=true).
+    // false, and every field below meaningless, for an ordinary unfragmented packet.
+    bool is_ip_fragment = false;
+    uint32_t ip_fragment_id = 0;       // IPv4 Identification (16-bit) or IPv6 fragment
+                                         // Identification (32-bit) -- correlates fragments of one
+                                         // datagram, together with src/dst/protocol
+    size_t ip_fragment_offset = 0;      // this fragment's own byte offset within the reassembled
+                                         // datagram (already multiplied by 8 from the wire's
+                                         // 8-byte-unit encoding)
+    bool ip_more_fragments = false;     // this fragment's own MF/M flag
+    // True only on the one packet whose decode() call completed this datagram's reassembly (the
+    // fragment whose arrival made the byte-range coverage exactly [0, total_length)) -- that
+    // packet's protocol/summary/etc. reflect the full, normal decode of the reassembled datagram,
+    // not "ip-fragment". ip_reassembled_fragment_count is meaningful only when this is true.
+    bool ip_reassembled = false;
+    size_t ip_reassembled_fragment_count = 0;
+
     bool has_tcp = false;
     bool has_udp = false;  // exactly one of has_tcp/has_udp is ever true for a given IPv4 packet
     // Shared between TCP and UDP -- populated whichever of has_tcp/has_udp is set. tcp_flags is
@@ -793,6 +815,12 @@ struct DecodedPacket {
     // ordinary TCP control traffic on an otherwise fully-recognized Modbus/TCP conduit.
     bool tcp_no_payload = false;
 
+    // "ip-fragment" (this packet is one IP fragment of a larger datagram that has not yet -- or
+    // will never -- fully reassemble: still buffering more fragments, or abandoned due to a
+    // resource cap or a consistency conflict, see DecodedPacket::is_ip_fragment above and
+    // Decoder::reassemble_ip_fragment in decoder.cpp; the ONE fragment whose arrival completes a
+    // reassembly is NOT reported this way -- it proceeds through the normal decode of the full
+    // reassembled datagram instead, with ip_reassembled=true),
     // "iec104", "modbus", "dnp3", "s7comm", "enip", "profinet", "goose", "sv", "ethercat", "stp",
     // "devicenet" (LINKTYPE_CAN_SOCKETCAN captures only -- see can_socketcan.hpp/devicenet.hpp),
     // "bacnet", "hartip", "opcua", "mms", "mqtt", "s7comm-plus", "cotp"
@@ -1271,6 +1299,38 @@ struct TcpFlowBuffer {
     size_t segment_count = 0;    // TCP segments contributed to `bytes` so far
 };
 
+// Cross-packet IP fragment reassembly state for one (IP version, src, dst, protocol,
+// identification) datagram -- keyed by a human-readable string (see Decoder::
+// reassemble_ip_fragment's call sites in decoder.cpp for the exact key format). A different layer
+// from TcpFlowBuffer above: this reassembles an IP datagram's own fragments (RFC 791 S3.2 / RFC
+// 8200 S4.5) BEFORE any transport-layer (TCP/UDP) parsing ever sees the bytes, whereas
+// TcpFlowBuffer reassembles TCP segments of an already-complete, already-unfragmented IP payload.
+// The two compose without conflict -- a fragmented datagram is reassembled here first, and the
+// resulting complete payload is then handed to decode_ip_payload exactly as an unfragmented
+// packet's payload would be, where TCP reassembly (if needed) proceeds normally on top of it.
+struct IpFragmentGroup {
+    std::vector<uint8_t> data;                        // grows to cover [0, total_length) once known
+    std::vector<std::pair<size_t, size_t>> received;   // sorted, merged, non-overlapping [start,end)
+                                                         // byte ranges actually written into `data`
+    bool have_last = false;                            // the MF=0 (last) fragment has been seen
+    size_t total_length = 0;                            // valid only once have_last is true
+    size_t fragment_count = 0;
+    // Deliberately no upper_protocol/ttl_or_hop_limit fields here (an earlier draft of this
+    // feature had them, captured per-fragment during buffering): IPv4's own protocol number is
+    // invariant across a datagram's fragments, so decoder.cpp's IPv4 call site just keeps using
+    // its own local Ipv4Header::protocol at completion, unconditionally correct. IPv6 has no
+    // equivalent invariant per-fragment value to capture in the first place -- per RFC 8200 only
+    // the offset-0 fragment's own (fully-walked) Ipv6Header::next_header is ever the true,
+    // resolved upper-layer protocol, and relying on whichever fragment happens to complete the
+    // group to carry that value was a real bug this feature's own manual IPv6 verification pass
+    // caught (a Destination Options header between Fragment and the upper layer, reassembled by a
+    // non-offset-0 completing fragment, dispatched to the wrong protocol with a shifted payload).
+    // decoder.cpp's IPv6 call site instead re-walks the fully reassembled datagram from scratch
+    // once complete (resolve_ipv6_fragment_upper_layer, ipv6.hpp/cpp) -- deterministic and
+    // correct regardless of arrival order or which fragment triggers completion, since by then
+    // the full Fragmentable Part's bytes are all present to walk.
+};
+
 // Cross-packet Modbus transaction-pairing state used to live here as ModbusPendingRequest/
 // Decoder::modbus_pending_ (a bespoke member dedicated to Modbus alone). It's now
 // ModbusPendingRequest/ModbusFlowState in modbus.hpp, reached generically through
@@ -1359,6 +1419,17 @@ private:
     // above for why that is safe here.
     mutable std::unordered_map<std::string, TcpFlowBuffer> tcp_reassembly_;
 
+    // See IpFragmentGroup above. Keyed by a human-readable string encoding IP version, src, dst,
+    // protocol/next-header, and identification (see reassemble_ip_fragment's call sites in
+    // decoder.cpp for the exact format) -- one entry per datagram CURRENTLY in the middle of an
+    // incomplete fragment reassembly, same "don't retain completed/abandoned entries" discipline
+    // as tcp_reassembly_ above, for the identical reason (docs/reviews/2026-09-chatgpt-security-
+    // review-patch160.md's finding 1 generalized to this new engine, ROADMAP item 102). Bounded
+    // from growing past --max-active-fragment-groups (resource_limits.hpp's
+    // max_active_fragment_groups) regardless of how many distinct fragmented datagrams a capture
+    // contains. `mutable` for the same cross-packet-state reason as tcp_reassembly_ above.
+    mutable std::unordered_map<std::string, IpFragmentGroup> ip_fragment_reassembly_;
+
     // registration-model decoder refactor (see protocol_decoder.hpp/protocol_registry.hpp): one
     // generic per-migrated-protocol flow-state map, replacing what used to require a bespoke
     // Decoder member per stateful protocol (this generalizes the old Decoder::modbus_pending_,
@@ -1416,6 +1487,39 @@ private:
     // `effective_payload`'s use -- the caller keeps it alive as a same-scope local in decode().
     bool reassemble_tcp_payload(const TcpSegment& tcp, const std::string& flow_key, DecodedPacket& out,
                                  std::vector<uint8_t>& storage, ByteSpan& effective_payload) const;
+
+    // Buffers one IP fragment into its reassembly group (see IpFragmentGroup/ip_fragment_reassembly_
+    // above; ROADMAP item 102). `group_key` identifies the datagram (IP version + src + dst +
+    // a value stable across every fragment of the datagram + identification -- for IPv4 that's the
+    // (invariant) protocol number; for IPv6 that's Ipv6Header::fragment_next_header, NOT
+    // Ipv6Header::next_header, which is only resolved to the true upper-layer protocol on the
+    // offset-0 fragment -- see decoder.cpp's two call sites, the IPv4 and IPv6 version-sniff
+    // branches, for the exact key format, and IpFragmentGroup's own comment for why this function
+    // doesn't try to track/hand back a resolved upper-layer protocol itself). `fragment_offset_bytes`/
+    // `more_fragments` are this fragment's own offset (already converted from the wire's 8-byte
+    // units) and MF/M flag; `fragment_payload` is this fragment's own raw contribution -- for IPv6
+    // callers this MUST be Ipv6Header::fragment_raw_payload, not Ipv6Header::payload (see that
+    // field's own comment).
+    //
+    // Returns true once `group_key`'s datagram is fully reassembled: `reassembled` (backed by
+    // `storage`, which must outlive its use exactly like reassemble_tcp_payload's own `storage`
+    // parameter) holds the complete, raw Fragmentable Part -- IPv4 callers can dispatch it directly
+    // (their own already-known protocol number is invariant across fragments); IPv6 callers must
+    // re-walk it via resolve_ipv6_fragment_upper_layer (ipv6.hpp/cpp), starting from
+    // Ipv6Header::fragment_next_header, to find the real upper-layer protocol and payload -- and
+    // `out.ip_reassembled`/`ip_reassembled_fragment_count` are set. Returns false while still
+    // buffering, or after abandoning the group (a resource cap hit, or a consistency conflict -- see
+    // this function's own definition in decoder.cpp for both) -- either way `out` is already a
+    // complete, ready-to-return DecodedPacket (protocol "ip-fragment", a descriptive summary, and
+    // any explanatory note) and the caller must return it immediately without calling
+    // decode_ip_payload, exactly mirroring reassemble_tcp_payload's own buffering-return contract.
+    // `out.is_ip_fragment`/`ip_fragment_id`/`ip_fragment_offset`/`ip_more_fragments` are the caller's
+    // own responsibility to set before calling this (they describe THIS fragment, not the group),
+    // same division of labor reassemble_tcp_payload's callers already have for src_ip/dst_ip/etc.
+    bool reassemble_ip_fragment(int ip_version, const std::string& group_key, uint32_t identification,
+                                 size_t fragment_offset_bytes, bool more_fragments,
+                                 ByteSpan fragment_payload, DecodedPacket& out,
+                                 std::vector<uint8_t>& storage, ByteSpan& reassembled) const;
 };
 
 }  // namespace conduitscope

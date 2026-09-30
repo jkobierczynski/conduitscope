@@ -51,6 +51,14 @@ Ipv6Header parse_ipv6(ByteSpan packet) {
 
     size_t base_header_bytes = c.position();  // always 40 by construction (4+2+2+1+1+16+16)
 
+    // Set only inside the kFragment branch below, to the cursor position (and captured raw bytes)
+    // immediately after the Fragment header's own fixed 8 bytes -- BEFORE any further extension-
+    // header walking that may happen for the offset-0 fragment specifically. See the comment where
+    // hdr.fragment_raw_payload is computed (after the walk loop) for why this can't just reuse
+    // hdr.payload.
+    size_t position_after_fragment_header = 0;
+    ByteSpan raw_bytes_after_fragment_header;
+
     // Walk the RFC 8200 extension-header chain far enough to reach the real upper-layer protocol
     // -- see this file's own header comment for exactly which header types are walked past
     // (Hop-by-Hop/Routing/Destination Options, all sharing one generic 8-byte-unit length format;
@@ -97,12 +105,58 @@ Ipv6Header parse_ipv6(ByteSpan packet) {
                 throw ParseError("IPv6 extension header chain exceeds " +
                                   std::to_string(kMaxExtensionHeaders) + " headers; refusing to walk further");
             }
-            uint8_t inner_next = c.u8();
             // Fixed 8 bytes total, no length field of its own: Next Header(1, just read) +
-            // Reserved(1) + Fragment Offset/flags(2) + Identification(4) = 8. See this file's own
-            // header comment on why a non-first fragment's bytes past here are not reassembled --
-            // the same documented limitation ipv4.hpp's own fragment-offset field already has.
-            c.skip(7);
+            // Reserved(1) + Fragment Offset(13 bits)/Reserved(2 bits)/M flag(1 bit)(2) +
+            // Identification(4) = 8. See this file's own header comment for the full RFC 8200
+            // S4.5 field layout and the decoder.cpp reassembly engine (Decoder::
+            // reassemble_ip_fragment) these fields feed.
+            uint8_t inner_next = c.u8();
+            c.u8();                                  // Reserved -- unused
+            uint16_t offset_res_m = c.u16be();
+            uint32_t identification = c.u32be();
+            hdr.has_fragment_header = true;
+            hdr.fragment_offset = static_cast<uint16_t>(offset_res_m >> 3);
+            hdr.fragment_more = (offset_res_m & 0x1) != 0;
+            hdr.fragment_identification = identification;
+            // RFC 8200 S4.5: the Fragment header's own Next Header byte "identifies the initial
+            // header type of the Fragmentable Part of the original packet" -- a property of the
+            // ORIGINAL, unfragmented datagram, not of this one fragment, so it is required to be
+            // byte-identical across every fragment of the same datagram regardless of arrival
+            // order or offset. Capture it here, unconditionally, before the offset-0-only walk
+            // decision below can touch `next_header` -- decoder.cpp's Decoder::reassemble_ip_fragment
+            // keys its reassembly groups on THIS field (fragment_next_header), not on
+            // hdr.next_header below, precisely because hdr.next_header is only ever resolved all
+            // the way to the true upper-layer protocol on the offset-0 fragment (see its own
+            // comment above) -- keying on it would put fragments of the same datagram into
+            // different groups whenever an extension header (e.g. Destination Options) sits
+            // between Fragment and the upper layer, since only the offset-0 fragment's copy of
+            // that value ever gets walked past. Found via this feature's own manual verification
+            // pass (ROADMAP item 102): a hand-built two-fragment IPv6 datagram with a Destination
+            // Options header after Fragment reassembled only when this fix was in place; before
+            // it, the two fragments silently landed in different groups and reassembly never
+            // completed.
+            hdr.fragment_next_header = inner_next;
+            // Snapshot the raw, uninterpreted bytes right here -- immediately after the Fragment
+            // header's own 8 bytes, before the offset-0-only branch below potentially walks (and
+            // thereby consumes/interprets away) a further Destination Options header. See
+            // hdr.fragment_raw_payload's own computation below for why this snapshot -- not
+            // hdr.payload -- is what decoder.cpp's fragment reassembly must use.
+            position_after_fragment_header = c.position();
+            raw_bytes_after_fragment_header = c.rest();
+            if (hdr.fragment_offset != 0) {
+                // RFC 8200: only the offset-0 fragment carries a real, further-walkable extension-
+                // header chain after Fragment -- on any other fragment, everything past this point
+                // is that fragment's own opaque continuation payload, not more structured extension
+                // headers. Stop walking here (do NOT `next_header = inner_next; continue;` -- that
+                // would misinterpret raw fragment bytes as a header type/length pair, a real bug
+                // found and fixed as part of ROADMAP item 102). `next_header` (and therefore
+                // `hdr.next_header` below) is left as this fragment's own Fragment-header
+                // `inner_next` byte -- unused for actual transport dispatch on a non-first fragment
+                // (decoder.cpp's Decoder::reassemble_ip_fragment always intercepts before that could
+                // happen), but harmless to leave set rather than inventing a sentinel value.
+                next_header = inner_next;
+                break;
+            }
             next_header = inner_next;
             continue;
         }
@@ -131,7 +185,93 @@ Ipv6Header parse_ipv6(ByteSpan packet) {
         // implausible total_length.
         hdr.payload = captured_after_headers;
     }
+
+    if (hdr.has_fragment_header) {
+        // decoder.cpp's Decoder::reassemble_ip_fragment needs the RAW, uninterpreted bytes of the
+        // Fragmentable Part starting at THIS fragment's own declared offset -- not hdr.payload
+        // above, which for the offset-0 fragment specifically has had any further extension
+        // headers (a Destination Options header is the one RFC 8200 actually permits here) walked
+        // past and their bytes consumed/discarded, same as hdr.next_header being resolved past
+        // them. Using hdr.payload for reassembly would silently drop those consumed bytes from the
+        // reassembled datagram (and misalign every byte after them) whenever an offset-0 fragment
+        // carries one -- a real bug found via this feature's own manual IPv6 verification pass
+        // (ROADMAP item 102): the completed reassembly came up short by exactly the walked
+        // extension header's own length, and the bytes that WERE written landed at the wrong
+        // offset. Computed the same way hdr.payload is above, but relative to
+        // position_after_fragment_header (captured before any such further walking could happen)
+        // instead of the post-walk cursor position.
+        size_t fragment_header_prefix_bytes = position_after_fragment_header - base_header_bytes;
+        if (static_cast<size_t>(payload_length) >= fragment_header_prefix_bytes) {
+            size_t declared_len = static_cast<size_t>(payload_length) - fragment_header_prefix_bytes;
+            if (declared_len <= raw_bytes_after_fragment_header.size()) {
+                hdr.fragment_raw_payload = raw_bytes_after_fragment_header.subspan(0, declared_len);
+            } else {
+                hdr.fragment_raw_payload = raw_bytes_after_fragment_header;
+            }
+        } else {
+            hdr.fragment_raw_payload = raw_bytes_after_fragment_header;
+        }
+    }
     return hdr;
+}
+
+Ipv6FragmentResolution resolve_ipv6_fragment_upper_layer(uint8_t first_header_type, ByteSpan reassembled_data) {
+    Ipv6FragmentResolution result;
+    // Last known-good position: the start of `first_header_type`'s own header, before this walk
+    // has consumed anything at all. Updated only once a header is FULLY, successfully walked past
+    // (mirroring parse_ipv6's own loop below) -- so if a read throws partway through a header
+    // (truncated/malformed data), the catch block below can fall back to treating everything from
+    // this last-good point on as opaque payload of last-good's own type, exactly the same terminal
+    // fallback parse_ipv6 uses for an unrecognized next_header value.
+    uint8_t next_header = first_header_type;
+    size_t last_good_position = 0;
+    uint8_t last_good_header_type = first_header_type;
+    Cursor c(reassembled_data);
+    int extension_headers_seen = 0;
+    try {
+        while (true) {
+            if (next_header == kHopByHop || next_header == kRouting || next_header == kDestinationOptions) {
+                if (++extension_headers_seen > kMaxExtensionHeaders) {
+                    break;  // same terminal fallback as parse_ipv6's own cap -- see this function's
+                             // own declaration comment (never throws)
+                }
+                uint8_t inner_next = c.u8();
+                uint8_t hdr_ext_len = c.u8();
+                size_t remaining_this_header = (static_cast<size_t>(hdr_ext_len) + 1) * 8 - 2;
+                c.skip(remaining_this_header);
+                next_header = inner_next;
+                last_good_position = c.position();
+                last_good_header_type = next_header;
+                continue;
+            }
+            if (next_header == AH_IP_PROTOCOL) {
+                if (++extension_headers_seen > kMaxExtensionHeaders) {
+                    break;
+                }
+                uint8_t inner_next = c.u8();
+                uint8_t payload_len_words = c.u8();
+                size_t remaining_this_header = (static_cast<size_t>(payload_len_words) + 2) * 4 - 2;
+                c.skip(remaining_this_header);
+                next_header = inner_next;
+                last_good_position = c.position();
+                last_good_header_type = next_header;
+                continue;
+            }
+            // Anything else -- a real upper-layer protocol, ESP, or (should never legitimately
+            // happen -- see this function's own declaration comment) another Fragment header --
+            // is the terminal case: stop here, this is the resolved upper-layer protocol.
+            last_good_position = c.position();
+            last_good_header_type = next_header;
+            break;
+        }
+    } catch (const ParseError&) {
+        // A header claimed a length longer than what's actually present -- fall back to the last
+        // point this walk fully understood (see the comment on last_good_position/
+        // last_good_header_type above).
+    }
+    result.upper_protocol = last_good_header_type;
+    result.upper_payload = reassembled_data.from(last_good_position);
+    return result;
 }
 
 std::string format_ipv6(const Ipv6Address& addr) {

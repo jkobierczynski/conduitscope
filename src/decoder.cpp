@@ -977,6 +977,182 @@ bool Decoder::reassemble_tcp_payload(const TcpSegment& tcp, const std::string& f
     return true;
 }
 
+namespace {
+
+// Merges [start,end) into a sorted, non-overlapping list of received byte-ranges, coalescing any
+// range it touches or overlaps (>= on the boundary comparison, not >, so two ranges that merely
+// TOUCH -- e.g. [0,10) and [10,20) -- still merge into one [0,20) span; an off-by-one here would be
+// exactly the kind of bug that could make Decoder::reassemble_ip_fragment's own completion check
+// silently report a datagram complete with a real gap still in it). O(n) in the number of existing
+// ranges, which is bounded by kDefaultMaxFragmentsPerDatagram (or its --max-reassembly-segments
+// override) -- see reassemble_ip_fragment's own per-group fragment-count cap.
+void merge_fragment_range(std::vector<std::pair<size_t, size_t>>& received, size_t start, size_t end) {
+    received.emplace_back(start, end);
+    std::sort(received.begin(), received.end());
+    std::vector<std::pair<size_t, size_t>> merged;
+    for (const auto& range : received) {
+        if (!merged.empty() && range.first <= merged.back().second) {
+            merged.back().second = std::max(merged.back().second, range.second);
+        } else {
+            merged.push_back(range);
+        }
+    }
+    received = std::move(merged);
+}
+
+// True iff any byte in [start,end) is already covered by `received` -- used only to decide whether
+// to push a one-time "overlapping fragment" note; never gates whether bytes are copied (see
+// reassemble_ip_fragment's own first-write-wins copy loop, which checks coverage per sub-range
+// directly rather than reusing this all-or-nothing helper).
+bool fragment_range_overlaps(const std::vector<std::pair<size_t, size_t>>& received, size_t start, size_t end) {
+    for (const auto& range : received) {
+        if (start < range.second && range.first < end) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+bool Decoder::reassemble_ip_fragment(int ip_version, const std::string& group_key, uint32_t identification,
+                                      size_t fragment_offset_bytes, bool more_fragments,
+                                      ByteSpan fragment_payload, DecodedPacket& out,
+                                      std::vector<uint8_t>& storage, ByteSpan& reassembled) const {
+    // Same extract()-then-conditionally-reinsert idiom as reassemble_tcp_payload above -- see that
+    // function's own header comment for the full "don't retain empty/completed entries" rationale
+    // (docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 1), generalized here to
+    // this new engine (ROADMAP item 102).
+    auto node = ip_fragment_reassembly_.extract(group_key);
+    bool had_existing_entry = !node.empty();
+    IpFragmentGroup group = had_existing_entry ? std::move(node.mapped()) : IpFragmentGroup{};
+
+    size_t fragment_end = fragment_offset_bytes + fragment_payload.size();
+
+    // Consistency-conflict guard: a "last" fragment disagreeing with an already-established
+    // total_length, or a fragment whose own span reaches past an already-established total_length,
+    // both mean this fragment disagrees with the datagram size a PRIOR fragment already
+    // established -- a malformed capture or a deliberately crafted attack, either way not
+    // resolvable by guessing which is "correct". Abandon and retry fresh from just this fragment,
+    // the same "abandon an in-progress reassembly, try this packet's own bytes fresh" shape
+    // reassemble_tcp_payload's own sequence-gap branch already uses above.
+    if (group.have_last &&
+        ((!more_fragments && fragment_end != group.total_length) || fragment_end > group.total_length)) {
+        out.notes.push_back("IP fragment reassembly conflict for datagram id=" + std::to_string(identification) +
+                             " (a fragment's span disagrees with this datagram's already-established " +
+                             std::to_string(group.total_length) +
+                             "-byte total length) -- abandoning it, retrying fresh from this fragment");
+        group = IpFragmentGroup{};
+    }
+
+    // Per-group safety caps, checked before merging -- mirrors reassemble_tcp_payload's own
+    // byte/segment-count cap placement above. kDefaultMaxIpFragmentBytes/
+    // kDefaultMaxFragmentsPerDatagram (resource_limits.hpp) are the true IPv4/IPv6 non-jumbogram
+    // datagram/fragment-count ceilings -- overridable via the SAME --max-reassembly-bytes/
+    // --max-reassembly-segments flags reassemble_tcp_payload/dnp3.cpp/cotp.cpp already share, one
+    // more site each. Also closes a real crafted-input concern: a fragment claiming a large offset
+    // AND a large payload could otherwise push `fragment_end` far past any real datagram's bound.
+    const size_t byte_cap = resource_limits().max_reassembly_bytes.value_or(kDefaultMaxIpFragmentBytes);
+    const size_t fragment_cap = resource_limits().max_reassembly_segments.value_or(kDefaultMaxFragmentsPerDatagram);
+    if (fragment_end > byte_cap || group.fragment_count + 1 > fragment_cap) {
+        out.notes.push_back("IP fragment reassembly for datagram id=" + std::to_string(identification) +
+                             " exceeded its safety cap (" + std::to_string(fragment_end) + " byte(s) across " +
+                             std::to_string(group.fragment_count + 1) +
+                             " fragment(s)) -- abandoning it; this fragment's own bytes are not decodable "
+                             "on their own");
+        out.protocol = "ip-fragment";
+        out.summary = "abandoned IPv" + std::to_string(ip_version) + " fragment reassembly for datagram id=" +
+                       std::to_string(identification) + " (exceeded its safety cap)";
+        // Not reinserted -- this group is gone, same "don't retain" posture a completed group gets
+        // below. A later fragment for this same identification simply starts a brand-new group.
+        return false;
+    }
+
+    // --max-active-fragment-groups: same placement/reasoning as reassemble_tcp_payload's own
+    // --max-active-flows check above -- only checked on the one path that can actually grow
+    // ip_fragment_reassembly_'s size (a brand-new group), arbitrary eviction rather than LRU (same
+    // "guarantees the same size-ceiling property as LRU would" reasoning already on record there).
+    if (!had_existing_entry) {
+        const size_t cap = resource_limits().max_active_fragment_groups.value_or(kDefaultMaxActiveFragmentGroups);
+        if (ip_fragment_reassembly_.size() >= cap) {
+            ip_fragment_reassembly_.erase(ip_fragment_reassembly_.begin());
+            out.notes.push_back("active IP fragment-reassembly group limit (" + std::to_string(cap) +
+                                 ") reached -- evicted an existing in-progress reassembly on another "
+                                 "datagram to make room for this one (--max-active-fragment-groups)");
+        }
+    }
+
+    // First-fragment-bytes-win on any content overlap: grow `data` to cover this fragment's span,
+    // then copy only the sub-ranges of [fragment_offset_bytes, fragment_end) not already covered by
+    // `received`. Deliberate choice over "reject the whole group on any overlap" -- overlapping
+    // fragments are sometimes benign retransmission duplicates, not only Teardrop-style attacks,
+    // and attack_detect.cpp's own, separately-running, unconditional Teardrop detection already
+    // flags genuinely suspicious overlaps as a security signal; this engine's job is best-effort
+    // correctness, not redundant security signaling.
+    if (group.data.size() < fragment_end) {
+        group.data.resize(fragment_end, 0);
+    }
+    if (fragment_range_overlaps(group.received, fragment_offset_bytes, fragment_end)) {
+        out.notes.push_back("overlapping IP fragment bytes for datagram id=" + std::to_string(identification) +
+                             " -- first-received data kept for the overlapping range");
+    }
+    // Copy byte-by-byte, skipping any position already covered -- simplest correct way to honor
+    // first-write-wins without a second interval-diff pass; the datagram/fragment-count caps above
+    // already bound this to at most kDefaultMaxIpFragmentBytes (or its override) total work.
+    for (size_t i = 0; i < fragment_payload.size(); ++i) {
+        size_t pos = fragment_offset_bytes + i;
+        bool already_covered = false;
+        for (const auto& range : group.received) {
+            if (pos >= range.first && pos < range.second) {
+                already_covered = true;
+                break;
+            }
+        }
+        if (!already_covered) {
+            group.data[pos] = fragment_payload.data()[i];
+        }
+    }
+    merge_fragment_range(group.received, fragment_offset_bytes, fragment_end);
+
+    if (!more_fragments) {
+        group.have_last = true;
+        group.total_length = fragment_end;
+    }
+    ++group.fragment_count;
+
+    bool complete = group.have_last && group.received.size() == 1 && group.received.front().first == 0 &&
+                     group.received.front().second == group.total_length;
+    if (complete) {
+        storage = std::move(group.data);
+        storage.resize(group.total_length);
+        reassembled = ByteSpan(storage.data(), storage.size());
+        out.ip_reassembled = true;
+        out.ip_reassembled_fragment_count = group.fragment_count;
+        out.notes.push_back("reassembled an IPv" + std::to_string(ip_version) + " datagram (id=" +
+                             std::to_string(identification) + ") from " + std::to_string(group.total_length) +
+                             " byte(s) spanning " + std::to_string(group.fragment_count) + " fragment(s)");
+        // Deliberately NOT reinserted -- this datagram is fully consumed. Same "don't retain
+        // completed/empty entries" discipline as reassemble_tcp_payload's own completion path.
+        return true;
+    }
+
+    size_t bytes_received = 0;
+    for (const auto& range : group.received) {
+        bytes_received += range.second - range.first;
+    }
+    out.protocol = "ip-fragment";
+    std::ostringstream s;
+    s << "buffering IPv" << ip_version << " fragment reassembly for datagram id=" << identification
+      << ": fragment " << group.fragment_count << ", " << bytes_received << " of ";
+    if (group.have_last) {
+        s << group.total_length << " declared";
+    } else {
+        s << "an unknown (awaiting last fragment)";
+    }
+    s << " byte(s) received so far, waiting for more";
+    out.summary = s.str();
+    ip_fragment_reassembly_[group_key] = std::move(group);
+    return false;
+}
+
 // Decoder::pair_modbus_transaction used to live here. It moved to ModbusDecoder::decode
 // (modbus.cpp) as part of the registration-model decoder refactor's pilot (Stage 2) -- see
 // modbus.hpp's ModbusPendingRequest/ModbusFlowState and protocol_decoder.hpp's DecodeContext.
@@ -1437,6 +1613,53 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                      "were trimmed (almost always Ethernet minimum-frame-size "
                                      "padding, not real payload)");
             }
+            // IP fragment reassembly (ROADMAP item 102) -- see Decoder::reassemble_ip_fragment's own
+            // declaration comment (decoder.hpp) for the full contract. ip6.has_fragment_header means
+            // a Fragment (44) extension header was present at all; the degenerate offset=0/M=0 case
+            // (a "fragmented" datagram that's really just one fragment) is handled correctly by the
+            // same code path below with no special-casing needed -- it trivially completes as soon
+            // as this one fragment is merged.
+            if (ip6.has_fragment_header) {
+                // Keyed on fragment_next_header, NOT next_header -- RFC 8200 guarantees the former
+                // is identical across every fragment of one datagram, while the latter is only
+                // resolved all the way to the true upper-layer protocol on the offset-0 fragment
+                // (see Ipv6Header's own comment on both fields). Keying on next_header would split
+                // one datagram's fragments across different groups -- and they'd then never
+                // complete -- whenever an extension header (e.g. Destination Options) sits between
+                // Fragment and the upper layer; caught by this feature's own manual IPv6
+                // verification pass (ROADMAP item 102).
+                std::string group_key = "6|" + out.src_ip + "->" + out.dst_ip + "|" +
+                                         std::to_string(ip6.fragment_next_header) + "|" +
+                                         std::to_string(ip6.fragment_identification);
+                out.is_ip_fragment = true;
+                out.ip_fragment_id = ip6.fragment_identification;
+                out.ip_fragment_offset = static_cast<size_t>(ip6.fragment_offset) * 8;
+                out.ip_more_fragments = ip6.fragment_more;
+                std::vector<uint8_t> ip_fragment_storage;
+                ByteSpan ip_reassembled_payload;
+                // ip6.fragment_raw_payload, NOT ip6.payload -- see Ipv6Header::fragment_raw_payload's
+                // own comment. For the offset-0 fragment, ip6.payload has had any further-walked
+                // extension header (Destination Options) consumed/interpreted away, which would
+                // silently drop those bytes from the reassembled datagram and misalign everything
+                // after them; fragment_raw_payload preserves them at their real wire offset.
+                if (!reassemble_ip_fragment(6, group_key, ip6.fragment_identification, out.ip_fragment_offset,
+                                             ip6.fragment_more, ip6.fragment_raw_payload, out, ip_fragment_storage,
+                                             ip_reassembled_payload)) {
+                    return out;
+                }
+                // Re-walk the now-complete, raw Fragmentable Part from scratch to find the real
+                // upper-layer protocol and payload -- deliberately not using THIS (possibly
+                // non-offset-0) completing fragment's own ip6.next_header, which is only ever
+                // resolved on the offset-0 fragment (RFC 8200). Correct regardless of arrival order
+                // or which fragment happened to complete the reassembly -- see
+                // resolve_ipv6_fragment_upper_layer's own declaration comment (ipv6.hpp).
+                Ipv6FragmentResolution resolved =
+                    resolve_ipv6_fragment_upper_layer(ip6.fragment_next_header, ip_reassembled_payload);
+                return decode_ip_payload(std::move(out), resolved.upper_protocol, resolved.upper_payload,
+                                          ip6.hop_limit, index, /*ip_version=*/6,
+                                          /*ipv4_src_addr_for_igrp=*/0,
+                                          /*ipv6_src_addr=*/ip6.src_addr, /*ipv6_dst_addr=*/ip6.dst_addr);
+            }
             return decode_ip_payload(std::move(out), ip6.next_header, ip6.payload, ip6.hop_limit, index,
                                       /*ip_version=*/6, /*ipv4_src_addr_for_igrp=*/0,
                                       /*ipv6_src_addr=*/ip6.src_addr, /*ipv6_dst_addr=*/ip6.dst_addr);
@@ -1466,6 +1689,31 @@ DecodedPacket Decoder::decode(const PcapPacket& packet, uint32_t link_type, size
                                  " trailing byte(s) after the IP header's declared total length were "
                                  "trimmed (almost always Ethernet minimum-frame-size padding, not real "
                                  "payload)");
+        }
+        // IP fragment reassembly (ROADMAP item 102) -- see Decoder::reassemble_ip_fragment's own
+        // declaration comment (decoder.hpp). Matches attack_detect.cpp's own identical is_fragment
+        // expression verbatim; that call above stays completely independent of, and unaffected by,
+        // this new gate -- attack-signature detection on the raw per-fragment data vs. this
+        // engine's own cross-packet correctness/decodability concern.
+        bool is_fragment = ip.flag_mf || ip.fragment_offset != 0;
+        if (is_fragment) {
+            std::string group_key = "4|" + out.src_ip + "->" + out.dst_ip + "|" +
+                                     std::to_string(ip.protocol) + "|" + std::to_string(ip.identification);
+            out.is_ip_fragment = true;
+            out.ip_fragment_id = ip.identification;
+            out.ip_fragment_offset = static_cast<size_t>(ip.fragment_offset) * 8;
+            out.ip_more_fragments = ip.flag_mf;
+            std::vector<uint8_t> ip_fragment_storage;
+            ByteSpan ip_reassembled_payload;
+            if (!reassemble_ip_fragment(4, group_key, ip.identification, out.ip_fragment_offset, ip.flag_mf,
+                                         ip.payload, out, ip_fragment_storage, ip_reassembled_payload)) {
+                return out;
+            }
+            // ip.protocol is invariant across every fragment of one IPv4 datagram (unlike IPv6's
+            // next_header), so it's always correct to dispatch on directly here, regardless of
+            // which fragment happened to complete the reassembly.
+            return decode_ip_payload(std::move(out), ip.protocol, ip_reassembled_payload, ip.ttl, index,
+                                      /*ip_version=*/4, /*ipv4_src_addr_for_igrp=*/ip.src_addr);
         }
         return decode_ip_payload(std::move(out), ip.protocol, ip.payload, ip.ttl, index, /*ip_version=*/4,
                                   /*ipv4_src_addr_for_igrp=*/ip.src_addr);

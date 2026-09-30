@@ -12142,24 +12142,25 @@ add_test(NAME max_coalesced_messages_hartip_stops_at_one
 set_tests_properties(max_coalesced_messages_hartip_stops_at_one PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.50:52150 -> 192.168.1.10:5094 \\(hart-ip\\)  \\[hartip\\]  Request Keep Alive[^\n]*\n *note: stopped after 1 HART-IP message\\(s\\) in this one TCP payload, more may remain \\(safety cap\\)")
 
-# All seven flags are registered identically on all three subcommands (unlike the --modbus-port-
+# All eight flags are registered identically on all three subcommands (unlike the --modbus-port-
 # style port-list flags, which remain decode-only) -- confirmed here via --help rather than only
 # by cli_main.cpp's own add_resource_limit_options call sites, so a future accidental removal
-# from one subcommand's wiring is actually caught by the test suite.
+# from one subcommand's wiring is actually caught by the test suite. (ROADMAP item 102 added the
+# eighth, --max-active-fragment-groups.)
 add_test(NAME resource_limit_flags_present_in_decode_help
   COMMAND conduitscope decode --help)
 set_tests_properties(resource_limit_flags_present_in_decode_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries")
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries[^\n]*\n.*--max-active-fragment-groups")
 
 add_test(NAME resource_limit_flags_present_in_policy_validate_help
   COMMAND conduitscope policy validate --help)
 set_tests_properties(resource_limit_flags_present_in_policy_validate_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries")
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries[^\n]*\n.*--max-active-fragment-groups")
 
 add_test(NAME resource_limit_flags_present_in_inventory_help
   COMMAND conduitscope inventory --help)
 set_tests_properties(resource_limit_flags_present_in_inventory_help PROPERTIES
-  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries")
+  PASS_REGULAR_EXPRESSION "--max-reassembly-bytes[^\n]*\n.*--max-reassembly-segments[^\n]*\n.*--max-recursion-depth[^\n]*\n.*--max-decoded-objects[^\n]*\n.*--max-coalesced-messages[^\n]*\n.*--max-active-flows[^\n]*\n.*--max-flow-state-entries[^\n]*\n.*--max-active-fragment-groups")
 
 # ============================================================================================
 # --max-active-flows / --max-flow-state-entries (docs/reviews/2026-09-chatgpt-security-review-
@@ -12210,6 +12211,148 @@ add_test(NAME max_flow_state_entries_unset_still_pairs
 set_tests_properties(max_flow_state_entries_unset_still_pairs PROPERTIES
   PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 100"
   FAIL_REGULAR_EXPRESSION "no outstanding request found")
+
+# ============================================================================================
+# IPv4/IPv6 fragment reassembly (Decoder::reassemble_ip_fragment, decoder.cpp; ROADMAP item 102).
+# tests/sample_ip_fragment_reassembly.pcap (tools/make_sample_pcap.py's own
+# build_ip_fragment_reassembly_sample) covers in-order/out-of-order/overlapping IPv4 fragments,
+# both consistency-conflict cases, a clean IPv6 case, and the IPv6 extension-header-walk-fix case
+# (a Destination Options header between Fragment and the upper layer). The three resource-cap
+# scenarios are their own separate fixtures -- see build_ip_fragment_resource_exhaustion_sample's
+# and build_ip_fragment_max_active_fragment_groups_sample's own docstrings for why.
+# ============================================================================================
+
+# A) IPv4, in-order: packet 1 buffers fragment 1 of 2 (24 of an unknown total, MF=1); packet 2
+# (the offset-24, MF=0 fragment) completes it, and the completed decode is the REAL, full Modbus
+# response (Read Holding Registers, registers 0-9) -- not anything fragment-specific -- with the
+# reassembly note appearing first among packet 2's notes.
+add_test(NAME ip_fragment_reassembly_ipv4_in_order
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv4_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "#1[^\n]*\\[ip-fragment\\]  buffering IPv4 fragment reassembly for datagram id=40961: fragment 1, 24 of an unknown \\(awaiting last fragment\\) byte\\(s\\) received so far, waiting for more[^\n]*\n#2[^\n]*\\[modbus\\]  Read Holding Registers: response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^\n]*\n *note: reassembled an IPv4 datagram \\(id=40961\\) from 49 byte\\(s\\) spanning 2 fragment\\(s\\)")
+
+# The completed decode is the ordinary full protocol decode even WITHOUT --verbose (the reassembly
+# note is verbose-only, same as every other note in this codebase, but the summary/protocol itself
+# never depends on --verbose).
+add_test(NAME ip_fragment_reassembly_ipv4_in_order_no_verbose_still_decodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text)
+set_tests_properties(ip_fragment_reassembly_ipv4_in_order_no_verbose_still_decodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2[^\n]*\\[modbus\\]  Read Holding Registers: response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09"
+  FAIL_REGULAR_EXPRESSION "note:")
+
+# B) IPv4, out-of-order: the MF=0 (last) fragment arrives FIRST (packet 3, offset 24, declares a
+# 49-byte total from just its own 25 bytes) and the offset-0 fragment arrives SECOND (packet 4),
+# completing the reassembly on arrival despite being chronologically second -- proving completion
+# isn't tied to arrival order, only to full byte coverage.
+add_test(NAME ip_fragment_reassembly_ipv4_out_of_order
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv4_out_of_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3[^\n]*\\[ip-fragment\\]  buffering IPv4 fragment reassembly for datagram id=45057: fragment 1, 25 of 49 declared byte\\(s\\) received so far, waiting for more[^\n]*\n#4[^\n]*\\[modbus\\]  Read Holding Registers: response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09[^\n]*\n *note: reassembled an IPv4 datagram \\(id=45057\\) from 49 byte\\(s\\) spanning 2 fragment\\(s\\)")
+
+# C) IPv4, overlap: fragment 2 re-sends the last 8 bytes fragment 1 already covered, with
+# different (corrupted, 0xff) content -- first-write-wins keeps fragment 1's real bytes, so the
+# completed decode is still the correct, uncorrupted Modbus response. Also proves this coexists
+# cleanly with attack_detect.cpp's own, separate, unconditional Teardrop detection (an overlapping
+# fragment is exactly that attack's structural shape) -- both fire, neither breaks the other.
+### The overlap must not have corrupted the reassembled bytes -- the completed decode is still the
+# real, correct Modbus response (all 10 registers, values 0-9), not truncated or garbled, on the
+# SAME summary line that also carries the Teardrop attack-signature tag -- proving both features
+# fire on the one completed packet without either corrupting the other's output.
+add_test(NAME ip_fragment_reassembly_ipv4_overlap_first_write_wins
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv4_overlap_first_write_wins PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers: response: 20 data byte\\(s\\) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09  \\[attack: teardrop\\][^\n]*\n *note: Teardrop:[^\n]*\n *note: overlapping IP fragment bytes for datagram id=49153 -- first-received data kept for the overlapping range\n *note: reassembled an IPv4 datagram \\(id=49153\\) from 49 byte\\(s\\) spanning 2 fragment\\(s\\)")
+
+# D) IPv4 conflict (a): a second "last" (MF=0) fragment disagreeing with an already-established
+# total length -- abandon the group and retry fresh from that fragment (the restart is visible as
+# a second "fragment 1" for the same datagram id right after the conflict note).
+add_test(NAME ip_fragment_reassembly_ipv4_conflict_total_length_mismatch
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv4_conflict_total_length_mismatch PROPERTIES
+  PASS_REGULAR_EXPRESSION "buffering IPv4 fragment reassembly for datagram id=53249: fragment 1, 8 of 40 declared byte\\(s\\) received so far, waiting for more\n *note: IP fragment reassembly conflict for datagram id=53249 \\(a fragment's span disagrees with this datagram's already-established 24-byte total length\\) -- abandoning it, retrying fresh from this fragment")
+
+# E) IPv4 conflict (b): a fragment whose own span reaches PAST an already-established total
+# length (not itself claiming to be "last") -- same abandon-and-retry-fresh handling.
+add_test(NAME ip_fragment_reassembly_ipv4_conflict_span_exceeds_total
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv4_conflict_span_exceeds_total PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: IP fragment reassembly conflict for datagram id=57345 \\(a fragment's span disagrees with this datagram's already-established 24-byte total length\\) -- abandoning it, retrying fresh from this fragment")
+
+# F) IPv6, clean in-order: no extension headers at all -- the common case.
+add_test(NAME ip_fragment_reassembly_ipv6_clean_in_order
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv6_clean_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "buffering IPv6 fragment reassembly for datagram id=1627389953: fragment 1, 16 of an unknown \\(awaiting last fragment\\) byte\\(s\\) received so far, waiting for more[^\n]*\n#[0-9]+[^\n]*\n *note: reassembled an IPv6 datagram \\(id=1627389953\\) from 48 byte\\(s\\) spanning 2 fragment\\(s\\)")
+
+# G) IPv6, the extension-header-walk-fix case (ROADMAP item 102's own manual-verification catch):
+# a Destination Options header sits between Fragment and the real upper-layer (UDP) header on the
+# offset-0 fragment. Fragment 2's own raw continuation bytes are deliberately crafted to begin
+# with what WOULD be misread as another Destination-Options header if the walk incorrectly kept
+# going past a non-offset-0 fragment's own Fragment header -- proving both that (a) fragment 2's
+# bytes are correctly treated as opaque payload, not walked, and (b) the reassembled datagram
+# still decodes correctly (the real UDP header/ports/payload, not corrupted or misaligned) once
+# complete. Before this fix, these two fragments landed in different reassembly groups entirely
+# (keyed on the offset-0 fragment's own fully-resolved next_header, which disagreed with fragment
+# 2's un-resolved copy) and never completed at all.
+add_test(NAME ip_fragment_reassembly_ipv6_extension_header_walk_fix
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_ipv6_extension_header_walk_fix PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[udp\\]  UDP payload of 32 byte\\(s\\) on port 40020->40021\n *note: reassembled an IPv6 datagram \\(id=1644167170\\) from 48 byte\\(s\\) spanning 2 fragment\\(s\\)")
+
+# JSON field gating: is_ip_fragment/ip_fragment_id/ip_fragment_offset/ip_more_fragments are always
+# present on a fragment; ip_reassembled/ip_reassembled_fragment_count are present ONLY on the one
+# packet whose arrival completed the reassembly (packet 2 here, scenario A) -- never on the
+# buffering packet (packet 1), matching the BACnet-style nested-omission JSON convention
+# (output.cpp) rather than the "always present, null when inapplicable" convention base fields use.
+add_test(NAME ip_fragment_reassembly_json_field_gating
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" -T json)
+set_tests_properties(ip_fragment_reassembly_json_field_gating PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip_fragment_id\": 40961,\n *\"ip_fragment_offset\": 0,\n *\"ip_more_fragments\": true,[^}]*\"protocol\": \"ip-fragment\"")
+add_test(NAME ip_fragment_reassembly_json_field_gating_no_reassembled_flag_while_buffering
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" -T json)
+set_tests_properties(ip_fragment_reassembly_json_field_gating_no_reassembled_flag_while_buffering PROPERTIES
+  FAIL_REGULAR_EXPRESSION "\"ip_fragment_id\": 40961,\n *\"ip_fragment_offset\": 0,\n *\"ip_more_fragments\": true,[^}]*\"ip_reassembled\"")
+add_test(NAME ip_fragment_reassembly_json_field_gating_reassembled_on_completion
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_reassembly.pcap" -T json)
+set_tests_properties(ip_fragment_reassembly_json_field_gating_reassembled_on_completion PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"ip_fragment_id\": 40961,\n *\"ip_fragment_offset\": 24,\n *\"ip_more_fragments\": false,\n *\"ip_reassembled\": true,\n *\"ip_reassembled_fragment_count\": 2,")
+
+# --max-reassembly-bytes / --max-reassembly-segments applied to IP fragment reassembly:
+# sample_ip_fragment_resource_exhaustion.pcap (build_ip_fragment_resource_exhaustion_sample) has
+# two independent scenarios, one per flag -- see that function's own docstring for why each CTest
+# entry below applies only ONE tiny override at a time.
+add_test(NAME ip_fragment_reassembly_max_reassembly_bytes_abandons
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_resource_exhaustion.pcap" --format text --max-reassembly-bytes 32 --verbose)
+set_tests_properties(ip_fragment_reassembly_max_reassembly_bytes_abandons PROPERTIES
+  PASS_REGULAR_EXPRESSION "#2[^\n]*\\[ip-fragment\\]  abandoned IPv4 fragment reassembly for datagram id=61441 \\(exceeded its safety cap\\)\n *note: IP fragment reassembly for datagram id=61441 exceeded its safety cap \\(40 byte\\(s\\) across 2 fragment\\(s\\)\\) -- abandoning it; this fragment's own bytes are not decodable on their own")
+
+add_test(NAME ip_fragment_reassembly_max_reassembly_segments_abandons
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_resource_exhaustion.pcap" --format text --max-reassembly-segments 2 --verbose)
+set_tests_properties(ip_fragment_reassembly_max_reassembly_segments_abandons PROPERTIES
+  PASS_REGULAR_EXPRESSION "#5[^\n]*\\[ip-fragment\\]  abandoned IPv4 fragment reassembly for datagram id=61697 \\(exceeded its safety cap\\)\n *note: IP fragment reassembly for datagram id=61697 exceeded its safety cap \\(40 byte\\(s\\) across 3 fragment\\(s\\)\\) -- abandoning it; this fragment's own bytes are not decodable on their own")
+
+# Unset (the default): neither scenario's datagram (40 bytes, 2-3 fragments) is anywhere near the
+# compiled-in 65535-byte/8192-fragment defaults, so neither cap-hit note appears at all.
+add_test(NAME ip_fragment_reassembly_max_reassembly_bytes_segments_unset_no_abandon
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_resource_exhaustion.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_max_reassembly_bytes_segments_unset_no_abandon PROPERTIES
+  PASS_REGULAR_EXPRESSION "waiting for more"
+  FAIL_REGULAR_EXPRESSION "exceeded its safety cap")
+
+# --max-active-fragment-groups: sample_ip_fragment_max_active_fragment_groups.pcap
+# (build_ip_fragment_max_active_fragment_groups_sample) has three DISTINCT, never-completing
+# fragment groups; capped to 2, the third group's own arrival must evict one of the first two.
+add_test(NAME ip_fragment_reassembly_max_active_fragment_groups_evicts
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_max_active_fragment_groups.pcap" --format text --max-active-fragment-groups 2 --verbose)
+set_tests_properties(ip_fragment_reassembly_max_active_fragment_groups_evicts PROPERTIES
+  PASS_REGULAR_EXPRESSION "#3[^\n]*\\[ip-fragment\\]  buffering IPv4 fragment reassembly for datagram id=61955: fragment 1, 8 of an unknown \\(awaiting last fragment\\) byte\\(s\\) received so far, waiting for more\n *note: active IP fragment-reassembly group limit \\(2\\) reached -- evicted an existing in-progress reassembly on another datagram to make room for this one \\(--max-active-fragment-groups\\)")
+
+# Unset (the default, 5,000): all three groups coexist, no eviction note anywhere.
+add_test(NAME ip_fragment_reassembly_max_active_fragment_groups_unset_no_eviction
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ip_fragment_max_active_fragment_groups.pcap" --format text --verbose)
+set_tests_properties(ip_fragment_reassembly_max_active_fragment_groups_unset_no_eviction PROPERTIES
+  PASS_REGULAR_EXPRESSION "waiting for more"
+  FAIL_REGULAR_EXPRESSION "active IP fragment-reassembly group limit")
 
 # --------------------------------------------------------------------------
 # ARP (RFC 826, EtherType 0x0806, arp.hpp) -- Stage 2 new-protocol work, not a migration (see

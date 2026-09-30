@@ -429,6 +429,11 @@ struct ResourceLimitCliVars {
     // resource_limits.hpp's own comments on max_active_flows/max_flow_state_entries.
     size_t max_active_flows = 0;
     size_t max_flow_state_entries = 0;
+    // ROADMAP item 102: same "evict to cap a COUNT of distinct in-progress groups" shape as the
+    // two fields above, for IP fragment reassembly (decoder.cpp's ip_fragment_reassembly_) instead
+    // of TCP flows/protocol session state. See resource_limits.hpp's own comment on
+    // max_active_fragment_groups.
+    size_t max_active_fragment_groups = 0;
 };
 
 void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
@@ -436,16 +441,18 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "--max-reassembly-bytes", vars.max_reassembly_bytes,
            "Override every cross-segment payload-buffering byte cap at once: the general TCP "
            "reassembly path (default 16 MiB), DNP3 fragment reassembly (default 64 KiB), COTP "
-           "TSDU reassembly (default 1 MiB), and OPC UA's/FF-HSE's own declared-length "
-           "plausibility ceiling (default 16 MiB each). 0 = leave every site at its own default "
-           "(see docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping)")
+           "TSDU reassembly (default 1 MiB), OPC UA's/FF-HSE's own declared-length plausibility "
+           "ceiling (default 16 MiB each), and IPv4/IPv6 fragment reassembly's own per-datagram "
+           "ceiling (default 65,535 bytes). 0 = leave every site at its own default (see "
+           "docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping)")
         ->capture_default_str();
     cmd->add_option(
            "--max-reassembly-segments", vars.max_reassembly_segments,
            "Override every cross-segment frame/segment-count cap at once: the general TCP "
            "reassembly path (default 20,000 segments), DNP3 fragment reassembly (default 500 "
-           "frames), and COTP TSDU reassembly (default 2,000 frames). 0 = leave every site at "
-           "its own default")
+           "frames), COTP TSDU reassembly (default 2,000 frames), and IPv4/IPv6 fragment "
+           "reassembly's own per-datagram fragment-count ceiling (default 8,192 fragments). 0 = "
+           "leave every site at its own default")
         ->capture_default_str();
     cmd->add_option(
            "--max-recursion-depth", vars.max_recursion_depth,
@@ -485,6 +492,13 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and more), combined. 0 (the "
            "default) applies the built-in default of 250,000")
         ->capture_default_str();
+    cmd->add_option(
+           "--max-active-fragment-groups", vars.max_active_fragment_groups,
+           "Cap the number of distinct in-progress IP fragment reassembly groups (decoder.cpp) "
+           "tracked at once, regardless of how many distinct fragmented datagrams the capture "
+           "contains -- an existing group's own state being updated never counts against this. "
+           "0 (the default) applies the built-in default of 5,000")
+        ->capture_default_str();
 }
 
 ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
@@ -496,6 +510,7 @@ ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
     if (vars.max_coalesced_messages != 0) limits.max_coalesced_messages = vars.max_coalesced_messages;
     if (vars.max_active_flows != 0) limits.max_active_flows = vars.max_active_flows;
     if (vars.max_flow_state_entries != 0) limits.max_flow_state_entries = vars.max_flow_state_entries;
+    if (vars.max_active_fragment_groups != 0) limits.max_active_fragment_groups = vars.max_active_fragment_groups;
     return limits;
 }
 

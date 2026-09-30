@@ -145,20 +145,58 @@ struct ResourceLimits {
     // observe a cap of exactly 0 (finding 3, same review as above). As with max_active_flows, 0
     // and "left unset" now both resolve to kDefaultMaxFlowStateEntries rather than to unbounded.
     std::optional<size_t> max_flow_state_entries;
+
+    // IP fragment reassembly (decoder.cpp's Decoder::reassemble_ip_fragment; ROADMAP item 102) --
+    // the same "many distinct flows/sessions" shape as max_active_flows/max_flow_state_entries
+    // above, applied to Decoder::ip_fragment_reassembly_ instead: bounds how many DISTINCT
+    // in-progress fragment-reassembly groups (one per fragmented IPv4/IPv6 datagram) can be
+    // tracked at once, regardless of how many a capture contains. Checked only when a fragment
+    // starts a brand-new group; an existing group's own state being updated by a later fragment
+    // never counts against this. Same 0-means-nullopt normalization and the same
+    // arbitrary-eviction-guarantees-the-same-property-as-LRU reasoning as max_active_flows's own
+    // comment above -- see kDefaultMaxActiveFragmentGroups below for why its default is set two
+    // orders of magnitude below kDefaultMaxActiveFlows.
+    std::optional<size_t> max_active_fragment_groups;
 };
 
-// Compiled-in defaults applied via .value_or() at max_active_flows's/max_flow_state_entries's own
-// enforcement sites (decoder.cpp's Decoder::reassemble_tcp_payload; protocol_decoder.hpp's
+// Compiled-in defaults applied via .value_or() at max_active_flows's/max_flow_state_entries's/
+// max_active_fragment_groups's own enforcement sites (decoder.cpp's Decoder::
+// reassemble_tcp_payload/Decoder::reassemble_ip_fragment; protocol_decoder.hpp's
 // DecodeContext::flow_state<T>()) whenever the corresponding field above is std::nullopt -- see
 // each field's own comment above for why std::nullopt still means a real ceiling
 // (docs/reviews/2026-09-chatgpt-security-review-patch209.md's finding 2, item 65,
 // docs/DEVELOPMENT.md). Sized generously enough that no legitimate deployment (many thousands of
 // devices, many concurrent sessions) should ever observe an eviction caused by the default alone
 // -- only a capture engineered to hold many more distinct flows/sessions than that should reach
-// it. Both are plain runtime ceilings, not stored per-entry costs -- see max_active_flows's own
+// it. All three are plain runtime ceilings, not stored per-entry costs -- see max_active_flows's own
 // comment above for how its worst-case memory interacts with --max-reassembly-bytes.
 inline constexpr size_t kDefaultMaxActiveFlows = 100000;
 inline constexpr size_t kDefaultMaxFlowStateEntries = 250000;
+// Two orders of magnitude below kDefaultMaxActiveFlows: each fragment-reassembly group can hold up
+// to kDefaultMaxIpFragmentBytes (see below) worth of buffered bytes -- unlike a TCP flow-reassembly
+// entry, which is typically far smaller in practice -- so a much lower group-count ceiling keeps
+// worst-case memory bounded to a few hundred MB (5,000 x 65,535 bytes ~= 320 MB) while still being
+// far larger than any legitimate OT/ICS capture should ever need: IP fragmentation is rare in this
+// traffic (most ICS protocol PDUs are well under typical MTU), unlike distinct TCP flows, which are
+// common enough to justify kDefaultMaxActiveFlows's much larger ceiling.
+inline constexpr size_t kDefaultMaxActiveFragmentGroups = 5000;
+
+// The true IPv4/IPv6 non-jumbogram datagram size ceiling (RFC 791/RFC 8200 -- a 13-bit
+// fragment-offset field, in 8-byte units, plus a fragment's own payload, cannot legitimately
+// describe a datagram larger than this) -- applied at Decoder::reassemble_ip_fragment's own
+// per-group byte-cap check via `resource_limits().max_reassembly_bytes.value_or(...)`, the SAME
+// shared field reassemble_tcp_payload/dnp3.cpp/cotp.cpp already use for their own byte caps (see
+// max_reassembly_bytes's own comment above), just a sixth site with its own much smaller default.
+// Also closes a real crafted-input concern: a fragment claiming both a large offset AND a large
+// payload could otherwise push a group's implied span far past any real datagram's bound before
+// this check catches it.
+inline constexpr size_t kDefaultMaxIpFragmentBytes = 65535;
+// 65535 / 8 (the smallest a non-last fragment's length may legitimately be, per RFC 791/RFC 8200's
+// own 8-byte-alignment requirement on every fragment but the last) -- the most fragments any single
+// legitimate datagram could ever be split into. Applied at reassemble_ip_fragment's own per-group
+// fragment-count check via the SAME shared `max_reassembly_segments` field reassemble_tcp_payload/
+// dnp3.cpp/cotp.cpp already use, a fourth site with its own smaller default.
+inline constexpr size_t kDefaultMaxFragmentsPerDatagram = 8192;
 
 // Returns the currently active limits for THIS THREAD (default-constructed, i.e. every field
 // std::nullopt, until set_resource_limits has been called at least once on this thread). Callable

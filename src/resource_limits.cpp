@@ -28,7 +28,8 @@ const ResourceLimits& resource_limits() { return mutable_resource_limits(); }
 void set_resource_limits(const ResourceLimits& limits) {
     // Security fix (finding 3, docs/reviews/2026-09-chatgpt-security-review-patch209.md,
     // "--max-active-flows 0 can cause invalid iterator erasure"): normalize a literal 0 for
-    // max_active_flows/max_flow_state_entries to std::nullopt HERE, the single point every caller
+    // max_active_flows/max_flow_state_entries (and, ROADMAP item 102, max_active_fragment_groups --
+    // the identical "evict to cap a COUNT" shape) to std::nullopt HERE, the single point every caller
     // of this function (Decoder's constructor, ScopedResourceLimits, and any direct library/API
     // caller) ends up going through -- so neither Decoder::reassemble_tcp_payload's nor
     // DecodeContext::flow_state<T>()'s own enforcement code (decoder.cpp / protocol_decoder.hpp)
@@ -51,6 +52,9 @@ void set_resource_limits(const ResourceLimits& limits) {
     }
     if (normalized.max_flow_state_entries && *normalized.max_flow_state_entries == 0) {
         normalized.max_flow_state_entries.reset();
+    }
+    if (normalized.max_active_fragment_groups && *normalized.max_active_fragment_groups == 0) {
+        normalized.max_active_fragment_groups.reset();
     }
     mutable_resource_limits() = normalized;
 }

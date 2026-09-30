@@ -229,6 +229,22 @@ conduitscope decode (-r FILE | -i INTERFACE) [options]
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+| `--max-reassembly-bytes N` | `0` (leave every site at its own default) | Override every cross-segment payload-buffering byte cap at once: the general TCP reassembly path (default 16 MiB), DNP3 fragment reassembly (default 64 KiB), COTP TSDU reassembly (default 1 MiB), OPC UA's/FF-HSE's own declared-length plausibility ceiling (default 16 MiB each), and IPv4/IPv6 fragment reassembly's own per-datagram ceiling (default 65,535 bytes). See docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping. |
+| `--max-reassembly-segments N` | `0` (leave every site at its own default) | Override every cross-segment frame/segment-count cap at once: the general TCP reassembly path (default 20,000 segments), DNP3 fragment reassembly (default 500 frames), COTP TSDU reassembly (default 2,000 frames), and IPv4/IPv6 fragment reassembly's own per-datagram fragment-count ceiling (default 8,192 fragments). |
+| `--max-recursion-depth N` | `0` (leave every site at its own default) | Override every recursive-decode depth cap at once: MMS Data-value nesting (default 32), EtherNet/IP CIP Multiple_Service_Packet/Unconnected_Send nesting (default 4), MPLS label-stack depth (default 16), S7comm-Plus struct/item nesting (default 16), and GOOSE Data ASN.1 nesting (default 6). |
+| `--max-decoded-objects N` | `0` (leave every site at its own default) | Override every per-message decoded-object/value/list-entry cap at once (~43 individually-named constants across DNP3/IEC104/GOOSE/EtherNet-IP/S7comm-Plus/MQTT/decoder.cpp's own summary lists, plus the 9 duplicated 50-entry list caps shared by EIGRP/OSPF/PIM/IGMP/ICMP/IGRP/RIP/VRRP/HSRP). Too many constants to enumerate here -- see docs/DEVELOPMENT.md item 7 for the full mapping. |
+| `--max-coalesced-messages N` | `0` (leave every site at its own default) | Override every "N application-layer messages found coalesced in one TCP/UDP payload" cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, and OPC UA (all default 50). |
+| `--max-active-flows N` | `0` (built-in default 100,000) | Cap the number of distinct TCP flows the general cross-segment reassembly path (decoder.cpp) tracks state for at once, regardless of how many distinct flows the capture contains -- an existing flow's own state being updated never counts against this. A flow that never needs reassembly at all is never tracked in the first place either way. See docs/DEVELOPMENT.md's security review write-up. |
+| `--max-flow-state-entries N` | `0` (built-in default 250,000) | Cap the TOTAL number of distinct sessions/flows tracked at once across every protocol's own state (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM, Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and more), combined. |
+| `--max-active-fragment-groups N` | `0` (built-in default 5,000) | Cap the number of distinct in-progress IP fragment reassembly groups (decoder.cpp) tracked at once, regardless of how many distinct fragmented datagrams the capture contains -- an existing group's own state being updated never counts against this. See "IP fragment reassembly" under OUTPUT FORMATS below. |
+
+Every option in this block is a decode-time resource-exhaustion safety valve, not
+something a normal run needs to touch -- each caps the cost of processing a single
+adversarial or malformed capture, never a capture's total size. `policy validate`,
+`inventory`, and `detect` register this identical set of eight flags too (same
+names, same defaults, same underlying option-registration code) even though
+their own OPTIONS tables below don't all spell out every one individually --
+see each subcommand's own `--help` output for its authoritative list.
 
 ### Display filters (`-Y`)
 
@@ -1388,7 +1404,7 @@ MITRE mapping table and exactly how each of the three dimensions is decided.
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each finding's server port. |
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
-| `--max-reassembly-bytes N`, `--max-reassembly-segments N`, `--max-recursion-depth N`, `--max-decoded-objects N`, `--max-coalesced-messages N` | *(compile-time defaults)* | Same five resource-exhaustion-limit overrides as `decode`'s own flags of the same name. |
+| `--max-reassembly-bytes N`, `--max-reassembly-segments N`, `--max-recursion-depth N`, `--max-decoded-objects N`, `--max-coalesced-messages N`, `--max-active-flows N`, `--max-flow-state-entries N`, `--max-active-fragment-groups N` | *(compile-time defaults)* | Same eight resource-exhaustion-limit overrides as `decode`'s own flags of the same name (see `decode`'s own OPTIONS above for what each one bounds). |
 | `--max-detect-findings N` | `20,000` | Cap the number of distinct findings (always-notable findings and new-conduit candidates, checked independently) `DetectEngine` records per capture. `0` = leave it at its own compiled default. Past this, further genuinely new findings of that kind are not recorded and the report is marked incomplete (see "Resource bounds and OBSERVATION INCOMPLETE" below). |
 | `--max-detect-tracked-keys-per-map N` | `50,000` | Cap the number of distinct keys `DetectEngine` tracks in any one of its per-source/per-server novelty/burst-tracking maps, applied identically and independently to each map. `0` = leave it at its own compiled default. Past this, further new keys in that map are not tracked and the report is marked incomplete. |
 | `--max-detect-originators-per-server N` | `2,000` | Cap the number of distinct originator IPs `DetectEngine` tracks per server key inside its nine per-server originator/writer maps (the CIP/UMAS engineering-station-originator and similar new-vs-known checks). `0` = leave it at its own compiled default. Past this, further new originators for that server are not tracked and the report is marked incomplete. |
@@ -6172,14 +6188,41 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   DNP3 data-link frames landing in one TCP segment (common, since DNP3
   frames are small), which conduitscope handles separately -- see PROTOCOL
   COVERAGE's DNP3 section.
-- **No IPv6.** Only IPv4 is parsed; an IPv6 packet over Ethernet is reported
-  as `non-ip` (named "IPv6" -- see docs/PROTOCOL_COVERAGE.md's link/IP-layer
-  plumbing section -- but its own header is not opened), and over a raw-IP
-  link type falls through to `parse-error` instead (there is no Ethernet
-  ethertype field to name it by in that case).
-- **IPv4 fragmentation is not reassembled.** A fragmented IPv4 packet's TCP
-  header will very likely fail to parse and be reported as a parse-error on
-  the fragments after the first.
+- **IPv4 and IPv6 fragments are reassembled before transport-layer parsing.**
+  A fragmented IPv4 or IPv6 datagram's later fragments no longer fail to
+  parse as garbage TCP/UDP headers -- every fragment is buffered (reported
+  as protocol `ip-fragment`, with a `buffering ... fragment N, X of Y
+  byte(s) received so far` summary) until the full datagram is available,
+  at which point the fragment whose arrival completed it is decoded exactly
+  as if it had never been fragmented at all, with a `reassembled an IPvN
+  datagram (id=...) from N byte(s) spanning M fragment(s)` note. Fragments
+  can arrive out of order (the datagram completes whenever the last gap is
+  filled, regardless of which fragment fills it) and overlapping fragments
+  are handled first-write-wins (the earliest-received bytes for any
+  overlapping range are kept; see `attack_detect`'s separate, always-on
+  Teardrop detection for flagging a suspicious overlap as a security
+  signal, which this mechanism doesn't duplicate). A later fragment that
+  disagrees with an already-established datagram size (a second "last"
+  fragment declaring a different total length, or a fragment whose own
+  span reaches past one) abandons that datagram and starts fresh from the
+  disagreeing fragment, rather than guessing which is correct. Every
+  fragment gets `is_ip_fragment`/`ip_fragment_id`/`ip_fragment_offset`/
+  `ip_more_fragments` in JSON output; the one completing fragment
+  additionally gets `ip_reassembled`/`ip_reassembled_fragment_count`. Three
+  new resource caps bound this (see OPTIONS below): `--max-reassembly-bytes`/
+  `--max-reassembly-segments` gain a sixth/fourth site each (a single
+  datagram's total reassembled size, default 65,535 bytes -- the true
+  IPv4/IPv6 non-jumbogram ceiling -- and fragment count, default 8,192),
+  and `--max-active-fragment-groups` caps how many distinct in-progress
+  reassemblies are tracked at once (default 5,000, arbitrary eviction of an
+  existing one to make room for a new one when exceeded -- no idle/time-
+  based timeout, matching this project's own TCP-reassembly convention).
+  IPv6 fragmentation specifically: only the offset-0 fragment can legally
+  carry a Destination Options header between the Fragment header and the
+  upper layer (RFC 8200) -- conduitscope re-walks the fully reassembled
+  datagram from scratch once complete to find the real upper-layer
+  protocol and payload, so this never depends on which fragment happened
+  to complete the reassembly.
 - **Non-IPv4 Ethernet frames and non-TCP IPv4 payloads (including UDP) are
   named but not decoded, with eight exceptions (CIP I/O, PROFINET RT, GOOSE,
   Sampled Values, EtherCAT, BACnet/IP, HART-IP, and FF-HSE).** A deliberately

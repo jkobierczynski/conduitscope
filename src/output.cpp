@@ -5177,6 +5177,21 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     }
     out_ << "    \"src_ip\": " << (p.has_ip ? ("\"" + json_escape(p.src_ip) + "\"") : "null") << ",\n";
     out_ << "    \"dst_ip\": " << (p.has_ip ? ("\"" + json_escape(p.dst_ip) + "\"") : "null") << ",\n";
+    // IP fragment reassembly (ROADMAP item 102) -- "omit, never null" annotation convention (see
+    // write_modbus_json_fields's own umas-sub-frame comment, and BACnet's bacnet_segmented/
+    // bacnet_reassembly_completed nested gating), not the base-value "null when inapplicable"
+    // convention src_ip/dst_ip above use: fragmentation status is a layer-specific annotation, not
+    // a base decoded value every packet class has.
+    if (p.is_ip_fragment) {
+        out_ << "    \"is_ip_fragment\": true,\n";
+        out_ << "    \"ip_fragment_id\": " << p.ip_fragment_id << ",\n";
+        out_ << "    \"ip_fragment_offset\": " << p.ip_fragment_offset << ",\n";
+        out_ << "    \"ip_more_fragments\": " << (p.ip_more_fragments ? "true" : "false") << ",\n";
+    }
+    if (p.ip_reassembled) {
+        out_ << "    \"ip_reassembled\": true,\n";
+        out_ << "    \"ip_reassembled_fragment_count\": " << p.ip_reassembled_fragment_count << ",\n";
+    }
     bool has_port = p.has_tcp || p.has_udp;
     out_ << "    \"src_port\": " << (has_port ? std::to_string(p.src_port) : "null") << ",\n";
     out_ << "    \"dst_port\": " << (has_port ? std::to_string(p.dst_port) : "null") << ",\n";

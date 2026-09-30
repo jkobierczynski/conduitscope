@@ -14950,6 +14950,153 @@ it done as its own patch.
     for any of them, since it's checked against `decode`'s own top-level protocol name rather than
     a per-protocol field table.
 
+102. **IPv4 and IPv6 fragment reassembly for `decode`.** Jurgen's next punch-list item after `-Y`.
+    Before this, `Ipv4Header` (`ipv4.hpp`) already parsed `identification`/`flag_df`/`flag_mf`/
+    `fragment_offset` off the wire but never acted on them -- a fragmented IPv4 datagram's non-first
+    fragment was handed straight into TCP/UDP parsing as if it were a fresh transport header, almost
+    always producing `parse-error`. IPv6 support already existed and was wired into the decoder --
+    docs/USER_GUIDE.md's own "No IPv6" LIMITATIONS bullet had simply gone stale since ROADMAP item
+    24 -- but its Fragment (44) extension header was only skipped structurally; offset/M-flag/
+    identification were discarded, never even parsed onto `Ipv6Header`. Neither IP version
+    reassembled anything. This item adds real fragment reassembly for both, following this
+    codebase's existing architectural convention for its closest analog, TCP stream reassembly
+    (`Decoder::reassemble_tcp_payload`), and the shared `ResourceLimits` bounded-state convention.
+
+    **Engine.** `Decoder::reassemble_ip_fragment` (`decoder.cpp`, declared in `decoder.hpp`) mirrors
+    `reassemble_tcp_payload`'s own extract-then-conditionally-reinsert idiom: extract the
+    `IpFragmentGroup` for a `group_key` (or default-construct one), grow its `data` buffer
+    (zero-filled) to cover the new fragment's span, copy in only the byte ranges not already covered
+    by `received` (first-write-wins on any content overlap), merge the new span into `received`'s
+    sorted/coalesced interval list (`>=` not `>` when coalescing, so a touching-but-not-overlapping
+    range still merges -- otherwise the completion check below can never fire), and check for
+    completion: `have_last && received.size() == 1 && received[0] == {0, total_length}`. A completed
+    group's bytes move out via `std::move` and the entry is erased, never reinserted -- the same
+    "don't retain completed/empty entries" discipline `reassemble_tcp_payload` already established.
+    An incomplete group is reinserted and the caller gets a `protocol: "ip-fragment"` packet with a
+    `buffering ... fragment N, X of Y byte(s) received so far` summary, shown even without
+    `--verbose` (matching TCP reassembly's own buffering-summary convention).
+
+    **Overlap policy (judgment call).** First-write-wins, not "reject the whole group on any
+    overlap": overlapping fragments are sometimes benign retransmission duplicates, not only
+    Teardrop-style attacks, and `attack_detect.cpp`'s existing, unrelated, already-unconditionally-
+    running Teardrop detection is what's responsible for flagging a genuinely suspicious overlap as
+    a security signal -- this engine's job is best-effort correctness, not redundant security
+    signaling. Confirmed against a real fixture: an overlapping-fragment scenario correctly produces
+    both the completed Modbus decode (using the earliest-received bytes for the overlapping range)
+    AND attack_detect's own `[attack: teardrop]` tag on the same packet line, coexisting exactly as
+    designed.
+
+    **Two conflict cases, one policy.** If a group already has `have_last == true` and a new
+    fragment disagrees with the already-established `total_length` -- either a second "last"
+    fragment declaring a different total length, or a fragment whose own span reaches past the
+    established total -- the group is abandoned (a note is pushed naming the datagram id) and
+    treated as the first fragment of a brand-new group starting fresh from the disagreeing fragment,
+    rather than guessing which of the two is correct. Same "abandon and retry fresh" shape
+    `reassemble_tcp_payload` already uses for its own sequence-gap case.
+
+    **Two safety caps, checked before merging.** `--max-reassembly-bytes` (default 65,535 -- the
+    true IPv4/IPv6 non-jumbogram datagram ceiling; also closes a real overflow-style attack, since a
+    crafted fragment with a large offset AND a large payload could otherwise claim an end position
+    far past any real datagram's bound) and `--max-reassembly-segments` (default 8,192, i.e.
+    65535/8, the minimum-fragment-size upper bound) each gained fragment reassembly as a new site
+    (sixth and fourth respectively). Exceeding either abandons the group outright (erased, not
+    reinserted) rather than truncating it -- this one packet's own bytes are simply not decodable,
+    the same outcome pre-feature code already had for any non-first fragment. A new
+    `--max-active-fragment-groups` (default 5,000; worst case 5,000 x 65,535 bytes ~= 320 MB, two
+    orders of magnitude below `--max-active-flows`'s own 100,000 default -- appropriately smaller
+    since legitimate OT/ICS traffic fragments far more rarely than it opens distinct TCP flows, most
+    ICS PDUs being well under typical MTU) bounds the total number of distinct in-progress groups,
+    with the same arbitrary-eviction-on-cap-hit, no-idle-timeout policy `--max-active-flows` already
+    established, wired through `cli_main.cpp`'s existing `ResourceLimitCliVars`/
+    `add_resource_limit_options`/`build_resource_limits` machinery.
+
+    **Three IPv6 bugs found and fixed during manual verification** (the plan's own original design
+    for the IPv6 side turned out to be insufficient in three separate, cascading ways -- none of
+    these were caught by review, only by hand-building a fixture with a Destination Options header
+    between Fragment and UDP on the offset-0 fragment and tracing the wrong output back to its
+    cause):
+
+    - *Group-key instability.* The original design keyed IPv6 reassembly groups by `next_header` --
+      but `next_header` means different things on different fragments of the *same* datagram: on the
+      offset-0 fragment it's fully resolved (walked through Destination Options to the real upper
+      protocol, e.g. `17`/UDP); on any other fragment, per RFC 8200, only the offset-0 fragment
+      legitimately carries the post-Fragment extension-header chain, so `next_header` there is left
+      as the Fragment header's own raw immediate value (e.g. `60`/DestinationOptions). Two fragments
+      of one datagram landed in two different groups and never completed. **Fix**: added
+      `Ipv6Header::fragment_next_header`, captured unconditionally and directly from the Fragment
+      header's own bytes before any further-walk decision -- RFC 8200 guarantees this byte is
+      identical across every fragment of one datagram -- and used it (not `next_header`) as the
+      IPv6 group-key's protocol component.
+    - *Offset-0 fragment payload byte-misalignment.* Even after the group-key fix, the reassembled
+      datagram decoded to garbage. Traced to `hdr.payload`'s existing computation in `parse_ipv6`:
+      for the offset-0 fragment, it's sized against the cursor position *after* the full walk,
+      meaning any further extension header walked past on that fragment (Destination Options, here)
+      has its raw bytes physically stripped out of `payload` -- while the byte offset passed to
+      reassembly still claimed this payload started at absolute datagram offset 0. The reassembly
+      buffer silently lost those bytes, left zero-filled and never written. **Fix**: added
+      `Ipv6Header::fragment_raw_payload`, captured via `Cursor::rest()` immediately after reading
+      the Fragment header's own 8 bytes (before any further-walk branch runs), trimmed against
+      `payload_length` the same way `hdr.payload` is but relative to the Fragment-header-end
+      position instead of the post-full-walk position. `decoder.cpp`'s IPv6 call site now passes
+      `fragment_raw_payload` (not `payload`) to `reassemble_ip_fragment`, so byte offsets align
+      correctly across every fragment regardless of what the offset-0 fragment's own further walk
+      consumed.
+    - *Dispatch on unwalked bytes after reassembly.* With byte counts now correct, the completed
+      decode still produced wrong ports: the reassembled buffer's first bytes were the raw
+      Destination Options header, which the UDP decoder misread as a UDP header. This exposed that
+      even a correctly-resolved protocol *number* isn't enough -- the reassembled *payload* bytes
+      still need any further extension header stripped before being handed to the transport decoder,
+      and that stripping can only correctly happen after full reassembly, since a fragment split
+      could in principle divide the Destination Options header itself across two fragments. **Fix
+      (a simplification, not an addition)**: removed the `upper_protocol`/`upper_protocol_trustworthy`/
+      `ttl_or_hop_limit` machinery this work had initially added to `IpFragmentGroup`/
+      `reassemble_ip_fragment` to chase the first two bugs, and replaced it with
+      `resolve_ipv6_fragment_upper_layer(first_header_type, reassembled_data)` -- a new free
+      function in `ipv6.cpp` that re-walks the *complete* reassembled buffer from scratch, starting
+      from the RFC-8200-invariant `fragment_next_header`, mirroring `parse_ipv6`'s own inner walk
+      loop (Hop-by-Hop/Routing/Destination-Options/AH) but never throwing (catches `ParseError`
+      internally and falls back to the last-known-good position -- an explicit design guarantee
+      documented on the declaration) and never handling a second Fragment header (a reassembled
+      datagram can't legitimately contain one). Called once, by `decoder.cpp`'s IPv6 branch, right
+      after `reassemble_ip_fragment` returns true. This made the final design deterministic and
+      correct regardless of arrival order or which fragment happened to complete the reassembly --
+      and simpler than the original plan, since IPv4's own call site could revert to just using its
+      own invariant `ip.protocol` directly at completion, with no walking or resolution step needed
+      at all (no equivalent byte-stripping problem exists on the IPv4 side).
+
+    **Verification.** Manual smoke-testing of every new code path against real, hand-built fixtures
+    before trusting any CTest assertion's expected text: IPv4 in-order, out-of-order, and
+    first-write-wins overlap (confirmed coexisting with attack_detect's Teardrop tag, above); both
+    conflict cases (total-length mismatch, span-exceeds-total -- both abandon-and-retry-fresh); both
+    cap-hit cases (`--max-reassembly-bytes`, `--max-reassembly-segments` -- both abandon-without-
+    reinsert); `--max-active-fragment-groups` eviction; and the IPv6 extension-header-walk case,
+    which was not "already correct" as first assumed but instead surfaced the three cascading bugs
+    above. 16 new CTest entries formalize all of these against three new fixtures built by
+    `tools/make_sample_pcap.py` (`sample_ip_fragment_reassembly.pcap` for the general scenarios,
+    kept deliberately separate from `sample_ip_fragment_resource_exhaustion.pcap`'s byte/segment-cap
+    scenarios and `sample_ip_fragment_max_active_fragment_groups.pcap`'s three-never-completing-
+    groups eviction scenario -- each cap test needs an unambiguous, uncontaminated baseline, the same
+    fixture-isolation discipline already established for TCP reassembly's own
+    `sample_resource_exhaustion_active_flows.pcap`/`sample_resource_exhaustion_flow_state.pcap`
+    pair, since any two size-similar scenarios sharing one capture under a tiny global cap override
+    contaminate each other's exact-count assertions). `-T json` field-gating tests confirm
+    `is_ip_fragment`/`ip_fragment_id`/`ip_fragment_offset`/`ip_more_fragments` appear on every
+    fragment while `ip_reassembled`/`ip_reassembled_fragment_count` appear only on the one packet
+    that completed a reassembly. The three `CMakeLists.txt` `--help`-output chained-regex tests
+    asserting all resource-limit flags appear in `decode`'s/`policy validate`'s/`inventory`'s own
+    `--help` text were extended for the new eighth flag, `--max-active-fragment-groups`. Three new
+    fuzz corpus seeds (multi-frame, reusing `fuzz_packet_decode`'s existing 2-byte-length-prefixed
+    framing -- no new fuzz harness needed, since that harness already feeds a packet *sequence* to
+    one `Decoder` instance specifically to exercise cross-packet state, and the new
+    `ip_fragment_reassembly_` map is exactly that shape) extend the corpus with fragment/overlap/
+    conflict/cap-hit sequences from the start rather than leaving them to blind mutation alone. Full
+    CTest across all four standing build configs (default GCC `build` -- 2,311/2,311 passing;
+    Clang ASan/UBSan `build-fuzz` plus a fresh `fuzz_packet_decode` campaign against the augmented
+    corpus, specifically watching for any finding in the new byte-copying/reassembly code;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW cross-compile `build-mingw`,
+    build-only per this sandbox's established precedent), plus a clean-room extract-rebuild-test
+    cycle, before delivery.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
