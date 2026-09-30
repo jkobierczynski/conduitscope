@@ -870,7 +870,8 @@ struct DecodedPacket {
     // "pim" (IP protocol number 103, try_parse_pim, see pim_* fields and pim.hpp), "eigrp" (IP
     // protocol number 88, EigrpDecoder -- a zero-flat-field migrated protocol, see
     // DecodedPacket::result and eigrp.hpp), and "ospf" (IP
-    // protocol number 89, try_parse_ospf, see ospf_* fields and ospf.hpp) -- all four dispatched
+    // protocol number 89, OspfDecoder -- a zero-flat-field migrated protocol, see
+    // DecodedPacket::result and ospf.hpp) -- all four dispatched
     // regardless of port, the same IP-protocol-number posture as igmp/vrrp above; a non-matching
     // payload on any of these four IP protocol numbers still falls through to "non-tcp".
     std::string protocol;
@@ -963,51 +964,11 @@ struct DecodedPacket {
     // S7CommResult's own comment in s7comm.hpp for why (a ByteSpan-into-a-call-site-local-buffer
     // lifetime hazard specific to S7comm's Read Var/Write Var response values).
 
-    // Only set when protocol == "s7comm-plus" -- see s7commplus.hpp/try_parse_s7comm_plus. A
-    // DIFFERENT, independent application protocol from classic S7comm above despite the shared
-    // "s7comm" name and TCP port 102/TPKT/COTP transport -- kept as its own "protocol" value
-    // (not an s7comm variant flag) for the same reason MMS is its own protocol value despite
-    // sharing that transport too.
-    std::string s7plus_pdu_type_name;  // "Connect", "Data", "DataFW1_5", "Keep Alive" -- always
-                                         // set when protocol == "s7comm-plus"
-    bool s7plus_is_keepalive = false;
-    uint8_t s7plus_keepalive_seq = 0;   // only meaningful when s7plus_is_keepalive
-    bool s7plus_has_opcode = false;
-    std::string s7plus_opcode_name;     // "Request"/"Response"/"Notification"/"Response2"
-    bool s7plus_has_function = false;
-    uint16_t s7plus_function_code = 0;
-    std::string s7plus_function_name;   // e.g. "GetMultiVariables", or "Unknown (0xNNNN)"
-    bool s7plus_has_sequence_number = false;
-    uint16_t s7plus_sequence_number = 0;
-    bool s7plus_has_session_id = false;  // Request telegrams only
-    uint32_t s7plus_session_id = 0;
-    // True only for the Tier-1 functions this decoder fully decodes (GetMultiVariables,
-    // SetMultiVariables, SetVariable, DeleteObject) -- see s7commplus.hpp's file header for the
-    // full Tier-1/Tier-2 split and why. False means the function code was still named (see
-    // s7plus_function_name) but its body is shown only via `notes`, same "named but not decoded"
-    // convention as MMS's other 67 services or OPC UA's Tier 2 services.
-    bool s7plus_body_decoded = false;
-    bool s7plus_has_return_value = false;
-    int16_t s7plus_return_code = 0;
-    std::string s7plus_return_code_name;
-    // Item addresses (GetMultiVariables/SetMultiVariables requests, SetVariable/DeleteObject) --
-    // S7comm-Plus's own native symbolic (CRC+LID) or object-id addressing, see
-    // S7CommPlusItemAddress::tag in s7commplus.hpp. Capped at 50 entries so a heavily batched
-    // request can't blow up JSON output (same cap classic S7comm's own item tags used, back when
-    // they were a flat field here too -- see S7CommResult::items in s7comm.hpp now).
-    std::vector<std::string> s7plus_item_tags;
-    // Decoded {id, value} pairs -- response values (GetMultiVariables), or values being written
-    // (SetMultiVariables/SetVariable requests). Same 50-entry cap.
-    std::vector<std::string> s7plus_value_summaries;
-    // Per-item status from a GetMultiVariables/SetMultiVariables response's own errorvalue-list.
-    // Same 50-entry cap.
-    std::vector<std::string> s7plus_item_errors;
-    bool s7plus_has_integrity = false;
-    bool s7plus_integrity_digest_present = false;  // false when the digest bytes weren't there
-                                                      // to consume (a truncated capture) or,
-                                                      // pre-DataFW1_5-fix, a digest_len != 32
-    uint8_t s7plus_integrity_digest_length = 0;      // expected 32; digest bytes never verified
-    bool s7plus_has_trailer = false;
+    // S7comm-Plus is a zero-flat-field migrated protocol (extra-reader batch, finishing the
+    // registration-model decoder refactor) -- its fields (PDU type, keepalive, opcode/function,
+    // sequence/session id, item addresses/values/errors, integrity trailer) live in the
+    // S7CommPlusFrame carried by DecodedPacket::result, not here -- see output.cpp's
+    // write_s7comm_plus_json_fields and s7commplus.hpp's own S7CommPlusFrame struct.
 
     // DNP3 is a zero-flat-field migrated protocol (extra-reader batch) -- see
     // ProtocolDecoder/ProtocolResult in protocol_decoder.hpp: its fields live in the Dnp3Result
@@ -1258,30 +1219,12 @@ struct DecodedPacket {
     // protocol_decoder.hpp): its fields live in the EigrpMessage carried by DecodedPacket::result,
     // not here -- see output.cpp's write_eigrp_json_fields.
 
-    // Only set when protocol == "ospf" -- see try_parse_ospf in ospf.hpp. Which of the fields
-    // below are populated depends on ospf_type_name; see ospf.hpp's own OspfMessage for exactly
-    // which packet type populates which group.
-    std::string ospf_type_name;
-    std::string ospf_router_id;
-    std::string ospf_area_id;
-    std::string ospf_auth_type_name;
-    std::string ospf_hello_designated_router;         // Hello only
-    std::string ospf_hello_backup_designated_router;  // Hello only
-    std::vector<std::string> ospf_hello_neighbors;    // Hello only. Capped at 50.
-    bool ospf_hello_neighbors_truncated = false;
-    // One rendered "Type len N: LinkStateID AdvRouter Seq=... Age=...s" entry per LSA header, wire
-    // order. Capped at 50.
-    std::vector<std::string> ospf_dbd_lsa_headers;    // DB Description only
-    bool ospf_dbd_lsa_headers_truncated = false;
-    std::vector<std::string> ospf_ls_requests;        // LS Request only. Capped at 50.
-    bool ospf_ls_requests_truncated = false;
-    // Same one-line rendering as ospf_dbd_lsa_headers, but with a decoded body's own key fields
-    // appended when this LSA's type has one (see ospf.hpp) -- e.g. a Router-LSA's link count, a
-    // Network-LSA's mask, a Summary/ASBR-Summary/AS-External's metric.
-    std::vector<std::string> ospf_ls_update_lsas;     // LS Update only. Capped at 50.
-    bool ospf_ls_update_lsas_truncated = false;
-    std::vector<std::string> ospf_ls_ack_headers;     // LS Ack only. Capped at 50.
-    bool ospf_ls_ack_headers_truncated = false;
+    // OSPF is a zero-flat-field migrated protocol (finishing the registration-model decoder
+    // refactor) -- its fields (type/router id/area id, auth, Hello designated-router/neighbor
+    // lists, DB Description/LS Request/LS Update/LS Ack summaries) live in the OspfMessage carried
+    // by DecodedPacket::result, not here -- see output.cpp's write_ospf_json_fields. Which of
+    // OspfMessage's own field groups are populated depends on its type_name; see ospf.hpp's own
+    // OspfMessage for exactly which packet type populates which group.
 
     // Appended last, after every other field above, so this addition never shifts the position of
     // any existing one -- the same append-only discipline this struct's own writers already follow

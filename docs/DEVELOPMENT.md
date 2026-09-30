@@ -1402,6 +1402,85 @@ Discussed and adopted, in this order:
    the relocated formatting logic, and its `--stats` message-type/
    pass-through-command aggregates still tallying correctly through
    `p.result->as<HartIpResult>()`.
+
+   **Update: registration-model decoder refactor finished -- OSPF and
+   S7comm-Plus dual-write removal, plus three missing registry-vector
+   registrations.** Jurgen asked to "finish the migration," citing "about
+   48 of the roughly 51 protocols are still on the legacy dispatch path."
+   Before touching any code, an exhaustive census (independently
+   cross-checked, then verified again directly against every protocol's
+   own `ProtocolDecoder` subclass and every remaining `decoder.hpp` flat
+   field) found that figure stale: it dates to before the cheap/mid-size/
+   extra-reader batches above landed. The actual state at the time this
+   Update started was zero protocols with no `ProtocolDecoder` at all,
+   only **two** (OSPF, S7comm-Plus) still dual-writing `decoder.hpp` flat
+   fields alongside their `DecodedPacket::result`, and three decoders
+   (DHCPv6, DICOM, ICMPv6) that were already decoding correctly through
+   their own `decoder.cpp` call sites but were simply missing from
+   `protocol_registry.cpp`'s own audit-trail vectors -- a bookkeeping gap,
+   not a functional one. The real remaining scope was five small fixes,
+   not 48 migrations. This Update corrects the record and finishes both.
+
+   OSPF and S7comm-Plus were the last two dual-write holdouts, deliberately
+   left that way when migration batch 5 (OSPF's own `IpProtocol` gate) and
+   migration batch 2 (S7comm-Plus's own `CotpPayload` gate, alongside
+   already-migrated MMS/S7comm) landed. Both followed the exact
+   zero-flat-field pattern every prior batch used: `write_ospf_json_fields`/
+   `write_s7comm_plus_json_fields` added to `output.cpp` (the latter
+   relocating `ospf_lsa_header_summary`/`ospf_lsa_full_summary`/
+   `ospf_ls_request_summary`, previously `decoder.cpp`-local helpers, into
+   `output.cpp` alongside its own new writer -- unchanged apart from that
+   move), each reproducing its old inline JSON block's exact field-gating
+   logic; `decoder.cpp`'s own OSPF/S7comm-Plus call sites simplified to
+   `out.result = *result;`, in exactly the same textual position their old
+   `if` blocks always occupied (the COEXISTENCE RULE, see
+   `protocol_decoder.hpp`); `StatsWriter`'s two aggregate blocks read from
+   `p.result->as<OspfMessage>()`/`p.result->as<S7CommPlusFrame>()` instead
+   of the old flat fields; and S7comm-Plus's own deferred 50-entry cap on
+   `item_addresses`/`id_values`/`item_errors` moved into
+   `write_s7comm_plus_json_fields`, the same "defer the transform to
+   render time" shape `write_mms_json_fields`/`write_s7comm_json_fields`
+   already established. The `ospf_*`/`s7plus_*` field declarations were
+   then removed from `decoder.hpp` entirely.
+
+   The exhaustive extra-reader grep this migration always runs before
+   removing a flat field found exactly one genuine extra reader beyond the
+   usual `decoder.cpp`/`output.cpp` pair: `asset_inventory.cpp`'s own
+   S7comm-Plus function-name tracking (`dp.s7plus_has_function`/
+   `dp.s7plus_function_name`), updated to read
+   `dp.result->as<S7CommPlusFrame>()` instead, the same shape this file's
+   Modbus function-name reader already uses. OSPF has no policy-engine or
+   asset-inventory counterpart at all (it isn't one of either engine's own
+   evaluated protocols), so it needed no extra-reader sweep.
+
+   Separately, `dhcpv6_decoder()` (`GateKind::UdpPort`), `dicom_tcp_decoder()`
+   (`GateKind::TcpPort`), and `icmpv6_decoder()` (`GateKind::IpProtocol`)
+   were added to `udp_port_registry()`/`tcp_port_registry()`/
+   `ip_protocol_registry()` respectively, plus their headers `#include`d
+   in `protocol_registry.cpp` -- all three decoders were already correct
+   and already dispatched from their own `decoder.cpp` call sites; only
+   this file's own audit-trail bookkeeping was incomplete. Each vector's
+   own stale "fully populated" doc comment (here and in
+   `protocol_registry.hpp`) was corrected to name the newly-added entry.
+
+   Verified the same way as every prior migration batch: full CTest across
+   all four standing build configs (default GCC, 2,257 tests; Clang
+   ASan/UBSan `build-fuzz`, 2,334 tests including the fuzz corpus
+   regression label; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+   `build_nolive`, 2,242 tests; MinGW-w64 `build-mingw`, compiles clean) --
+   100% passing everywhere, zero changed assertions -- plus manual `--format
+   json` smoke tests against `tests/sample_ospf.pcap` and
+   `tests/sample_s7commplus.pcap` confirming field-for-field identical
+   output to before this change, and an `inventory --format json` smoke
+   test against the same S7comm-Plus fixture confirming
+   `GetMultiVariables`/`SetMultiVariables`/`SetVariable`/`DeleteObject`/
+   `Explore` still surface correctly on `InventoryEdge::observed_functions`
+   through the relocated `asset_inventory.cpp` reader.
+
+   This closes out the registration-model decoder refactor: every protocol
+   this codebase decodes is now on the `ProtocolDecoder` interface with
+   zero `decoder.hpp` dual-write, and every one of `protocol_registry.cpp`'s
+   8 audit-trail vectors accounts for every decoder gated on it.
 4. **Comment-density trim: acknowledged, not scheduled.** Real cost, no
    plan yet to act on it -- lower priority than the three items above.
 5. **No new protocols until 1-3 above are substantially underway,** per
@@ -1420,9 +1499,12 @@ Discussed and adopted, in this order:
    Items 1-2 above are done; item 3 now has a working pilot (not yet a
    full migration); this item's bar for "substantially underway" is
    judged met for the one new protocol actually requested, not as a
-   blanket reopening of new-protocol work -- the ~48 unmigrated legacy
-   protocols and the full registry-driven-dispatch migration remain real,
-   unscheduled follow-on work.
+   blanket reopening of new-protocol work -- the pilot's own remaining
+   scope (at the time this item's own text was written) was a genuinely
+   large one, and the full registry-driven-dispatch migration remained
+   real, unscheduled follow-on work. (Superseded by item 3's own final
+   Update above: that scope turned out to be far smaller than estimated
+   here by the time it was actually finished, and is now done.)
 
 A follow-up review
 ([docs/reviews/2026-09-chatgpt-security-review.md](reviews/2026-09-chatgpt-security-review.md),

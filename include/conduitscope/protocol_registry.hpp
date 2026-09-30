@@ -57,7 +57,12 @@ const std::vector<const ProtocolDecoder*>& ethertype_registry();
 // cotp_payload_registry() below for the other two batch-2-completed ones): ICMP, IGMP, VRRP,
 // IGRP, PIM, EIGRP (Stage 1 of the pilot), OSPF. IGRP is the one protocol here whose decode()
 // needs more than the payload bytes -- see DecodeContext::ip_src_addr's comment
-// (protocol_decoder.hpp) and igrp.hpp's file header for why.
+// (protocol_decoder.hpp) and igrp.hpp's file header for why. ICMPv6 (IP protocol number 58,
+// IPv6's own next-header value) was added afterward -- it already decoded correctly through
+// decoder.cpp's own call site, but was missing from this vector's own audit-trail bookkeeping
+// until the OSPF/S7comm-Plus zero-flat-field migration batch that finished this project's
+// registration-model refactor also swept up this and two other such omissions (see
+// dicom_tcp_decoder() in tcp_port_registry() and dhcpv6_decoder() in udp_port_registry() below).
 const std::vector<const ProtocolDecoder*>& ip_protocol_registry();
 
 // Migrated TCP-port-independent protocols, in the order their decoder.cpp call sites run.
@@ -116,8 +121,11 @@ const std::vector<const ProtocolDecoder*>& tcp_port_independent_registry();
 // (fox.hpp's FoxDecoder) joins this gate right after AMQP 1.0, port-gated for the same "real but
 // not magic-constant-strength structural gate" reason GE SRTP/AMQP already are -- see fox.hpp's
 // DETECTION/DISPATCH section; its call site calls
-// fox_tcp_decoder() directly. Not migrated:
-// none -- all seven of this gate's protocols are migrated.
+// fox_tcp_decoder() directly. DICOM (dicom.hpp's DicomDecoder, tcp_port() DICOM_PORT 104, with a
+// DICOM_PORT_ALT 11112 fallback checked at the call site) joins this gate right after Fox -- it
+// already decoded correctly through decoder.cpp's own call site, but was missing from this
+// vector's own audit-trail bookkeeping until now. Not migrated:
+// none -- all eight of this gate's protocols are migrated.
 const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 
 // Migrated UDP-port-gated protocols, in the order their decoder.cpp call sites run. This GateKind
@@ -135,7 +143,12 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry();
 // UDP port 623 since RMCP IS the framing ASF/IPMI ride inside) join right after CoAP, in that
 // most-specific-first order (see rmcp.hpp's DETECTION/DISPATCH paragraph for why order among the
 // three matters not at all for correctness -- they are mutually exclusive by RMCP Class value --
-// but ASF/IPMI are still tried before the generic RMCP fallback purely for clarity).
+// but ASF/IPMI are still tried before the generic RMCP fallback purely for clarity). DHCPv6
+// (dhcpv6.hpp's Dhcpv6Decoder, udp_port() the client port 546 with server port 547 also checked at
+// the call site, the same "one filter value, gate lives at the call site" shape DICOM's own
+// two-port case uses -- see dicom_tcp_decoder()'s comment in tcp_port_registry() above) already
+// decoded correctly through decoder.cpp's own call site, but was missing from this vector's own
+// audit-trail bookkeeping until now.
 const std::vector<const ProtocolDecoder*>& udp_port_registry();
 
 // Migration batch 2 addition: migrated UDP-port-INDEPENDENT protocols (GateKind::UdpPortIndependent

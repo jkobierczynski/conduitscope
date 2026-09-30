@@ -3,21 +3,26 @@
 // base, plus the small pieces of context (DecodeContext/DecoderFlowState/ProtocolResult) it needs
 // to fit alongside decoder.cpp's existing, much larger hand-ordered dispatch chain.
 //
-// THIS IS A PILOT, NOT A REPLACEMENT (see docs/DEVELOPMENT.md's "registration-model decoder
-// refactor" entry for the full staged plan). decoder.cpp's ~44-protocol ordered if-chain and
-// DecodedPacket's ~449 protocol-prefixed flat fields are UNCHANGED by this file's existence --
-// every protocol keeps working exactly as it did before. Only a handful of protocols (one per
-// structural "gate shape" this codebase has, chosen to prove the interface actually covers all of
-// them, plus Beckhoff TwinCAT/ADS as the first protocol built ONLY on this interface) are wired
-// through it. The other ~37 (and shrinking, batch by batch -- see docs/DEVELOPMENT.md's item 3
-// "Update" paragraphs for the running count) stay on the legacy path indefinitely, until/unless a
-// future pass migrates them -- there is no timeline commitment for that here. NOT counted in that
-// figure, and never a migration candidate at all: the 43 name-only "IT protocols an OT auditor
-// flags" recognitions (it_protocols.hpp/tunnel_vpn.hpp/eapol.hpp/pppoe.hpp/mpls.hpp/quic.hpp,
-// ROADMAP item 18) -- decided directly, see that item's own "Architectural scope note" in
-// docs/DEVELOPMENT.md: none of them decode a typed struct into DecodedPacket flat fields in the
-// first place (by design -- they're deliberately recognized, not decoded), so there is no
-// dual-write for this interface to retire there, and nothing to gain by wrapping them in it.
+// THIS STARTED AS A PILOT AND IS NOW THE FINISHED MIGRATION (see docs/DEVELOPMENT.md's
+// "registration-model decoder refactor" entry, item 3, for the full staged plan and its final
+// "Update" paragraph for how it closed out). What began as a handful of protocols proving the
+// interface covers every structural "gate shape" this codebase has, plus Beckhoff TwinCAT/ADS as
+// the first protocol built ONLY on this interface, grew batch by batch until every protocol this
+// codebase decodes was carried onto ProtocolDecoder with zero DecodedPacket dual-write -- OSPF and
+// S7comm-Plus were the last two holdouts, finished together in the same batch that also caught
+// three decoders (DHCPv6, DICOM, ICMPv6) that had been migrated correctly all along but were
+// simply missing from protocol_registry.cpp's own audit-trail bookkeeping. decoder.cpp's dispatch
+// cascades and DecodedPacket's structure are otherwise unchanged by this: every protocol's call
+// site still sits exactly where its old `if (want_x) {...}` block always did (see the COEXISTENCE
+// RULE below), and the four cascades (EtherType/IP-protocol-number/TCP-port-independent/UDP-port)
+// still route packets to a candidate payload exactly as before -- only WHAT runs at each call site
+// changed. NOT counted in "every protocol," and never a migration candidate at all: the 43
+// name-only "IT protocols an OT auditor flags" recognitions (it_protocols.hpp/tunnel_vpn.hpp/
+// eapol.hpp/pppoe.hpp/mpls.hpp/quic.hpp, ROADMAP item 18) -- decided directly, see that item's own
+// "Architectural scope note" in docs/DEVELOPMENT.md: none of them decode a typed struct into
+// DecodedPacket flat fields in the first place (by design -- they're deliberately recognized, not
+// decoded), so there was never a dual-write for this interface to retire there, and nothing to
+// gain by wrapping them in it.
 //
 // WHY A NEW ABSTRACTION AT ALL, GIVEN HOW SMALL ITS FOOTPRINT IS RIGHT NOW: every protocol added
 // to this codebase before TwinCAT required touching ProtocolFilter (decoder.hpp), DecodedPacket

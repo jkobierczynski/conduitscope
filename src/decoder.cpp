@@ -132,74 +132,6 @@ std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std:
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
-// Renders one OspfLsa's header ONLY (no body) as a single line -- used for DB Description and LS
-// Ack, which never carry LSA bodies (see ospf.hpp).
-std::string ospf_lsa_header_summary(const OspfLsa& lsa) {
-    std::ostringstream s;
-    s << lsa.type_name << " len " << lsa.length << ": " << lsa.link_state_id << " " << lsa.advertising_router
-      << " Seq=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << lsa.sequence_number
-      << std::dec << " Age=" << lsa.age_sec << "s";
-    if (lsa.do_not_age) s << " (DoNotAge)";
-    return s.str();
-}
-
-// Renders one OspfLsa's header plus, when present, a short rendering of its decoded body -- used
-// for LS Update, the only packet type that ever carries LSA bodies.
-std::string ospf_lsa_full_summary(const OspfLsa& lsa) {
-    std::string s = ospf_lsa_header_summary(lsa);
-    if (lsa.router_body) {
-        s += " links=" + std::to_string(lsa.router_body->links.size());
-        if (lsa.router_body->flag_border) s += " ABR";
-        if (lsa.router_body->flag_external) s += " ASBR";
-        if (lsa.router_body->flag_virtual) s += " V";
-    } else if (lsa.network_body) {
-        s += " mask=" + lsa.network_body->network_mask +
-             " routers=" + std::to_string(lsa.network_body->attached_routers.size());
-    } else if (lsa.summary_body) {
-        s += " mask=" + lsa.summary_body->network_mask + " metric=" + std::to_string(lsa.summary_body->metric);
-    } else if (lsa.as_external_body) {
-        s += " mask=" + lsa.as_external_body->network_mask +
-             " metric=" + std::to_string(lsa.as_external_body->metric) +
-             (lsa.as_external_body->e_bit ? " (Type 2)" : " (Type 1)");
-    }
-    return s;
-}
-
-// Renders one OspfLsRequestEntry as a single line for DecodedPacket::ospf_ls_requests.
-std::string ospf_ls_request_summary(const OspfLsRequestEntry& e) {
-    return e.ls_type_name + ": " + e.link_state_id + " " + e.advertising_router;
-}
-
-// Flattens a parsed OspfMessage (see ospf.hpp) into DecodedPacket's ospf_* fields. Which of the
-// per-type field groups end up populated depends entirely on msg.type_name -- this just copies
-// every group across unconditionally, since the unused ones are simply left at their default
-// (empty/false/0) values.
-void fill_ospf_fields(DecodedPacket& out, const OspfMessage& msg) {
-    out.summary = msg.summary;
-    for (const auto& n : msg.notes) out.notes.push_back(n);
-    out.ospf_type_name = msg.type_name;
-    out.ospf_router_id = msg.router_id;
-    out.ospf_area_id = msg.area_id;
-    out.ospf_auth_type_name = msg.auth_type_name;
-
-    out.ospf_hello_designated_router = msg.hello_designated_router;
-    out.ospf_hello_backup_designated_router = msg.hello_backup_designated_router;
-    out.ospf_hello_neighbors_truncated = msg.hello_neighbors_truncated;
-    out.ospf_hello_neighbors = msg.hello_neighbors;
-
-    out.ospf_dbd_lsa_headers_truncated = msg.dbd_lsa_headers_truncated;
-    for (const auto& lsa : msg.dbd_lsa_headers) out.ospf_dbd_lsa_headers.push_back(ospf_lsa_header_summary(lsa));
-
-    out.ospf_ls_requests_truncated = msg.ls_requests_truncated;
-    for (const auto& e : msg.ls_requests) out.ospf_ls_requests.push_back(ospf_ls_request_summary(e));
-
-    out.ospf_ls_update_lsas_truncated = msg.ls_update_lsas_truncated;
-    for (const auto& lsa : msg.ls_update_lsas) out.ospf_ls_update_lsas.push_back(ospf_lsa_full_summary(lsa));
-
-    out.ospf_ls_ack_headers_truncated = msg.ls_ack_headers_truncated;
-    for (const auto& lsa : msg.ls_ack_headers) out.ospf_ls_ack_headers.push_back(ospf_lsa_header_summary(lsa));
-}
-
 }  // namespace
 
 namespace {
@@ -2844,17 +2776,23 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             bool want_ospf = options_.protocol_filter == ProtocolFilter::Auto ||
                               options_.protocol_filter == ProtocolFilter::OspfOnly;
             if (want_ospf) {
-                // Migration batch 5: try_parse_ospf is now reached through OspfDecoder::decode
-                // rather than called directly -- same function, same semantics, see ospf.hpp.
-                // fill_ospf_fields is unchanged. This completes migration batch 5: every protocol
-                // in decoder.cpp's IP-protocol-number-gated cascade (ICMP, IGMP, VRRP, IGRP, PIM,
-                // EIGRP, OSPF) is now on the ProtocolDecoder interface -- the fifth of six GateKinds
-                // to reach that state (see protocol_registry.cpp's ip_protocol_registry()).
+                // Migration batch 5: try_parse_ospf is reached through OspfDecoder::decode rather
+                // than called directly -- same function, same semantics, see ospf.hpp. Zero-flat-
+                // field migration (finishing the registration-model decoder refactor): OSPF no
+                // longer dual-writes into DecodedPacket::ospf_* -- out.result carries the whole
+                // OspfMessage, and output.cpp's write_ospf_json_fields renders it directly. This
+                // completes migration batch 5: every protocol in decoder.cpp's IP-protocol-number-
+                // gated cascade (ICMP, IGMP, VRRP, IGRP, PIM, EIGRP, OSPF) is now on the
+                // ProtocolDecoder interface -- the fifth of six GateKinds to reach that state (see
+                // protocol_registry.cpp's ip_protocol_registry()).
                 DecodeContext ctx;
                 ctx.protocol_id = "ospf";
                 if (auto result = ospf_decoder().decode(payload, ctx)) {
+                    const OspfMessage& msg = result->as<OspfMessage>();
                     out.protocol = "ospf";
-                    fill_ospf_fields(out, result->as<OspfMessage>());
+                    out.summary = msg.summary;
+                    for (const auto& n : msg.notes) out.notes.push_back(n);
+                    out.result = *result;
                     return out;
                 }
             }
@@ -4055,41 +3993,19 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     if (want_s7commplus) {
                         rider_ctx.protocol_id = "s7comm-plus";
                         if (auto result = s7comm_plus_decoder().decode(cr.s7_candidate(), rider_ctx)) {
+                            // Zero-flat-field migration (finishing the registration-model decoder
+                            // refactor): S7comm-Plus no longer dual-writes into DecodedPacket::
+                            // s7plus_* -- out.result carries the whole S7CommPlusFrame, exactly
+                            // the same shape MMS's own call site just above already has. The old
+                            // dual write's own 50-entry cap on item_addresses/id_values/item_errors
+                            // is now applied where it's rendered instead (output.cpp's
+                            // write_s7comm_plus_json_fields), the same "defer the transform" shape
+                            // MmsResult::values/S7CommResult::items already use.
                             const S7CommPlusFrame& s7p = result->as<S7CommPlusFrame>();
                             out.protocol = "s7comm-plus";
                             out.summary = s7p.summary;
                             for (const auto& n : s7p.notes) out.notes.push_back(n);
-                            out.s7plus_pdu_type_name = s7p.pdu_type_name;
-                            out.s7plus_is_keepalive = s7p.is_keepalive;
-                            out.s7plus_keepalive_seq = s7p.keepalive_seq;
-                            out.s7plus_has_opcode = s7p.has_data_part && !s7p.is_notification &&
-                                                     !s7p.opcode_name.empty();
-                            out.s7plus_opcode_name = s7p.opcode_name;
-                            out.s7plus_has_function = s7p.has_function;
-                            out.s7plus_function_code = s7p.function_code;
-                            out.s7plus_function_name = s7p.function_name;
-                            out.s7plus_has_sequence_number = s7p.has_sequence_number;
-                            out.s7plus_sequence_number = s7p.sequence_number;
-                            out.s7plus_has_session_id = s7p.has_session_id;
-                            out.s7plus_session_id = s7p.session_id;
-                            out.s7plus_body_decoded = s7p.body_decoded;
-                            out.s7plus_has_return_value = s7p.has_return_value;
-                            out.s7plus_return_code = s7p.return_code;
-                            out.s7plus_return_code_name = s7p.return_code_name;
-                            const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
-                            for (size_t i = 0; i < s7p.item_addresses.size() && i < kMaxTags; ++i) {
-                                out.s7plus_item_tags.push_back(s7p.item_addresses[i].tag);
-                            }
-                            for (size_t i = 0; i < s7p.id_values.size() && i < kMaxTags; ++i) {
-                                out.s7plus_value_summaries.push_back(s7p.id_values[i].rendered);
-                            }
-                            for (size_t i = 0; i < s7p.item_errors.size() && i < kMaxTags; ++i) {
-                                out.s7plus_item_errors.push_back(s7p.item_errors[i].rendered);
-                            }
-                            out.s7plus_has_integrity = s7p.has_integrity;
-                            out.s7plus_integrity_digest_present = s7p.integrity_digest_present;
-                            out.s7plus_integrity_digest_length = s7p.integrity_digest_length;
-                            out.s7plus_has_trailer = s7p.has_trailer;
+                            out.result = *result;
                             for (const auto& n : cr.notes) out.notes.push_back(n);
                             annotate_port();
                             return out;

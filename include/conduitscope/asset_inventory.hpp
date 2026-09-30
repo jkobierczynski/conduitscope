@@ -15,12 +15,12 @@
 //
 // S7comm-Plus is NOT one of the ten protocols PolicyEngine::observe evaluates (it has no
 // policy-engine zoning counterpart yet), but it's a distinct, independently-decoded application
-// protocol (s7commplus.hpp/DecodedPacket::s7plus_* -- a flat-field protocol, not one carried via
-// DecodedPacket::result) sharing classic S7comm's own TCP/102/TPKT/COTP transport, so it counts
-// toward this feature's asset/edge model the same way every other TCP-based protocol here does --
-// see AssetInventoryEngine::observe's own comment for exactly where it's dispatched and how its
-// function name (DecodedPacket::s7plus_function_name) is surfaced on InventoryEdge::
-// observed_functions.
+// protocol (s7commplus.hpp/S7CommPlusFrame -- a zero-flat-field migrated protocol, carried via
+// DecodedPacket::result like every other migrated protocol, not flat fields) sharing classic
+// S7comm's own TCP/102/TPKT/COTP transport, so it counts toward this feature's asset/edge model
+// the same way every other TCP-based protocol here does -- see AssetInventoryEngine::observe's own
+// comment for exactly where it's dispatched and how its function name
+// (S7CommPlusFrame::function_name) is surfaced on InventoryEdge::observed_functions.
 //
 // TWO of those ten (HART-IP, FF-HSE) are deliberately narrower here than what decoder.cpp itself can
 // recognize: both protocols can appear over UDP on the wire (HART-IP conventionally; FF-HSE almost

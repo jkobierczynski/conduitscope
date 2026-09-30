@@ -3101,6 +3101,111 @@ void write_eigrp_json_fields(std::ostream& out, const EigrpMessage& msg) {
     out << "    \"eigrp_routes_truncated\": " << (msg.routes_truncated ? "true" : "false") << ",\n";
 }
 
+// Relocated from decoder.cpp unchanged (previously local helpers feeding fill_ospf_fields'
+// DecodedPacket::ospf_* dual-write, now feeding write_ospf_json_fields below directly instead) --
+// see this file's own OspfMessage/OspfLsa/OspfLsRequestEntry types in ospf.hpp.
+
+// Renders one OspfLsa's header ONLY (no body) as a single line -- used for DB Description and LS
+// Ack, which never carry LSA bodies (see ospf.hpp).
+std::string ospf_lsa_header_summary(const OspfLsa& lsa) {
+    std::ostringstream s;
+    s << lsa.type_name << " len " << lsa.length << ": " << lsa.link_state_id << " " << lsa.advertising_router
+      << " Seq=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << lsa.sequence_number
+      << std::dec << " Age=" << lsa.age_sec << "s";
+    if (lsa.do_not_age) s << " (DoNotAge)";
+    return s.str();
+}
+
+// Renders one OspfLsa's header plus, when present, a short rendering of its decoded body -- used
+// for LS Update, the only packet type that ever carries LSA bodies.
+std::string ospf_lsa_full_summary(const OspfLsa& lsa) {
+    std::string s = ospf_lsa_header_summary(lsa);
+    if (lsa.router_body) {
+        s += " links=" + std::to_string(lsa.router_body->links.size());
+        if (lsa.router_body->flag_border) s += " ABR";
+        if (lsa.router_body->flag_external) s += " ASBR";
+        if (lsa.router_body->flag_virtual) s += " V";
+    } else if (lsa.network_body) {
+        s += " mask=" + lsa.network_body->network_mask +
+             " routers=" + std::to_string(lsa.network_body->attached_routers.size());
+    } else if (lsa.summary_body) {
+        s += " mask=" + lsa.summary_body->network_mask + " metric=" + std::to_string(lsa.summary_body->metric);
+    } else if (lsa.as_external_body) {
+        s += " mask=" + lsa.as_external_body->network_mask +
+             " metric=" + std::to_string(lsa.as_external_body->metric) +
+             (lsa.as_external_body->e_bit ? " (Type 2)" : " (Type 1)");
+    }
+    return s;
+}
+
+// Renders one OspfLsRequestEntry as a single line for write_ospf_json_fields' own ospf_ls_requests.
+std::string ospf_ls_request_summary(const OspfLsRequestEntry& e) {
+    return e.ls_type_name + ": " + e.link_state_id + " " + e.advertising_router;
+}
+
+// Zero-flat-field migration (finishing the registration-model decoder refactor): the OSPF analog of
+// write_eigrp_json_fields above -- reproduces the exact same independent per-field gating
+// decoder.cpp's old dual-write call site (fill_ospf_fields) had, unchanged, reading from
+// OspfMessage instead of DecodedPacket's now-removed ospf_* fields.
+void write_ospf_json_fields(std::ostream& out, const OspfMessage& msg) {
+    out << "    \"ospf_type\": \"" << json_escape(msg.type_name) << "\",\n";
+    out << "    \"ospf_router_id\": \"" << json_escape(msg.router_id) << "\",\n";
+    out << "    \"ospf_area_id\": \"" << json_escape(msg.area_id) << "\",\n";
+    out << "    \"ospf_auth_type\": \"" << json_escape(msg.auth_type_name) << "\",\n";
+    if (!msg.hello_designated_router.empty() || !msg.hello_neighbors.empty()) {
+        out << "    \"ospf_hello_designated_router\": \"" << json_escape(msg.hello_designated_router) << "\",\n";
+        out << "    \"ospf_hello_backup_designated_router\": \""
+            << json_escape(msg.hello_backup_designated_router) << "\",\n";
+        out << "    \"ospf_hello_neighbors\": [";
+        for (size_t i = 0; i < msg.hello_neighbors.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(msg.hello_neighbors[i]) << "\"";
+        }
+        out << "],\n";
+        out << "    \"ospf_hello_neighbors_truncated\": " << (msg.hello_neighbors_truncated ? "true" : "false")
+            << ",\n";
+    }
+    if (!msg.dbd_lsa_headers.empty()) {
+        out << "    \"ospf_dbd_lsa_headers\": [";
+        for (size_t i = 0; i < msg.dbd_lsa_headers.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ospf_lsa_header_summary(msg.dbd_lsa_headers[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"ospf_dbd_lsa_headers_truncated\": " << (msg.dbd_lsa_headers_truncated ? "true" : "false")
+            << ",\n";
+    }
+    if (!msg.ls_requests.empty()) {
+        out << "    \"ospf_ls_requests\": [";
+        for (size_t i = 0; i < msg.ls_requests.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ospf_ls_request_summary(msg.ls_requests[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"ospf_ls_requests_truncated\": " << (msg.ls_requests_truncated ? "true" : "false") << ",\n";
+    }
+    if (!msg.ls_update_lsas.empty()) {
+        out << "    \"ospf_ls_update_lsas\": [";
+        for (size_t i = 0; i < msg.ls_update_lsas.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ospf_lsa_full_summary(msg.ls_update_lsas[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"ospf_ls_update_lsas_truncated\": " << (msg.ls_update_lsas_truncated ? "true" : "false")
+            << ",\n";
+    }
+    if (!msg.ls_ack_headers.empty()) {
+        out << "    \"ospf_ls_ack_headers\": [";
+        for (size_t i = 0; i < msg.ls_ack_headers.size(); ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(ospf_lsa_header_summary(msg.ls_ack_headers[i])) << "\"";
+        }
+        out << "],\n";
+        out << "    \"ospf_ls_ack_headers_truncated\": " << (msg.ls_ack_headers_truncated ? "true" : "false")
+            << ",\n";
+    }
+}
+
 // The BGP analog of write_twincat_json_fields above -- same rationale (a plain free function, not a
 // ProtocolRenderer interface). BgpResult (bgp.hpp) wraps one fully-decoded message (`first`) plus,
 // when BgpDecoder::decode's own coalescing loop found more, a `coalesced_message_count` > 1 (every
@@ -4008,6 +4113,70 @@ void write_s7comm_json_fields(std::ostream& out, const S7CommResult& sr) {
             out << "    \"s7comm_szl_module_type_name\": \"" << json_escape(sr.szl_module_type_name) << "\",\n";
         }
     }
+}
+
+// Zero-flat-field migration (finishing the registration-model decoder refactor): the S7comm-Plus
+// analog of write_s7comm_json_fields above -- reproduces the exact same independent per-field
+// gating decoder.cpp's old dual-write call site had, unchanged, reading from S7CommPlusFrame
+// instead of DecodedPacket's now-removed s7plus_* fields. The one deferred transform: the
+// item_addresses/id_values/item_errors 50-entry cap (max_decoded_objects), previously applied at
+// decoder.cpp's own call site before copying into s7plus_item_tags/s7plus_value_summaries/
+// s7plus_item_errors, is applied HERE instead -- the same "defer the cap to render time" shape
+// write_mms_json_fields/write_s7comm_json_fields above already established for MMS's mms_values
+// and S7comm's s7comm_items.
+void write_s7comm_plus_json_fields(std::ostream& out, const S7CommPlusFrame& s7p) {
+    out << "    \"s7plus_pdu_type\": \"" << json_escape(s7p.pdu_type_name) << "\",\n";
+    if (s7p.is_keepalive) {
+        out << "    \"s7plus_keepalive_seq\": " << static_cast<unsigned>(s7p.keepalive_seq) << ",\n";
+    }
+    const bool has_opcode = s7p.has_data_part && !s7p.is_notification && !s7p.opcode_name.empty();
+    if (has_opcode) {
+        out << "    \"s7plus_opcode\": \"" << json_escape(s7p.opcode_name) << "\",\n";
+    }
+    if (s7p.has_function) {
+        out << "    \"s7plus_function\": \"" << json_escape(s7p.function_name) << "\",\n";
+        out << "    \"s7plus_body_decoded\": " << (s7p.body_decoded ? "true" : "false") << ",\n";
+    }
+    if (s7p.has_sequence_number) {
+        out << "    \"s7plus_sequence_number\": " << s7p.sequence_number << ",\n";
+    }
+    if (s7p.has_session_id) {
+        out << "    \"s7plus_session_id\": " << s7p.session_id << ",\n";
+    }
+    if (s7p.has_return_value) {
+        out << "    \"s7plus_return_code\": " << s7p.return_code << ",\n";
+        out << "    \"s7plus_return_code_name\": \"" << json_escape(s7p.return_code_name) << "\",\n";
+    }
+    const size_t kMaxTags = resource_limits().max_decoded_objects.value_or(50);
+    if (!s7p.item_addresses.empty()) {
+        out << "    \"s7plus_items\": [";
+        for (size_t i = 0; i < s7p.item_addresses.size() && i < kMaxTags; ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(s7p.item_addresses[i].tag) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!s7p.id_values.empty()) {
+        out << "    \"s7plus_values\": [";
+        for (size_t i = 0; i < s7p.id_values.size() && i < kMaxTags; ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(s7p.id_values[i].rendered) << "\"";
+        }
+        out << "],\n";
+    }
+    if (!s7p.item_errors.empty()) {
+        out << "    \"s7plus_item_errors\": [";
+        for (size_t i = 0; i < s7p.item_errors.size() && i < kMaxTags; ++i) {
+            if (i != 0) out << ", ";
+            out << "\"" << json_escape(s7p.item_errors[i].rendered) << "\"";
+        }
+        out << "],\n";
+    }
+    if (s7p.has_integrity) {
+        out << "    \"s7plus_integrity_digest_present\": "
+            << (s7p.integrity_digest_present ? "true" : "false") << ",\n";
+    }
+    out << "    \"s7plus_has_trailer\": " << (s7p.has_trailer ? "true" : "false") << ",\n";
 }
 
 // The MELSEC analog of write_twincat_json_fields/write_kerberos_json_fields above -- same
@@ -5066,57 +5235,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "mqtt" && p.result) {
         write_mqtt_json_fields(out_, p.result->as<MqttResult>().first);
     }
-    if (p.protocol == "s7comm-plus") {
-        out_ << "    \"s7plus_pdu_type\": \"" << json_escape(p.s7plus_pdu_type_name) << "\",\n";
-        if (p.s7plus_is_keepalive) {
-            out_ << "    \"s7plus_keepalive_seq\": " << static_cast<unsigned>(p.s7plus_keepalive_seq) << ",\n";
-        }
-        if (p.s7plus_has_opcode) {
-            out_ << "    \"s7plus_opcode\": \"" << json_escape(p.s7plus_opcode_name) << "\",\n";
-        }
-        if (p.s7plus_has_function) {
-            out_ << "    \"s7plus_function\": \"" << json_escape(p.s7plus_function_name) << "\",\n";
-            out_ << "    \"s7plus_body_decoded\": " << (p.s7plus_body_decoded ? "true" : "false") << ",\n";
-        }
-        if (p.s7plus_has_sequence_number) {
-            out_ << "    \"s7plus_sequence_number\": " << p.s7plus_sequence_number << ",\n";
-        }
-        if (p.s7plus_has_session_id) {
-            out_ << "    \"s7plus_session_id\": " << p.s7plus_session_id << ",\n";
-        }
-        if (p.s7plus_has_return_value) {
-            out_ << "    \"s7plus_return_code\": " << p.s7plus_return_code << ",\n";
-            out_ << "    \"s7plus_return_code_name\": \"" << json_escape(p.s7plus_return_code_name) << "\",\n";
-        }
-        if (!p.s7plus_item_tags.empty()) {
-            out_ << "    \"s7plus_items\": [";
-            for (size_t i = 0; i < p.s7plus_item_tags.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.s7plus_item_tags[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        if (!p.s7plus_value_summaries.empty()) {
-            out_ << "    \"s7plus_values\": [";
-            for (size_t i = 0; i < p.s7plus_value_summaries.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.s7plus_value_summaries[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        if (!p.s7plus_item_errors.empty()) {
-            out_ << "    \"s7plus_item_errors\": [";
-            for (size_t i = 0; i < p.s7plus_item_errors.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.s7plus_item_errors[i]) << "\"";
-            }
-            out_ << "],\n";
-        }
-        if (p.s7plus_has_integrity) {
-            out_ << "    \"s7plus_integrity_digest_present\": "
-                 << (p.s7plus_integrity_digest_present ? "true" : "false") << ",\n";
-        }
-        out_ << "    \"s7plus_has_trailer\": " << (p.s7plus_has_trailer ? "true" : "false") << ",\n";
+    if (p.protocol == "s7comm-plus" && p.result) {
+        write_s7comm_plus_json_fields(out_, p.result->as<S7CommPlusFrame>());
     }
     if (p.protocol == "ffhse" && p.result) {
         write_ffhse_json_fields(out_, p.result->as<FfhseResult>().first);
@@ -5160,58 +5280,8 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "eigrp" && p.result) {
         write_eigrp_json_fields(out_, p.result->as<EigrpMessage>());
     }
-    if (p.protocol == "ospf") {
-        out_ << "    \"ospf_type\": \"" << json_escape(p.ospf_type_name) << "\",\n";
-        out_ << "    \"ospf_router_id\": \"" << json_escape(p.ospf_router_id) << "\",\n";
-        out_ << "    \"ospf_area_id\": \"" << json_escape(p.ospf_area_id) << "\",\n";
-        out_ << "    \"ospf_auth_type\": \"" << json_escape(p.ospf_auth_type_name) << "\",\n";
-        if (!p.ospf_hello_designated_router.empty() || !p.ospf_hello_neighbors.empty()) {
-            out_ << "    \"ospf_hello_designated_router\": \"" << json_escape(p.ospf_hello_designated_router) << "\",\n";
-            out_ << "    \"ospf_hello_backup_designated_router\": \"" << json_escape(p.ospf_hello_backup_designated_router) << "\",\n";
-            out_ << "    \"ospf_hello_neighbors\": [";
-            for (size_t i = 0; i < p.ospf_hello_neighbors.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.ospf_hello_neighbors[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"ospf_hello_neighbors_truncated\": " << (p.ospf_hello_neighbors_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.ospf_dbd_lsa_headers.empty()) {
-            out_ << "    \"ospf_dbd_lsa_headers\": [";
-            for (size_t i = 0; i < p.ospf_dbd_lsa_headers.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.ospf_dbd_lsa_headers[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"ospf_dbd_lsa_headers_truncated\": " << (p.ospf_dbd_lsa_headers_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.ospf_ls_requests.empty()) {
-            out_ << "    \"ospf_ls_requests\": [";
-            for (size_t i = 0; i < p.ospf_ls_requests.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.ospf_ls_requests[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"ospf_ls_requests_truncated\": " << (p.ospf_ls_requests_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.ospf_ls_update_lsas.empty()) {
-            out_ << "    \"ospf_ls_update_lsas\": [";
-            for (size_t i = 0; i < p.ospf_ls_update_lsas.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.ospf_ls_update_lsas[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"ospf_ls_update_lsas_truncated\": " << (p.ospf_ls_update_lsas_truncated ? "true" : "false") << ",\n";
-        }
-        if (!p.ospf_ls_ack_headers.empty()) {
-            out_ << "    \"ospf_ls_ack_headers\": [";
-            for (size_t i = 0; i < p.ospf_ls_ack_headers.size(); ++i) {
-                if (i != 0) out_ << ", ";
-                out_ << "\"" << json_escape(p.ospf_ls_ack_headers[i]) << "\"";
-            }
-            out_ << "],\n";
-            out_ << "    \"ospf_ls_ack_headers_truncated\": " << (p.ospf_ls_ack_headers_truncated ? "true" : "false") << ",\n";
-        }
+    if (p.protocol == "ospf" && p.result) {
+        write_ospf_json_fields(out_, p.result->as<OspfMessage>());
     }
     if (p.protocol == "twincat" && p.result) {
         write_twincat_json_fields(out_, p.result->as<TwinCatFrame>());
@@ -5938,11 +6008,12 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
             mqtt_sparkplug_message_type_counts_[m.sparkplug_message_type]++;
         }
     }
-    if (p.protocol == "s7comm-plus") {
-        s7plus_pdu_type_counts_[p.s7plus_pdu_type_name]++;
-        if (p.s7plus_has_function) {
-            s7plus_function_counts_[p.s7plus_function_name]++;
-            if (p.s7plus_body_decoded) s7plus_body_decoded_count_++;
+    if (p.protocol == "s7comm-plus" && p.result) {
+        const S7CommPlusFrame& s7p = p.result->as<S7CommPlusFrame>();
+        s7plus_pdu_type_counts_[s7p.pdu_type_name]++;
+        if (s7p.has_function) {
+            s7plus_function_counts_[s7p.function_name]++;
+            if (s7p.body_decoded) s7plus_body_decoded_count_++;
         }
     }
     if (p.protocol == "ffhse" && p.result) {
@@ -6246,8 +6317,8 @@ void StatsWriter::write_packet(const DecodedPacket& p) {
     if (p.protocol == "eigrp" && p.result) {
         eigrp_opcode_counts_[p.result->as<EigrpMessage>().opcode_name]++;
     }
-    if (p.protocol == "ospf") {
-        ospf_type_counts_[p.ospf_type_name]++;
+    if (p.protocol == "ospf" && p.result) {
+        ospf_type_counts_[p.result->as<OspfMessage>().type_name]++;
     }
     if (!has_ts_) {
         first_ts_ = last_ts_ = p.timestamp;

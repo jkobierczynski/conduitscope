@@ -16,6 +16,8 @@
 #include "conduitscope/dcom.hpp"
 #include "conduitscope/devicenet.hpp"
 #include "conduitscope/zigbee.hpp"
+#include "conduitscope/dhcpv6.hpp"
+#include "conduitscope/dicom.hpp"
 #include "conduitscope/dnp3.hpp"
 #include "conduitscope/dns.hpp"
 #include "conduitscope/eapol.hpp"
@@ -31,6 +33,7 @@
 #include "conduitscope/homeplug_av.hpp"
 #include "conduitscope/hsrp.hpp"
 #include "conduitscope/icmp.hpp"
+#include "conduitscope/icmpv6.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/igmp.hpp"
 #include "conduitscope/igrp.hpp"
@@ -225,13 +228,18 @@ const std::vector<const ProtocolDecoder*>& ip_protocol_registry() {
                             // EIGRP, no ordering rationale needed for the same reason GOOSE above
                             // needs none.
         &ospf_decoder(),   // Migration batch 5 -- sits exactly where the old `if (want_ospf)` block
-                            // always did: tried last of this whole cascade, after every
-                            // IP-protocol-number-keyed protocol above (all seven now migrated, in
-                            // this and the pilot's own batches). This completes migration batch 5 --
-                            // the IP-protocol-number gate cascade is now fully populated, the fifth
-                            // GateKind (after EtherType/TcpPortIndependent/UdpPortIndependent/
-                            // CotpPayload) to reach that state. IP protocol number 89 is
-                            // IANA-exclusive to OSPF.
+                            // always did: after ICMP/IGMP/VRRP/IGRP/PIM/EIGRP (all migrated above),
+                            // before ICMPv6 below. This completed migration batch 5 -- every
+                            // protocol dispatched by decoder.cpp's own IP-protocol-number cascade
+                            // was, at that point, on the ProtocolDecoder interface. IP protocol
+                            // number 89 is IANA-exclusive to OSPF.
+        &icmpv6_decoder(),  // Added after migration batch 5 landed -- this decoder already existed
+                            // and decoder.cpp already dispatches to it correctly (IP protocol number
+                            // 58, IANA-exclusive to ICMPv6), but it was missing from this vector's
+                            // own audit-trail bookkeeping until now. Tried last of this cascade,
+                            // purely for locality (append-at-the-end, see this vector's own doc
+                            // comment in protocol_registry.hpp) -- not a claim about dispatch order,
+                            // which decoder.cpp's own call-site position alone controls.
     };
     return order;
 }
@@ -437,6 +445,16 @@ const std::vector<const ProtocolDecoder*>& tcp_port_registry() {
         &fox_tcp_decoder(),  // Tridium Niagara Fox (building-automation-system station protocol)
                                // -- decoder.cpp's own Fox call site likewise calls it directly.
                                // tcp_port() returns FOX_PORT (1911, fox.hpp).
+        &dicom_tcp_decoder(),  // DICOM (medical imaging, ubiquitous on OT-adjacent hospital
+                               // networks) -- this decoder already existed and decoder.cpp already
+                               // dispatches to it correctly, but it was missing from this vector's
+                               // own audit-trail bookkeeping until now. decoder.cpp's own DICOM call
+                               // site calls it directly, same posture as every other entry in this
+                               // vector. tcp_port() returns DICOM_PORT (104, dicom.hpp) -- the
+                               // DICOM_PORT_ALT (11112) fallback is checked at the call site, the
+                               // same "one filter value, gate lives at the call site" shape
+                               // dhcpv6_decoder()'s own comment (udp_port_registry() below)
+                               // describes for its own two-port case.
     };
     return order;
 }
@@ -510,6 +528,15 @@ const std::vector<const ProtocolDecoder*>& udp_port_registry() {
                             // strength structural gate of its own -- an SDO Sequence Layer header
                             // is just a few small integer fields). decoder.cpp's own POWERLINK-SDO
                             // call site likewise sits right after its RMCP/ASF/IPMI block.
+        &dhcpv6_decoder(),  // DHCPv6 -- this decoder already existed and decoder.cpp already
+                            // dispatches to it correctly, but it was missing from this vector's own
+                            // audit-trail bookkeeping until now. udp_port() names the client port
+                            // (546) for audit-trail purposes only; decoder.cpp's own call site
+                            // checks both 546 and 547 explicitly, the same "one filter value, gate
+                            // lives at the call site" shape a two-default-port protocol like DICOM
+                            // uses (see dicom_tcp_decoder()'s own comment in tcp_port_registry()
+                            // above). Appended last purely for locality (this vector's own
+                            // audit-trail convention), not a claim about dispatch order.
     };
     return order;
 }

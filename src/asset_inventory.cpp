@@ -24,6 +24,7 @@
 #include "conduitscope/portable_time.hpp"
 #include "conduitscope/resolver.hpp"
 #include "conduitscope/s7comm.hpp"
+#include "conduitscope/s7commplus.hpp"
 #include "conduitscope/time_format.hpp"
 
 namespace conduitscope {
@@ -528,10 +529,11 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     else if (dp.protocol == "mqtt") protocol = "mqtt";
     else if (dp.protocol == "s7comm-plus") {
         // A different, independent application protocol from classic S7comm above despite sharing
-        // its TCP/102/TPKT/COTP transport -- see this file's own header comment. Flat-field on
-        // DecodedPacket (dp.s7plus_*), not carried via dp.result -- see decoder.hpp's own comment
-        // for why. Not one of PolicyEngine::observe's own ten protocols (no policy-engine zoning
-        // counterpart yet), but Grok gap #2 explicitly asked for it here regardless.
+        // its TCP/102/TPKT/COTP transport -- see this file's own header comment. Zero-flat-field
+        // migrated protocol: carried via dp.result as an S7CommPlusFrame (s7commplus.hpp), not
+        // flat fields on DecodedPacket. Not one of PolicyEngine::observe's own ten protocols (no
+        // policy-engine zoning counterpart yet), but Grok gap #2 explicitly asked for it here
+        // regardless.
         protocol = "s7comm-plus";
     } else if (dp.protocol == "ffhse") {
         // Same reasoning as hartip above -- FF-HSE is decodable over TCP (decoder.cpp's own
@@ -698,8 +700,9 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         function_name = dp.result->as<MqttResult>().first.packet_type_name;
     } else if (protocol == "ffhse" && dp.result && !dp.result->as<FfhseResult>().first.message_name.empty()) {
         function_name = dp.result->as<FfhseResult>().first.message_name;
-    } else if (protocol == "s7comm-plus" && dp.s7plus_has_function && !dp.s7plus_function_name.empty()) {
-        function_name = dp.s7plus_function_name;
+    } else if (protocol == "s7comm-plus" && dp.result && dp.result->as<S7CommPlusFrame>().has_function &&
+               !dp.result->as<S7CommPlusFrame>().function_name.empty()) {
+        function_name = dp.result->as<S7CommPlusFrame>().function_name;
     }
 
     // Tag/point/DB touch summarization (Phase 7 of Grok gap #2) -- see
