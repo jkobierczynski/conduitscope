@@ -17022,6 +17022,104 @@ it done as its own patch.
     source tree, configure, build, full CTest suite) also passing 2489/2489 with zero failures,
     exactly matching the default build's own count.
 
+120. **MSVC warning cleanup, and a third occurrence of the sanitizers CI job's "new live-capture
+    test, forgot the allowlist" bug.** Jurgen's own direct request: "Can you check these warnings
+    again?" (a pasted Visual Studio build log) followed, mid-turn, by "Also to do after checking
+    the warnings, check this CI build test failure" (a pasted `ctest` failure log from the
+    sanitizers CI job). Two independent, unrelated findings from those two logs:
+
+    **Finding 1 (from the MSVC log): `C4996` "this function or variable may be unsafe" on
+    `std::getenv("COLUMNS")`** (`cli_main.cpp`, `terminal_width()`, item 114's own `--help`
+    column-width fallback). A real, previously-unaudited gap -- the Linux sandbox this project is
+    developed in has no MSVC to surface it, so it only ever shows up on Jurgen's own Windows
+    build, the same way the `std::gmtime`/`std::localtime` and `std::strcpy` C4996 warnings this
+    same "External code review and engineering priorities" section already documents were each
+    first caught. Unlike `std::strcpy` (fixed by switching to `std::memcpy`, a function MSVC
+    doesn't flag at all) there's no drop-in replacement that's both portable and silent here --
+    `_dupenv_s` is MSVC/Windows-only. Fixed the same way `portable_time.hpp`'s own
+    `portable_gmtime`/`portable_localtime` split `gmtime_s`/`gmtime_r` apart: a small
+    `portable_getenv(const char*) -> std::optional<std::string>` helper, `#ifdef _MSC_VER`
+    (deliberately the compiler macro, not `_WIN32` -- this warning is an MSVC CRT diagnostic, not
+    a Windows-platform concern, so a MinGW/GCC-on-Windows build should keep using plain
+    `std::getenv` rather than risk depending on `_dupenv_s`, which this project's own MinGW
+    cross-compile toolchain has never been confirmed to provide), calling `_dupenv_s` and copying
+    its result into an owned `std::string` on MSVC, falling back to plain `std::getenv` wrapped in
+    an `optional` everywhere else. Kept local to `cli_main.cpp` (its one call site) rather than
+    promoted to a shared header, unlike `portable_time.hpp` (six call sites across five files).
+    `std::getenv`'s own theoretical unsafety (another thread calling `putenv`/`_putenv_s`
+    concurrently, invalidating the returned pointer) doesn't actually apply to this process today
+    -- confirmed by grep that this codebase spawns no `std::thread`/`std::async` anywhere
+    (`std::this_thread::yield()` in `cli_main.cpp` is the only `<thread>` use, not a real thread)
+    -- but the bounded, owning replacement costs nothing and removes the question entirely
+    regardless, the same "currently unexercised, but free to fix" reasoning already applied to
+    `portable_time.hpp`.
+
+    **The rest of the pasted MSVC log needed no fix.** Every `LINK : warning LNK4199
+    "/DELAYLOAD:wpcap.dll" ignored; no imports found from wpcap.dll` line (on `crypto_selftest`/
+    `protocol_result_selftest`/`resource_limits_selftest`/`rotating_pcap_writer_selftest`, and now
+    also `detect_export_invariants_selftest`, item 119's own new tool) is the exact same
+    already-documented, intentional, "not a bug -- left as-is" pattern this same section's own
+    `/DELAYLOAD` bullet already covers in full: every executable linking `conduitscope_core`
+    inherits that target's own `PUBLIC /DELAYLOAD:wpcap.dll` link option, including self-test
+    tools that never call a single `pcap_*()` function, and MSVC's linker correctly (and
+    harmlessly) notices those binaries have nothing to actually delay-load. `item 119`'s new tool
+    simply joined a category that already existed -- nothing new to silence or fix, and this entry
+    deliberately doesn't repeat that bullet's own already-complete rationale.
+
+    **Finding 2 (from the CI failure log): the sanitizers job's CAP_NET_RAW test-splitting
+    allowlist was never updated for item 118's own three new live-capture tests.** Exact failure:
+    `live_capture_decode_no_spurious_drop_warning_with_no_traffic`/`live_capture_detect_...`/
+    `live_capture_capture_...` (item 118's own idle-`-i lo`-no-spurious-drop-warning regression
+    tests) all failed with `error: cannot activate capture on 'lo': You don't have permission to
+    perform this capture on that device (socket: Operation not permitted)` in the "Clang /
+    ASan+UBSan + fuzz corpus regression" CI job specifically -- not in `build-and-test` (which
+    grants `CAP_NET_RAW`/`CAP_NET_ADMIN` directly on the built binary via `setcap` before running
+    the whole suite unfiltered, so every test that opens `lo` just works there regardless of when
+    it was added) and not in `build-without-libpcap`/`release-windows` (neither registers these
+    `UNIX`-only tests at all). The sanitizers job is different: it can't use `setcap`, because
+    `setcap`'s non-dumpable-process side effect makes `/proc/self/environ` unreadable even to the
+    process's own (unprivileged) owner, which silently drops the `ASAN_OPTIONS=detect_leaks=0`
+    override LeakSanitizer needs for these specific tests (a previously-root-caused bug, documented
+    in full in this same job's own existing `.github/workflows/ci.yml` comment, confirmed via
+    google/sanitizers#784). The job's own fix for that was to split the suite in two: everything
+    NOT needing `CAP_NET_RAW` runs first, unprivileged, with full leak detection genuinely intact;
+    only the tests that genuinely open a live interface run second, under `sudo --preserve-env`
+    (root can always read its own `/proc/self/environ`). This split is maintained as two
+    hand-written `ctest -E .../-R ...` regexes (one per step) in `ci.yml` itself -- the job's own
+    comment already states explicitly "every CTest case that actually opens a live interface...
+    must be named in BOTH this step's -E exclusion AND the next step's -R inclusion... there is no
+    third place that lists them" -- and already documents TWO prior times exactly this update was
+    missed (the `capture` subcommand's own two tests, then
+    `capture_rotation_failure_reports_incomplete_with_real_traffic`), each confirmed by a real CI
+    failure with this identical "Operation not permitted" error. Item 118's three new tests are the
+    THIRD occurrence of this same class of miss -- added to `CMakeLists.txt` without the
+    corresponding `ci.yml` update, exactly the mistake the job's own comment already warned future
+    work to avoid.
+
+    **Fix.** Added all three new test names to both regexes (now 10 entries each, byte-identical
+    between the `-E` and `-R` lists, confirmed via `grep`/diff), and extended the job's own comment
+    to record this as the third occurrence, plus a suggestion (not acted on here, to keep this fix
+    minimal and scoped) that a CTest `LABEL` on every test that genuinely opens a live interface
+    would let this split collapse to one list instead of two kept in sync by hand -- worth
+    revisiting if a fourth occurrence happens. Also refreshed `build-and-test`'s own now-stale "4
+    live_capture_* tests" comment (that job doesn't maintain an allowlist at all, so the number was
+    purely descriptive and not load-bearing, but was undercounting even before this item: 4
+    `live_capture_*`-prefixed plus 3 `capture_*`-prefixed = 7 total before this item, 10 after).
+
+    **Verification.** `cli_main.cpp`'s fix: full default-build CTest suite re-run in full
+    (2489/2489 passing, zero regressions, including every `COLUMNS`-env-var-driven `--help`
+    width-clamping test), re-run under Clang ASan/UBSan (zero sanitizer hits), the
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` build re-run in full (2471/2471, unchanged), the
+    MinGW cross-compile rebuilt clean (confirming it correctly takes the plain `std::getenv`
+    branch, since `_MSC_VER` is never defined there -- no `_dupenv_s` dependency risked), and a
+    full clean-room extract-rebuild-test cycle (2489/2489, zero failures). `ci.yml`'s fix: this
+    sandbox has no GitHub Actions runner to execute the workflow against, so verified instead by
+    confirming the YAML still parses (`python3`'s own `yaml.safe_load`), and by confirming via a
+    standalone Python regex check that the updated pattern matches all three new test names and
+    continues to correctly NOT match unrelated tests (`detect_export_format_invariants_self_test`,
+    `live_capture_requires_exactly_one_source_inventory`) that don't actually open a live
+    interface.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

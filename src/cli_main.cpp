@@ -118,6 +118,33 @@ bool stdout_is_terminal() {
 //      group names -- no further plumbing needed beyond tagging each option with the right one.
 // --------------------------------------------------------------------------------------------
 
+// MSVC flags std::getenv with C4996 ("this function or variable may be unsafe") and recommends
+// _dupenv_s instead -- a narrower concern than e.g. std::gmtime's own genuine shared-static-buffer
+// data race (portable_time.hpp's own portable_gmtime/portable_localtime, added for that reason):
+// std::getenv's own returned pointer could only actually go stale if another thread concurrently
+// called putenv/_putenv_s, and this process spawns no threads anywhere (std::this_thread::yield()
+// below is the only <thread> use in this file, not a real thread), so there's no real race here
+// today. The bounded, owning _dupenv_s replacement costs nothing and removes the question entirely
+// regardless, the same "currently unexercised, but free to fix" reasoning already applied to
+// portable_time.hpp -- kept local to this one call site (unlike portable_time.hpp, which has six
+// call sites across five files) rather than promoted to a shared header.
+#ifdef _MSC_VER
+std::optional<std::string> portable_getenv(const char* name) {
+    char* buf = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&buf, &len, name) != 0 || buf == nullptr) return std::nullopt;
+    std::string result(buf);
+    free(buf);
+    return result;
+}
+#else
+std::optional<std::string> portable_getenv(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) return std::nullopt;
+    return std::string(value);
+}
+#endif
+
 // The column width used to word-wrap --help's option descriptions: the real terminal width when
 // stdout is an interactive terminal (ioctl(TIOCGWINSZ) on POSIX, GetConsoleScreenBufferInfo on
 // Windows -- the same stdout_is_terminal() platform split just above decides which path runs),
@@ -149,8 +176,8 @@ unsigned terminal_width() {
 #endif
     }
     if (width == 0) {
-        if (const char* columns_env = std::getenv("COLUMNS")) {
-            int parsed = std::atoi(columns_env);
+        if (auto columns_env = portable_getenv("COLUMNS")) {
+            int parsed = std::atoi(columns_env->c_str());
             if (parsed > 0) width = static_cast<unsigned>(parsed);
         }
     }

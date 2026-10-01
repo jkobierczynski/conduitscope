@@ -124,8 +124,10 @@ jobs:
 
       # Opening a live capture (pcap_activate) needs CAP_NET_RAW even on
       # loopback, and the GitHub-hosted runner doesn't run as root, so the
-      # 4 live_capture_* tests that actually open "lo" (as opposed to just
-      # validating arguments or enumerating interfaces) fail with "You
+      # live_capture_*/capture_* tests that actually open "lo" (as opposed
+      # to just validating arguments or enumerating interfaces -- 10 of
+      # them as of ROADMAP item 118; see the sanitizers job's own longer
+      # comment below for the exact, maintained list) fail with "You
       # don't have permission to perform this capture on that device"
       # otherwise. Granting the built binary the specific capability it
       # needs -- rather than running the whole test suite under sudo --
@@ -224,12 +226,22 @@ jobs:
       # (`capture --interface lo ...` inside the smoke script) but was never added to either regex
       # below, so it ran unprivileged and failed with the identical "You don't have permission to
       # perform this capture on that device (socket: Operation not permitted)" pcap_activate error.
-      # Added here as the 7th test in both lists; nothing else about the split changed.
+      # Added as the 7th test in both lists at that point.
+      #
+      # ROADMAP item 118's own three `live_capture_*_no_spurious_drop_warning_with_no_traffic`
+      # tests (decode/detect/capture, each `-i lo --duration 1`) hit this exact same miss a THIRD
+      # time -- added to CMakeLists.txt without updating either regex here, so all three ran
+      # unprivileged and failed with the identical "Operation not permitted" error, confirmed by a
+      # real CI run. Added here as the 8th-10th tests in both lists; nothing else about the split
+      # changed. (If this keeps recurring, consider a CTest LABEL on every test that actually opens
+      # a live interface instead of a hand-maintained name list in both places -- `ctest -LE`/`-L`
+      # would then need only one list, here, to stay in sync with CMakeLists.txt's own labeling,
+      # rather than two lists here plus CMakeLists.txt's own comment to remember by hand.)
       - name: Test everything that doesn't need CAP_NET_RAW (full leak detection)
         working-directory: build
         run: >
           ctest -j"$(nproc)" --output-on-failure
-          -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic|capture_rotation_failure_reports_incomplete_with_real_traffic)$"
+          -E "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic|capture_rotation_failure_reports_incomplete_with_real_traffic|live_capture_decode_no_spurious_drop_warning_with_no_traffic|live_capture_detect_no_spurious_drop_warning_with_no_traffic|live_capture_capture_no_spurious_drop_warning_with_no_traffic)$"
 
       - name: Test the CAP_NET_RAW-needing live-capture tests (under sudo -- see above)
         working-directory: build
@@ -238,7 +250,7 @@ jobs:
         run: >
           sudo --preserve-env=ASAN_OPTIONS
           ctest -j"$(nproc)" --output-on-failure
-          -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic|capture_rotation_failure_reports_incomplete_with_real_traffic)$"
+          -R "^(live_capture_invalid_filter_reports_clearly|live_capture_duration_stops_cleanly_with_no_traffic|live_capture_policy_validate_duration_stops_cleanly|live_capture_max_packets_stops_capture_early_with_real_traffic|capture_duration_stops_cleanly_with_no_traffic|capture_rotation_and_retention_with_real_traffic|capture_rotation_failure_reports_incomplete_with_real_traffic|live_capture_decode_no_spurious_drop_warning_with_no_traffic|live_capture_detect_no_spurious_drop_warning_with_no_traffic|live_capture_capture_no_spurious_drop_warning_with_no_traffic)$"
 
   release-windows:
     # Windows counterpart to build-and-test/build-without-libpcap above, but scoped to tag pushes
