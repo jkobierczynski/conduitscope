@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>detect -- OT incident-response findings &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a class="active" href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / detect -- OT incident-response findings</div>
+      
+<h1>detect -- OT incident-response findings</h1>
+<p class="lede">Flags the things an OT incident-response team actually recognizes: engineering-
+station mode changes, firmware/logic downloads and restarts, protocol misuse, and new remote-access
+channels. Every finding cites a MITRE ATT&amp;CK for ICS technique and never asserts malicious
+intent -- the judgment belongs to the human analyst reading the report.</p>
+
+<h2>The four-axis model</h2>
+<p>Every finding carries three independent, explicitly labeled dimensions, plus a protocol/
+category description that is itself a fourth, non-independent axis:</p>
+<table class="ref">
+<tr><th>Axis</th><th>Values</th><th>Means</th></tr>
+<tr><td><strong>evidence</strong></td><td><code>Confirmed</code> / <code>Heuristic</code></td><td>how reliably the event was observed -- read directly off the wire vs. partly inferred</td></tr>
+<tr><td><strong>novelty</strong></td><td><code>Confirmed New</code> / <code>First Occurrence</code> / <code>N/A</code></td><td>new vs. known (against a <code>--baseline-file</code> if given, otherwise first-seen-in-this-capture)</td></tr>
+<tr><td><strong>severity</strong></td><td><code>Critical</code> / <code>Moderate</code> / <code>Informational</code></td><td>impact if the finding is genuine</td></tr>
+<tr><td>category / technique</td><td>e.g. <code>Firmware/Logic Change</code> / <code>T0843</code></td><td>what happened and its MITRE ATT&amp;CK for ICS technique ID</td></tr>
+</table>
+<p>These three axes are deliberately kept separate rather than collapsed into one score -- a
+Heuristic-evidence finding is never silently promoted to Confirmed, and novelty never changes
+severity, in any output format. See
+<a href="../DEVELOPMENT.md">DEVELOPMENT.md's ROADMAP item 119</a> for the regression suite that
+specifically proves this invariant holds across every export format below.</p>
+
+<h2>A text report</h2>
+<div class="term-wrap">
+<div class="term-label">Findings, first-seen order, with the summary header</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap</span>
+<span class="ln-out">=== conduitscope detect report ===</span>
+<span class="ln-out">capture: tests/sample_detect.pcap</span>
+<span class="ln-out">total packets: 12</span>
+<span class="ln-out">findings: 9 (Critical 5, Moderate 4, Informational 0)</span>
+<span class="ln-out">  evidence: Confirmed 8, Heuristic 1</span>
+<span class="ln-out">  Firmware/Logic Change: 4</span>
+<span class="ln-out">  Remote-Access Channel: 1</span>
+<span class="ln-out">  Protocol Misuse: 4</span>
+<span class="ln-out">note: evidence/novelty/severity never assert malicious intent -- see USER_GUIDE.md's DETECT</span>
+<span class="ln-out">      section. That judgment belongs to the human analyst reading this report.</span>
+
+<span class="ln-out">--- findings (first-seen order) ---</span>
+
+<span class="ln-out">[Firmware/Logic Change] T0843 (Program Download)</span>
+<span class="ln-out">  evidence: Confirmed  novelty: N/A  severity: Critical</span>
+<span class="ln-out">  192.168.1.60 -&gt; 192.168.1.10:102 (s7comm)</span>
+<span class="ln-out">  S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station</span>
+<span class="ln-out">  first seen: 2023-11-15 03:46:40.000000Z  last seen: 2023-11-15 03:46:40.000000Z  packets: 1</span>
+
+<span class="ln-out">[Firmware/Logic Change] T0816 (Device Restart/Shutdown)</span>
+<span class="ln-out">  evidence: Confirmed  novelty: N/A  severity: Critical</span>
+<span class="ln-out">  192.168.1.60 -&gt; 192.168.1.61:20000 (dnp3)</span>
+<span class="ln-out">  DNP3 Cold Restart request -- an outstation is being commanded to restart</span>
+<span class="ln-out">  first seen: 2023-11-15 03:46:41.001000Z  last seen: 2023-11-15 03:46:41.001000Z  packets: 1</span>
+
+<span class="ln-out">[Protocol Misuse] T0855 (Unauthorized Command Message)</span>
+<span class="ln-out">  evidence: Confirmed  novelty: N/A  severity: Moderate</span>
+<span class="ln-out">  192.168.1.60 -&gt; 192.168.1.62:20000 (dnp3)</span>
+<span class="ln-out">  DNP3 Unsolicited Response from an outstation this capture never saw a master enable unsolicited responses on</span>
+<span class="ln-out">  first seen: 2023-11-15 03:46:44.004000Z  last seen: 2023-11-15 03:46:44.004000Z  packets: 1</span>
+
+<span class="ln-out">...</span>
+</code></pre></div>
+
+<h2>JSON</h2>
+<div class="term-wrap">
+<div class="term-label">One finding, as JSON</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T json | jq '.findings[0]'</span>
+<span class="ln-out">{</span>
+<span class="ln-out">  "category": "Firmware/Logic Change",</span>
+<span class="ln-out">  "technique_id": "T0843",</span>
+<span class="ln-out">  "technique_name": "Program Download",</span>
+<span class="ln-out">  "evidence": "Confirmed",</span>
+<span class="ln-out">  "novelty": "N/A",</span>
+<span class="ln-out">  "severity": "Critical",</span>
+<span class="ln-out">  "client_ip": "192.168.1.60",</span>
+<span class="ln-out">  "server_ip": "192.168.1.10",</span>
+<span class="ln-out">  "protocol": "s7comm",</span>
+<span class="ln-out">  "server_port": 102,</span>
+<span class="ln-out">  "description": "S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station",</span>
+<span class="ln-out">  "first_seen_text": "2023-11-15 03:46:40.000000Z",</span>
+<span class="ln-out">  "packet_count": 1</span>
+<span class="ln-out">}</span>
+</code></pre></div>
+
+<h2 id="security-event-export">SIEM export: CEF / LEEF / syslog</h2>
+<p><code>-T cef</code>/<code>-T leef</code>/<code>-T syslog</code> render one curated line per
+finding, with evidence and novelty carried as labeled custom fields (<code>cs1</code>/
+<code>cs1Label</code>, <code>cs2</code>/<code>cs2Label</code>) rather than folded into the
+severity number -- so a SIEM operator filtering on <code>cs1=Heuristic</code> can still see the
+real CEF/LEEF severity independently.</p>
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T cef</span>CEF -- severity (the number after the technique name) maps from Critical/Moderate/Informational</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T cef</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-detect|0.2.9|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-detect|0.2.9|T0855|Unauthorized Command Message|5|src=192.168.1.60 dst=192.168.1.62 dpt=20000 proto=dnp3 cat=Protocol Misuse msg=DNP3 Unsolicited Response from an outstation this capture never saw a master enable unsolicited responses on ... cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020004004 end=1700020004004</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T leef</span>LEEF -- tab-separated key=value pairs, IBM QRadar's own format</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T leef</span>
+<span class="ln-out">LEEF:2.0|conduitscope|conduitscope-detect|0.2.9|T0843|src=192.168.1.60\tdst=192.168.1.10\tdpt=102\tproto=s7comm\tcat=Firmware/Logic Change\tmsg=S7comm block download (Request Download) ...\tcs1Label=Evidence\tcs1=Confirmed\tcs2Label=Novelty\tcs2=N/A\tcnt=1\tstart=1700020000000\tend=1700020000000\tsev=9</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T syslog</span>syslog -- RFC 5424 envelope wrapping the same CEF payload, PRI mapped from severity</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T syslog</span>
+<span class="ln-out">&lt;106&gt;1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.2.9|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download ...</span>
+<span class="ln-out">&lt;108&gt;1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.2.9|T0855|Unauthorized Command Message|5|src=192.168.1.60 dst=192.168.1.62 dpt=20000 proto=dnp3 ...</span>
+</code></pre></div>
+<p>Forward any of these straight to a log pipeline:</p>
+<div class="term-wrap">
+<div class="term-label">Stream CEF findings to a syslog collector</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T cef | logger -n siem.internal -P 514 -T</span>
+</code></pre></div>
+
+<h2>Novelty against a real baseline</h2>
+<p>Without <code>--baseline-file</code>, "new vs. known" means first-occurrence-within-this-
+capture. With it, novelty is resolved against real history from
+<a href="baseline.html"><code>baseline learn</code></a> -- a conduit already in the baseline isn't
+flagged at all; one genuinely absent gets <code>Confirmed New</code>:</p>
+<div class="term-wrap">
+<div class="term-label">Same capture, now checked against a learned baseline</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope baseline learn --baseline-file known.json tests/sample_modbus.pcap tests/sample_s7comm.pcap</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap --baseline-file known.json -T json | jq '.findings[] | select(.novelty == "Confirmed New")'</span>
+</code></pre></div>
+
+<h2>Resource bounds</h2>
+<p><code>detect</code> tracks internal state (flow history, per-conduit novelty tables) bounded by
+several <code>--max-detect-*</code> ceilings -- hitting one doesn't fail the run, but marks the
+report OBSERVATION INCOMPLETE and returns exit code 6 rather than silently under-reporting. See
+<a href="../USER_GUIDE.md">EXIT STATUS</a> code 6, and
+<a href="../DEVELOPMENT.md">DEVELOPMENT.md's ROADMAP item 118</a> for the clean-vs-degraded
+distinction this manual's own CI fix (ROADMAP item 120) added regression coverage for.</p>
+
+<h2>Live detection</h2>
+<p><code>detect</code> accepts <code>-i &lt;interface&gt;</code> in place of <code>-r</code>, same
+as <code>policy validate</code>/<code>inventory</code> -- see
+<a href="live-capture.html">Live capture &amp; continuous capture</a>.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="inventory.html">&larr; inventory -- passive asset discovery</a></span>
+        <span class="next"><a class="next" href="baseline.html">baseline -- learn / check &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

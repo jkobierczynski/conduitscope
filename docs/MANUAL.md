@@ -26,6 +26,15 @@ the three below.
   September 2026 external code review and the engineering priorities that
   came out of it, protocol-detection dispatch order and collision
   handling, and the development roadmap.
+- **[manual/index.html](manual/index.html)** -- an extended, example-driven
+  manual: one HTML page per feature (`decode`, `info`, live/continuous
+  capture, `policy validate`, `inventory`, `detect`, `baseline`,
+  `evidence`, `merge`), every command run for real against the fixtures in
+  `tests/`, Linux and Windows setup instructions, and a dedicated page of
+  JSON-filtering recipes (`jq` on Linux/macOS, PowerShell on Windows) with
+  shell-escaping worked through explicitly. A worked-example companion to
+  the three references above, not a replacement for them -- open
+  `manual/index.html` in a browser to start.
 
 See also the top-level [README.md](../README.md) for the project overview
 and quick start, and [man/conduitscope.1](../man/conduitscope.1) for the

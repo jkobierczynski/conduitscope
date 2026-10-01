@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evidence -- audit evidence packs &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a class="active" href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / evidence -- audit evidence packs</div>
+      
+<h1>evidence -- audit evidence packs</h1>
+<p class="lede">One command that assembles an audit-binder-ready report: the observed zone/conduit
+topology (reuses <a href="inventory.html"><code>inventory</code></a>), policy compliance mapped to
+IEC 62443 FR5 / NIS2 (reuses <a href="policy.html"><code>policy validate</code></a>, if
+<code>--policy</code> is given), detection findings with their own FR mapping (reuses
+<a href="detect.html"><code>detect</code></a>), an optional baseline check (reuses
+<a href="baseline.html"><code>baseline check</code></a>, if <code>--baseline-file</code> is
+given), an optional NERC CIP-007 R4-style monitoring-coverage note, and a reproducible integrity
+record (tool version, SHA-256 hashes, an optional HMAC-SHA256 signature).</p>
+
+<div class="callout warn">
+<strong class="label">Not a compliance determination</strong>
+<p>Every framework mapping below (FR5/SL-T, NIS2, CIP) is this tool's own interpretive cross-
+reference, never an official conformance or compliance determination -- a qualified assessor's own
+judgment is still required. The report says this itself, verbatim, in its own SCOPE &amp; HONESTY
+NOTE section (reproduced in the first example below) -- it is not manual-only framing.</p>
+</div>
+
+<h2>A minimal run</h2>
+<div class="term-wrap">
+<div class="term-label">Topology + policy compliance, no baseline</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope evidence -r tests/sample_detect.pcap --policy tests/policies/compliant.yaml</span>
+<span class="ln-out">ConduitScope Evidence Pack</span>
+<span class="ln-out">  generated: 2026-10-01 15:17:35.000000Z UTC</span>
+<span class="ln-out">  tool version: conduitscope 0.2.9  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]</span>
+
+<span class="ln-out">SCOPE &amp; HONESTY NOTE</span>
+<span class="ln-out">  This report assembles already-validated conduitscope output (zone/conduit topology, policy</span>
+<span class="ln-out">  compliance, detection findings, and, optionally, a baseline check) into one package, plus</span>
+<span class="ln-out">  hashes/timestamps for reproducibility and, optionally, an HMAC-SHA256 integrity stamp. It is</span>
+<span class="ln-out">  evidence FOR an audit, not a certification, a compliance determination, or a substitute for a</span>
+<span class="ln-out">  qualified assessor's own judgment. Specifically:</span>
+<span class="ln-out">    - Every finding below already states its own evidence basis (Confirmed = read directly off</span>
+<span class="ln-out">      the wire; Heuristic = partly inferred, could be wrong) and, where applicable, novelty.</span>
+<span class="ln-out">    - Framework mappings (FR5/SL-T, NIS2, CIP) below are this tool's own interpretive cross-</span>
+<span class="ln-out">      references, never official conformance determinations.</span>
+<span class="ln-out">    - "OBSERVATION INCOMPLETE"/truncation notes below mean this analysis only partially</span>
+<span class="ln-out">      observed the capture -- treat those sections as a floor, not a ceiling.</span>
+<span class="ln-out">    - Absence of a finding is not proof of absence of the underlying activity.</span>
+
+<span class="ln-out">CAPTURE</span>
+<span class="ln-out">  file: tests/sample_detect.pcap</span>
+<span class="ln-out">  SHA-256: 803db12d48f2d7083342585a65cf4f65a0cf70735f4f8d8e1ceca79bb84df00e</span>
+<span class="ln-out">  window: 2023-11-15 03:46:40.000000Z to 2023-11-15 03:46:51.011000Z UTC</span>
+<span class="ln-out">  packets: 12 (0 could not be decoded at all)</span>
+
+<span class="ln-out">1. OBSERVED ZONE/CONDUIT TOPOLOGY (ground truth from this capture)</span>
+<span class="ln-out">  1 zone(s), 5 conduit(s), 9 asset(s) observed</span>
+
+<span class="ln-out">  Mermaid diagram (render with any Mermaid-compatible viewer, e.g. mermaid.live):</span>
+
+<span class="ln-out">    graph LR</span>
+<span class="ln-out">      zone_192_168_1_0_24["zone_192_168_1_0_24&lt;br/&gt;192.168.1.0/24&lt;br/&gt;(9 asset(s))"]</span>
+<span class="ln-out">      zone_192_168_1_0_24 --&gt;|"bacnet/47808"| zone_192_168_1_0_24</span>
+<span class="ln-out">      zone_192_168_1_0_24 --&gt;|"dnp3/20000"| zone_192_168_1_0_24</span>
+
+<span class="ln-out">2. POLICY COMPLIANCE -- IEC 62443 FR5 (Restricted Data Flow) / NIS2 Segmentation Evidence</span>
+<span class="ln-out">  policy file: tests/policies/compliant.yaml (2 zone(s), 3 conduit(s))</span>
+<span class="ln-out">  SHA-256: aa299b40c5ccfb30addfd8379002b63406a876aa6caaf06fb28b2c93d87975e4</span>
+<span class="ln-out">  result: NON-COMPLIANT (0 violation(s), 7 unclassified flow(s), 0 allowed)</span>
+
+<span class="ln-out">  Full policy validate report follows (flows, violations, unclassified traffic):</span>
+<span class="ln-out">    ...</span>
+</code></pre></div>
+
+<h2>Full-feature run</h2>
+<p>Add a baseline check, an operator-declared Security Level target (echoed verbatim, never
+computed from traffic -- IEC 62443-3-2 defines SL-T as an organizational risk-assessment output),
+the NERC CIP-007 R4 monitoring-coverage note, and an HMAC-signed integrity stamp:</p>
+<div class="term-wrap">
+<div class="term-label">Every optional section turned on</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope evidence -r tests/sample_detect.pcap \\</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    --policy tests/policies/compliant.yaml \\</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    --baseline-file baseline.json \\</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    --sl-target SL2 \\</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    --cip-monitoring-window \\</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    --sign-key hmac.key \\</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    -o evidence_pack.txt</span>
+</code></pre></div>
+<p>The Integrity section then includes a hex HMAC-SHA256 signature plus a one-line recipe to
+independently verify it offline -- the report is meant to leave the conduitscope installation
+entirely and still be checkable.</p>
+
+<h2>Exit codes</h2>
+<p><code>evidence</code> reuses the same exit-code vocabulary as the subcommands it wraps, combined
+onto one report: 0 (clean), 3 (policy non-compliant, if <code>--policy</code> given), 4 (baseline
+anomalies, if <code>--baseline-file</code> given), 1 (a required input couldn't be read), and 6
+(any wrapped engine's own observation was truncated -- takes priority over every other code,
+including 0/3/4). See <a href="../USER_GUIDE.md">EXIT STATUS</a> for the exact
+precedence rules.</p>
+
+<h2>When to reach for this vs. the individual subcommands</h2>
+<p>Run the individual subcommands (<code>inventory</code>, <code>policy validate</code>,
+<code>detect</code>, <code>baseline check</code>) directly while you're actively investigating --
+their own JSON/CEF/CSV exports are better suited to scripting and SIEM pipelines. Reach for
+<code>evidence</code> once, at the end, to produce the single document that goes in the audit
+binder or gets attached to a compliance ticket.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="baseline.html">&larr; baseline -- learn / check</a></span>
+        <span class="next"><a class="next" href="merge.html">merge -- combine multi-site reports &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

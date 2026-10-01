@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>merge -- combine multi-site reports &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a class="active" href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / merge -- combine multi-site reports</div>
+      
+<h1>merge -- combine multi-site reports</h1>
+<p class="lede">Combines N independent <code>inventory --format json</code> reports (one per tap
+point) into one site-wide asset/communications/zone/conduit matrix. Currently the only report kind
+<code>merge</code> supports -- merging <code>policy</code>/<code>detect</code>/<code>baseline</code>
+reports across tap points is a reasonable follow-up, not built yet.</p>
+
+<h2>Why a separate step</h2>
+<p><code>inventory</code> itself only ever sees one capture (one tap point) at a time. A real site
+usually has several SPAN/TAP collectors, each running its own <code>capture</code> process (see
+<a href="live-capture.html">Live capture &amp; continuous capture</a>'s "one tap point per
+process" note) and its own analysis pass. <code>merge inventory</code> is the step that reassembles
+those separate views back into one picture -- assets seen at more than one tap point are unioned,
+not duplicated, and zones/conduits are always freshly re-derived from the merged result rather than
+merged themselves (so the merged zone model reflects the combined traffic, not a union of each
+site's own possibly-inconsistent zone boundaries).</p>
+
+<h2>Produce one JSON report per tap point</h2>
+<div class="term-wrap">
+<div class="term-label">Two independent inventory reports</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tap1.pcap -T json -o site_a.json</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tap2.pcap -T json -o site_b.json</span>
+</code></pre></div>
+
+<h2>Merge them</h2>
+<div class="term-wrap">
+<div class="term-label">One combined, site-wide report</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope merge inventory site_a.json site_b.json</span>
+<span class="ln-out">OT asset inventory</span>
+<span class="ln-out">  capture: merged: 2 report(s) (site_a.json, site_b.json)</span>
+
+<span class="ln-out">9 asset(s) observed, 17 total packet(s) in capture, 0 skipped</span>
+
+<span class="ln-out">ASSETS (9):</span>
+<span class="ln-out">  10.0.5.21  00:0c:29:de:ad:01  [client]  dnp3, s7comm  (6 packet(s))</span>
+<span class="ln-out">      role: HMI/Engineering Station  (heuristic, low confidence)</span>
+<span class="ln-out">  192.168.1.10  00:0c:29:aa:bb:cc  [server]  modbus  (5 packet(s))</span>
+<span class="ln-out">      first seen: 2023-11-14 22:13:20.000000Z  last seen: 2023-11-15 03:46:41.001000Z</span>
+<span class="ln-out">      role: PLC/RTU  (heuristic, low confidence)</span>
+<span class="ln-out">  ...</span>
+</code></pre></div>
+<p>Notice <code>192.168.1.10</code>'s packet count (5) and first-seen time are the union of what
+each separate report observed -- one asset merged from two partial views, not two rows.</p>
+
+<p>Every output format <code>inventory</code> itself supports also works on the merged result --
+<code>-T json</code>, <code>-T csv</code>, <code>-T stix</code>, <code>--diagram</code>,
+<code>--policy-out</code> -- so a site-wide Mermaid diagram or inferred policy comes from the same
+<code>merge inventory ... --diagram site.mmd --policy-out site_policy.yaml</code> invocation.</p>
+<div class="term-wrap">
+<div class="term-label">A site-wide diagram and inferred policy from the merged view</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope merge inventory site_a.json site_b.json --diagram site.mmd --policy-out site_policy.yaml</span>
+</code></pre></div>
+
+<h2>Scaling to more than two tap points</h2>
+<p><code>merge inventory</code> takes any number of report files on the command line -- list every
+tap point's JSON report:</p>
+<div class="term-wrap">
+<div class="term-label">Four tap points at once</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope merge inventory site_a.json site_b.json site_c.json site_d.json -o site_wide.json -T json</span>
+</code></pre></div>
+<p>A typical unattended pipeline: each site runs its own <code>capture</code> continuously
+(<a href="live-capture.html">Live capture &amp; continuous capture</a>), a scheduled job runs
+<code>inventory -r &lt;latest rotated files&gt; -T json -o &lt;site&gt;.json</code> per tap point,
+and a central job periodically runs <code>merge inventory</code> across all of them.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="evidence.html">&larr; evidence -- audit evidence packs</a></span>
+        <span class="next"><a class="next" href="json-filtering.html">JSON output &amp; filtering (jq / PowerShell) &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

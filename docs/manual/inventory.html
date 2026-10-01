@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>inventory -- passive asset discovery &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a class="active" href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / inventory -- passive asset discovery</div>
+      
+<h1>inventory -- passive asset discovery</h1>
+<p class="lede">Infers a first-draft asset list, communications matrix, and zone/conduit model
+from a capture -- the opposite direction from <a href="policy.html"><code>policy validate</code>
+</a>, which checks traffic against a policy you already wrote. Run <code>inventory</code> first on
+an unfamiliar network; feed its output into <code>policy validate</code> once you've reviewed it.</p>
+
+<h2>Text report</h2>
+<div class="term-wrap">
+<div class="term-label">Assets, communications, and inferred zones from one capture</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap</span>
+<span class="ln-out">OT asset inventory</span>
+<span class="ln-out">  capture: tests/sample_inventory.pcap</span>
+
+<span class="ln-out">9 asset(s) observed, 14 total packet(s) in capture, 0 skipped</span>
+
+<span class="ln-out">ASSETS (9):</span>
+<span class="ln-out">  10.0.5.21  00:0c:29:de:ad:01  [client]  dnp3, s7comm  (6 packet(s))</span>
+<span class="ln-out">      first seen: 2023-11-15 03:46:42.002000Z  last seen: 2023-11-15 03:46:47.007000Z</span>
+<span class="ln-out">      role: HMI/Engineering Station  (heuristic, low confidence)</span>
+<span class="ln-out">  192.168.1.10  00:0c:29:aa:bb:cc  [server]  modbus  (2 packet(s))</span>
+<span class="ln-out">      role: PLC/RTU  (heuristic, low confidence)</span>
+<span class="ln-out">  ...</span>
+
+<span class="ln-out">COMMUNICATIONS (5):</span>
+<span class="ln-out">  192.168.1.50 -&gt; 192.168.1.10:502 (modbus)  modbus  [Read Holding Registers]  (2 packet(s), direction: port-heuristic)</span>
+<span class="ln-out">      top touched addresses (1-based Modicon-style addressing) (1 distinct address(es) touched):</span>
+<span class="ln-out">        hreg:00001-00010  (1 touch(es))</span>
+<span class="ln-out">  10.0.5.21 -&gt; 192.168.1.11:20000 (dnp3)  dnp3  [Read, Response]  (2 packet(s), direction: port-heuristic)</span>
+<span class="ln-out">      top touched addresses (2 distinct address(es) touched):</span>
+<span class="ln-out">        g1v2 idx 0-2  (1 touch(es))</span>
+<span class="ln-out">        g60v1  (1 touch(es))</span>
+<span class="ln-out">  ...</span>
+
+<span class="ln-out">INFERRED ZONES (2, grouped by observed /24 subnet):</span>
+<span class="ln-out">  zone_10_0_5_0_24 (10.0.5.0/24): 10.0.5.21, 10.0.5.22</span>
+<span class="ln-out">  zone_192_168_1_0_24 (192.168.1.0/24): 192.168.1.10, 192.168.1.11, 192.168.1.12, 192.168.1.14, 192.168.1.15, 192.168.1.16, 192.168.1.50</span>
+</code></pre></div>
+<p>Role inference ("PLC/RTU", "HMI/Engineering Station") is always labeled heuristic/low
+confidence -- it's based on which side of each protocol's client/server pattern a host sits on,
+not a vendor fingerprint.</p>
+
+<h2>Asset-only exports: CSV and STIX 2.1</h2>
+<p><code>-T csv</code> and <code>-T stix</code> are both deliberately asset-only (one row/object
+per device) -- for CMDB import or threat-intel tooling. Use <code>text</code>/<code>json</code>
+for the full communications/zones/conduits picture.</p>
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T csv</span>-T csv -- one row per asset, ready for a CMDB import</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap -T csv</span>
+<span class="ln-out">ip,mac,mac_vendor,vendor,product,firmware_revision,serial_number,plant_identification,security_posture,inferred_role,protocols,ever_client,ever_server,first_seen,last_seen,packet_count</span>
+<span class="ln-out">10.0.5.21,00:0c:29:de:ad:01,,,,,,,,HMI/Engineering Station,"dnp3, s7comm",true,false,2023-11-15 03:46:42.002000Z,2023-11-15 03:46:47.007000Z,6</span>
+<span class="ln-out">192.168.1.10,00:0c:29:aa:bb:cc,,,,,,,,PLC/RTU,modbus,false,true,2023-11-15 03:46:40.000000Z,2023-11-15 03:46:41.001000Z,2</span>
+<span class="ln-out">...</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T stix</span>-T stix -- a STIX 2.1 bundle, one infrastructure object per asset</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap -T stix | jq '.objects[0]'</span>
+<span class="ln-out">{</span>
+<span class="ln-out">  "type": "infrastructure",</span>
+<span class="ln-out">  "spec_version": "2.1",</span>
+<span class="ln-out">  "id": "infrastructure--b2490a7e-d12a-846d-8220-96a9affcac7d",</span>
+<span class="ln-out">  "created": "2023-11-15T03:46:42.002Z",</span>
+<span class="ln-out">  "name": "10.0.5.21",</span>
+<span class="ln-out">  "infrastructure_types": ["unknown"],</span>
+<span class="ln-out">  "x_conduitscope_ip": "10.0.5.21",</span>
+<span class="ln-out">  "x_conduitscope_mac": "00:0c:29:de:ad:01",</span>
+<span class="ln-out">  "x_conduitscope_inferred_role": "HMI/Engineering Station",</span>
+<span class="ln-out">  "x_conduitscope_protocols": ["dnp3", "s7comm"],</span>
+<span class="ln-out">  "x_conduitscope_packet_count": 6</span>
+<span class="ln-out">}</span>
+</code></pre></div>
+
+<h2>Topology diagram (<code>--diagram</code>)</h2>
+<p>A Mermaid or Graphviz/DOT zone-communication graph, written to a file -- render it with any
+Mermaid-compatible viewer (e.g. <a href="https://mermaid.live">mermaid.live</a>) or
+<code>dot</code>.</p>
+<div class="term-wrap">
+<div class="term-label">Mermaid diagram of the inferred zone topology</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap --diagram zones.mmd --diagram-format mermaid</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cat zones.mmd</span>
+<span class="ln-out">graph LR</span>
+<span class="ln-out">  zone_10_0_5_0_24["zone_10_0_5_0_24&lt;br/&gt;10.0.5.0/24&lt;br/&gt;(2 asset(s))"]</span>
+<span class="ln-out">  zone_192_168_1_0_24["zone_192_168_1_0_24&lt;br/&gt;192.168.1.0/24&lt;br/&gt;(7 asset(s))"]</span>
+<span class="ln-out">  zone_10_0_5_0_24 --&gt;|"dnp3/20000"| zone_192_168_1_0_24</span>
+<span class="ln-out">  zone_10_0_5_0_24 --&gt;|"enip/44818"| zone_192_168_1_0_24</span>
+<span class="ln-out">  zone_10_0_5_0_24 --&gt;|"s7comm/102"| zone_192_168_1_0_24</span>
+<span class="ln-out">  zone_192_168_1_0_24 --&gt;|"bacnet/47808"| zone_192_168_1_0_24</span>
+<span class="ln-out">  zone_192_168_1_0_24 --&gt;|"modbus/502"| zone_192_168_1_0_24</span>
+</code></pre></div>
+<p><code>--diagram-format dot</code> produces Graphviz DOT instead, for <code>dot -Tpng
+zones.dot -o zones.png</code> or similar.</p>
+
+<h2 id="inferred-zoneconduit-policy">Inferred zone/conduit policy (<code>--policy-out</code>)</h2>
+<p>Writes a ready-to-edit YAML policy file in exactly the schema
+<a href="policy.html"><code>policy validate</code></a> expects -- zones grouped by observed /24
+subnet, one conduit per distinct (zone-pair, protocol, port) combination actually seen:</p>
+<div class="term-wrap">
+<div class="term-label">--policy-out inferred.yaml</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap --policy-out inferred.yaml</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cat inferred.yaml</span>
+<span class="ln-comment"># Auto-generated by `conduitscope inventory` -- a FIRST-DRAFT zone/conduit policy inferred from</span>
+<span class="ln-comment"># observed traffic, not a hand-authored security policy. Review it ... before using it to</span>
+<span class="ln-comment"># gate real `policy validate` runs.</span>
+<span class="ln-out">zones:</span>
+<span class="ln-out">  zone_10_0_5_0_24:</span>
+<span class="ln-out">    description: "Inferred from observed traffic: 2 asset(s) in 10.0.5.0/24"</span>
+<span class="ln-out">    networks:</span>
+<span class="ln-out">      - 10.0.5.0/24</span>
+<span class="ln-out">  zone_192_168_1_0_24:</span>
+<span class="ln-out">    description: "Inferred from observed traffic: 7 asset(s) in 192.168.1.0/24"</span>
+<span class="ln-out">    networks:</span>
+<span class="ln-out">      - 192.168.1.0/24</span>
+
+<span class="ln-out">conduits:</span>
+<span class="ln-out">  - name: "zone_10_0_5_0_24 -&gt; zone_192_168_1_0_24 (dnp3/20000)"</span>
+<span class="ln-out">    from: zone_10_0_5_0_24</span>
+<span class="ln-out">    to: zone_192_168_1_0_24</span>
+<span class="ln-out">    protocols: [dnp3]</span>
+<span class="ln-out">    ports: [20000]</span>
+<span class="ln-out">  ...</span>
+</code></pre></div><div class="callout"><strong class="label">Review before enforcing</strong>
+<p>An inferred policy reflects what the capture <em>happened to contain</em>, not what
+segmentation was <em>intended</em> -- a capture that's too short, or taken at the wrong tap point,
+produces a policy that's too permissive. Read it before wiring it into a gating
+<code>policy validate</code> run; see <a href="policy.html">policy validate's own round-trip
+example</a>.</p>
+</div>
+
+<h2>Firewall/ACL export</h2>
+<p><code>--acl-out FILE --acl-format {cisco,fortinet,paloalto}</code> renders the same inferred
+conduits as vendor-flavored ACL syntax -- a starting point for an actual firewall rule set, with
+the same review caveat as the policy export above.</p>
+<div class="term-wrap">
+<div class="term-label">Cisco-flavored ACL sketch</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap --acl-out rules.txt --acl-format cisco</span>
+</code></pre></div>
+
+<h2>Edges/conduits as CSV</h2>
+<p><code>--edges-csv</code> and <code>--conduits-csv</code> export the raw communication edges
+and the derived conduit list as flat CSV, for spreadsheet review or import elsewhere -- useful
+alongside <code>-T csv</code>'s asset-only view when you want the relationships too.</p>
+<div class="term-wrap">
+<div class="term-label">Edges and conduits as CSV</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap --edges-csv edges.csv --conduits-csv conduits.csv</span>
+</code></pre></div>
+
+<h2>Trying it against a real capture</h2>
+<div class="term-wrap">
+<div class="term-label">Inventory from a real-world mixed-protocol excerpt</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap</span>
+<span class="ln-out">OT asset inventory</span>
+<span class="ln-out">  capture: tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap</span>
+</code></pre></div>
+<p>See <a href="live-capture.html">Live capture &amp; continuous capture</a> for running
+<code>inventory -i &lt;interface&gt;</code> directly against a live span port instead of a file.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="policy.html">&larr; policy validate -- zone/conduit compliance</a></span>
+        <span class="next"><a class="next" href="detect.html">detect -- OT incident-response findings &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

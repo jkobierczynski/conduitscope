@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>policy validate -- zone/conduit compliance &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a class="active" href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / policy validate -- zone/conduit compliance</div>
+      
+<h1>policy validate -- zone/conduit compliance</h1>
+<p class="lede">Checks a capture against a hand-authored YAML zone/conduit policy: every observed
+flow is either ALLOWED (matches a declared conduit), a VIOLATION (crosses zones with no permitting
+conduit), or UNCLASSIFIED (an endpoint isn't in any declared zone at all). This is the IEC 62443
+FR5 (Restricted Data Flow) angle -- the opposite direction from <a href="inventory.html">
+<code>inventory</code></a>, which infers a policy from traffic instead of checking against one.</p>
+
+<h2>A minimal policy file</h2>
+<p>Two zones (named sets of networks), and conduits (named permitted flows between zones, by
+protocol and port):</p>
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">yaml</span>tests/policies/compliant.yaml</div>
+<pre class="term"><code>
+<span class="ln-out">zones:</span>
+<span class="ln-out">  hmi_zone:</span>
+<span class="ln-out">    description: "HMI / engineering workstation"</span>
+<span class="ln-out">    networks:</span>
+<span class="ln-out">      - 192.168.1.50/32</span>
+<span class="ln-out">  plc_zone:</span>
+<span class="ln-out">    description: "PLC"</span>
+<span class="ln-out">    networks: [192.168.1.10/32]</span>
+
+<span class="ln-out">conduits:</span>
+<span class="ln-out">  - name: "HMI polls PLC via Modbus"</span>
+<span class="ln-out">    from: hmi_zone</span>
+<span class="ln-out">    to: plc_zone</span>
+<span class="ln-out">    protocols: [modbus]</span>
+<span class="ln-out">    ports: [502]</span>
+</code></pre></div>
+<p>See <a href="../USER_GUIDE.md">USER_GUIDE.md's POLICY FILE FORMAT</a> for
+the complete schema: VLAN-membership zones (by MAC/EtherType, for PROFINET/GOOSE/SV/EtherCAT which
+have no IP layer at all), bidirectional conduits, function-level restrictions, and every
+validation rule a malformed policy file is checked against before any packet is read.</p>
+
+<h2>A compliant run</h2>
+<div class="term-wrap">
+<div class="term-label">Every observed flow matches a declared conduit</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/compliant.yaml</span>
+<span class="ln-out">Zone/conduit policy validation</span>
+<span class="ln-out">  capture: tests/sample_modbus.pcap</span>
+<span class="ln-out">  policy:  tests/policies/compliant.yaml (2 zone(s), 3 conduit(s))</span>
+
+<span class="ln-out">Result: COMPLIANT</span>
+
+<span class="ln-out">Flows evaluated: 1 (1 allowed, 0 violation(s), 0 unclassified)</span>
+<span class="ln-out">  3 total packet(s) in capture, 0 skipped (non-TCP/non-IP)</span>
+
+<span class="ln-out">VIOLATIONS (0):</span>
+<span class="ln-out">  (none)</span>
+
+<span class="ln-out">ALLOWED (1):</span>
+<span class="ln-out">  [1] 192.168.1.50 -&gt; 192.168.1.10:502 (modbus)  (modbus, 3 packet(s))</span>
+<span class="ln-out">      zones: hmi_zone -&gt; plc_zone, matched conduit "HMI polls PLC via Modbus"</span>
+
+<span class="ln-out">Conduits never exercised by this capture (2):</span>
+<span class="ln-out">  - HMI polls PLC via DNP3</span>
+<span class="ln-out">  - Engineering station S7comm</span>
+</code></pre></div>
+<h2>A real violation</h2>
+<p>Same capture, a policy that only permits Modbus on the <em>wrong</em> port -- the flow is
+between two known zones, but no conduit permits it on port 502, so it's a VIOLATION (not
+UNCLASSIFIED -- that's reserved for an endpoint outside every declared zone):</p>
+<div class="term-wrap">
+<div class="term-label">--policy tests/policies/wrong_port.yaml</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/wrong_port.yaml</span>
+<span class="ln-out">Zone/conduit policy validation</span>
+<span class="ln-out">  policy:  tests/policies/wrong_port.yaml (2 zone(s), 1 conduit(s))</span>
+
+<span class="ln-out">Result: NON-COMPLIANT (1 violation(s), 0 unclassified flow(s))</span>
+
+<span class="ln-out">VIOLATIONS (1):</span>
+<span class="ln-out">  [1] 192.168.1.50 -&gt; 192.168.1.10:502 (modbus)  (modbus, 3 packet(s))</span>
+<span class="ln-out">      zones: hmi_zone -&gt; plc_zone</span>
+<span class="ln-out">      a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502</span>
+
+<span class="ln-out">Conduits never exercised by this capture (1):</span>
+<span class="ln-out">  - HMI to PLC on the wrong port</span>
+</code></pre></div><div class="callout"><strong class="label">Exit code encodes the verdict</strong>
+<p>0 = COMPLIANT, 3 = NON-COMPLIANT (a real violation and/or unclassified flow was found), 1 =
+couldn't even run (bad policy file, unreadable capture). A script can distinguish "ran fine, found
+a problem" from "didn't run" without parsing output -- see
+<a href="../USER_GUIDE.md">EXIT STATUS</a>.</p>
+</div>
+<h2>Unclassified traffic</h2>
+<p>An endpoint that isn't in <em>any</em> declared zone -- different from a violation, which
+requires both endpoints to be known:</p>
+<div class="term-wrap">
+<div class="term-label">Traffic from hosts this policy never declared a zone for</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope policy validate -r tests/sample_detect.pcap --policy tests/policies/compliant.yaml</span>
+<span class="ln-out">Result: NON-COMPLIANT (0 violation(s), 7 unclassified flow(s))</span>
+
+<span class="ln-out">UNCLASSIFIED TRAFFIC (7):</span>
+<span class="ln-out">  [1] 192.168.1.60 -&gt; 192.168.1.10:102 (mms)  (s7comm, 1 packet(s))</span>
+<span class="ln-out">      zones: unclassified -&gt; plc_zone</span>
+<span class="ln-out">      no declared zone contains 192.168.1.60</span>
+<span class="ln-out">  [2] 192.168.1.60 -&gt; 192.168.1.61:20000 (dnp3)  (dnp3, 3 packet(s))</span>
+<span class="ln-out">      zones: unclassified -&gt; unclassified</span>
+<span class="ln-out">      no declared zone contains 192.168.1.60 or 192.168.1.61</span>
+<span class="ln-out">  ...</span>
+</code></pre></div>
+
+<h2>Output formats</h2>
+<p><code>-T/--format</code>: <code>text</code> (default), <code>json</code>, or curated
+one-line-per-finding SIEM formats <code>cef</code>/<code>leef</code>/<code>syslog</code> -- see
+<a href="json-filtering.html">JSON output &amp; filtering</a> and
+<a href="detect.html#security-event-export">detect's SIEM export section</a> for the shared
+CEF/LEEF/syslog conventions across every subcommand that supports them.</p>
+<div class="term-wrap">
+<div class="term-label">A violation as a CEF one-liner, ready for a SIEM forwarder</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/wrong_port.yaml --format cef</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-policy|0.2.9|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3</span>
+</code></pre></div>
+
+<h2>Discover, then enforce</h2>
+<p>Don't have a policy file yet? <a href="inventory.html"><code>inventory</code></a> infers a
+first-draft one from observed traffic, which feeds straight back into <code>policy validate</code>:</p>
+<div class="term-wrap">
+<div class="term-label">Round-trip: infer a policy, then validate against it</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap --policy-out inferred.yaml</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope policy validate -r tests/sample_inventory.pcap --policy inferred.yaml</span>
+<span class="ln-out">Result: COMPLIANT</span>
+</code></pre></div>
+<p>Review an inferred policy before using it to gate anything real -- it's a first draft of what
+was <em>observed</em>, not a statement of what's <em>intended</em>. See
+<a href="inventory.html#inferred-zoneconduit-policy">inventory's own policy-out section</a>.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="live-capture.html">&larr; Live capture &amp; continuous capture</a></span>
+        <span class="next"><a class="next" href="inventory.html">inventory -- passive asset discovery &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>conduitscope manual &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a class="active" href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / conduitscope manual</div>
+      
+<h1>conduitscope -- extended manual</h1>
+<p class="lede">A worked-example companion to the reference docs: every command on every page
+below was actually run against the real fixture captures shipped in <code>tests/</code>, and the
+output shown is the real, unedited (occasionally truncated for length) result of that run on
+conduitscope 0.2.9.</p>
+
+<p>conduitscope is a passive OT/ICS network-security monitoring CLI: it reads pcap/pcapng
+captures (or a live interface) and decodes, inventories, audits, and detects findings across
+Modbus/TCP, DNP3, S7comm, IEC 60870-5-104, EtherNet/IP, PROFINET, IEC 61850 (GOOSE/SV/MMS),
+EtherCAT, BACnet/IP, HART-IP, OPC UA, MELSEC, FINS, MQTT, and more. It never transmits anything
+onto the wire -- see <a href="../USER_GUIDE.md">PASSIVE-MODE
+GUARANTEE</a> in the User Guide.</p>
+
+<div class="callout">
+<strong class="label">How this manual is organized</strong>
+<p>Eleven subcommands, eleven pages, roughly matching how you'd actually use the tool: read a
+capture file first (<a href="decode.html">decode</a>, <a href="info.html">info</a>), then move to
+live/continuous capture, then to the security- and compliance-facing commands
+(<a href="policy.html">policy validate</a>, <a href="inventory.html">inventory</a>,
+<a href="detect.html">detect</a>, <a href="baseline.html">baseline</a>,
+<a href="evidence.html">evidence</a>), then multi-site <a href="merge.html">merge</a> and a
+dedicated page on <a href="json-filtering.html">JSON output and filtering</a> with real
+<code>jq</code> (Linux/macOS) and PowerShell (Windows) recipes, escape characters included.</p>
+</div>
+
+<h2>Every feature, at a glance</h2>
+<div class="grid">
+  <a class="card" href="setup.html"><div class="card-title">Setup</div><div class="card-desc">Build from source on Linux and Windows, with and without live-capture support.</div></a>
+  <a class="card" href="decode.html"><div class="card-title">decode</div><div class="card-desc">Per-packet decode: text/json/csv/fields/zeek, BPF filters, display filters, hex dump, -V details.</div></a>
+  <a class="card" href="info.html"><div class="card-title">info</div><div class="card-desc">File metadata, protocol histogram, IPv4/Ethernet/TCP conversations and endpoints, Follow Stream.</div></a>
+  <a class="card" href="live-capture.html"><div class="card-title">Live &amp; continuous capture</div><div class="card-desc">conduitscope interfaces, decode -i, and capture's disk-bounded rotated-file recorder.</div></a>
+  <a class="card" href="policy.html"><div class="card-title">policy validate</div><div class="card-desc">Zone/conduit compliance checking against a YAML policy file -- the IEC 62443 FR5 angle.</div></a>
+  <a class="card" href="inventory.html"><div class="card-title">inventory</div><div class="card-desc">Passive asset discovery: assets, communications, inferred zones, Mermaid/DOT diagrams, STIX 2.1.</div></a>
+  <a class="card" href="detect.html"><div class="card-title">detect</div><div class="card-desc">MITRE ATT&amp;CK for ICS findings with evidence/novelty/severity axes, CEF/LEEF/syslog export.</div></a>
+  <a class="card" href="baseline.html"><div class="card-title">baseline</div><div class="card-desc">Learn normal protocol-operation behavior, then flag new conduits/operations/address ranges.</div></a>
+  <a class="card" href="evidence.html"><div class="card-title">evidence</div><div class="card-desc">One audit-binder-ready report: topology + policy + detect + baseline + integrity hashes.</div></a>
+  <a class="card" href="merge.html"><div class="card-title">merge</div><div class="card-desc">Combine inventory reports from several independent tap points into one site-wide view.</div></a>
+  <a class="card" href="json-filtering.html"><div class="card-title">JSON &amp; filtering</div><div class="card-desc">Piping --format json through jq (Linux/macOS) and PowerShell (Windows), escaping compared.</div></a>
+</div>
+
+<h2>60-second tour</h2>
+<p>Every example below reads <code>tests/sample_modbus.pcap</code>, one of the small synthetic
+fixtures this project's own test suite uses (see <code>tools/make_sample_pcap.py</code>) -- real
+enough to show the tool's actual output, small enough to read in full.</p>
+<div class="term-wrap">
+<div class="term-label">Decode a capture as text, then as JSON</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap</span>
+<span class="ln-out">#1  0.000000  192.168.1.50:51000 -&gt; 192.168.1.10:502 (modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">#2  1.001000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+<span class="ln-out">#3  2.002000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address</span>
+
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T json | jq '.[0].summary'</span>
+<span class="ln-out">"Read Holding Registers: request: read 10 holding register(s) starting at address 0"</span>
+</code></pre></div>
+<p>Every page that follows does the same thing for a different subcommand or feature: a short
+explanation, then real commands against real fixtures, with the real output underneath.</p>
+
+<h2>About the example captures</h2>
+<p>Two kinds of capture appear throughout this manual:</p>
+<ul>
+<li><strong>Synthetic fixtures</strong> (<code>tests/sample_*.pcap</code>) -- small, deterministic
+captures this project generates itself (<code>tools/make_sample_pcap.py</code>) specifically to
+exercise one feature cleanly. Most examples use these, because their output is short and stable.</li>
+<li><strong>Real-world captures</strong> (<code>tests/real_captures/&lt;protocol&gt;/*.pcap</code>)
+-- genuine third-party OT/ICS traffic pulled from public research repositories (see each
+directory's own <code>ATTRIBUTION.md</code> for exact provenance and licensing). A handful of
+pages below run the same commands against one of these too, to show the tool against traffic it
+didn't generate itself.</li>
+</ul>
+
+      <div class="pagefoot">
+        <span class="prev"></span>
+        <span class="next"><a class="next" href="setup.html">Setup: Linux &amp; Windows &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

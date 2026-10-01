@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>baseline -- learn / check &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a class="active" href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / baseline -- learn / check</div>
+      
+<h1>baseline -- learn / check</h1>
+<p class="lede">ICS communication-baseline analysis at the protocol-<em>operation</em> level
+(S7comm, Modbus, EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, FINS, IEC 104): learn what operations
+and address ranges are normally seen on a conduit from known-good traffic, then check a later
+capture against that baseline.</p>
+
+<h2>Learn</h2>
+<p>Feed one or more known-good captures; the baseline file accumulates conduits, their operations,
+and (where that protocol's addressing supports it) the address ranges touched:</p>
+<div class="term-wrap">
+<div class="term-label">Learn from two captures into one baseline file</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope baseline learn --baseline-file baseline.json tests/sample_modbus.pcap tests/sample_s7comm.pcap</span>
+<span class="ln-out">learned from 2 capture(s), touching 2 conduit observation(s); baseline file 'baseline.json' now has 2 conduit(s)</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">jq</span>What a baseline file looks like (one conduit, condensed)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>jq '.conduits[0]' baseline.json</span>
+<span class="ln-out">{</span>
+<span class="ln-out">  "client_ip": "192.168.1.50",</span>
+<span class="ln-out">  "server_ip": "192.168.1.10",</span>
+<span class="ln-out">  "protocol": "modbus",</span>
+<span class="ln-out">  "server_port": 502,</span>
+<span class="ln-out">  "operations": [</span>
+<span class="ln-out">    {</span>
+<span class="ln-out">      "operation_key": "Read Holding Registers",</span>
+<span class="ln-out">      "packet_count": 1,</span>
+<span class="ln-out">      "has_target_range": true,</span>
+<span class="ln-out">      "observed_ranges": [[0, 10]]</span>
+<span class="ln-out">    }</span>
+<span class="ln-out">  ]</span>
+<span class="ln-out">}</span>
+</code></pre></div>
+<p>Re-run <code>learn</code> against the same <code>--baseline-file</code> with more captures to
+extend it incrementally -- operations and ranges are unioned in, never replaced.</p>
+
+<h2>Check: clean</h2>
+<div class="term-wrap">
+<div class="term-label">A capture that matches everything learned</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope baseline check --baseline-file baseline.json tests/sample_modbus.pcap</span>
+<span class="ln-out">ICS communication-baseline check</span>
+<span class="ln-out">  capture: tests/sample_modbus.pcap</span>
+
+<span class="ln-out">Result: CLEAN</span>
+
+<span class="ln-out">1 conduit(s) observed, 1 distinct operation(s) observed, 1 matched the baseline, 0 did not</span>
+
+<span class="ln-out">FINDINGS (0):</span>
+<span class="ln-out">  (none)</span>
+</code></pre></div>
+
+<h2>Check: anomalies found</h2>
+<p>Two kinds of finding: <code>new-target-range</code> (a known operation touching addresses
+outside what was learned) and <code>new-operation</code> (an operation never seen at all on this
+conduit):</p>
+<div class="term-wrap">
+<div class="term-label">A capture with a widened address range and a new operation</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope baseline check --baseline-file baseline.json tests/sample_baseline_modbus_mutated.pcap</span>
+<span class="ln-out">ICS communication-baseline check</span>
+<span class="ln-out">  capture: tests/sample_baseline_modbus_mutated.pcap</span>
+
+<span class="ln-out">Result: ANOMALIES FOUND (2 finding(s))</span>
+
+<span class="ln-out">1 conduit(s) observed, 2 distinct operation(s) observed, 0 matched the baseline, 2 did not</span>
+
+<span class="ln-out">FINDINGS (2):</span>
+<span class="ln-out">  [1] new-target-range  192.168.1.50 -&gt; 192.168.1.10:502  modbus  operation="Read Holding Registers"  (2 packet(s))</span>
+<span class="ln-out">      observed range: [200, 205)</span>
+<span class="ln-out">      baseline ranges: [0, 10)</span>
+<span class="ln-out">  [2] new-operation  192.168.1.50 -&gt; 192.168.1.10:502  modbus  operation="Write Multiple Registers"  (1 packet(s))</span>
+</code></pre></div><div class="callout"><strong class="label">Exit code 4 on any finding</strong>
+<p><code>baseline check</code> returns 0 (CLEAN), 4 (ANOMALIES FOUND, both findings and exit code
+clearly distinguishable from a <code>policy validate</code> violation's own code 3), or 5
+(observation truncated -- re-run with a higher <code>--max-baseline-*</code> ceiling, see
+<a href="../USER_GUIDE.md">EXIT STATUS</a>). <code>baseline learn</code> itself always
+exits 0 -- a possibly-partial baseline is still written, with an INCOMPLETE warning to stderr, not
+a failure.</p>
+</div>
+
+<h2>SIEM export for check findings</h2>
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T cef</span>Anomalies as CEF one-liners</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope baseline check --baseline-file baseline.json tests/sample_baseline_modbus_mutated.pcap -T cef</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-baseline|0.2.9|new-target-range|New Target Range|3|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=new-target-range msg=new-target-range: operation "Read Holding Registers" (observed range 200-205 not fully covered by the baseline) cnt=2</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-baseline|0.2.9|new-operation|New Operation|5|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=new-operation msg=new-operation: operation "Write Multiple Registers" cnt=1</span>
+</code></pre></div>
+<p><code>-T leef</code> and <code>-T syslog</code> work the same way, matching
+<a href="detect.html#security-event-export">detect's own SIEM export conventions</a>.</p>
+
+<h2>Feeding novelty detection</h2>
+<p>A learned baseline also feeds <a href="detect.html"><code>detect</code></a>'s own novelty axis
+(<code>--baseline-file</code>) -- a genuinely new remote-access channel or CIP originator is
+resolved against the same real history, not just first-occurrence-within-the-capture. See
+<a href="detect.html">detect -- Novelty against a real baseline</a>.</p>
+
+<h2>Which protocols, and at what granularity</h2>
+<p>S7comm, Modbus, EtherNet/IP, DNP3, BACnet, OPC UA, MELSEC, and FINS all track address ranges
+per operation where that protocol's own addressing model supports it (Modbus register ranges,
+DNP3 group/variation/index, EtherNet/IP tag paths, ...); IEC 104 tracks operations without a
+comparable range concept. See
+<a href="../design/baseline-engine.md">docs/design/baseline-engine.md</a> for the full per-
+protocol design rationale.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="detect.html">&larr; detect -- OT incident-response findings</a></span>
+        <span class="next"><a class="next" href="evidence.html">evidence -- audit evidence packs &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

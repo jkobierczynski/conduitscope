@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live capture &amp; continuous capture &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a class="active" href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / Live capture &amp; continuous capture</div>
+      
+<h1>Live capture &amp; continuous capture</h1>
+<p class="lede">Two different jobs: <code>decode -i</code> (and <code>info</code>/<code>policy
+validate</code>/<code>inventory</code>/<code>detect</code> with <code>-i</code>) analyze a live
+interface directly, one pass, in-process. <code>capture</code> does the opposite -- it only
+records, to disk-bounded rotated classic-pcap files, meant to run unattended for weeks, with
+analysis as a separate later pass.</p>
+
+<div class="callout warn">
+<strong class="label">Passive-mode guarantee</strong>
+<p>conduitscope never transmits anything onto the wire, in any mode -- no ARP, no probes, no
+replies, nothing. See
+<a href="../USER_GUIDE.md">USER_GUIDE.md's
+PASSIVE-MODE GUARANTEE</a> for how to verify this yourself (e.g. with an isolated span port and a
+packet counter) if that matters for your deployment.</p>
+</div>
+
+<h2>Listing interfaces</h2>
+<div class="term-wrap">
+<div class="term-label">conduitscope interfaces</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope interfaces</span>
+<span class="ln-out">eth0</span>
+<span class="ln-out">any  -- Pseudo-device that captures on all interfaces</span>
+<span class="ln-out">lo  [loopback]</span>
+<span class="ln-out">ifb0</span>
+<span class="ln-out">ifb1</span>
+<span class="ln-out">bluetooth-monitor  -- Bluetooth Linux Monitor</span>
+<span class="ln-out">nflog  -- Linux netfilter log (NFLOG) interface</span>
+<span class="ln-out">nfqueue  -- Linux netfilter queue (NFQUEUE) interface</span>
+</code></pre></div>
+
+<h2>Permissions: CAP_NET_RAW (Linux) / admin (Windows)</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash</span>Grant the built binary CAP_NET_RAW once, root never needed again</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>sudo apt install -y libcap2-bin</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope</span>
+
+<span class="ln-comment"># every run after this, by any user, opens -i without sudo:</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>build/conduitscope decode -i lo --duration 2</span>
+<span class="ln-out">capture on 'lo' stopped (0 packet(s) captured)</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Npcap driver + an elevated shell</div>
+<pre class="term"><code>
+<span class="ln-comment"># install the Npcap runtime/driver (separate from the build-time SDK -- see setup.html)</span>
+<span class="ln-comment"># from https://npcap.com/#download, then run from an elevated PowerShell/cmd session:</span>
+
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>build\Release\conduitscope.exe interfaces</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>build\Release\conduitscope.exe decode -i "\\Device\\NPF_{...}" --duration 2</span>
+</code></pre></div>
+</div>
+
+<p>On Windows, Npcap interface names are GUID-style device paths, not friendly names like
+<code>eth0</code> -- run <code>interfaces</code> first and copy the exact string it prints.</p>
+
+<h2>Live decode (<code>-i</code>)</h2>
+<p>Any subcommand that takes <code>-r</code> also takes <code>-i &lt;interface&gt;</code> instead
+(mutually exclusive) -- <code>decode</code>, <code>info</code>... wait, <code>info</code>'s
+metadata/histogram view has no live equivalent (there's no natural "end of file" moment for a
+live interface), but <code>policy validate</code>, <code>inventory</code>, and <code>detect</code>
+all support <code>-i</code> directly, running their analysis continuously against live traffic
+instead of a file.</p>
+<div class="term-wrap">
+<div class="term-label">Live decode on loopback, 2-second window</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -i lo --duration 2</span>
+<span class="ln-out">capture on 'lo' stopped (0 packet(s) captured)</span>
+</code></pre></div>
+<p><code>-a/--duration</code>, <code>--snaplen</code>, and <code>--no-promiscuous</code> are
+live-capture-only options -- promiscuous mode is on by default (the main use case is watching a
+mirrored SPAN/TAP port, which needs traffic not addressed to this host at all).</p>
+
+<h3>Packet-loss visibility</h3>
+<p>Live capture always ends its run with a drop-count line from libpcap/Npcap's own statistics
+(<code>pcap_stats</code>) -- if the OS dropped packets because this process couldn't keep up, that
+shows up here, not as silence:</p>
+<div class="term-wrap">
+<div class="term-label">A run with OS-level drops (illustrative)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -i eth0 --duration 30</span>
+<span class="ln-out">...</span>
+<span class="ln-out">capture on 'eth0' stopped (14201 packet(s) captured, 37 packet(s) dropped by the OS -- see USER_GUIDE.md's Packet loss visibility subsection)</span>
+</code></pre></div>
+
+<h2><code>capture</code> -- continuous, disk-bounded recording</h2>
+<p>No decoding, no analysis -- just writes rotated classic-pcap files to a directory, bounded by
+size/count/time retention policy, meant to run unattended. Analyze the rotated files afterward
+with <code>decode</code>/<code>inventory</code>/<code>detect</code>/<code>baseline</code> as a
+separate pass.</p>
+<div class="term-wrap">
+<div class="term-label">Capture on loopback for 2 seconds, rotating at 1 MB, keeping at most 5 files</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope capture -i lo --duration 2 -d ./rotated --prefix demo --rotate-bytes 1000000 --max-files 5</span>
+<span class="ln-out">capturing on 'lo' into './rotated/demo_*.pcap' -- Ctrl+C to stop</span>
+<span class="ln-out">0 packet(s) captured across 1 file(s); most recent: './rotated/demo_20261001T151707882654Z_567_000000.pcap' (24 bytes)</span>
+</code></pre></div>
+<p>Rotation and retention are independent knobs:</p>
+<table class="ref">
+<tr><th>Option</th><th>Controls</th></tr>
+<tr><td><code>--rotate-bytes N</code></td><td>roll to a new file once the current one reaches roughly this many bytes</td></tr>
+<tr><td><code>--rotate-seconds N</code></td><td>roll once a packet's own timestamp is &ge; N seconds past the file's first packet (capture time, not wall clock)</td></tr>
+<tr><td><code>--max-total-bytes N</code></td><td>delete the oldest rotated file(s) to keep combined size under N (requires a rotation policy above)</td></tr>
+<tr><td><code>--max-files N</code></td><td>delete the oldest rotated file(s) to keep at most N files total, counting the active one</td></tr>
+</table>
+<p>One tap point (interface) per <code>capture</code> process -- for a multi-tap site, run one
+independent process per interface, each with its own <code>--directory</code>, then combine their
+separate analysis passes afterward with <a href="merge.html"><code>merge</code></a>.</p>
+
+<div class="callout warn">
+<strong class="label">Disk and rotation failure reporting (exit code 7)</strong>
+<p>If the write side fails mid-capture -- disk full, a permission changed, the target directory
+disappeared -- <code>capture</code> prints a prominent <code>*** CAPTURE INCOMPLETE ***</code>
+banner to stderr and exits <code>7</code>, distinct from exit <code>1</code> (never produced any
+evidence at all). Every already-rotated file up to that point stays intact. See
+<a href="../USER_GUIDE.md">EXIT STATUS</a> for the full table.</p>
+</div>
+
+<h2>BPF filtering on the wire</h2>
+<p><code>-f/--filter</code> works the same way for every live-capture-capable subcommand,
+including <code>capture</code> -- libpcap/Npcap applies it at capture time, before this process
+even sees non-matching packets:</p>
+<div class="term-wrap">
+<div class="term-label">Capture only Modbus/TCP traffic</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope capture -i eth0 -f 'tcp port 502' -d ./rotated --rotate-seconds 3600 --max-files 24</span>
+</code></pre></div>
+
+<h2>Running <code>capture</code> as a long-lived unattended service</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">systemd</span>systemd unit (sketch)</div>
+<pre class="term"><code>
+<span class="ln-comment"># /etc/systemd/system/conduitscope-capture.service</span>
+<span class="ln-out">[Unit]</span>
+<span class="ln-out">Description=conduitscope continuous capture</span>
+<span class="ln-out">After=network.target</span>
+
+<span class="ln-out">[Service]</span>
+<span class="ln-out">ExecStart=/usr/local/bin/conduitscope capture -i eth0 -d /var/log/conduitscope/pcap \\</span>
+<span class="ln-out">  --prefix eth0 --rotate-seconds 3600 --max-total-bytes 10737418240</span>
+<span class="ln-out">Restart=on-failure</span>
+<span class="ln-out">User=conduitscope</span>
+<span class="ln-out">AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN</span>
+
+<span class="ln-out">[Install]</span>
+<span class="ln-out">WantedBy=multi-user.target</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Scheduled Task / NSSM (sketch)</div>
+<pre class="term"><code>
+<span class="ln-comment"># Run from an elevated PowerShell to register a Scheduled Task that starts at boot:</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$action = New-ScheduledTaskAction -Execute 'C:\conduitscope\conduitscope.exe' `</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      -Argument 'capture -i "\\Device\\NPF_{...}" -d C:\pcap --prefix eth0 --rotate-seconds 3600'</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$trigger = New-ScheduledTaskTrigger -AtStartup</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>Register-ScheduledTask -TaskName "conduitscope-capture" -Action $action -Trigger $trigger -RunLevel Highest</span>
+</code></pre></div>
+</div>
+
+<p>Either way, <code>capture</code> itself has no daemonization logic (no fork-to-background, no
+PID file) -- it relies on the OS's own service manager for that, deliberately, so it behaves the
+same whether launched by systemd, NSSM, a container entrypoint, or just a foreground terminal.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="info.html">&larr; info -- stats, conversations &amp; Follow Stream</a></span>
+        <span class="next"><a class="next" href="policy.html">policy validate -- zone/conduit compliance &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

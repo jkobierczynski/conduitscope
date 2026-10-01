@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>decode -- packet-by-packet output &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a class="active" href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / decode -- packet-by-packet output</div>
+      
+<h1>decode -- packet-by-packet output</h1>
+<p class="lede"><code>decode</code> is the base command: read a capture (or live interface),
+walk each packet, and print whatever it recognizes. Everything else in conduitscope builds on
+the same decode pass.</p>
+
+<h2>Output formats</h2>
+<p>Five formats, selected with <code>-T/--format</code>: <code>text</code> (default, human-
+readable), <code>json</code>, <code>csv</code>, <code>fields</code> (print only requested
+<code>-e</code> values, tab-separated, mirroring <code>tshark -T fields</code>), and
+<code>zeek</code> (a real Zeek <code>conn.log</code>, one row per TCP/UDP connection, not per
+packet).</p>
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T text</span>text (default)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap</span>
+<span class="ln-out">#1  0.000000  192.168.1.50:51000 -&gt; 192.168.1.10:502 (modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">#2  1.001000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+<span class="ln-out">#3  2.002000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T json</span>json (one object per packet -- see json-filtering.html for piping this through jq/PowerShell)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T json | jq '.[0]'</span>
+<span class="ln-out">{</span>
+<span class="ln-out">  "index": 1,</span>
+<span class="ln-out">  "timestamp": 1700000000.000000,</span>
+<span class="ln-out">  "src_ip": "192.168.1.50",</span>
+<span class="ln-out">  "dst_ip": "192.168.1.10",</span>
+<span class="ln-out">  "src_port": 51000,</span>
+<span class="ln-out">  "dst_port": 502,</span>
+<span class="ln-out">  "protocol": "modbus",</span>
+<span class="ln-out">  "summary": "Read Holding Registers: request: read 10 holding register(s) starting at address 0",</span>
+<span class="ln-out">  "modbus_is_request": true,</span>
+<span class="ln-out">  "modbus_start_address": 0,</span>
+<span class="ln-out">  "modbus_quantity": 10,</span>
+<span class="ln-out">  "notes": [</span>
+<span class="ln-out">    "classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking"</span>
+<span class="ln-out">  ],</span>
+<span class="ln-out">  "direction_source": "port-heuristic",</span>
+<span class="ln-out">  "has_detect_finding": false,</span>
+<span class="ln-out">  ...</span>
+<span class="ln-out">}</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T csv</span>csv</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T csv</span>
+<span class="ln-out">index,timestamp,src_mac,dst_mac,src_mac_vendor,dst_mac_vendor,src_ip,src_hostname,src_port,src_port_service,dst_ip,dst_hostname,dst_port,dst_port_service,protocol,summary,notes,vlan_id,time,direction_source,direction_client_ip,has_detect_finding,detect_finding_kind,detect_finding_technique,detect_finding_description</span>
+<span class="ln-out">1,1700000000.000000,00:0c:29:11:22:33,00:0c:29:aa:bb:cc,,,192.168.1.50,,51000,,192.168.1.10,,502,modbus,modbus,"Read Holding Registers: request: read 10 holding register(s) starting at address 0","classified as a request because the PDU is exactly 4 bytes...",,0.000000,port-heuristic,192.168.1.50,false,,,</span>
+<span class="ln-out">...</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T fields</span>fields (-e repeated, tab-separated columns -- scriptable without any JSON parser at all)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T fields -e src_ip -e dst_ip -e dst_port -e protocol -e summary</span>
+<span class="ln-out">192.168.1.50\t192.168.1.10\t502\tmodbus\tRead Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">192.168.1.10\t192.168.1.50\t51000\tmodbus\tRead Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+<span class="ln-out">192.168.1.10\t192.168.1.50\t51000\tmodbus\tRead Holding Registers: exception response to Read Holding Registers: Illegal Data Address</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-T zeek</span>zeek (a real conn.log, one row per connection)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T zeek</span>
+<span class="ln-out">#separator \x09</span>
+<span class="ln-out">#set_separator\t,</span>
+<span class="ln-out">#empty_field\t(empty)</span>
+<span class="ln-out">#unset_field\t-</span>
+<span class="ln-out">#path\tconn</span>
+<span class="ln-out">#open\t2026-10-01-15-18-01</span>
+<span class="ln-out">#fields\tts\tuid\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tservice\tduration\torig_bytes\tresp_bytes\tconn_state\tlocal_orig\tlocal_resp\tmissed_bytes\thistory\torig_pkts\torig_ip_bytes\tresp_pkts\tresp_ip_bytes\ttunnel_parents</span>
+<span class="ln-out">#types\ttime\tstring\taddr\tport\taddr\tport\tenum\tstring\tinterval\tcount\tcount\tstring\tbool\tbool\tcount\tstring\tcount\tcount\tcount\tcount\tset[string]</span>
+<span class="ln-out">1700000000.000000\tC00000000000000001\t192.168.1.50\t51000\t192.168.1.10\t502\ttcp\tmodbus\t2.002000\t-\t-\t-\t-\t-\t-\t-\t1\t66\t2\t146\t-</span>
+<span class="ln-out">#close\t2026-10-01-15-18-01</span>
+</code></pre></div>
+
+<h2>Filtering: BPF (<code>-f</code>) vs. display filter (<code>-Y</code>)</h2>
+<p>Two independent filters, applied at different stages. <code>-f/--filter</code> is a BPF
+filter (tcpdump syntax), matched against raw bytes before/during decode -- the same filter you'd
+hand to <code>tcpdump</code>/<code>wireshark -f</code>. <code>-Y/--display-filter</code> is
+evaluated <em>after</em> decode, against already-dissected fields -- Wireshark's own display-filter
+language, not BPF. They combine as an intersection when both are given, and a packet that fails
+<code>-Y</code> doesn't count toward <code>-c/--max-packets</code>.</p>
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-f BPF</span>BPF filter -- raw-byte match before decode</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -f 'tcp port 502' -T fields -e summary</span>
+<span class="ln-out">Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+<span class="ln-out">Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">-Y</span>Display filter -- decoded-field match, with a quoted string literal</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_enip.pcap -Y 'enip.service_name contains "Read"' -T fields -e summary</span>
+<span class="ln-out">SendRRData; Read_Tag request path=Pump1_Speed</span>
+<span class="ln-out">SendRRData; Read_Tag response: Success</span>
+</code></pre></div><div class="callout"><strong class="label">A field's type decides whether it needs quotes</strong>
+<p><code>-Y</code> fields are typed (see the full table in
+<a href="../USER_GUIDE.md">USER_GUIDE.md's Display filters section</a>):
+numeric fields (<code>bacnet.service == 16</code>) and bare dotted-decimal IPv4 literals
+(<code>ip.src == 10.1.2.3</code>) are written unquoted; string fields need a quoted literal
+(<code>enip.service_name == "Write_Tag"</code>, or <code>contains</code>/<code>matches</code> for
+substring/regex tests). Comparing a numeric field against a string literal is a compile-time
+error, not a silent non-match:</p>
+</div><div class="term-wrap">
+<div class="term-label">Mismatched type -- caught before any packet is read, not silently empty</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_detect.pcap -Y 'bacnet.service == "readProperty"'</span>
+<span class="ln-out">error: display filter 'bacnet.service == "readProperty"' cannot compare numeric field 'bacnet.service' against a string literal (expected a numeric value, e.g. bacnet.service == 16)</span>
+</code></pre></div>
+<p>A bare protocol name, with no comparison at all, is a field-existence test across any of the
+~115 protocols this tool decodes -- not only the ones in the curated field table:</p>
+<div class="term-wrap">
+<div class="term-label">Bare protocol name as an existence test</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_detect.pcap -Y bacnet -T fields -e summary</span>
+<span class="ln-out">BVLC Original-Unicast-NPDU Confirmed-Request invoke-id=40 reinitializeDevice</span>
+<span class="ln-out">BVLC Original-Unicast-NPDU Confirmed-Request invoke-id=41 deviceCommunicationControl</span>
+</code></pre></div>
+<p>See <a href="json-filtering.html">JSON output &amp; filtering</a> for how the same quoting
+problem looks in <code>jq</code> (Linux) and PowerShell (Windows) once the output itself is JSON,
+rather than a <code>-Y</code> expression on conduitscope's own command line.</p>
+
+<h3>Shell quoting for <code>-Y</code> itself</h3>
+<p>A <code>-Y</code> expression almost always contains spaces, <code>&amp;&amp;</code>, and
+sometimes embedded double quotes -- all things your shell has its own opinion about before
+conduitscope ever sees the string.</p>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash</span>bash/zsh -- single-quote the whole expression</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r cap.pcap -Y 'modbus.func_code == 16 &amp;&amp; ip.src == 10.1.2.3'</span>
+
+<span class="ln-comment"># the expression itself needs a double-quoted string literal (for a string field) --</span>
+<span class="ln-comment"># single quotes around the whole thing let double quotes through untouched:</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r cap.pcap -Y 'enip.service_name contains "Write"'</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>PowerShell -- single-quote the whole expression too</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r cap.pcap -Y 'modbus.func_code == 16 &amp;&amp; ip.src == 10.1.2.3'</span>
+
+<span class="ln-comment"># PowerShell single-quoted strings are literal, same idea as bash -- double quotes inside</span>
+<span class="ln-comment"># pass through untouched:</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r cap.pcap -Y 'enip.service_name contains "Write"'</span>
+
+<span class="ln-comment"># if you must double-quote the OUTER string (e.g. because it's built from a PowerShell</span>
+<span class="ln-comment"># variable), escape the inner double quotes with a backtick:</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$svc = "Write"</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r cap.pcap -Y "enip.service_name contains `"$svc`""</span>
+</code></pre></div>
+</div>
+
+<p>cmd.exe (not PowerShell) has no single-quote string literal at all -- everything is
+double-quoted, and an embedded double quote is escaped by doubling it or with a backslash
+depending on context. This is one of several reasons PowerShell, not cmd.exe, is used for every
+Windows example in this manual; see
+<a href="json-filtering.html#cmd-exe">JSON &amp; filtering's cmd.exe note</a> if you're stuck
+scripting from a legacy batch file.</p>
+
+<h2>Other decode options</h2>
+<h3>Hex dump (<code>-x</code>)</h3>
+<div class="term-wrap">
+<div class="term-label">Raw bytes under each packet's summary line</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -c 1 -x</span>
+<span class="ln-out">#1  0.000000  192.168.1.50:51000 -&gt; 192.168.1.10:502 (modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">0000  00 0c 29 aa bb cc 00 0c  29 11 22 33 08 00 45 00  ..).....)".3..E.</span>
+<span class="ln-out">0010  00 34 10 00 40 00 40 06  00 00 c0 a8 01 32 c0 a8  .4..@.@......2..</span>
+<span class="ln-out">0020  01 0a c7 38 01 f6 00 00  03 e8 00 00 07 d0 50 18   ...8..........P.</span>
+<span class="ln-out">0030  20 00 00 00 00 00 00 01  00 00 00 06 01 03 00 00   ...............</span>
+<span class="ln-out">0040  00 0a                                             ..</span>
+</code></pre></div>
+<h3>Full layer-by-layer detail (<code>-V</code>)</h3>
+<p>Mirrors Wireshark's Packet Details pane -- every field <code>-T json</code> would show,
+grouped by layer, instead of flattened into one summary line. Text output only; composes with
+<code>-x</code>.</p>
+<div class="term-wrap">
+<div class="term-label">-V -- layer-by-layer breakdown</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -c 1 -V</span>
+<span class="ln-out">#1  Frame: 66 byte(s) captured, 66 byte(s) on wire, 0.000000</span>
+<span class="ln-out">Ethernet II: 00:0c:29:11:22:33 -&gt; 00:0c:29:aa:bb:cc</span>
+<span class="ln-out">Internet Protocol: 192.168.1.50 -&gt; 192.168.1.10</span>
+<span class="ln-out">        ttl: 64</span>
+<span class="ln-out">Transmission Control Protocol: 51000 -&gt; 502 (modbus)</span>
+<span class="ln-out">        flags: ACK,PSH</span>
+<span class="ln-out">        direction: client 192.168.1.50 (port-heuristic)</span>
+<span class="ln-out">modbus:</span>
+<span class="ln-out">        summary: Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">        modbus_is_request: true</span>
+<span class="ln-out">        modbus_quantity: 10</span>
+<span class="ln-out">        modbus_start_address: 0</span>
+<span class="ln-out">        note: classified as a request because the PDU is exactly 4 bytes (address+quantity); this is a heuristic, not stream tracking</span>
+</code></pre></div>
+<h3>Selecting packets by position (<code>--range</code>)</h3>
+<p>Wireshark/editcap-style 1-based packet numbers and ranges -- combines with <code>-f</code> (both
+must match) and <code>-c</code> (caps how many of the selection are taken).</p>
+<div class="term-wrap">
+<div class="term-label">--range -- same numbering as decode's own #&lt;n&gt; index</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap --range 1-2 -T fields -e summary</span>
+<span class="ln-out">Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+</code></pre></div>
+<h3>Restricting to one protocol (<code>--protocol</code>)</h3>
+<div class="term-wrap">
+<div class="term-label">--protocol -- skip auto-detection, decode only this protocol's own dissector</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap --protocol modbus -T fields -e summary</span>
+</code></pre></div>
+<h3>Writing a filtered capture back out (<code>-w</code>)</h3>
+<p>Writes every packet that reaches the run (after <code>-f</code>, if given) to a new classic-pcap
+file, raw and unmodified -- mirrors tcpdump/tshark's own <code>-w</code>. Unaffected by
+<code>-Y</code>, which only governs what's <em>printed</em>. Works identically for <code>-r</code>
+or <code>-i</code> input.</p>
+<div class="term-wrap">
+<div class="term-label">-w -- save only the packets a BPF filter matched</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -f 'tcp port 502' -w filtered.pcap</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r filtered.pcap</span>
+<span class="ln-out">file:           filtered.pcap</span>
+<span class="ln-out">packets:        3</span>
+<span class="ln-out">protocols:</span>
+<span class="ln-out">  modbus          3</span>
+</code></pre></div>
+
+<h2>Trying it against a real-world capture</h2>
+<p>Everything above used a synthetic fixture. The same commands work unchanged against a genuine
+third-party capture (<code>tests/real_captures/</code> -- see each directory's own
+<code>ATTRIBUTION.md</code> for provenance):</p>
+<div class="term-wrap">
+<div class="term-label">A real Modbus/TCP capture (102 packets, from automayt/ICS-pcap)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/real_captures/modbus/modbus_read_holding_registers.pcap -c 4</span>
+<span class="ln-out">#1  0.000000  192.168.110.131:2074 -&gt; 192.168.110.138:502 (modbus)  [modbus]  Read Holding Registers: request: read 1 holding register(s) starting at address 1</span>
+<span class="ln-out">#2  0.001135  192.168.110.138:502 (modbus) -&gt; 192.168.110.131:2074  [modbus]  Read Holding Registers: response: 2 data byte(s) = 00 00</span>
+<span class="ln-out">#3  0.001208  192.168.110.131:2074 -&gt; 192.168.110.138:502 (modbus)  [modbus]  Read Holding Registers: request: read 1 holding register(s) starting at address 0</span>
+<span class="ln-out">#4  0.002040  192.168.110.138:502 (modbus) -&gt; 192.168.110.131:2074  [modbus]  Read Holding Registers: response: 2 data byte(s) = 41 c8</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label">A real BACnet/IP excerpt (from mrhenrike/PCAPTrafficAnalysis)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/real_captures/bacnet/ICS-OT-Network-001-bacnet-excerpt.pcap -c 2</span>
+<span class="ln-out">#1  0.000000  192.168.1.100:47808 (bacnet) -&gt; 192.168.1.21:47808 (bacnet)  [bacnet]  BVLC Original-Unicast-NPDU Confirmed-Request invoke-id=52 readProperty [object=trend-log,34 +1 more]</span>
+<span class="ln-out">#2  0.090946  192.168.1.21:47808 (bacnet) -&gt; 192.168.1.100:47808 (bacnet)  [bacnet]  BVLC Original-Unicast-NPDU Complex-ACK invoke-id=52 readProperty [object=trend-log,34 +2 more]</span>
+</code></pre></div>
+<p>Every protocol directory under <code>tests/real_captures/</code> works the same way --
+<code>dnp3/</code>, <code>enip/</code>, <code>ethercat/</code>, <code>goose/</code>,
+<code>hartip/</code>, <code>iec104/</code>, <code>mms/</code>, <code>mqtt/</code>,
+<code>opcua/</code>, <code>profinet/</code>, <code>s7comm/</code>, plus <code>igmp/</code> and
+<code>stp/</code> for the surrounding non-OT traffic those same captures contain.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="setup.html">&larr; Setup: Linux &amp; Windows</a></span>
+        <span class="next"><a class="next" href="info.html">info -- stats, conversations &amp; Follow Stream &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>info -- stats, conversations &amp; Follow Stream &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a class="active" href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / info -- stats, conversations &amp; Follow Stream</div>
+      
+<h1>info -- stats, conversations &amp; Follow Stream</h1>
+<p class="lede"><code>info</code> prints pcap file metadata and a protocol histogram without full
+per-packet output -- a first look at an unfamiliar capture -- plus, when asked with
+<code>-z/--stat</code>, tshark-style Conversations, Endpoints, and Follow-Stream tables.</p>
+
+<div class="callout">
+<strong class="label">You don't need to type "info"</strong>
+<p>If <code>-z/--stat</code> appears anywhere on the command line, the no-subcommand default
+becomes <code>info</code> automatically (ROADMAP item 109) -- <code>conduitscope -r FILE -z
+conv,tcp</code> is exactly <code>conduitscope info -r FILE -z conv,tcp</code>. Every example below
+types <code>info</code> explicitly for clarity, but either form works.</p>
+</div>
+
+<h2>Default output: metadata and protocol histogram</h2>
+<p>With no <code>-z</code> at all, <code>info</code> shows the pcap format version, link type,
+snaplen, timestamp resolution, and a protocol/function-code histogram -- nothing else is tracked
+unless you ask for it with <code>-z</code>.</p>
+<div class="term-wrap">
+<div class="term-label">info with no -z</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/sample_modbus.pcap</span>
+<span class="ln-out">file:           tests/sample_modbus.pcap</span>
+<span class="ln-out">pcap version:   2.4</span>
+<span class="ln-out">link type:      Ethernet</span>
+<span class="ln-out">snaplen:        262144 bytes</span>
+<span class="ln-out">timestamps:     microsecond resolution</span>
+<span class="ln-out">packets:        3</span>
+<span class="ln-out">time span:      2.002 s</span>
+<span class="ln-out">protocols:</span>
+<span class="ln-out">  modbus          3</span>
+<span class="ln-out">modbus function codes:</span>
+<span class="ln-out">  Read Holding Registers                  3</span>
+<span class="ln-out">modbus exception responses: 1</span>
+<span class="ln-out">modbus responses authoritatively paired (transaction ID, not heuristic): 1</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label">The same, against a real-world capture (79 packets, Siemens S1200 HMI traffic)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/real_captures/s7comm/s7comm_1200_hmi.pcap</span>
+<span class="ln-out">file:           tests/real_captures/s7comm/s7comm_1200_hmi.pcap</span>
+<span class="ln-out">packets:        79</span>
+<span class="ln-out">time span:      7.115 s</span>
+<span class="ln-out">protocols:</span>
+<span class="ln-out">  cotp            27</span>
+<span class="ln-out">  s7comm-plus     36</span>
+<span class="ln-out">  tcp             16</span>
+<span class="ln-out">s7comm-plus pdu types:</span>
+<span class="ln-out">  Connect                                 3</span>
+<span class="ln-out">  Data                                    33</span>
+</code></pre></div>
+<h2>Conversations and Endpoints tables (<code>-z</code>)</h2>
+<p><code>-z</code> is repeatable -- each occurrence adds one table. Four conversation/endpoint
+kinds: <code>conv,ip</code>, <code>endpoints,ip</code>, <code>conv,eth</code>,
+<code>endpoints,eth</code> (Ethernet-layer, by MAC), plus TCP-specific <code>conv,tcp</code> and
+the Follow-Stream forms below.</p>
+<div class="term-wrap">
+<div class="term-label">-z conv,ip -- IPv4 conversations, ranked by total bytes</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/sample_inventory.pcap -z conv,ip</span>
+<span class="ln-out">ipv4 conversations (5, ranked by total bytes):</span>
+<span class="ln-out">  10.0.5.22 &lt;-&gt; 192.168.1.12  4 frame(s), 380 byte(s) total  (A-&gt;B: 2 frame(s)/194 byte(s), B-&gt;A: 2 frame(s)/186 byte(s), duration 3.003s)</span>
+<span class="ln-out">  10.0.5.21 &lt;-&gt; 192.168.1.16  4 frame(s), 312 byte(s) total  (A-&gt;B: 2 frame(s)/155 byte(s), B-&gt;A: 2 frame(s)/157 byte(s), duration 3.003s)</span>
+<span class="ln-out">  10.0.5.21 &lt;-&gt; 192.168.1.11  2 frame(s), 151 byte(s) total  (A-&gt;B: 1 frame(s)/72 byte(s), B-&gt;A: 1 frame(s)/79 byte(s), duration 1.001s)</span>
+<span class="ln-out">  192.168.1.50 &lt;-&gt; 192.168.1.10  2 frame(s), 149 byte(s) total  (A-&gt;B: 1 frame(s)/66 byte(s), B-&gt;A: 1 frame(s)/83 byte(s), duration 1.001s)</span>
+<span class="ln-out">  192.168.1.14 &lt;-&gt; 192.168.1.15  2 frame(s), 124 byte(s) total  (A-&gt;B: 1 frame(s)/59 byte(s), B-&gt;A: 1 frame(s)/65 byte(s), duration 1.001s)</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label">-z endpoints,ip -- per-address totals</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/sample_inventory.pcap -z endpoints,ip</span>
+<span class="ln-out">ipv4 endpoints (9, ranked by total bytes):</span>
+<span class="ln-out">  10.0.5.21  6 frame(s), 463 byte(s) total  (tx: 3 frame(s)/227 byte(s), rx: 3 frame(s)/236 byte(s))</span>
+<span class="ln-out">  10.0.5.22  4 frame(s), 380 byte(s) total  (tx: 2 frame(s)/194 byte(s), rx: 2 frame(s)/186 byte(s))</span>
+<span class="ln-out">  192.168.1.12  4 frame(s), 380 byte(s) total  (tx: 2 frame(s)/186 byte(s), rx: 2 frame(s)/194 byte(s))</span>
+<span class="ln-out">  ...</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label">-z conv,tcp -- TCP-specific, with Wireshark's own tcp.stream numbering</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/sample_modbus.pcap -z conv,tcp</span>
+<span class="ln-out">tcp conversations (1, ranked by total bytes):</span>
+<span class="ln-out">  192.168.1.50:51000 &lt;-&gt; 192.168.1.10:502  (tcp.stream 0)  3 frame(s), 212 byte(s) total  (A-&gt;B: 1 frame(s)/66 byte(s), B-&gt;A: 2 frame(s)/146 byte(s), duration 2.002s)</span>
+</code></pre></div>
+<p>Stack multiple tables in one run by repeating <code>-z</code>:</p>
+<div class="term-wrap">
+<div class="term-label">Two tables from one run</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/sample_inventory.pcap -z conv,ip -z endpoints,ip</span>
+</code></pre></div>
+<h2>TCP Follow Stream (<code>-z follow,tcp,stream,N</code>)</h2>
+<p>Reassembles one TCP stream's payload bytes in each direction and prints them as a hex dump --
+Wireshark's "Follow TCP Stream" -- addressed by the same <code>tcp.stream</code> number
+<code>-z conv,tcp</code> prints.</p>
+<div class="term-wrap">
+<div class="term-label">Follow stream 0</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope info -r tests/sample_modbus.pcap -z follow,tcp,stream,0</span>
+<span class="ln-out">follow tcp stream 0: 192.168.1.50:51000 &lt;-&gt; 192.168.1.10:502</span>
+<span class="ln-out">  192.168.1.50:51000 -&gt; 192.168.1.10:502 (1 segment(s), 12 byte(s)):</span>
+<span class="ln-out">0000  00 01 00 00 00 06 01 03  00 00 00 0a              ............</span>
+<span class="ln-out">  192.168.1.10:502 -&gt; 192.168.1.50:51000 (2 segment(s), 29 byte(s)):</span>
+<span class="ln-out">0000  00 01 00 00 00 17 01 03  14 00 00 00 01 00 02 00  ................</span>
+<span class="ln-out">0010  03 00 04 00 05 00 06 00  07 00 08 00 09           .............</span>
+<span class="ln-out">  (1 out-of-order segment(s) totaling 9 byte(s) never became contiguous -- a gap in this direction's capture, not shown)</span>
+</code></pre></div>
+<p>A UDP equivalent, <code>follow,udp,stream,N</code>, works the same way for UDP flows (BACnet,
+CIP I/O, HART-IP, FF-HSE).</p>
+
+<h2>Growth caps</h2>
+<p>Three ceilings, each <code>0</code> by default meaning "use the built-in default" (200,000
+conversations/endpoints, 16&nbsp;MiB per Follow-Stream direction): <code>--max-conversations</code>,
+<code>--max-endpoints</code>, <code>--max-follow-bytes</code>. These exist so an adversarial or
+pathological capture can't exhaust memory building these tables; see USER_GUIDE.md's own
+"Conversations and Endpoints tables" subsection for exactly what happens once a cap is hit.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="decode.html">&larr; decode -- packet-by-packet output</a></span>
+        <span class="next"><a class="next" href="live-capture.html">Live capture &amp; continuous capture &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

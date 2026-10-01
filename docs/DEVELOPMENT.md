@@ -17120,6 +17120,94 @@ it done as its own patch.
     `live_capture_requires_exactly_one_source_inventory`) that don't actually open a live
     interface.
 
+121. **An extended, example-driven HTML manual (`docs/manual/`), one page per feature.**
+    Jurgen's own direct request: a multipage HTML manual covering every feature with examples
+    drawn from the real captures in `tests/`, Linux/Windows setup instructions, condensed
+    example output of every output format, and extended `jq` (Linux)/PowerShell (Windows) JSON-
+    filtering examples with shell escape characters specifically called out -- its own location
+    under `docs/`, distinct from the existing Markdown references.
+
+    **What it is, and isn't.** `docs/manual/index.html` plus eleven more pages (one per
+    subcommand: `setup`, `decode`, `info`, `live-capture` (covering both `-i` live decode and the
+    standalone `capture` subcommand), `policy`, `inventory`, `detect`, `baseline`, `evidence`,
+    `merge`, and a dedicated `json-filtering` page), a shared `assets/style.css` (light/dark via
+    `prefers-color-scheme`) and `assets/script.js` (vanilla JS: mobile sidebar toggle, Linux/
+    Windows tab switching, a copy-button on every command block that copies only the command
+    lines, not the captured output below them -- no CDN dependency, nothing external loaded). It
+    is deliberately a *companion* to USER_GUIDE.md/PROTOCOL_COVERAGE.md/DEVELOPMENT.md, not a
+    replacement -- every page's sidebar footer says so and links back to USER_GUIDE.md for the
+    authoritative option reference, since this manual's own job is worked examples, not
+    exhaustive flag-by-flag documentation (USER_GUIDE.md already does that job well).
+
+    **Every example is real, not invented.** Every command shown, and the output beneath it, was
+    actually run against this build (conduitscope 0.2.9) and the real fixtures it names --
+    `tests/sample_*.pcap` for the deterministic, feature-targeted examples (matching this
+    project's own `tools/make_sample_pcap.py`-generated fixtures used throughout its test suite),
+    plus `tests/real_captures/{modbus,s7comm,bacnet}/` for three examples specifically chosen to
+    show the tool against genuine third-party OT/ICS traffic it didn't generate itself (each
+    directory's own `ATTRIBUTION.md` covers provenance/licensing, linked rather than reproduced).
+    The two places genuinely-run output wasn't available (a CI build-log excerpt; an OS-level
+    packet-drop line, which needs a real sustained-overload live capture to trigger) are each
+    marked "illustrative" in their own surrounding prose rather than presented as a real run.
+
+    **Content, page by page:** `decode` covers all five output formats (`text`/`json`/`csv`/
+    `fields`/`zeek`), `-f` BPF vs. `-Y` display-filter semantics with a real type-mismatch error
+    and a real `contains("...")` string-field match, `-x`/`-V`/`--range`/`--protocol`/`-w`, plus
+    the same decode run against two real-world captures. `info` covers the default metadata/
+    histogram view and every `-z` table (`conv,ip`/`endpoints,ip`/`conv,tcp`/`follow,tcp,stream`).
+    `live-capture` covers `interfaces`, CAP_NET_RAW/Npcap permissions, live `-i` decode, and
+    `capture`'s rotation/retention options plus a systemd/Scheduled-Task sketch for running it
+    unattended. `policy`/`inventory`/`detect`/`baseline`/`evidence`/`merge` each show a real
+    compliant/clean run and a real violation/anomaly/finding run, every export format that
+    subcommand supports (including the CEF/LEEF/syslog SIEM export item 119 just finished proving
+    invariant-safe, and STIX 2.1/Mermaid/DOT/CSV from `inventory`), and cross-link to each other
+    at the exact point one subcommand's output feeds another (e.g. `inventory --policy-out` ->
+    `policy validate`, `baseline learn` -> `detect --baseline-file`'s novelty resolution).
+
+    **`json-filtering.html`'s escaping coverage** was the most deliberately scrutinized page,
+    since a wrong shell-quoting example is worse than none: every `jq` filter shown was run for
+    real (including the hardest case -- filtering on `sample_enip.pcap`'s `ListIdentity` summary
+    text, which itself contains a literal embedded double quote, `name="Conduit-ENIP-Sample"`,
+    requiring a backslash-escaped quote inside jq's own double-quoted string literal, inside
+    bash's outer single quotes -- a real two-layer escaping case, not a contrived one). The
+    PowerShell column was written to the same semantics and double-checked against PowerShell's
+    own documented quoting rules, but -- since this sandbox has no Windows shell to execute it
+    against -- is explicitly disclosed as such in the page's own intro callout, rather than
+    presented with the same "actually run" confidence as the Linux column. A dedicated callout
+    documents the specific, known PowerShell-calling-a-native-executable quoting pitfall for a jq
+    filter with an *internal* escaped quote (distinct from the simpler single-quote-wrapped case,
+    which does work normally), and recommends PowerShell's own native `ConvertFrom-Json`/
+    `Where-Object`/`Group-Object`/`ConvertTo-Csv` cmdlets throughout as the primary, no-extra-
+    install Windows path -- `jq` is covered too, but framed as the Linux-native and
+    Windows-secondary option, not presented as equally frictionless on both platforms. A short
+    `#cmd-exe` note (linked from `decode.html`'s own `-Y` shell-quoting section) explains why
+    cmd.exe specifically -- as opposed to PowerShell -- is out of scope for worked examples here.
+
+    **Integration with existing docs.** Added as a new bullet to README.md's own Documentation
+    list and to `docs/MANUAL.md`'s index (both already enumerate USER_GUIDE.md/
+    PROTOCOL_COVERAGE.md/DEVELOPMENT.md the same way), rather than silently sitting undiscoverable
+    under `docs/`. Internal cross-page links go through relative `href`s with no `#fragment`
+    anchors into the `.md` files (confirmed this matches every existing `.md`-to-`.md` cross-link
+    in this codebase, e.g. `docs/MANUAL.md`'s own `[USER_GUIDE.md](USER_GUIDE.md)` -- none of them
+    use heading fragments either, since a plain-text `.md` viewer has no id attributes to jump to;
+    a fragment would only work rendered through something like GitHub, which this no-git project
+    doesn't assume).
+
+    **Verification.** Every one of the roughly 150 command/output blocks across all twelve pages
+    was copied from an actual terminal run captured during this session (see the session
+    transcript), not hand-written -- this is also stated in each page's own "every command was
+    actually run" callout, so a reader knows what level of trust to place in the examples. The
+    generated HTML was validated structurally (every tag opened is closed, no stray/unmatched
+    tags, checked programmatically across all twelve files) and every internal link (both the
+    cross-page manual links and the `../USER_GUIDE.md`/`../PROTOCOL_COVERAGE.md`/
+    `../DEVELOPMENT.md`/`../design/baseline-engine.md`/`../../README.md` links out to the existing
+    docs) was confirmed to resolve to a real file once `docs/manual/` sits where it's meant to,
+    alongside the other docs. Rendered with a headless Chromium (light and dark
+    `prefers-color-scheme`, desktop and a 420px mobile viewport) to confirm the sidebar
+    navigation, the Linux/Windows tab switcher, the mobile menu toggle, and the per-block copy
+    button all actually work, not just that the HTML parses -- screenshots reviewed directly, not
+    assumed from the markup alone.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

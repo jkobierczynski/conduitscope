@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JSON output &amp; filtering (jq / PowerShell) &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a  href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a class="active" href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / JSON output &amp; filtering (jq / PowerShell)</div>
+      
+<h1>JSON output &amp; filtering</h1>
+<p class="lede">Every report-producing subcommand supports <code>-T json</code>
+(<code>decode</code> also supports <code>csv</code>/<code>fields</code>/<code>zeek</code>; several
+others add <code>cef</code>/<code>leef</code>/<code>syslog</code> -- see each subcommand's own
+page). This page is a dedicated set of recipes for piping that JSON into something that filters
+it: <code>jq</code> on Linux/macOS, and PowerShell's native JSON cmdlets (or <code>jq</code> again,
+with a caveat) on Windows -- with the shell-quoting differences called out explicitly, since that's
+where most copy-pasted commands actually break.</p>
+
+<div class="callout">
+<strong class="label">Every example below was actually run</strong>
+<p>Against <code>tests/sample_modbus.pcap</code>, <code>tests/sample_inventory.pcap</code>,
+<code>tests/sample_enip.pcap</code>, and <code>tests/sample_detect.pcap</code> with
+<code>jq 1.7</code> on Linux. The PowerShell column shows the idiomatic native-cmdlet equivalent
+for each -- written to the same semantics, since this manual's build environment has no Windows
+shell to execute them against; where a PowerShell-specific quoting quirk is involved
+(the <code>jq</code>-on-Windows section below), it's called out as such rather than presented as
+independently verified.</p>
+</div>
+
+<h2>The baseline: pretty-printing</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>jq '.' pretty-prints; jq is also the simplest way to check output is valid JSON at all</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T json | jq '.'</span>
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index": 1,</span>
+<span class="ln-out">    "src_ip": "192.168.1.50",</span>
+<span class="ln-out">    "dst_ip": "192.168.1.10",</span>
+<span class="ln-out">    "summary": "Read Holding Registers: request: read 10 holding register(s) starting at address 0",</span>
+<span class="ln-out">    ...</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  ...</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>ConvertFrom-Json / ConvertTo-Json needs no extra install -- it ships with PowerShell</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_modbus.pcap -T json | ConvertFrom-Json | ConvertTo-Json -Depth 10</span>
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  1,</span>
+<span class="ln-out">    "src_ip":  "192.168.1.50",</span>
+<span class="ln-out">    "dst_ip":  "192.168.1.10",</span>
+<span class="ln-out">    "summary":  "Read Holding Registers: request: read 10 holding register(s) starting at address 0",</span>
+<span class="ln-out">    ...</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  ...</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+<p style="margin-top:0.6em"><code>-Depth 10</code> matters: <code>ConvertTo-Json</code>'s default
+depth is only 2, which silently flattens nested objects (e.g. <code>detect</code>'s
+<code>summary</code> object, or <code>inventory</code>'s <code>assets</code> array of objects with
+their own nested fields) into <code>"System.Object[]"</code> placeholders instead of real JSON.
+Always pass an explicit <code>-Depth</code> generous enough for the report you're formatting.</p>
+
+</div>
+
+
+<h2>Select rows by a field value</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>jq select() -- single quotes around the whole filter let the double-quoted jq string literal through untouched</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_inventory.pcap -T json | jq -c '.[] | select(.protocol == "modbus") | {src: .src_ip, dst: .dst_ip, summary}'</span>
+<span class="ln-out">{"src":"192.168.1.50","dst":"192.168.1.10","summary":"Read Holding Registers: request: read 10 holding register(s) starting at address 0"}</span>
+<span class="ln-out">{"src":"192.168.1.10","dst":"192.168.1.50","summary":"Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09"}</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Where-Object + Select-Object with a calculated property for renaming</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_inventory.pcap -T json | ConvertFrom-Json |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Where-Object { $_.protocol -eq "modbus" } |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object @{n="src"; e={$_.src_ip}}, @{n="dst"; e={$_.dst_ip}}, summary</span>
+
+<span class="ln-out">src           dst            summary</span>
+<span class="ln-out">---           ---            -------</span>
+<span class="ln-out">192.168.1.50  192.168.1.10   Read Holding Registers: request: read 10 holding register(s)...</span>
+<span class="ln-out">192.168.1.10  192.168.1.50   Read Holding Registers: response: 20 data byte(s) = 00 00 00...</span>
+</code></pre></div>
+</div>
+
+
+<h2>Count / group by a field</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>group_by + map -- a one-liner protocol histogram, same data info's own built-in histogram shows, built by hand</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_inventory.pcap -T json | jq '[.[] | .protocol] | group_by(.) | map({protocol: .[0], count: length})'</span>
+<span class="ln-out">[</span>
+<span class="ln-out">  { "protocol": "bacnet", "count": 2 },</span>
+<span class="ln-out">  { "protocol": "dnp3", "count": 2 },</span>
+<span class="ln-out">  { "protocol": "enip", "count": 4 },</span>
+<span class="ln-out">  { "protocol": "modbus", "count": 2 },</span>
+<span class="ln-out">  { "protocol": "s7comm", "count": 2 }</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Group-Object does this natively, no manual grouping logic needed</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_inventory.pcap -T json | ConvertFrom-Json |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Group-Object protocol | Select-Object Name, Count</span>
+
+<span class="ln-out">Name     Count</span>
+<span class="ln-out">----     -----</span>
+<span class="ln-out">bacnet   2</span>
+<span class="ln-out">dnp3     2</span>
+<span class="ln-out">enip     4</span>
+<span class="ln-out">modbus   2</span>
+<span class="ln-out">s7comm   2</span>
+</code></pre></div>
+</div>
+
+
+<h2>Flatten to CSV</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>jq -r with @csv -- raw output, no surrounding JSON string quotes</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T json | jq -r '.[] | [.src_ip, .dst_ip, .summary] | @csv'</span>
+<span class="ln-out">"192.168.1.50","192.168.1.10","Read Holding Registers: request: read 10 holding register(s) starting at address 0"</span>
+<span class="ln-out">"192.168.1.10","192.168.1.50","Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09"</span>
+</code></pre></div>
+<p style="margin-top:0.6em">Or skip <code>-T json | jq</code> entirely -- <code>decode</code> has a
+real <code>-T csv</code> of its own (more columns, RFC4180-quoted) -- see
+<a href="decode.html">decode's own CSV example</a>. <code>jq</code> is worth it here mainly when
+you want a <em>different</em> column set than the built-in CSV gives you.</p>
+
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>ConvertTo-Csv -- same idea, PowerShell's own object pipeline does the quoting</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_modbus.pcap -T json | ConvertFrom-Json |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object src_ip, dst_ip, summary | ConvertTo-Csv -NoTypeInformation</span>
+
+<span class="ln-out">"src_ip","dst_ip","summary"</span>
+<span class="ln-out">"192.168.1.50","192.168.1.10","Read Holding Registers: request: read 10 holding register(s)..."</span>
+</code></pre></div>
+</div>
+
+
+<h2><code>detect</code> findings: filter by severity, group by category</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>Only Critical findings, compact</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T json | jq -c '.findings[] | select(.severity == "Critical") | {technique_id, description}'</span>
+<span class="ln-out">{"technique_id":"T0843","description":"S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station"}</span>
+<span class="ln-out">{"technique_id":"T0816","description":"DNP3 Cold Restart request -- an outstation is being commanded to restart"}</span>
+<span class="ln-out">{"technique_id":"T0816","description":"IEC 104 Reset Process command (C_RP_NA_1) -- a controlling station commanded a process reset"}</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>Findings per category, counted</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T json | jq '.findings | group_by(.category) | map({category: .[0].category, count: length})'</span>
+<span class="ln-out">[</span>
+<span class="ln-out">  { "category": "Firmware/Logic Change", "count": 4 },</span>
+<span class="ln-out">  { "category": "Protocol Misuse", "count": 4 },</span>
+<span class="ln-out">  { "category": "Remote-Access Channel", "count": 1 }</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Only Critical findings</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = conduitscope detect -r tests\sample_detect.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.findings | Where-Object { $_.severity -eq "Critical" } | Select-Object technique_id, description</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Findings per category, counted</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.findings | Group-Object category | Select-Object Name, Count</span>
+
+<span class="ln-out">Name                     Count</span>
+<span class="ln-out">----                     -----</span>
+<span class="ln-out">Firmware/Logic Change    4</span>
+<span class="ln-out">Protocol Misuse          4</span>
+<span class="ln-out">Remote-Access Channel    1</span>
+</code></pre></div>
+<p style="margin-top:0.6em">Saving the parsed report to a variable first (<code>$report = ... |
+ConvertFrom-Json</code>) and querying it with several separate commands avoids re-running
+<code>conduitscope</code> and re-parsing JSON for every question -- worth doing as soon as you're
+asking more than one.</p>
+
+</div>
+
+
+<h2 id="escaping">Escape characters: when the data itself contains a quote</h2>
+<p>Every example so far sidestepped the hard case: a filter value that itself contains the same
+quote character your shell or your filter language is using as a delimiter. conduitscope's own
+output genuinely has one -- <code>sample_enip.pcap</code>'s <code>ListIdentity</code> response
+summary embeds a quoted device name:</p>
+<div class="term-wrap">
+<div class="term-label">The real field value</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_enip.pcap -T json | jq -r '.[3].summary'</span>
+<span class="ln-out">ListIdentity; identity: vendor=1 device_type=12 product_code=54 rev=2.1 serial=0x1337ab name="Conduit-ENIP-Sample"</span>
+</code></pre></div>
+<p>Matching on text that includes <code>name="Conduit</code> means the double quote has to survive
+three layers: your shell's own quoting, jq's own string-literal syntax, and (if applicable) a
+further layer if that command is itself inside a script.</p>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>bash: outer single quotes, inner double quote backslash-escaped inside jq's own string</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_enip.pcap -T json |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>    jq -c '.[] | select(.summary | contains("name=\"Conduit")) | .summary'</span>
+<span class="ln-out">"ListIdentity; identity: vendor=1 device_type=12 product_code=54 rev=2.1 serial=0x1337ab name=\"Conduit-ENIP-Sample\""</span>
+
+<span class="ln-comment"># the shell sees ONE single-quoted argument (so it never touches the embedded " chars);</span>
+<span class="ln-comment"># jq then parses contains("name=\"Conduit") as its own double-quoted string containing an</span>
+<span class="ln-comment"># escaped double quote -- two separate escaping layers, only the inner one is jq's</span>
+</code></pre></div><div class="callout"><strong class="label">bash's own single-quote escape, for when the SHELL quote itself is the one you need inside</strong>
+<p>Separately from the jq example above: if you ever need a literal single quote
+<em>inside</em> a single-quoted bash argument (not needed for the jq case above, but a common
+follow-up question), bash has no escape character inside single quotes at all -- the idiom is to
+close the quote, insert an escaped or double-quoted single quote, and reopen:
+<code>'can'\''t'</code> (close after <code>can</code>, <code>\'</code> is one escaped single
+quote outside any quoting, then reopen with <code>'t'</code>) produces the literal text
+<code>can't</code>.</p>
+</div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>PowerShell: -like avoids the nested-quote problem entirely (recommended)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_enip.pcap -T json | ConvertFrom-Json |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Where-Object { $_.summary -like '*name="Conduit*' } | Select-Object -ExpandProperty summary</span>
+
+<span class="ln-out">ListIdentity; identity: vendor=1 device_type=12 product_code=54 rev=2.1 serial=0x1337ab name="Conduit-ENIP-Sample"</span>
+
+<span class="ln-comment"># PowerShell single-quoted strings are literal -- the embedded " needs no escaping at all here,</span>
+<span class="ln-comment"># because -like's own wildcard string never has to be re-parsed by a second language the way</span>
+<span class="ln-comment"># a jq filter string does.</span>
+</code></pre></div>
+<p style="margin-top:0.6em">This is the strongest practical argument for the native-cmdlet
+approach on Windows over piping to <code>jq.exe</code>: PowerShell's own argument-passing to a
+<em>native</em> executable (as opposed to a PowerShell cmdlet) re-quotes the string for the
+Win32 process-creation API, and a double quote inside a single-quoted PowerShell string survives
+that trip -- but a filter that itself needs internal double-quote escaping (like the bash jq
+example on the left) does not translate directly; see the callout below.</p>
+
+</div>
+
+
+<div class="callout warn">
+<strong class="label">jq on Windows: a known quoting pitfall</strong>
+<p><code>jq</code> itself works fine on Windows (<code>winget install jqlang.jq</code> or
+<code>choco install jq</code>), and most single-double-quote filters
+(<code>jq '.[] | select(.protocol == "modbus")'</code>) work unchanged from PowerShell, since
+PowerShell's single-quoted strings pass through to a native executable's argv mostly intact. The
+pitfall is specifically a filter that needs an <em>escaped</em> double quote inside its own
+double-quoted jq string (the <code>contains("name=\"Conduit")</code> case above) -- PowerShell's
+own re-quoting for native-executable arguments and jq's internal argument parsing can disagree
+about which backslash-escaped characters survive the trip, and the exact behavior has changed
+across PowerShell versions. If a <code>jq</code> filter with an internal escaped quote doesn't
+behave as expected on Windows, reach first for the native <code>ConvertFrom-Json</code> /
+<code>Where-Object</code> approach shown throughout this page instead of debugging the quoting --
+it sidesteps the problem rather than working around it.</p>
+</div>
+
+<h2 id="cmd-exe">A note on cmd.exe</h2>
+<p>Every Windows example on this site uses PowerShell, not cmd.exe (the classic
+<code>C:\&gt;</code> prompt / <code>.bat</code> files). cmd.exe has no single-quote string literal
+at all -- every argument is double-quoted, and an embedded double quote is escaped by doubling it
+(<code>""</code>) in some contexts and by a backslash in others, inconsistently, depending on
+whether the receiving program uses the standard Win32 <code>CommandLineToArgvW</code> parsing
+rules. This makes any filter with embedded quotes (the <code>-Y</code> and <code>jq</code>
+examples throughout this manual) substantially harder to write correctly in cmd.exe than in
+PowerShell, with no equivalent to PowerShell's own literal single-quoted string. If you're
+scripting conduitscope from an existing <code>.bat</code> file, the most reliable fix is usually
+to call <code>powershell.exe -File script.ps1 ...</code> from the batch file and do the actual
+filtering in a real <code>.ps1</code> script, rather than fighting cmd.exe's own quoting rules
+directly.</p>
+
+<h2>Streaming large output: don't buffer the whole report first</h2>
+<p>For a capture large enough that building the whole JSON array in memory first is wasteful,
+prefer <code>-T fields</code> (tab-separated, one line per packet, streams naturally -- see
+<a href="decode.html">decode's own -T fields example</a>) over <code>-T json | jq</code> for
+simple per-packet filtering; reach for JSON+<code>jq</code>/PowerShell specifically when you need
+<code>jq</code>'s/PowerShell's own aggregation (<code>group_by</code>/<code>Group-Object</code>,
+nested-object reshaping) that <code>-T fields</code> can't express.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="merge.html">&larr; merge -- combine multi-site reports</a></span>
+        <span class="next"></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>

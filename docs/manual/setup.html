@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup: Linux &amp; Windows &middot; conduitscope manual</title>
+<meta name="description" content="Worked examples for every conduitscope feature, run against the real fixtures in tests/, with Linux and Windows setup and JSON-filtering recipes.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">conduitscope</a>
+    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <nav>
+<div class="nav-group-title">Start here</div><ul>
+<li><a  href="index.html">Overview</a></li>
+<li><a class="active" href="setup.html">Setup: Linux &amp; Windows</a></li>
+</ul>
+<div class="nav-group-title">Reading captures</div><ul>
+<li><a  href="decode.html">decode -- packet-by-packet</a></li>
+<li><a  href="info.html">info -- stats &amp; streams</a></li>
+</ul>
+<div class="nav-group-title">Live &amp; continuous</div><ul>
+<li><a  href="live-capture.html">Live capture &amp; capture</a></li>
+</ul>
+<div class="nav-group-title">Security &amp; compliance</div><ul>
+<li><a  href="policy.html">policy validate</a></li>
+<li><a  href="inventory.html">inventory</a></li>
+<li><a  href="detect.html">detect</a></li>
+<li><a  href="baseline.html">baseline learn / check</a></li>
+<li><a  href="evidence.html">evidence</a></li>
+</ul>
+<div class="nav-group-title">Multi-site &amp; output</div><ul>
+<li><a  href="merge.html">merge</a></li>
+<li><a  href="json-filtering.html">JSON output &amp; filtering</a></li>
+</ul>
+</nav>
+    <div class="sidebar-footer">
+      <p>This is a worked-example companion. For the authoritative command/option
+      reference, see <a href="../USER_GUIDE.md">docs/USER_GUIDE.md</a>; for per-protocol
+      decode detail, <a href="../PROTOCOL_COVERAGE.md">docs/PROTOCOL_COVERAGE.md</a>.</p>
+    </div>
+  </aside>
+  <button type="button" class="nav-toggle">&#9776; Menu</button>
+  <main>
+    <div class="content">
+      <div class="crumb"><a href="index.html">Manual</a> / Setup: Linux &amp; Windows</div>
+      
+<h1>Setup: build conduitscope from source</h1>
+<p class="lede">There is no distributed binary -- you build it. One C++17 toolchain, CMake
+&gt;= 3.16, and (optionally) libpcap/Npcap for live capture. Everything else (CLI11) is vendored.</p>
+
+<p>Pick your platform below; the same CMake project drives both.</p>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash</span>Linux -- Release build, with live-capture support</div>
+<pre class="term"><code>
+<span class="ln-comment"># optional, only needed for -i/--interface live capture:</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>sudo apt install libpcap-dev</span>
+
+<span class="ln-cmd"><span class="prompt-mark">$</span>cmake -S . -B build -DCMAKE_BUILD_TYPE=Release</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cmake --build build -j</span>
+
+<span class="ln-comment"># optional: let an ordinary user open live captures without sudo (see callout below)</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>sudo apt install -y libcap2-bin</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>sudo setcap cap_net_raw,cap_net_admin=eip build/conduitscope</span>
+
+<span class="ln-comment"># optional: run the fixture-based regression suite</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>ctest --test-dir build --output-on-failure</span>
+
+<span class="ln-cmd"><span class="prompt-mark">$</span>build/conduitscope version</span>
+<span class="ln-out">conduitscope 0.2.9  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Windows -- MSVC via Visual Studio 2022</div>
+<pre class="term"><code>
+<span class="ln-comment"># optional, only needed for -i/--interface live capture:</span>
+<span class="ln-comment"># download and install the Npcap SDK from https://npcap.com/#download, then either</span>
+<span class="ln-comment"># set NPCAP_SDK_DIR or pass -DNPCAP_SDK_DIR=&lt;path&gt; to cmake below</span>
+
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>cmake -S . -B build -G "Visual Studio 17 2022" -A x64</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>cmake --build build --config Release</span>
+
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>build\Release\conduitscope.exe version</span>
+<span class="ln-out">conduitscope 0.2.9  [MSVC 19.4x, Windows, Release build, live capture: libpcap/Npcap]</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash (MSYS2)</span>Windows -- MinGW-w64, from an MSYS2/MinGW shell</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cmake --build build -j</span>
+
+<span class="ln-cmd"><span class="prompt-mark">$</span>build/conduitscope.exe version</span>
+</code></pre></div>
+</div>
+
+
+<div class="callout">
+<strong class="label">Live capture: build-time SDK vs. runtime driver</strong>
+<p>On Linux, building against <code>libpcap-dev</code> is enough -- the runtime library is the
+same package. On Windows the two are separate: the <strong>Npcap SDK</strong> is headers and an
+import library, needed only at build time; actually running <code>-i</code> on a given Windows
+machine also needs the <strong>Npcap runtime/driver</strong> installed on <em>that</em> machine,
+separately, even if the binary itself was built elsewhere. See USER_GUIDE.md's LIVE CAPTURE
+section for the full build-time-vs-runtime distinction.</p>
+</div>
+
+<div class="callout">
+<strong class="label">CAP_NET_RAW on Linux</strong>
+<p>Opening a live capture (<code>-i</code>, even against loopback) needs <code>CAP_NET_RAW</code>,
+which an ordinary Linux user doesn't have by default. The <code>setcap</code> step above grants
+that capability to the built binary itself, once, as a one-time root step -- every run after that,
+by any user, works without <code>sudo</code>. Without it, <code>-i</code> (and the
+<code>live_capture_*</code> CTest cases that exercise it) need root. This is the same fix
+<code>.github/workflows/ci.yml</code> applies before its own CI test suite runs.</p>
+</div>
+
+<h2>A dependency-free build</h2>
+<p>To guarantee a build with no libpcap/Npcap dependency at all -- e.g. for a decode-only
+deployment that will only ever read offline files -- skip the detection step entirely:</p>
+<div class="term-wrap">
+<div class="term-label">Force a build with no live-capture support</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cmake -S . -B build_nolive -DCMAKE_BUILD_TYPE=Release -DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>cmake --build build_nolive -j</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>build_nolive/conduitscope version</span>
+<span class="ln-out">conduitscope 0.2.9  [GNU 13.3.0, Linux, Release build, live capture: not built]</span>
+
+<span class="ln-cmd"><span class="prompt-mark">$</span>build_nolive/conduitscope decode -i eth0</span>
+<span class="ln-out">error: this build was compiled without live capture support (-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF or libpcap/Npcap not found)</span>
+</code></pre></div>
+
+<h2>Verify the build</h2>
+<p>Generate the synthetic sample captures and decode a few, exactly as the project's own
+<a href="../../README.md">README quick start</a> does:</p>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash</span>Smoke-test on Linux</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>python3 tools/make_sample_pcap.py</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>build/conduitscope decode -r tests/sample_modbus.pcap</span>
+<span class="ln-out">#1  0.000000  192.168.1.50:51000 -&gt; 192.168.1.10:502 (modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">#2  1.001000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+<span class="ln-out">#3  2.002000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Smoke-test on Windows (PowerShell)</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>python tools\make_sample_pcap.py</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>build\Release\conduitscope.exe decode -r tests\sample_modbus.pcap</span>
+<span class="ln-out">#1  0.000000  192.168.1.50:51000 -&gt; 192.168.1.10:502 (modbus)  [modbus]  Read Holding Registers: request: read 10 holding register(s) starting at address 0</span>
+<span class="ln-out">#2  1.001000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09</span>
+<span class="ln-out">#3  2.002000  192.168.1.10:502 (modbus) -&gt; 192.168.1.50:51000  [modbus]  Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address</span>
+</code></pre></div>
+</div>
+
+
+<p>Note Windows's own path separator above (<code>\</code> vs. <code>/</code>) -- conduitscope
+itself doesn't care which separator you use for <code>-r</code>/<code>-o</code>/etc. (the C++
+standard library and Windows's own APIs both accept forward slashes), but PowerShell's and
+cmd.exe's own path-completion and copy-pasted documentation elsewhere will usually show
+backslashes, so both are shown throughout this manual to match whichever shell a given example is
+for.</p>
+
+<h2>Capturing your own traffic</h2>
+<p>To decode traffic you've actually captured -- from a Modbus simulator such as
+<code>pymodbus</code>, or a public sample set like the
+<a href="https://www.netresec.com/?page=PCAP4SICS">4SICS ICS pcaps</a> -- capture it with any
+standard tool and decode the resulting file:</p>
+<div class="term-wrap">
+<div class="term-label">Capture with tcpdump, decode with conduitscope</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>tcpdump -i &lt;iface&gt; -w capture.pcap port 502 or port 20000 or port 2404 or port 102 or port 44818 or port 2222 or port 47808 or port 5094 or port 4840</span>
+<span class="ln-cmd"><span class="prompt-mark">$</span>build/conduitscope decode -r capture.pcap</span>
+</code></pre></div>
+<p>Or skip the intermediate file and capture straight into conduitscope -- see
+<a href="live-capture.html">Live capture &amp; continuous capture</a>.</p>
+
+      <div class="pagefoot">
+        <span class="prev"><a class="prev" href="index.html">&larr; conduitscope manual</a></span>
+        <span class="next"><a class="next" href="decode.html">decode -- packet-by-packet output &rarr;</a></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="assets/script.js"></script>
+</body>
+</html>
