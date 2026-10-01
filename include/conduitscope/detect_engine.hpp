@@ -501,6 +501,23 @@ struct DetectionReport {
     DetectionSummary summary;
     size_t total_packets = 0;
 
+    // patch257 security review section 4, "Detection completeness": "...unsupported protocols...
+    // must be distinguishable from a clean capture with no findings. An empty report must not
+    // imply that the network is safe." Counts every packet DetectEngine::observe() saw whose
+    // DecodedPacket::protocol was "parse-error" -- a packet this tool could not structurally
+    // understand at all, as opposed to one it understood but simply found uninteresting. Distinct
+    // from observation_truncated below: a parse error doesn't mean this engine ran out of room to
+    // track something it WAS analyzing (the resource-ceiling case truncation_reasons covers), it
+    // means some packets were never analyzable in the first place, for reasons ranging from
+    // genuine capture corruption to a protocol this tool simply hasn't implemented a decoder for
+    // -- `detect` cannot and does not try to tell those two apart (see `info`'s own protocol
+    // histogram, docs/USER_GUIDE.md, for a breakdown BY protocol name). Always populated (text/json
+    // report writers print it unconditionally, not just when nonzero) so a reader -- human or
+    // automated -- never has to infer decode coverage from total_packets and the stderr-only
+    // parse-warning count alone; see write_detection_report_text's own "no findings" branch for
+    // why a high parse_error_packets specifically changes that branch's own wording.
+    size_t parse_error_packets = 0;
+
     // Mirrors BaselineCheckReport::observation_truncated (baseline.hpp) -- true iff this capture's
     // own DetectEngine hit at least one of its three DetectEngineLimits ceilings, so `findings`
     // above is a true but possibly INCOMPLETE subset of what the capture actually contained. See
@@ -966,6 +983,7 @@ private:
     std::unordered_map<std::string, WriteBurstState> write_burst_state_;
 
     size_t total_packets_ = 0;
+    size_t parse_error_packets_ = 0;  // see DetectionReport::parse_error_packets' own comment
 };
 
 // Renders `report` as a human-readable text report to `out`: a summary line, then every finding

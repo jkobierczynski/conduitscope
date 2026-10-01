@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <sstream>
 #include <thread>
 
 #ifdef CONDUITSCOPE_HAVE_PCAP
@@ -26,6 +27,30 @@ bool live_capture_available() {
 #else
     return false;
 #endif
+}
+
+// See live_capture.hpp's own doc comment for the full rationale. Deliberately defined here, OUTSIDE
+// every CONDUITSCOPE_HAVE_PCAP guard in this file -- it never touches pcap.h, so it compiles and
+// behaves identically whether or not this build has live-capture support at all (a LiveCaptureStats
+// value can always be constructed and formatted, even in a build where nothing can ever produce a
+// non-default one).
+std::optional<std::string> format_live_capture_drop_reason(const LiveCaptureStats& stats) {
+    if (stats.packets_dropped_by_libpcap == 0 && stats.packets_dropped_by_interface == 0) {
+        return std::nullopt;
+    }
+    std::ostringstream msg;
+    msg << "the OS/capture driver reported " << stats.packets_dropped_by_libpcap
+        << " packet(s) dropped (libpcap's own buffer/ring filled up before this process read "
+           "them out)";
+    if (stats.packets_dropped_by_interface > 0) {
+        msg << " and " << stats.packets_dropped_by_interface
+            << " packet(s) dropped by the network interface/driver itself, below libpcap";
+    }
+    msg << " during this live capture -- these packets never reached conduitscope at all, so "
+           "nothing decoded/written by this run can account for them; a busy tap point, a "
+           "narrower --filter applied at capture time, or a smaller --snaplen can all reduce the "
+           "read-rate pressure that causes this";
+    return msg.str();
 }
 
 #ifdef CONDUITSCOPE_HAVE_PCAP
@@ -73,6 +98,8 @@ LiveCapture::~LiveCapture() = default;
 bool LiveCapture::next(PcapPacket&) { throw_unavailable(); }
 
 void LiveCapture::stop() {}
+
+LiveCaptureStats LiveCapture::stats() const { return LiveCaptureStats{}; }
 
 #else  // CONDUITSCOPE_HAVE_PCAP
 
@@ -268,6 +295,21 @@ bool LiveCapture::next(PcapPacket& out) {
         // handle, but treated the same as "no more packets" rather than asserting on it).
         return false;
     }
+}
+
+LiveCaptureStats LiveCapture::stats() const {
+    LiveCaptureStats result;
+    if (!impl_ || impl_->handle == nullptr) return result;
+    struct pcap_stat ps {};
+    // A nonzero return means pcap_stats() itself failed (e.g. not supported on this platform/
+    // capture type) -- `result` stays all-zero, matching this method's own documented "never
+    // throws, returns zeroed stats on failure" contract (live_capture.hpp).
+    if (pcap_stats(impl_->handle, &ps) == 0) {
+        result.packets_received = ps.ps_recv;
+        result.packets_dropped_by_libpcap = ps.ps_drop;
+        result.packets_dropped_by_interface = ps.ps_ifdrop;
+    }
+    return result;
 }
 
 #endif  // CONDUITSCOPE_HAVE_PCAP

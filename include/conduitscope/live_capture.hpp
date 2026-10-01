@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -58,6 +59,52 @@ class CaptureError : public std::runtime_error {
 public:
     explicit CaptureError(const std::string& message) : std::runtime_error(message) {}
 };
+
+// Live-capture drop statistics, from the underlying pcap_stats() call -- OS/driver-level packet
+// loss that happened BEFORE a packet ever reached this process. This is a distinct failure mode
+// from every other "observation incomplete" signal this codebase already tracks (an engine's own
+// internal growth ceiling, a flow-state eviction, a malformed/truncated capture FILE): those all
+// involve a packet this process actually received, just not fully retained or analyzed. A
+// pcap_stats() drop means the packet never arrived here at all -- no decoder, engine, or report
+// writer above LiveCapture::stats() itself can ever detect that it existed, which is exactly why
+// this needs its own explicit, separate signal rather than being inferred from anything else (see
+// docs/reviews/2026-09-chatgpt-security-review-patch257.md section 4, "Detection completeness":
+// "Packet loss... must be distinguishable from a clean capture with no findings").
+struct LiveCaptureStats {
+    // pcap_stat::ps_recv -- packets libpcap itself received from the OS, whether or not this
+    // process ever read them out via pcap_next_ex() (e.g. capture stopped early with packets still
+    // queued -- not itself evidence of loss on its own).
+    uint64_t packets_received = 0;
+    // pcap_stat::ps_drop -- packets libpcap received but dropped because its own internal
+    // buffer/ring filled up before this process read them out. The single most common real-world
+    // "packet loss" cause this field exists to surface: a burst of traffic (or a process that
+    // fell behind, e.g. blocked on slow -o/-w disk I/O) outpacing this capture's own read rate.
+    uint64_t packets_dropped_by_libpcap = 0;
+    // pcap_stat::ps_ifdrop -- packets dropped by the network interface/driver itself, below
+    // libpcap entirely. NOT implemented on every platform/driver -- reads 0 both when nothing was
+    // dropped there AND when this platform simply doesn't report the counter at all, two cases
+    // this field cannot tell apart (a known, accepted libpcap limitation, not a bug in this
+    // wrapper). packets_dropped_by_libpcap above has no such ambiguity: ps_drop is universally
+    // supported.
+    uint64_t packets_dropped_by_interface = 0;
+};
+
+// Formats a human-readable "observation incomplete" reason string from a LiveCaptureStats
+// snapshot, or returns std::nullopt when it shows zero drops (packets_dropped_by_libpcap == 0 &&
+// packets_dropped_by_interface == 0) -- the exact same "nothing to report" condition every call
+// site below treats as a no-op. Pure/stateless, and deliberately independent of
+// CONDUITSCOPE_HAVE_PCAP/pcap.h entirely (plain string formatting over three already-extracted
+// integers) -- this is what lets cli_main.cpp's own several call sites (decode/policy validate/
+// inventory/detect/capture, one per `-i`-capable subcommand) share identical wording without
+// hand-writing it five times, AND what makes this specific logic unit-testable at all
+// (tools/live_capture_stats_selftest.cpp): a REAL OS-level pcap_stats() drop can't be
+// deterministically constructed through the CLI/CTest the way every other "observation
+// incomplete" condition this codebase tracks can (an engine's own --max-* ceiling, say) -- it
+// depends on genuine kernel/driver buffer timing under real traffic load, not anything a fixed
+// capture file replayed through PcapReader can reproduce. Splitting the decision+wording out from
+// the actual pcap_stats() call (LiveCapture::stats()) is what makes the former independently
+// testable even though the latter still isn't.
+std::optional<std::string> format_live_capture_drop_reason(const LiveCaptureStats& stats);
 
 struct InterfaceInfo {
     std::string name;         // pass this to LiveCapture's constructor / -I
@@ -112,6 +159,15 @@ public:
     // destroyed) -- a caller invoking stop() from its own signal/Ctrl+C handler without an
     // equivalent guard would need to provide the same guarantee itself.
     void stop();
+
+    // A snapshot of this capture's own OS/driver-level drop counters (pcap_stats()), safe to call
+    // at any point after construction -- including after stop()/the final next() returning false,
+    // right up until this object is destroyed (pcap_close() hasn't happened yet). Never throws: if
+    // the underlying pcap_stats() call itself fails (platform/driver-dependent -- the handle may
+    // simply not support it), this returns an all-zero LiveCaptureStats rather than propagating a
+    // CaptureError, since a caller unable to learn whether packets were dropped should not be a
+    // harder failure than just not knowing -- the capture itself already succeeded.
+    LiveCaptureStats stats() const;
 
 private:
     struct Impl;

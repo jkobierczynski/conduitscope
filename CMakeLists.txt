@@ -326,6 +326,23 @@ add_test(NAME resource_limits_scoping_self_test
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap")
 
 # --------------------------------------------------------------------------------------------
+# Live capture drop-statistics self-test -- see tools/live_capture_stats_selftest.cpp's own file
+# header for the full rationale (ROADMAP item 118, docs/reviews/2026-09-chatgpt-security-review-
+# patch257.md section 4, "Detection completeness": "Packet loss... must be distinguishable from a
+# clean capture with no findings"). Same "always built, no opt-in flag, needs no libpcap/Npcap SDK
+# itself" posture as crypto_selftest/protocol_result_selftest above -- format_live_capture_drop_
+# reason (live_capture.hpp) has no pcap.h dependency at all, so this links and runs identically
+# whether or not THIS build has CONDUITSCOPE_HAVE_PCAP defined. A real OS-level pcap_stats() drop
+# can't be constructed on demand through the CLI/CTest the way resource_limits_selftest's own
+# --max-* scenarios can -- a dedicated executable against the library API directly, exercising
+# just the pure decision+wording logic, is the only way.
+# --------------------------------------------------------------------------------------------
+add_executable(live_capture_stats_selftest tools/live_capture_stats_selftest.cpp)
+target_link_libraries(live_capture_stats_selftest PRIVATE conduitscope_core)
+
+add_test(NAME live_capture_drop_statistics_self_test COMMAND live_capture_stats_selftest)
+
+# --------------------------------------------------------------------------------------------
 # RotatingPcapWriter rotation/retention self-test -- see tools/rotating_pcap_writer_selftest.cpp's
 # own file header for the full rationale (Grok review item 5, docs/reviews/2026-09-grok-ics-ot-
 # improvement-areas.md: "runs for weeks... rotates captures, does not fill the disk" -- see
@@ -18739,3 +18756,77 @@ add_test(NAME evidence_help_group_headers_present_in_order
   COMMAND conduitscope evidence --help)
 set_tests_properties(evidence_help_group_headers_present_in_order PROPERTIES
   PASS_REGULAR_EXPRESSION "Input/output:.*Output format:.*Display options:.*Name resolution:")
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 118: "Detection completeness: distinguish clean from degraded"
+# (docs/reviews/2026-09-chatgpt-security-review-patch257.md section 4, item 2, High priority --
+# "Packet loss, unsupported protocols, truncated captures, and resource-limit exhaustion must be
+# distinguishable from a clean capture with no findings. An empty report must not imply that the
+# network is safe."). See DetectionReport::parse_error_packets' own comment (detect_engine.hpp)
+# and live_capture.hpp's own LiveCaptureStats/format_live_capture_drop_reason comments for the
+# full design. The pure logic half of the live-capture-drop-stats fix is covered by
+# tools/live_capture_stats_selftest.cpp's own 6 checks (see live_capture_drop_statistics_self_test
+# above) -- the tests below cover the `detect`-report-level parse_error_packets addition
+# (deterministic, offline, no live capture needed) plus a handful of real-live-capture
+# false-positive checks (does the new drop-warning code path stay silent on an ordinary, driver-
+# level-loss-free run -- the live-capture counterpart to crypto_selftest's own "happy path costs
+# nothing" check).
+# ---------------------------------------------------------------------------------------------
+
+# tests/sample_modbus.pcap: 3 packets, 0 parse errors, 0 findings -- confirmed against the real
+# built binary (not assumed) before being pinned here. The genuinely clean case: parse_error_packets
+# must be present and zero, and the "no findings" line must stay the original bare wording (no
+# caveat text) when there is nothing to caveat about.
+add_test(NAME detect_parse_error_packets_zero_on_clean_capture_text
+  COMMAND conduitscope detect -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(detect_parse_error_packets_zero_on_clean_capture_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets this tool could not decode at all \\(parse errors\\): 0 \\(0.0%\\).*\nno findings\n"
+  FAIL_REGULAR_EXPRESSION "NOT evidence of absence")
+
+add_test(NAME detect_parse_error_packets_zero_on_clean_capture_json
+  COMMAND conduitscope detect -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -T json)
+set_tests_properties(detect_parse_error_packets_zero_on_clean_capture_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 3,\n  \"parse_error_packets\": 0,")
+
+# tests/sample_zigbee.pcap: 32 packets, 1 parse error, 0 findings -- confirmed against the real
+# built binary before being pinned here. The degraded-but-looks-clean case this whole item exists
+# for: "findings: 0" alone would misleadingly read as "capture is clean" without the caveat text
+# below it.
+add_test(NAME detect_parse_error_packets_nonzero_adds_no_findings_caveat
+  COMMAND conduitscope detect -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap")
+set_tests_properties(detect_parse_error_packets_nonzero_adds_no_findings_caveat PROPERTIES
+  PASS_REGULAR_EXPRESSION "packets this tool could not decode at all \\(parse errors\\): 1 \\(3.1%\\).*no findings in the packets this tool could analyze -- but 1 of 32 packet\\(s\\).*NOT evidence of absence")
+
+add_test(NAME detect_parse_error_packets_nonzero_json
+  COMMAND conduitscope detect -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_zigbee.pcap" -T json)
+set_tests_properties(detect_parse_error_packets_nonzero_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 32,\n  \"parse_error_packets\": 1,")
+
+if(CONDUITSCOPE_HAVE_PCAP AND UNIX)
+  # Real-live-capture false-positive checks: an ordinary idle "lo" run (same determinism
+  # conventions as live_capture_duration_stops_cleanly_with_no_traffic above -- no traffic
+  # generator, --duration alone stops it) must never print the new drop-warning text or flip
+  # observation_truncated, since pcap_stats() has nothing to report here. These are the
+  # integration-level counterpart to live_capture_stats_selftest's own unit-level "zero drops ->
+  # nullopt" check -- proving the real cli_main.cpp wiring (not just the pure formatter function)
+  # stays silent on the overwhelmingly common case.
+  add_test(NAME live_capture_decode_no_spurious_drop_warning_with_no_traffic
+    COMMAND conduitscope decode --interface lo --duration 1)
+  set_tests_properties(live_capture_decode_no_spurious_drop_warning_with_no_traffic PROPERTIES
+    TIMEOUT 10
+    FAIL_REGULAR_EXPRESSION "packet\\(s\\) dropped|error:")
+
+  add_test(NAME live_capture_detect_no_spurious_drop_warning_with_no_traffic
+    COMMAND conduitscope detect --interface lo --duration 1 --format json)
+  set_tests_properties(live_capture_detect_no_spurious_drop_warning_with_no_traffic PROPERTIES
+    TIMEOUT 10
+    PASS_REGULAR_EXPRESSION "\"observation_truncated\": false"
+    FAIL_REGULAR_EXPRESSION "packet\\(s\\) dropped")
+
+  add_test(NAME live_capture_capture_no_spurious_drop_warning_with_no_traffic
+    COMMAND conduitscope capture --interface lo --directory "${CMAKE_CURRENT_BINARY_DIR}" --prefix
+            live_capture_drop_stats_smoke --duration 1)
+  set_tests_properties(live_capture_capture_no_spurious_drop_warning_with_no_traffic PROPERTIES
+    TIMEOUT 10
+    FAIL_REGULAR_EXPRESSION "packet\\(s\\) dropped|error:")
+endif()

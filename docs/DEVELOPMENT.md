@@ -16735,6 +16735,163 @@ it done as its own patch.
     full clean-room extract-rebuild-test cycle (fresh copy of the whole source tree, configure,
     build, full CTest suite) also passing 2474/2474 with zero failures.
 
+118. **Detection completeness: distinguish clean from degraded.** Jurgen's own direct request,
+    verbatim: "Detection completeness: distinguish clean from degraded." Sourced from
+    `docs/reviews/2026-09-chatgpt-security-review-patch257.md` section 4's unheaded five-item
+    list, item 2 (High priority) -- "section 4.2" following the identical informal numbering
+    items 100/107 already used for that same list ("section 4.5"/"section 4.3"). Exact wording:
+
+    > 2. Detection completeness
+    > High
+    > Packet loss, unsupported protocols, truncated captures, and resource-limit exhaustion must
+    > be distinguishable from a clean capture with no findings. An empty report must not imply
+    > that the network is safe.
+
+    **Shape: an audit-and-fix task, matching items 100/107's own precedent.** Read every existing
+    "observation incomplete" code path, confirm each named scenario (packet loss, unsupported
+    protocols, truncated captures, resource-limit exhaustion) is already distinguishable from a
+    clean report, and fix only what the audit actually found to be a real gap.
+
+    **Audit findings -- three of the four named scenarios were already correctly handled, and
+    left untouched.**
+    - **Resource-limit exhaustion**: already fully covered by the pre-existing
+      `observation_truncated`/`truncation_reasons`/`kExitObservationIncomplete` (6) machinery
+      (patch257 finding 3, patch282 finding F4 -- see `detect`'s/`inventory`'s/`policy
+      validate`'s own "Resource bounds and OBSERVATION INCOMPLETE" sections above) and the
+      `*** OBSERVATION INCOMPLETE ***` text banner plus matching JSON fields. No gap.
+    - **Truncated captures (the capture *file* itself)**: `PcapReader` already throws
+      `ParseError` on any truncated-mid-record pcap/pcapng file (e.g. `"'<path>' ends with a
+      truncated pcapng block header"`), confirmed by reading -- a truncated capture file can
+      never silently produce a false "clean" report; the read fails outright before any engine
+      runs. No gap.
+    - **Unsupported protocols**: a packet whose protocol this tool doesn't decode already
+      produces a `DecodedPacket` with `has_ip`/layer data populated as far as decoding got, and
+      is counted in `total_packets` either way -- `detect`'s own finding logic only ever flags
+      what it actually recognizes, so an unsupported-protocol-heavy capture legitimately produces
+      a sparse or empty finding set without that being a defect; distinguishing "no findings
+      because nothing interesting happened" from "no findings because this tool doesn't
+      understand most of what it saw" is exactly what the new `parse_error_packets` fix below
+      addresses (see Fix B) -- a packet this tool can't decode AT ALL (not merely one it declines
+      to flag) is the sharper, unambiguous signal, and is now always surfaced.
+    - **Packet loss: a real, previously-unaddressed gap.** `pcap_stats()` -- libpcap's own
+      drop-counter API (`struct pcap_stat { ps_recv, ps_drop, ps_ifdrop }`) -- was never called
+      anywhere in this codebase before this item. This is categorically different from every
+      other "observation incomplete" cause already tracked: a dropped packet never reaches
+      `Decoder::decode()` at all, so no engine, however carefully written, can ever detect its
+      own absence -- it has to be read directly from libpcap.
+
+    **Fix A: OS-level live-capture packet loss, surfaced across all five `-i`-capable
+    subcommands.** `LiveCapture::stats()` (new, `live_capture.hpp`/`.cpp`) calls `pcap_stats()`
+    once a live capture stops and returns a `LiveCaptureStats{packets_received,
+    packets_dropped_by_libpcap, packets_dropped_by_interface}` (never throws -- an all-zero
+    result on any internal failure, matching this project's own "diagnostics must never crash
+    the run they're diagnosing" convention). `format_live_capture_drop_reason(LiveCaptureStats)`
+    (new, same files, deliberately kept outside any `CONDUITSCOPE_HAVE_PCAP` guard so it compiles
+    and is testable identically in every build config including a no-live-capture build) turns
+    that into `std::nullopt` when nothing was dropped, or an operator-facing sentence naming the
+    libpcap-buffer count and, if nonzero, the interface/driver-level count separately (they call
+    for different fixes -- a busy tap point/narrower `--filter`/smaller `--snaplen` for the
+    former, a driver/NIC-level problem for the latter). Five `cli_main.cpp` call sites use it:
+    - `decode` and `capture` (no report-level "observation incomplete" concept of their own)
+      print `warning: the OS/capture driver reported N packet(s) dropped ...` to stderr once the
+      capture stops, if and only if libpcap reported any drops -- diagnostic only, no exit-code
+      change. `capture` prints it from both its normal-completion path and its own `*** CAPTURE
+      INCOMPLETE ***` path (exit 7), since a drop can co-occur with either.
+    - `policy validate`, `inventory`, and `detect` fold a nonzero drop count into their existing
+      `observation_truncated`/`truncation_reasons`/`*** OBSERVATION INCOMPLETE ***`/
+      `kExitObservationIncomplete` (6) machinery via a small shared helper
+      (`append_live_capture_drop_reason`, `cli_main.cpp`), the same "one shared helper, one
+      wording, used identically at every call site" pattern
+      `append_flow_state_eviction_reason` (item 113/F4) already established -- identically to,
+      and combinable with, every other truncation reason these three subcommands already report.
+      This is the literal fix for patch257's own "an empty report must not imply that the
+      network is safe" wording: a live `detect` run that lost packets to a full OS buffer can no
+      longer show a clean, exit-0 "no findings" report without also saying so.
+
+    **Fix B: `detect`'s own report now always states how much of the capture it could not decode
+    at all.** `DetectionReport` gains `parse_error_packets` (new field, alongside the existing
+    `total_packets`), incremented in `DetectEngine::observe()` whenever `dp.protocol ==
+    "parse-error"`. The text report always prints `packets this tool could not decode at all
+    (parse errors): N (X.X%)` right after the existing `total packets:` line (zero included --
+    this is a completeness statement, not a conditional warning), and the JSON report always
+    carries `"parse_error_packets"` alongside `"total_packets"`. When `report.findings` is empty
+    AND `parse_error_packets > 0`, the previously-bare `"no findings"` line is replaced with an
+    explicit caveat: `"no findings in the packets this tool could analyze -- but N of M packet(s)
+    in this capture could not be decoded at all (see above) and were never analyzed for findings
+    either way. Absence of findings there is NOT evidence of absence of activity."` -- this is
+    the literal fix for patch257's own "an empty report must not imply that the network is safe"
+    wording, for the specific case of a capture that happens to be mostly garbage/unparseable
+    rather than genuinely clean. CEF/LEEF/syslog exports were deliberately left unmodified: their
+    one-event-per-finding model has no natural slot for a whole-capture completeness statistic,
+    and the existing `ObservationIncomplete` sentinel event (item 113/F4) already covers the
+    truncation-flag case those formats need to carry.
+
+    **New selftest: `tools/live_capture_stats_selftest.cpp`.** Modeled directly on
+    `tools/resource_limits_selftest.cpp`'s own stated rationale for being a dedicated executable
+    rather than a CLI-driven CTest case: a real OS-level `pcap_stats()` drop depends on genuine
+    kernel/driver buffer timing under real traffic load outpacing this process's own read rate --
+    not anything a fixed capture file replayed through `PcapReader` can reproduce on demand, and
+    not anything CI should be racing against. `LiveCapture::stats()` (the actual untestable-on-
+    demand `pcap_stats()` call) is deliberately split from `format_live_capture_drop_reason()`
+    (pure string formatting over an already-extracted `LiveCaptureStats` value, no `pcap.h`
+    dependency) specifically so the latter -- the part every call site's own behavior actually
+    depends on -- is as testable as any other pure function in this codebase. Six checks: all-zero
+    stats and `packets_received`-alone-with-no-drops both produce `std::nullopt` (no false
+    positive on an ordinary clean live run, where a capture stopped early by `--duration`/
+    `--max-packets`/Ctrl+C while packets were still queued is completely normal and not a drop);
+    libpcap-only drops name the buffer cause and not the interface; interface-only drops still
+    surface the interface-level count even with zero libpcap-level drops; both-nonzero names both
+    counts; and the reason text explicitly states the packets never reached conduitscope at all.
+    Wired into `CMakeLists.txt` as its own CTest case (`live_capture_drop_statistics_self_test`),
+    built and run unconditionally regardless of `CONDUITSCOPE_HAVE_PCAP`.
+
+    **Other new tests, `CMakeLists.txt`.** Four `detect_parse_error_packets_*` tests (text and
+    JSON, against both a genuinely clean fixture -- `tests/sample_modbus.pcap`, 0 parse errors --
+    and one with real parse errors -- `tests/sample_zigbee.pcap`, 1 of 32 packets, confirmed
+    against the real built binary's actual output before being pinned -- proving both the always-
+    present count/percentage line and the "NOT evidence of absence" caveat). Three
+    `live_capture_*_no_spurious_drop_warning_with_no_traffic` tests (`decode`/`detect`/`capture`
+    each against `-i lo --duration 1` with no generated traffic, gated
+    `if(CONDUITSCOPE_HAVE_PCAP AND UNIX)`) prove the new drop-visibility machinery stays silent
+    and `observation_truncated: false` on an ordinary idle run -- the single most important
+    false-positive guard for a feature that's otherwise untestable against a real drop. All
+    `PASS_REGULAR_EXPRESSION`s are single bare `.*` spans between literal anchors with no nested
+    repeated group, per this project's own established cmsys-regex-engine lesson.
+
+    **Docs.** `docs/USER_GUIDE.md` gets a new "Packet loss visibility (OS-level drops)"
+    subsection under LIVE CAPTURE (Fix A), and its five `detect` worked examples (against
+    `tests/real_captures/modbus/modbus_test_data_part1.pcap`,
+    `tests/sample_detect_snort_patterns.pcap`, `tests/sample_detect_snort_patterns_batch5.pcap`,
+    `tests/sample_detect.pcap`, `tests/sample_umas.pcap`) each gain the new always-printed
+    "packets this tool could not decode at all (parse errors): 0 (0.0%)" line (Fix B), each
+    verified against the real built binary first. No `detect`-specific JSON worked example exists
+    anywhere in USER_GUIDE.md to update for the new `"parse_error_packets"` JSON field (confirmed
+    by exhaustive search -- the file's only `"total_packets"` JSON occurrence belongs to `policy
+    validate`'s own unrelated schema). The `evidence` subcommand's own pre-existing section 6
+    ("DECODER CONFIDENCE & DATA-QUALITY NOTES", item 117) already independently tracks and prints
+    an identically-worded parse-error count/percentage from its own internal pass -- confirmed
+    unaffected by this item (a separate field on `EvidenceReport`, not reused from
+    `DetectionReport`) and not duplicated in its own worked example, which abbreviates the
+    embedded `detect` report's own body. No new EXIT STATUS code was introduced -- a live-capture
+    drop folds into the already-existing `kExitObservationIncomplete` (6) -- but that code's own
+    table row is amended to name live-capture packet loss explicitly as a third cause, alongside
+    the pre-existing "internal growth ceiling"/"flow-state entry evicted" wording, rather than
+    leaving it only implicitly covered.
+
+    **Verification.** Full cycle, not scoped down: default `build` rebuilt clean and the complete
+    CTest suite re-run in full (2482/2482 passing, zero regressions elsewhere, including the 8 new
+    tests above); the new selftest and the three idle-capture false-positive-guard tests re-run
+    under Clang ASan/UBSan (`build-fuzz`, 8/8 passing, zero sanitizer hits); the
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` build (`build_nolive`) rebuilt clean and its complete
+    CTest suite re-run in full (2464/2464 passing -- fewer than the default build only because the
+    three `CONDUITSCOPE_HAVE_PCAP AND UNIX`-gated idle-capture tests above don't exist in this
+    config, confirmed the selftest itself still builds, links, and passes identically here since
+    `format_live_capture_drop_reason` has no `pcap.h` dependency); the MinGW cross-compile
+    (`build-mingw`) rebuilt clean (build-only, matching item 117's own precedent for a Windows
+    target this sandbox can't execute); and a full clean-room extract-rebuild-test cycle (fresh
+    copy of the whole source tree, configure, build, full CTest suite) also passing 2482/2482 with
+    zero failures.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

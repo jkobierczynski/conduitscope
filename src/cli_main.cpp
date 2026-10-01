@@ -646,6 +646,35 @@ PacketSource open_packet_source(const std::string& input, const std::string& int
     return source;
 }
 
+// patch257 security review section 4, "Detection completeness": "Packet loss... must be
+// distinguishable from a clean capture with no findings." A live capture's own OS/driver-level
+// drop counters (LiveCaptureStats, live_capture.hpp) are the one "observation incomplete" cause
+// none of this codebase's existing engines can ever detect on their own -- a dropped packet never
+// reaches Decoder::decode() at all, so there is nothing for AssetInventoryEngine/PolicyEngine/
+// DetectEngine to notice. This is the one shared place that checks for it and folds a
+// human-readable reason into whatever `reasons` vector a caller's own Report struct already
+// exposes (PolicyReport::truncation_reasons, AssetInventoryReport::truncation_reasons,
+// DetectionReport::truncation_reasons -- see each one's own observation_truncated/
+// truncation_reasons comment), reusing that SAME existing "observation incomplete" machinery
+// (report text/json already render truncation_reasons unconditionally, and the CLI layer's
+// existing kExitObservationIncomplete handling already takes priority over every other exit code)
+// rather than inventing a parallel "packet loss" concept -- matching this file's own
+// append_flow_state_eviction_reason precedent (resource_limits.hpp), which folds a different
+// capture-wide concern into the same vector the same way.
+//
+// A no-op for an offline source (source.live_ptr() == nullptr) or a live source that reported
+// zero drops -- returns false in both cases, leaving `reasons` untouched; `decode`, which has no
+// Report/truncation_reasons of its own, calls LiveCapture::stats() directly instead (see
+// run_decode) rather than through this helper.
+bool append_live_capture_drop_reason(const PacketSource& source, std::vector<std::string>& reasons) {
+    LiveCapture* live = source.live_ptr();
+    if (live == nullptr) return false;
+    std::optional<std::string> reason = format_live_capture_drop_reason(live->stats());
+    if (!reason) return false;
+    reasons.push_back(*reason);
+    return true;
+}
+
 std::string link_type_name(uint32_t linktype) {
     switch (linktype) {
         case LINKTYPE_ETHERNET: return "Ethernet";
@@ -1688,6 +1717,18 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                  << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
                     "the first one, or -q to silence this message\n";
         }
+        // `decode` has no Report/truncation_reasons of its own to fold a drop reason into (see
+        // append_live_capture_drop_reason's own comment) -- it's a raw per-packet dump, not a
+        // verdict a silent drop could make falsely look clean -- but the OS/driver-level drop
+        // count itself is still real data loss worth surfacing plainly. Printed unconditionally,
+        // ignoring --quiet: this is the same "affects correctness, not just diagnostic noise"
+        // posture run_baseline_learn's own INCOMPLETE warning already takes, not routine progress
+        // chatter.
+        if (!interface_name.empty() && source.live_ptr() != nullptr) {
+            std::optional<std::string> drop_reason =
+                format_live_capture_drop_reason(source.live_ptr()->stats());
+            if (drop_reason) diag << "warning: " << *drop_reason << "\n";
+        }
     } catch (const ResolverError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -1913,6 +1954,11 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         // file path.
         std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
         PolicyReport report = engine.finish(resolver);
+        // See append_live_capture_drop_reason's own comment (above open_packet_source) -- a no-op
+        // for an offline `-r` read.
+        if (append_live_capture_drop_reason(source, report.truncation_reasons)) {
+            report.observation_truncated = true;
+        }
         if (format == "json") {
             write_policy_report_json(*out, report, policy, capture_label, policy_path, resolver);
         } else if (format == "cef") {
@@ -2026,6 +2072,11 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
 
         std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
         AssetInventoryReport report = engine.finish();
+        // See append_live_capture_drop_reason's own comment (above open_packet_source) -- a no-op
+        // for an offline `-r` read.
+        if (append_live_capture_drop_reason(source, report.truncation_reasons)) {
+            report.observation_truncated = true;
+        }
         if (format == "json") {
             write_inventory_report_json(*out, report, capture_label, resolver);
         } else if (format == "csv") {
@@ -2200,6 +2251,14 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
 
         std::string capture_label = interface_name.empty() ? input : "live:" + interface_name;
         DetectionReport report = engine.finish(policy ? &*policy : nullptr, baseline ? &*baseline : nullptr);
+        // See append_live_capture_drop_reason's own comment (above open_packet_source) -- a no-op
+        // for an offline `-r` read. This is the literal fix for patch257 section 4's "Detection
+        // completeness" finding's own "packet loss... must be distinguishable from a clean
+        // capture with no findings": a live `detect` run that silently dropped packets at the OS
+        // level must never come back as a trustworthy "no findings".
+        if (append_live_capture_drop_reason(source, report.truncation_reasons)) {
+            report.observation_truncated = true;
+        }
         if (format == "json") {
             write_detection_report_json(*out, report, capture_label, resolver);
         } else if (format == "cef") {
@@ -2805,6 +2864,20 @@ int run_capture(const std::string& interface_name, const std::string& filter, in
 
         PcapPacket pkt;
         size_t captured_count = 0;
+        // See append_live_capture_drop_reason's own comment (above open_packet_source) for the
+        // general "why" -- `capture` has no Report/truncation_reasons to fold this into (it's the
+        // write-side sensor, not a report-producing subcommand), but it's the one place patch257's
+        // own "report capture loss... prominently rather than silently continuing as if the
+        // evidence stream were complete" wording (finding 2, the sibling of section 4's "Detection
+        // completeness") applies MOST directly: this is the actual "continuously running sensor"
+        // deployment surface the whole review is written against. Printed unconditionally,
+        // ignoring --quiet, from both the normal-completion path and the CAPTURE INCOMPLETE path
+        // below -- a drop can occur either way, and this is data-loss evidence, not progress
+        // chatter.
+        auto print_drop_stats_if_any = [&]() {
+            std::optional<std::string> drop_reason = format_live_capture_drop_reason(capture.stats());
+            if (drop_reason) std::cerr << "warning: " << *drop_reason << "\n";
+        };
         // patch257 security review finding 2 fix: this inner try/catch is deliberately separate
         // from the outer one below. A ParseError here means the write side failed AFTER capture
         // was already under way (RotatingPcapWriter::write_packet -- disk full, a permission
@@ -2831,8 +2904,10 @@ int run_capture(const std::string& interface_name, const std::string& filter, in
                        << "condition (Ctrl+C/--duration/--max-packets) -- treat this run's coverage "
                        << "as incomplete and investigate the underlying storage problem before "
                        << "relying on it. ***\n";
+            print_drop_stats_if_any();
             return kExitCaptureIncomplete;
         }
+        print_drop_stats_if_any();
 
         if (!quiet) {
             diag << captured_count << " packet(s) captured across " << (writer.rotation_count() + 1)

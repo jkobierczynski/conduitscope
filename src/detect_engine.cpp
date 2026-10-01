@@ -277,6 +277,11 @@ bool DetectEngine::admit_finding_slot(size_t current_size, const char* what) {
 
 void DetectEngine::observe(const DecodedPacket& dp) {
     ++total_packets_;
+    // See DetectionReport::parse_error_packets' own comment (detect_engine.hpp) -- counted before
+    // the has_ip early return below, since a parse-error packet frequently has has_ip false too
+    // (the failure was often in the IP layer itself or everything above it), and this count must
+    // include those regardless of why analysis stopped.
+    if (dp.protocol == "parse-error") ++parse_error_packets_;
     if (!dp.has_ip) return;
 
     // `severity` defaults to Critical -- most always-notable sources are a real control/restart/
@@ -1872,6 +1877,7 @@ void DetectEngine::observe(const DecodedPacket& dp) {
 DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* baseline) const {
     DetectionReport report;
     report.total_packets = total_packets_;
+    report.parse_error_packets = parse_error_packets_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
     // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
@@ -2214,6 +2220,19 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
     out << "=== conduitscope detect report ===\n";
     out << "capture: " << capture_path << "\n";
     out << "total packets: " << report.total_packets << "\n";
+    // patch257 section 4, "Detection completeness" fix: always printed, not just when nonzero --
+    // see DetectionReport::parse_error_packets' own comment (detect_engine.hpp) for why this must
+    // live in the report itself, not only in a stderr warning a reader of just this report (or an
+    // automated consumer of --format json) would never see.
+    out << "packets this tool could not decode at all (parse errors): " << report.parse_error_packets;
+    if (report.total_packets > 0) {
+        double pct = 100.0 * static_cast<double>(report.parse_error_packets) /
+                     static_cast<double>(report.total_packets);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), " (%.1f%%)", pct);
+        out << buf;
+    }
+    out << "\n";
     out << "findings: " << report.summary.total << " (Critical " << report.summary.critical << ", Moderate "
         << report.summary.moderate << ", Informational " << report.summary.informational << ")\n";
     out << "  evidence: Confirmed " << report.summary.confirmed_evidence << ", Heuristic "
@@ -2240,7 +2259,24 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
     }
 
     if (report.findings.empty()) {
-        out << "\nno findings\n";
+        // patch257 section 4, "Detection completeness" fix: "An empty report must not imply that
+        // the network is safe." A bare "no findings" read in isolation is exactly that implication
+        // -- when a nontrivial share of this capture's own packets were never analyzable at all
+        // (parse_error_packets above), this says so again, right here, rather than relying on a
+        // reader to notice and do the total_packets/parse_error_packets subtraction themselves.
+        // Threshold is deliberately "any parse errors at all", not some percentage cutoff -- even a
+        // handful of unanalyzable packets means this "no findings" is about a strict subset of the
+        // capture, which is worth saying plainly rather than only when it crosses some arbitrary
+        // bar.
+        if (report.parse_error_packets > 0) {
+            out << "\nno findings in the packets this tool could analyze -- but " << report.parse_error_packets
+                << " of " << report.total_packets
+                << " packet(s) in this capture could not be decoded at all (see above) and were "
+                   "never analyzed for findings either way. Absence of findings there is NOT "
+                   "evidence of absence of activity.\n";
+        } else {
+            out << "\nno findings\n";
+        }
         return;
     }
 
@@ -2267,6 +2303,11 @@ void write_detection_report_json(std::ostream& out, const DetectionReport& repor
     out << "{\n";
     out << "  \"capture\": \"" << json_escape(capture_path) << "\",\n";
     out << "  \"total_packets\": " << report.total_packets << ",\n";
+    // See DetectionReport::parse_error_packets' own comment (detect_engine.hpp) -- a machine
+    // consumer of this JSON report must be able to tell "fully analyzed, genuinely clean" apart
+    // from "mostly unanalyzable" from the report alone, same reasoning as the text writer's own
+    // identical addition just above it in this file.
+    out << "  \"parse_error_packets\": " << report.parse_error_packets << ",\n";
     out << "  \"summary\": {\n";
     out << "    \"total\": " << report.summary.total << ",\n";
     out << "    \"critical\": " << report.summary.critical << ",\n";
