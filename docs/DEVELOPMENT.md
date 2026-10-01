@@ -16551,6 +16551,190 @@ it done as its own patch.
     pre-existing item 109/--help tests are unaffected). The full four-config/clean-room
     verification cycle was deliberately not repeated for this change.
 
+117. **`evidence` subcommand: an audit-binder-ready evidence pack from one command (62443 / NIS2 /
+    NERC CIP / NIST 800-82).** Jurgen's own direct request, quoted in full since its own wording
+    sets the bar this item is held to:
+
+    > 7. Evidence pack for 62443 / NIS2 / NERC CIP / NIST 800-82. This is how a small tool
+    > displaces a slide in an audit binder. Produce, from one command: zone/conduit diagram +
+    > violation list (already close); mapping of each finding to 62443 FR 5 (RDF), SL target,
+    > NIS2 Article-style "network segmentation evidence"; optional CIP-007 / CIP-015 style
+    > "monitoring was in place for this window"; signed, reproducible report: tool version, policy
+    > hash, capture hash, decoder confidence notes. Honesty about heuristics belongs in that
+    > report. Auditors punish silent overclaim more than "unknown."
+
+    Two design questions were genuinely ambiguous and were put to Jurgen directly before writing
+    any code, rather than guessed: what "signed" should mean (an operator-supplied HMAC-SHA256 key
+    was chosen over a bundled/self-signed certificate -- this tool has no PKI machinery anywhere
+    and inventing one for this alone would be its own large, separately-risky feature), and how
+    much of the four named frameworks to build in v1 (62443 + NIS2 now, CIP optional and gated
+    behind its own flag, NIST 800-82 deferred entirely -- see below for why).
+
+    **Design: assemble, don't reimplement.** `evidence` is deliberately NOT a fifth engine. It
+    runs up to four independent decode passes over the same capture file -- one per existing
+    engine (`AssetInventoryEngine` for topology, `PolicyEngine` for compliance if `--policy` is
+    given, `DetectEngine` always, `BaselineEngine`/`check_baseline` if `--baseline-file` is given)
+    -- matching every other subcommand's own established "one engine, one pass" shape rather than
+    inventing this codebase's first combined multi-engine pass. It then assembles the report by
+    embedding each engine's own already-tested report-writer output verbatim
+    (`write_policy_report_text`/`_json`, `write_detection_report_text`/`_json`,
+    `write_baseline_check_report_text`/`_json`, `write_inventory_diagram_mermaid`) rather than
+    reimplementing any rendering logic a second time. The new code
+    (`include/conduitscope/evidence_report.hpp`, `src/evidence_report.cpp`) is strictly an
+    assembly/framing layer on top of output this project already trusts.
+
+    **The report's 7 sections**, always printed in this fixed numbered order (never reordered,
+    never silently skipped -- a section whose input was not supplied still prints its own numbered
+    header, explaining the absence rather than leaving a gap; see below for why that matters):
+
+    1. **Observed zone/conduit topology** -- reuses `inventory`'s own engine and Mermaid diagram
+       writer verbatim; always present, since this needs only the capture file itself.
+    2. **Policy compliance -- IEC 62443 FR5 / NIS2 segmentation evidence** -- a fixed legend maps a
+       policy violation to FR5 (Restricted Data Flow), SR 5.1/5.2, and frames the section as
+       supporting technical evidence for a NIS2 Article 21(2) risk-management assessment (the
+       citation deliberately stops at the Article-21(2) level rather than naming a specific
+       sub-point, since this project could not be fully certain which sub-letter an operator's own
+       assessment would cite, and a wrong specific citation is worse than a correctly-scoped
+       general one). Present only if `--policy` is given; otherwise the section says so plainly.
+    3. **Detection findings -- IEC 62443 FR mapping** -- reuses `detect`'s own report verbatim,
+       prefixed with a per-category FR5-primary/secondary-FR legend (e.g. Firmware/Logic Change
+       also cross-references FR3, System Integrity). Always present.
+    4. **Baseline anomalies** -- reuses `baseline check`'s own report verbatim. Present only if
+       `--baseline-file` is given; otherwise the section says the absence is deliberate, "not
+       silently omitted: no baseline-deviation claim is being made either way" -- an audit document
+       staying silent on a topic reads very differently from it explicitly declining to claim
+       something, and this tool picks the latter on purpose.
+    5. **Continuous monitoring coverage (NERC CIP-007 R4 / CIP-015-style evidence)** -- opt-in via
+       `--cip-monitoring-window` (off by default: CIP applies only to the North American bulk
+       electric system, so most captures have no reason to carry it). When on, reports this
+       capture's own time window, packet count, and largest inter-packet gap, explicitly caveated
+       as "coverage of this capture file only... not proof of continuous monitoring infrastructure
+       uptime" -- this tool has no way to know whether the sensor was running before or after this
+       file's own first/last packet. **This header always prints**, even when the flag is off (a
+       one-line "not requested" explanation takes its place) -- an earlier version of this code
+       omitted the whole section when the flag was off, which made the report's own numbering jump
+       straight from "4." to "6." with no "5." anywhere, exactly the kind of gap an audit binder
+       reviewer would read as a missing page rather than a section nobody asked for. Caught and
+       fixed during this item's own manual verification pass, before any test was written against
+       it.
+    6. **Decoder confidence & data-quality notes** -- parse-error count/percentage, how many
+       detection findings rest on heuristic (vs. confirmed) evidence, and whether any engine hit a
+       resource/complexity ceiling during this analysis. This is the section most directly in
+       answer to Jurgen's own "honesty about heuristics... auditors punish silent overclaim more
+       than 'unknown'" -- every number here is pulled from each engine's own already-existing
+       evidence/novelty/truncation machinery (ROADMAP item 90's own four-axis detection model,
+       and every engine's own `observation_truncated`/`truncation_reasons` fields), not invented
+       for this report.
+    7. **Integrity** -- tool version, generation timestamp, capture file SHA-256, policy file
+       SHA-256 (if one was supplied), and, if `--sign-key` was given, an HMAC-SHA256 signature over
+       the report's own preceding content plus a literal recompute-and-compare recipe printed right
+       next to it (the JSON format's own signature covers the JSON object itself, serialized up to
+       and including `policy_file` plus one closing brace, with the exact byte range spelled out in
+       a `signature_verification_note` field alongside the signature). Unsigned reports say so
+       explicitly rather than leaving the reader to wonder whether signing was attempted and
+       failed silently.
+
+    A **SCOPE & HONESTY NOTE** opens every report, before the CAPTURE block, stating plainly that
+    this is "evidence FOR an audit, not a certification, a compliance determination, or a
+    substitute for a qualified assessor's own judgment," and that every framework mapping anywhere
+    in the report is "this tool's own interpretive cross-reference, never an official conformance
+    determination." This sentence (or a close paraphrase of it) is also repeated locally at the top
+    of sections 2 and 3, so a reader who jumps straight to a section without reading the front
+    matter still sees the caveat.
+
+    **SL-Target is never computed.** `--sl-target` (e.g. `SL2`) is echoed verbatim into the CAPTURE
+    block for audit cross-referencing and nowhere else influences the report -- IEC 62443-3-2
+    defines a Security Level Target as an organizational risk-assessment output, something a
+    passive-monitoring tool reading traffic off the wire has no basis to infer. Omitted, the report
+    says plainly that none was supplied rather than guessing or leaving the field blank.
+
+    **NIST 800-82 is deferred entirely**, per Jurgen's own answer to the scoping question: unlike
+    62443/NIS2 (where this tool's existing zone/conduit/policy/detection model maps onto FR5/
+    Article-21(2) segmentation language fairly directly) and CIP-007/CIP-015 (a narrow, mechanical
+    "was monitoring running" window check), NIST 800-82's own control-family structure (SP 800-53
+    control baselines tailored for OT) does not map onto anything this tool currently models, and
+    building a mapping that doesn't actually reflect an honest cross-reference would be exactly the
+    silent-overclaim risk this whole feature exists to avoid. Left as a clearly-named future item,
+    not implemented as a stub.
+
+    **No new per-engine resource-limit CLI overrides.** Every one of `evidence`'s four internal
+    passes runs with its engine's own compiled-in default `*EngineLimits`; the CLI surface
+    deliberately does not expose a `--max-*` override for each of the four engines a second time
+    under `evidence` (every one of those already exists under its own subcommand -- `detect
+    --max-flow-state-entries`, `baseline check --max-tcp-sessions`, etc.). Scoped out to keep this
+    already-large option surface (15 of `evidence`'s own options, across four `->group()`
+    categories) manageable; an operator who needs non-default limits runs the individual
+    subcommands directly and assembles the pieces by hand, same as before this item existed.
+
+    **Offline-only, no `-i`/`--interface`, no `--filter`.** An audit evidence pack needs to reflect
+    the whole of a specific, hashable capture file -- `-i` live-capture has no file to hash, and a
+    display filter would silently make the "observed topology"/"policy compliance" sections
+    describe a filtered subset of the capture while the Integrity section's hash still covers the
+    whole unfiltered file, a mismatch this tool has no business introducing into an audit artifact.
+
+    **Reused crypto primitives, not new ones.** `sha256_hex` (`evidence_report.cpp`) and
+    `hmac_sha256_hex` (same file, local to its anonymous namespace) are thin wrappers around the
+    existing from-scratch `sha256()` (`sha256.hpp`/`.cpp`) and `hmac_sha256()` (`hkdf.hpp`/`.cpp`)
+    primitives, both of which previously existed for exactly one reason each: QUIC Initial-packet
+    key derivation. Both header's own file-header comments are updated to document this second,
+    deliberate caller rather than continuing to claim "no plan to add a second use." Neither
+    primitive's own implementation changed; both already carry their own FIPS 180-4/RFC 4231 self-
+    tests (`crypto_selftest`), run in every build config and every CTest suite, unaffected by this
+    item.
+
+    **Dispatch-wiring bug caught before any test was written.** `rewrite_subcommand_alias`'s own
+    `kBareSubcommands` set (`src/cli_main.cpp`, the set ROADMAP item 109's own no-subcommand
+    default-injection logic consults to recognize "a subcommand word is already present on the
+    command line") did not initially include `"evidence"` -- an oversight caught during this item's
+    own code review, before the subcommand was ever run once, not discovered via a failing test.
+    Left unfixed, `conduitscope evidence -r file.pcap` would have been silently mis-parsed as if no
+    subcommand were present at all, and item 109's own default-subcommand injection would have
+    wrongly rewritten it to `conduitscope decode evidence -r file.pcap`, breaking the feature
+    entirely on its very first real invocation. Fixed by adding `"evidence"` to that set; the first
+    CTest entry below (`evidence_kbaresubcommands_fix_no_spurious_decode_injection`) is this bug's
+    own regression test, with a `FAIL_REGULAR_EXPRESSION` pinned against `decode`'s own
+    missing-source error text so this exact failure mode can never silently reappear.
+
+    **Exit codes.** Reuses this project's own existing exit-code vocabulary rather than inventing
+    new ones: `kExitObservationIncomplete` (6, highest priority -- any of the four engines hit a
+    resource ceiling), else `kExitPolicyNonCompliant` (3), else `kExitBaselineAnomaly` (4), else 0.
+
+    **Tests.** 23 new CTest entries (`evidence_*`), covering: the `kBareSubcommands` regression
+    above; all 7 section headers present and in order on a bare invocation, including section 5's
+    own "not requested" header fix; the SCOPE & HONESTY NOTE; section 2 and section 4 both ways
+    (supplied vs. omitted input, including policy-violation exit code 3 and baseline-anomaly exit
+    code 4); `--sl-target` echoed vs. its own "none supplied" message; `--cip-monitoring-window`
+    toggling section 5's content; `--sign-key` producing a signature line vs. "signature: none";
+    `-T json` producing syntactically valid JSON (piped through Python's own `json` module) with
+    every optional section correctly `null` vs. populated; a clean run exiting 0; CLI11's own
+    existing-file/required-option validation for a nonexistent capture and a missing `-r`; `-o`
+    writing to a file; and the `--help` group-header ordering (Input/output, Output format, Display
+    options, Name resolution), matching every other subcommand's own group-header regression test
+    (items 114/116). Every `PASS_REGULAR_EXPRESSION` is a single bare `.*` between literal anchors
+    with no nested repeated group, per this project's own established cmsys-regex-engine lesson.
+
+    Beyond the CTest suite itself, both signing recipes (text and JSON) were independently
+    verified during manual testing by recomputing the HMAC-SHA256 signature with Python's own
+    `hmac`/`hashlib` modules against the exact byte ranges the report's own verification notes
+    describe, confirming the printed signature and the independently recomputed one matched
+    byte-for-byte in both formats -- the report's own "how to verify this" instructions were
+    checked to actually work, not just to read plausibly.
+
+    **Docs.** `docs/USER_GUIDE.md` gets a new `evidence` subcommand section (see there for the full
+    worked example and option reference).
+
+    **Verification.** Full cycle, not scoped down (a new subcommand, unlike items 115/116's own
+    narrow fixes, touches enough new surface -- a new header/implementation file pair, 15 new CLI
+    options, and a real dispatch-wiring bug already caught once -- to warrant it): default `build`
+    rebuilt clean; all 23 new tests passing; the complete default-build CTest suite re-run in full
+    (2474/2474 passing, zero regressions elsewhere); the three other standing build configs
+    (`build-fuzz` Clang ASan/UBSan, `build_nolive` with live capture compiled out,
+    `build-mingw` Windows cross-compile) each rebuilt clean (build-only -- the new code is
+    platform-agnostic file I/O and already-self-tested crypto primitives, so a full CTest re-run in
+    each was judged not to add meaningfully over the default build's own full-suite pass); and a
+    full clean-room extract-rebuild-test cycle (fresh copy of the whole source tree, configure,
+    build, full CTest suite) also passing 2474/2474 with zero failures.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

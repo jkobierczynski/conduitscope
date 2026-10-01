@@ -15,9 +15,11 @@
 #include <cstdlib>
 #include <csignal>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <set>
@@ -52,6 +54,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/display_filter.hpp"
+#include "conduitscope/evidence_report.hpp"
 #include "conduitscope/flow_direction.hpp"
 #include "conduitscope/inventory_merge.hpp"
 #include "conduitscope/live_capture.hpp"
@@ -2469,6 +2472,258 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
     }
 }
 
+// `evidence` -- Jurgen's direct request for an audit-binder-ready "evidence pack" produced from
+// one command (see evidence_report.hpp's own file header for the full design record, including the
+// deliberate "assemble existing proven report writers, don't reimplement any of them" decision this
+// function follows). Offline captures ONLY -- no -i/--interface, unlike every other subcommand that
+// reads a packet source: this report hashes the capture file and may run more than one independent
+// decode pass over it (inventory always, policy/detect/baseline each needing their own pass over
+// the SAME bytes), both of which need a static, already-complete file, not a live, one-shot stream.
+//
+// Up to four independent passes, one per engine -- deliberately NOT a single pass feeding all four
+// engines at once. Every other subcommand in this codebase already does its own single-engine,
+// single-pass decode loop; reusing that exact proven shape four times here (rather than inventing
+// the first-ever multi-engine combined pass) is the lower-risk choice for a report that stitches
+// four already-independently-tested engines together, at the cost of decoding the same file up to
+// four times. Inventory's own pass is the one that gathers capture-wide timing (first/last
+// timestamp, the largest inter-packet gap, total packet/parse-error counts) -- decoding is
+// deterministic over the same bytes, so every other pass would produce identical counts; there is
+// no need to re-gather them.
+int run_evidence(const std::string& input, const std::string& policy_path,
+                  const std::string& baseline_path, const std::string& sl_target,
+                  bool cip_monitoring_window, const std::string& sign_key_path,
+                  const std::string& output, const std::string& format, bool strict, bool quiet,
+                  uint8_t zone_prefix_len, bool oui_enabled, bool resolve_hostnames,
+                  const std::string& hosts_path, bool service_names_enabled,
+                  const std::string& services_path, std::ostream& diag) {
+    std::ofstream file_out;
+    std::ostream* out = &std::cout;
+    if (!output.empty()) {
+        file_out.open(output, std::ios::binary);
+        if (!file_out) {
+            std::cerr << "error: cannot open output file '" << output << "'\n";
+            return 1;
+        }
+        out = &file_out;
+    }
+
+    try {
+        // Fail fast, before any decode pass runs, on every file this command needs to read whole --
+        // same "validate every input up front" posture run_policy_validate's hostname-zone check
+        // already established.
+        std::ifstream capture_in(input, std::ios::binary);
+        if (!capture_in) {
+            std::cerr << "error: cannot open '" << input << "' for reading\n";
+            return 1;
+        }
+        std::vector<uint8_t> capture_bytes((std::istreambuf_iterator<char>(capture_in)),
+                                            std::istreambuf_iterator<char>());
+        capture_in.close();
+
+        std::string policy_sha256_hex;
+        std::optional<Policy> policy;
+        if (!policy_path.empty()) {
+            std::ifstream policy_in(policy_path, std::ios::binary);
+            if (!policy_in) {
+                std::cerr << "error: cannot open '" << policy_path << "' for reading\n";
+                return 1;
+            }
+            std::vector<uint8_t> policy_bytes((std::istreambuf_iterator<char>(policy_in)),
+                                               std::istreambuf_iterator<char>());
+            policy_sha256_hex = sha256_hex(policy_bytes);
+            policy = parse_policy_file(policy_path);
+        }
+
+        std::vector<uint8_t> sign_key;
+        if (!sign_key_path.empty()) {
+            std::ifstream key_in(sign_key_path, std::ios::binary);
+            if (!key_in) {
+                std::cerr << "error: cannot open --sign-key file '" << sign_key_path << "' for reading\n";
+                return 1;
+            }
+            sign_key.assign((std::istreambuf_iterator<char>(key_in)), std::istreambuf_iterator<char>());
+        }
+
+        std::optional<BaselineStore> baseline_store;
+        if (!baseline_path.empty()) {
+            baseline_store = load_baseline_store(baseline_path);
+        }
+
+        std::vector<std::string> resolver_notes;
+        Resolver resolver(oui_enabled, resolve_hostnames, hosts_path, service_names_enabled,
+                           services_path, resolver_notes);
+        if (!quiet) {
+            for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
+        }
+
+        DecodeOptions options;
+        options.strict = strict;
+        // Deliberately the compiled-in default resource limits for every engine below, not exposed
+        // as CLI overrides here -- see evidence_report.hpp's own header comment: keeping this
+        // command's own CLI surface small, on top of four already-large per-engine surfaces, is a
+        // deliberate v1 scoping choice, not an oversight. A capture large enough to need a raised
+        // limit here can still be analyzed with the individual subcommands' own --max-* flags.
+
+        // --- Pass 1: asset inventory -- always runs; gathers capture-wide timing too -------------
+        size_t total_packets = 0, parse_error_packets = 0;
+        double first_ts = 0.0, last_ts = 0.0, max_gap = 0.0, max_gap_at = 0.0;
+        AssetInventoryReport inventory_report;
+        {
+            PcapReader reader(input);
+            Decoder decoder(options);
+            AssetInventoryEngine engine(zone_prefix_len);
+            PcapPacket pkt;
+            size_t index = 0;
+            bool have_prev = false;
+            double prev_ts = 0.0;
+            while (reader.next(pkt)) {
+                ++index;
+                DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+                if (dp.protocol == "parse-error") {
+                    ++parse_error_packets;
+                    if (!quiet) diag << "warning: packet " << index << ": " << dp.summary << "\n";
+                }
+                engine.observe(dp);
+                if (index == 1) first_ts = dp.timestamp;
+                last_ts = dp.timestamp;
+                if (have_prev) {
+                    double gap = dp.timestamp - prev_ts;
+                    if (gap > max_gap) {
+                        max_gap = gap;
+                        max_gap_at = dp.timestamp;
+                    }
+                }
+                prev_ts = dp.timestamp;
+                have_prev = true;
+            }
+            total_packets = index;
+            inventory_report = engine.finish();
+        }
+
+        // --- Pass 2: policy validate -- only when --policy was given ----------------------------
+        std::optional<PolicyReport> policy_report;
+        if (policy) {
+            PcapReader reader(input);
+            Decoder decoder(options);
+            PolicyEngine engine(*policy);
+            PcapPacket pkt;
+            size_t index = 0;
+            while (reader.next(pkt)) {
+                ++index;
+                DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+                engine.observe(dp);
+            }
+            policy_report = engine.finish(resolver);
+        }
+
+        // --- Pass 3: detect -- always runs ---------------------------------------------------------
+        DetectionReport detection_report;
+        {
+            PcapReader reader(input);
+            Decoder decoder(options);
+            DetectEngine engine;
+            PcapPacket pkt;
+            size_t index = 0;
+            while (reader.next(pkt)) {
+                ++index;
+                DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+                engine.observe(dp);
+            }
+            detection_report =
+                engine.finish(policy ? &*policy : nullptr, baseline_store ? &*baseline_store : nullptr);
+        }
+
+        // --- Pass 4: baseline check -- only when --baseline-file was given --------------------------
+        std::optional<BaselineCheckReport> baseline_report;
+        if (baseline_store) {
+            PcapReader reader(input);
+            Decoder decoder(options);
+            BaselineEngine engine;
+            PcapPacket pkt;
+            size_t index = 0;
+            while (reader.next(pkt)) {
+                ++index;
+                DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
+                engine.observe(dp);
+            }
+            baseline_report =
+                check_baseline(*baseline_store, engine.finish(), input, policy ? &*policy : nullptr);
+            baseline_report->observation_truncated = engine.truncated();
+            baseline_report->truncation_reasons = engine.truncation_reasons();
+        }
+
+        std::string inventory_diagram;
+        {
+            std::ostringstream diagram_out;
+            write_inventory_diagram_mermaid(diagram_out, inventory_report);
+            inventory_diagram = diagram_out.str();
+        }
+
+        EvidenceReportInputs in;
+        in.tool_version = "conduitscope " + version_string();
+        double now = static_cast<double>(std::time(nullptr));
+        in.generated_at_utc = format_timestamp(now, TimeFormat::AbsoluteDate, TimeOffset{}, now, now);
+        in.capture_path = input;
+        in.capture_sha256_hex = sha256_hex(capture_bytes);
+        in.policy_path = policy_path;
+        in.policy_sha256_hex = policy_sha256_hex;
+        in.sl_target = sl_target;
+        in.cip_monitoring_window = cip_monitoring_window;
+        in.capture_first_ts = first_ts;
+        in.capture_last_ts = last_ts;
+        in.total_packets = total_packets;
+        in.parse_error_packets = parse_error_packets;
+        in.max_inter_packet_gap_seconds = max_gap;
+        in.max_inter_packet_gap_at_ts = max_gap_at;
+        in.inventory = &inventory_report;
+        in.inventory_diagram_mermaid = inventory_diagram;
+        in.policy = policy ? &*policy : nullptr;
+        in.policy_report = policy_report ? &*policy_report : nullptr;
+        in.detection = &detection_report;
+        in.baseline = baseline_report ? &*baseline_report : nullptr;
+        in.resolver = &resolver;
+
+        if (format == "json") {
+            write_evidence_report_json(*out, in, sign_key);
+        } else {
+            write_evidence_report_text(*out, in, sign_key);
+        }
+
+        if (parse_error_packets > 0 && !quiet) {
+            diag << parse_error_packets
+                 << " packet(s) had parse warnings (shown above); rerun with --strict to stop at "
+                    "the first one, or -q to silence this message\n";
+        }
+
+        bool any_truncated = inventory_report.observation_truncated ||
+                              (policy_report && policy_report->observation_truncated) ||
+                              detection_report.observation_truncated ||
+                              (baseline_report && baseline_report->observation_truncated);
+        if (any_truncated) return kExitObservationIncomplete;
+        if (policy_report && !policy_report->compliant()) return kExitPolicyNonCompliant;
+        if (baseline_report && !baseline_report->compliant()) return kExitBaselineAnomaly;
+        return 0;
+    } catch (const PolicyError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const BaselineStoreError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ParseError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const CaptureError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const ProtocolResultTypeMismatch& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+}
+
 int run_interfaces(std::ostream& out) {
     try {
         std::vector<InterfaceInfo> interfaces = list_interfaces();
@@ -2729,7 +2984,7 @@ int rewrite_subcommand_alias(int argc, char** argv) {
     };
     static const std::set<std::string> kBareSubcommands = {
         "decode", "info", "interfaces", "policy",  "inventory",
-        "detect",  "baseline", "capture", "merge", "version",
+        "detect",  "baseline", "capture", "merge", "version", "evidence",
     };
 
     int candidate_start = -1;  // index a resolved alias is rotated up to; -1 while still skipping
@@ -4090,6 +4345,103 @@ int main(int argc, char** argv) {
                       "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
+    // --- evidence -------------------------------------------------------------
+    // Jurgen's direct request: an audit-binder-ready "evidence pack" produced from one command --
+    // see evidence_report.hpp's own file header for the full design record. Offline captures only
+    // (no -i/--interface -- see run_evidence's own comment for why), and deliberately no --filter:
+    // an audit evidence pack should reflect the whole capture, not a filtered subset of it.
+    auto* evidence_cmd = app.add_subcommand(
+        "evidence",
+        "Produce an audit-binder-ready evidence pack from one command: the observed zone/conduit "
+        "topology (reuses 'inventory'), policy compliance mapped to IEC 62443 FR5 (Restricted Data "
+        "Flow)/NIS2 segmentation evidence (reuses 'policy validate', if --policy is given), "
+        "detection findings with their own FR mapping (reuses 'detect'), an optional baseline "
+        "check (reuses 'baseline check', if --baseline-file is given), an optional NERC CIP-007 "
+        "R4/CIP-015-style monitoring-coverage note, and a reproducible integrity record (tool "
+        "version, capture/policy file SHA-256 hashes, an optional HMAC-SHA256 signature). Every "
+        "framework mapping is this tool's own interpretive cross-reference, never an official "
+        "conformance/compliance determination -- see this report's own SCOPE & HONESTY NOTE "
+        "section, and docs/USER_GUIDE.md's 'evidence' section for the full design rationale.");
+    std::string evidence_input, evidence_policy_file, evidence_baseline_file, evidence_sl_target,
+        evidence_sign_key, evidence_output, evidence_format = "text";
+    bool evidence_cip_monitoring_window = false, evidence_strict = false;
+    int evidence_zone_prefix = static_cast<int>(kDefaultInventoryZonePrefixLen);
+    bool evidence_mac_vendor = false, evidence_resolve = false, evidence_service_names = true;
+    std::string evidence_hosts_file, evidence_services_file;
+    evidence_cmd->add_option("-r,--read", evidence_input, "Input capture file (classic pcap or pcapng, auto-detected)")
+        ->group("Input/output")
+        ->required()
+        ->check(CLI::ExistingFile);
+    evidence_cmd
+        ->add_option("--policy", evidence_policy_file,
+                      "Zone/conduit policy file -- when given, adds the Policy Compliance / FR5 / "
+                      "NIS2 section (Section 2) with a real compliance verdict; when omitted, that "
+                      "section says plainly that no policy was supplied, rather than being silently "
+                      "left out")->group("Input/output")
+        ->check(CLI::ExistingFile);
+    evidence_cmd
+        ->add_option("--baseline-file", evidence_baseline_file,
+                      "Baseline file (from 'baseline learn') -- when given, adds the Baseline "
+                      "Anomalies section (Section 4) and also feeds 'detect's own new-vs-known "
+                      "novelty determination")->group("Input/output")
+        ->check(CLI::ExistingFile);
+    evidence_cmd->add_option(
+        "--sl-target", evidence_sl_target,
+        "An operator-declared IEC 62443-3-2 Security Level target (e.g. 'SL2'), echoed verbatim "
+        "into the report for audit cross-referencing -- NEVER computed by this tool from traffic; "
+        "SL-T is an organizational risk-assessment output, something a passive-monitoring tool has "
+        "no basis to infer. Omit to have the report say plainly that none was supplied")->group("Input/output");
+    evidence_cmd->add_flag(
+        "--cip-monitoring-window", evidence_cip_monitoring_window,
+        "Also include a NERC CIP-007 R4 / CIP-015-style 'monitoring coverage' section: this "
+        "capture's own time window, packet count, and largest inter-packet gap -- explicitly "
+        "caveated as coverage of this capture file only, never proof of continuous monitoring "
+        "infrastructure uptime. Off by default (CIP applies only to the North American bulk "
+        "electric system; most captures have no reason to carry this section)")->group("Input/output");
+    evidence_cmd
+        ->add_option("--sign-key", evidence_sign_key,
+                      "HMAC-SHA256-sign the report with this key file's raw bytes -- the report's "
+                      "own Integrity section then includes a hex signature and a one-line recipe "
+                      "to independently verify it. Omit to leave the report unsigned (its "
+                      "Integrity section says so explicitly); there is no PKI/certificate "
+                      "mechanism here, only a shared-key HMAC stamp")->group("Input/output")
+        ->check(CLI::ExistingFile);
+    evidence_cmd->add_option("-o,--output", evidence_output,
+                              "Write the report here instead of stdout. Caution: a single-dash "
+                              "long-option typo glues onto this flag -- always use the double dash "
+                              "for a long option name")->group("Input/output");
+    evidence_cmd
+        ->add_option("-T,--format", evidence_format, "Report format: text or json")->group("Output format")
+        ->transform(CLI::IsMember({"text", "json"}))
+        ->capture_default_str();
+    evidence_cmd->add_flag("--strict", evidence_strict,
+                            "Abort on the first malformed packet instead of reporting it and "
+                            "continuing")->group("Display options");
+    evidence_cmd
+        ->add_option("--zone-prefix", evidence_zone_prefix,
+                      "CIDR prefix length ([0, 32]) used to group observed asset IPs into inferred "
+                      "zones for Section 1's topology -- see docs/MANUAL.md's ROADMAP item 17")->group("Display options")
+        ->capture_default_str()
+        ->check(CLI::Range(0, 32));
+    evidence_cmd->add_flag("--mac-vendor", evidence_mac_vendor,
+                            "Enable OUI (MAC vendor) resolution in the embedded sub-reports")->group("Name resolution");
+    evidence_cmd->add_flag(
+        "--resolve", evidence_resolve,
+        "Enable hostname resolution from an explicitly-supplied hosts file (--hosts); NEVER "
+        "performs live DNS -- file-only")->group("Name resolution");
+    evidence_cmd
+        ->add_option("--hosts", evidence_hosts_file,
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")->group("Name resolution")
+        ->check(CLI::ExistingFile);
+    evidence_cmd->add_flag("!--nn", evidence_service_names,
+                            "Disable service name resolution (built-in table plus --services), on "
+                            "by default")->group("Name resolution");
+    evidence_cmd
+        ->add_option("--services", evidence_services_file,
+                      "Unix /etc/services-style file to supplement/override the built-in "
+                      "port->service-name table")->group("Name resolution")
+        ->check(CLI::ExistingFile);
+
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
 
@@ -4378,6 +4730,13 @@ int main(int argc, char** argv) {
     if (merge_cmd->parsed()) {
         std::cerr << "error: 'merge' needs a subcommand (currently only 'inventory' exists)\n";
         return 1;
+    }
+    if (evidence_cmd->parsed()) {
+        return run_evidence(evidence_input, evidence_policy_file, evidence_baseline_file, evidence_sl_target,
+                             evidence_cip_monitoring_window, evidence_sign_key, evidence_output, evidence_format,
+                             evidence_strict, quiet, static_cast<uint8_t>(evidence_zone_prefix), evidence_mac_vendor,
+                             evidence_resolve, evidence_hosts_file, evidence_service_names, evidence_services_file,
+                             *diag);
     }
     std::cout << "conduitscope " << version_string() << "\n";
     return 0;

@@ -2502,6 +2502,153 @@ Modbus edge's `packet_count` of 5 there is the sum of that shared conduit's own 
 report, `2 + 3`, proving the union/sum behavior rather than a naive concatenation. See
 `tests/inventory_merge_smoke.sh`.)
 
+### `evidence` -- an audit-binder-ready evidence pack from one command
+
+```
+conduitscope evidence -r <capture> [--policy <policy.yaml>] [--baseline-file <baseline.json>]
+                       [--sl-target <SLx>] [--cip-monitoring-window] [--sign-key <keyfile>]
+                       [-o <output>] [-T text|json]
+```
+
+One command, one capture file, one report covering: the observed zone/conduit topology (reusing
+`inventory`), policy compliance mapped to IEC 62443 FR5 (Restricted Data Flow) / NIS2
+segmentation-evidence language (reusing `policy validate`, if `--policy` is given), detection
+findings with their own FR mapping (reusing `detect`), an optional baseline check (reusing
+`baseline check`, if `--baseline-file` is given), an optional NERC CIP-007 R4 / CIP-015-style
+"monitoring was in place for this window" note, and a reproducible integrity record -- tool
+version, capture/policy file SHA-256 hashes, and, if `--sign-key` is given, an HMAC-SHA256
+signature with a printed recipe to verify it independently. `evidence` does not add any decoding
+or detection logic of its own: every number in the report comes from the same engines `inventory`/
+`policy validate`/`detect`/`baseline check` already use and this project already tests on their own
+terms; `evidence` only assembles and frames their output for an audit reader.
+
+**Offline capture only** -- there is no `-i/--interface`. An audit evidence pack needs to reflect a
+specific, hashable file; a live interface has no file to hash. There is also deliberately no
+`--filter`/`-Y` -- an evidence pack should reflect the whole capture, not a filtered subset of it,
+while its own Integrity section hashes the unfiltered file.
+
+**Options:**
+
+| Option | Meaning |
+| --- | --- |
+| `-r, --read <file>` | Required. The capture file (classic pcap or pcapng, auto-detected). |
+| `--policy <file>` | Adds Section 2 (Policy Compliance) with a real compliance verdict. Omitted, that section explains plainly that no policy was supplied. |
+| `--baseline-file <file>` | A baseline from `baseline learn`. Adds Section 4 (Baseline Anomalies), and also feeds `detect`'s own new-vs-known novelty determination. |
+| `--sl-target <SLx>` | An operator-declared IEC 62443-3-2 Security Level target (e.g. `SL2`), echoed verbatim into the report for audit cross-referencing. **Never computed from traffic** -- SL-T is an organizational risk-assessment output, something a passive-monitoring tool has no basis to infer. |
+| `--cip-monitoring-window` | Adds Section 5: this capture's own time window, packet count, and largest inter-packet gap, as NERC CIP-007 R4 / CIP-015-style "monitoring coverage" evidence. Off by default -- CIP applies only to the North American bulk electric system. |
+| `--sign-key <file>` | HMAC-SHA256-signs the report with this key file's raw bytes; the Integrity section then includes a hex signature and a recipe to verify it independently. There is no PKI/certificate mechanism here, only a shared-key HMAC stamp. |
+| `-o, --output <file>` | Write the report here instead of stdout. |
+| `-T, --format text\|json` | Report format. Default `text`. |
+| `--strict` | Abort on the first malformed packet instead of reporting it and continuing. |
+| `--zone-prefix <0-32>` | CIDR prefix length used to group observed asset IPs into Section 1's zones. Same meaning as `inventory`'s own `--zone-prefix`. |
+| `--mac-vendor`, `--resolve`, `--hosts <file>`, `--nn`, `--services <file>` | Name resolution, identical to every other subcommand's own options of the same name. |
+
+Every per-engine resource-limit override (`detect --max-flow-state-entries`, `baseline check
+--max-tcp-sessions`, and so on) is deliberately **not** re-exposed under `evidence` -- each of the
+four internal passes runs with its own engine's compiled-in defaults. An operator who needs
+non-default limits runs the individual subcommands directly and assembles the pieces by hand.
+
+**The report's 7 sections**, always printed in this fixed order. A section whose input was not
+supplied still prints its own numbered header with a one-line explanation of the absence, rather
+than being silently skipped -- so the report's own numbering never jumps (e.g. straight from "4."
+to "6." with no "5." anywhere), which in an audit binder would read as a missing page:
+
+1. Observed zone/conduit topology (always present -- the Mermaid diagram from `inventory`).
+2. Policy compliance -- IEC 62443 FR5 / NIS2 segmentation evidence (present with a verdict if
+   `--policy` is given; otherwise explains that no policy was supplied).
+3. Detection findings -- IEC 62443 FR mapping (always present -- `detect`'s own report, prefixed
+   with a per-category FR5-primary/secondary-FR legend).
+4. Baseline anomalies (present if `--baseline-file` is given; otherwise explains that the section
+   is "intentionally empty, not silently omitted: no baseline-deviation claim is being made either
+   way").
+5. Continuous monitoring coverage -- NERC CIP-007 R4 / CIP-015-style evidence (present with detail
+   if `--cip-monitoring-window` is given; otherwise says plainly it was not requested).
+6. Decoder confidence & data-quality notes -- parse-error rate, how many detection findings rest on
+   heuristic (vs. confirmed) evidence, and whether any engine hit a resource/complexity ceiling.
+   This is the section most directly answering "honesty about heuristics belongs in that report."
+7. Integrity -- tool version, generation timestamp, capture/policy SHA-256 hashes, and, if
+   `--sign-key` was given, an HMAC-SHA256 signature plus a recompute-and-compare recipe.
+
+A **SCOPE & HONESTY NOTE** opens every report, before the sections, stating plainly that this is
+"evidence FOR an audit, not a certification, a compliance determination, or a substitute for a
+qualified assessor's own judgment," and that every framework mapping anywhere in the report is
+"this tool's own interpretive cross-reference, never an official conformance determination." The
+same caveat is repeated locally at the top of sections 2 and 3.
+
+**NIST 800-82 is not covered.** Unlike 62443/NIS2 (where this tool's existing zone/conduit/policy/
+detection model maps onto FR5/Article-21(2) segmentation language fairly directly) and CIP-007/
+CIP-015 (a narrow, mechanical monitoring-window check), NIST 800-82's own control-family structure
+does not map onto anything this tool currently models -- left as a clearly-named future item rather
+than a mapping that wouldn't actually be an honest cross-reference.
+
+**Exit status:** `6` if any of the four internal passes hit a resource/complexity ceiling
+(observation incomplete -- takes priority over everything below), else `3` if the policy
+compliance verdict is non-compliant, else `4` if the baseline check found a deviation, else `0`.
+
+**Worked example** (`conduitscope evidence -r tests/sample_modbus.pcap --policy
+tests/policies/compliant.yaml --sl-target SL2`, abbreviated):
+
+```
+ConduitScope Evidence Pack
+  generated: 2026-10-01 12:09:04.000000Z UTC
+  tool version: conduitscope 0.2.9  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
+
+SCOPE & HONESTY NOTE
+  This report assembles already-validated conduitscope output (zone/conduit topology, policy
+  compliance, detection findings, and, optionally, a baseline check) into one package, plus
+  hashes/timestamps for reproducibility and, optionally, an HMAC-SHA256 integrity stamp. It is
+  evidence FOR an audit, not a certification, a compliance determination, or a substitute for a
+  qualified assessor's own judgment. [... 4 more bullet points ...]
+
+CAPTURE
+  file: tests/sample_modbus.pcap
+  SHA-256: 20895004d0deacc4bf6b8342e45b094e8293dc77487ef6a2079ed7f69eb28b1d
+  window: 2023-11-14 22:13:20.000000Z to 2023-11-14 22:13:22.002000Z UTC
+  packets: 3 (0 could not be decoded at all)
+  operator-declared SL target: SL2 (echoed verbatim -- see SL-T note below; never computed by this tool)
+
+1. OBSERVED ZONE/CONDUIT TOPOLOGY (ground truth from this capture)
+  1 zone(s), 1 conduit(s), 2 asset(s) observed
+
+  Mermaid diagram (render with any Mermaid-compatible viewer, e.g. mermaid.live):
+
+    graph LR
+      zone_192_168_1_0_24["zone_192_168_1_0_24<br/>192.168.1.0/24<br/>(2 asset(s))"]
+      zone_192_168_1_0_24 -->|"modbus/502"| zone_192_168_1_0_24
+
+2. POLICY COMPLIANCE -- IEC 62443 FR5 (Restricted Data Flow) / NIS2 Segmentation Evidence
+  [... FR5/NIS2 legend, then policy file/hash/verdict, then the full embedded
+       `policy validate` report ...]
+
+3. DETECTION FINDINGS -- IEC 62443 FR Mapping
+  [... FR5-primary/secondary-FR legend, then the full embedded `detect` report ...]
+
+4. BASELINE ANOMALIES
+  (no --baseline-file supplied -- this section is intentionally empty, not silently
+   omitted: no baseline-deviation claim is being made either way)
+
+5. CONTINUOUS MONITORING COVERAGE (NERC CIP-007 R4 / CIP-015-style evidence)
+  (not requested -- pass --cip-monitoring-window to add this section; it applies only to
+   the North American bulk electric system, so most captures have no reason to carry it)
+
+6. DECODER CONFIDENCE & DATA-QUALITY NOTES
+  packets in capture: 3
+  packets this tool could not decode at all (parse errors): 0 (0.0%)
+  detection findings based on partial/heuristic evidence (not read directly off the wire): 0 of 0
+  no engine hit a resource/complexity ceiling during this analysis
+
+7. INTEGRITY
+  tool version: conduitscope 0.2.9  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
+  report generated: 2026-10-01 12:09:04.000000Z UTC
+  capture file: tests/sample_modbus.pcap
+    SHA-256: 20895004d0deacc4bf6b8342e45b094e8293dc77487ef6a2079ed7f69eb28b1d
+  policy file: tests/policies/compliant.yaml
+    SHA-256: aa299b40c5ccfb30addfd8379002b63406a876aa6caaf06fb28b2c93d87975e4
+  signature: none (no --sign-key given -- this report's own integrity can only be checked by
+    recomputing the capture/policy hashes above against the original files, not by verifying
+    this report text itself was unaltered)
+```
+
 ### `version` -- print version and build information
 
 Equivalent to the global `--version` flag; provided as a subcommand as well
@@ -8108,13 +8255,13 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
 
 | Code | Meaning |
 |---|---|
-| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit) AND the observation was not truncated (see code 6 below). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful, untruncated run, even one that observed zero assets. For `detect`: a report was produced and the observation was not truncated -- `detect` has no compliant/non-compliant concept to report against; it's a reporting tool surfacing findings for a human or a SIEM to triage, not a pass/fail gate. A caller wanting a non-zero result specifically when `detect` finds something should check the JSON report's own `summary.total` rather than the process exit code. For `baseline check`: the capture was COMPLIANT against the baseline (no findings) and the observation was not truncated. |
-| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"); for `detect`, the same for a `--policy` or `--baseline-file` that couldn't be opened or failed to parse; for `baseline check`/`baseline learn`, the same for an unreadable/malformed `--baseline-file`. |
+| 0 | Success. For `policy validate`: the capture is COMPLIANT (every observed flow was explicitly allowed by a conduit) AND the observation was not truncated (see code 6 below). For `inventory`: the capture was read and a report was produced -- `inventory` has no compliance concept (there's no hand-written policy to be compliant *against*), so it returns 0 on any successful, untruncated run, even one that observed zero assets. For `detect`: a report was produced and the observation was not truncated -- `detect` has no compliant/non-compliant concept to report against; it's a reporting tool surfacing findings for a human or a SIEM to triage, not a pass/fail gate. A caller wanting a non-zero result specifically when `detect` finds something should check the JSON report's own `summary.total` rather than the process exit code. For `baseline check`: the capture was COMPLIANT against the baseline (no findings) and the observation was not truncated. For `evidence`: the report was produced, none of its four internal engine passes was truncated, and (if `--policy`/`--baseline-file` were given) their embedded verdicts were clean -- see codes 3/4/6 below for `evidence`'s own non-zero cases. |
+| 1 | A fatal error occurred -- bad arguments, the input file could not be opened, the file is not a recognized capture format (classic pcap or pcapng) or is corrupt, (with `--strict`) a packet failed to parse, or (for `policy validate`) the policy file couldn't be opened or failed validation (see POLICY FILE FORMAT's "Validation errors"); for `detect`, the same for a `--policy` or `--baseline-file` that couldn't be opened or failed to parse; for `baseline check`/`baseline learn`, the same for an unreadable/malformed `--baseline-file`; for `evidence`, the same for any of its own optional inputs that was given but couldn't be read or parsed (`--policy`, `--baseline-file`, `--sign-key`), or for an `-o/--output` file that couldn't be opened for writing. |
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
-| 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory`/`detect` (see code 0 above); superseded by code 6 when the observation was also truncated (code 6 takes priority -- see below). |
-| 4 | `baseline check` only: the capture and baseline file were both readable and valid, but `BaselineCheckReport::compliant()` is false (at least one finding -- a control-plane operation, a new conduit, or a new/out-of-range operation not covered by the baseline). Deliberately its own value rather than reusing code 3 -- a caller scripting against both subcommands needs to tell which one flagged something without also parsing output. Superseded by code 5 when the observation was also truncated. |
-| 5 | `baseline check` only: `BaselineCheckReport::observation_truncated` is true -- this run's own `BaselineEngine` hit at least one of its four internal growth ceilings (`--max-baseline-tcp-sessions`/`--max-baseline-conduits`/`--max-baseline-operations-per-conduit`/`--max-baseline-ranges-per-operation`), **or** `--max-flow-state-entries` was reached and a flow-state entry was evicted (patch282 security review finding F4 -- see `detect`'s "Flow-state eviction is a second, separate way..." paragraph above), so the capture was only PARTLY observed. Takes priority over both 0 and 4: a truncated observation can only ever produce false negatives, so a plain 0/4 here would risk reading a truncated capture as a clean or fully-characterized one. Treat this as "re-run with a higher `--max-baseline-*`/`--max-flow-state-entries` limit," not as clean and not as an ordinary anomaly (code 4). `baseline learn` itself always exits 0 on success (it writes a best-effort, possibly-partial baseline rather than failing outright) but still prints a `warning: ... is INCOMPLETE` line to stderr under either truncation condition -- check stderr, not the exit code, for `learn`. |
-| 6 | `detect`, `inventory`, and `policy validate` only: the equivalent of code 5 above for these three subcommands' own engines (patch257 security review finding 3) -- `DetectEngine`/`AssetInventoryEngine`/`PolicyEngine` hit at least one of their own internal growth ceilings (`--max-detect-*`/`--max-inventory-*`/`--max-policy-*` respectively -- see each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection above), **or** `--max-flow-state-entries` was reached and a flow-state entry was evicted (patch282 security review finding F4), so the report reflects only PART of what the capture actually contains. Takes priority over every other exit code these three subcommands return, including 0, 3, and (implicitly) a `policy validate` "COMPLIANT" verdict -- the same "truncation can only produce false negatives, so it must never be masked by a clean-looking result" reasoning as code 5. Not returned by `baseline check`, which keeps its own pre-existing code 5 for this condition (an already-shipped exit code's value is never repurposed once released, to avoid breaking scripted callers). |
+| 3 | `policy validate`, and `evidence` when `--policy` was given: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR (`policy validate` only) `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory`/`detect` (see code 0 above), nor by `evidence` when `--policy` was omitted (its own Section 2 then just explains that no policy was supplied); superseded by code 6 when the observation was also truncated (code 6 takes priority -- see below). |
+| 4 | `baseline check`, and `evidence` when `--baseline-file` was given: the capture and baseline file were both readable and valid, but `BaselineCheckReport::compliant()` is false (at least one finding -- a control-plane operation, a new conduit, or a new/out-of-range operation not covered by the baseline). Deliberately its own value rather than reusing code 3 -- a caller scripting against these subcommands needs to tell which check flagged something without also parsing output. Not returned by `evidence` when `--baseline-file` was omitted. Superseded by code 5 (`baseline check`) or code 6 (`evidence`) when the observation was also truncated. |
+| 5 | `baseline check` only: `BaselineCheckReport::observation_truncated` is true -- this run's own `BaselineEngine` hit at least one of its four internal growth ceilings (`--max-baseline-tcp-sessions`/`--max-baseline-conduits`/`--max-baseline-operations-per-conduit`/`--max-baseline-ranges-per-operation`), **or** `--max-flow-state-entries` was reached and a flow-state entry was evicted (patch282 security review finding F4 -- see `detect`'s "Flow-state eviction is a second, separate way..." paragraph above), so the capture was only PARTLY observed. Takes priority over both 0 and 4: a truncated observation can only ever produce false negatives, so a plain 0/4 here would risk reading a truncated capture as a clean or fully-characterized one. Treat this as "re-run with a higher `--max-baseline-*`/`--max-flow-state-entries` limit," not as clean and not as an ordinary anomaly (code 4). `baseline learn` itself always exits 0 on success (it writes a best-effort, possibly-partial baseline rather than failing outright) but still prints a `warning: ... is INCOMPLETE` line to stderr under either truncation condition -- check stderr, not the exit code, for `learn`. `evidence` uses code 6 for this condition instead (see below), not code 5. |
+| 6 | `detect`, `inventory`, `policy validate`, and `evidence`: the equivalent of code 5 above for these subcommands' own engines (patch257 security review finding 3) -- `DetectEngine`/`AssetInventoryEngine`/`PolicyEngine` hit at least one of their own internal growth ceilings (`--max-detect-*`/`--max-inventory-*`/`--max-policy-*` respectively -- see each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection above), **or** `--max-flow-state-entries` was reached and a flow-state entry was evicted (patch282 security review finding F4), so the report reflects only PART of what the capture actually contains. For `evidence`, this covers all four of its own internal passes (inventory, policy, detect, and -- unlike `baseline check`'s own standalone code 5 -- baseline too, since `evidence` has only one "observation incomplete" code to give a single combined report), and takes priority over every other exit code `evidence` itself returns, including 0, 3, and 4. For `detect`/`inventory`/`policy validate`, takes priority over every other exit code these subcommands return, including 0, 3, and (implicitly) a `policy validate` "COMPLIANT" verdict -- the same "truncation can only produce false negatives, so it must never be masked by a clean-looking result" reasoning as code 5. Not returned by standalone `baseline check`, which keeps its own pre-existing code 5 for this condition (an already-shipped exit code's value is never repurposed once released, to avoid breaking scripted callers). |
 | 7 | `capture` only (patch257 security review finding 2): the run stopped because the write side failed mid-capture -- `RotatingPcapWriter::write_packet` threw, e.g. the disk filled up, a permission changed, or the target directory disappeared out from under an unattended run -- rather than because the requested stop condition (Ctrl+C, `--duration`, `--max-packets`) was reached. A prominent `*** CAPTURE INCOMPLETE ***` banner on stderr names the underlying problem; every already-rotated file up to that point is intact. Distinct from code 1: code 1 means this run never produced any evidence at all (bad arguments, the interface couldn't be opened, the initial `--directory` didn't exist), while code 7 means real capture happened first and then coverage was lost partway through. See `capture`'s own "Disk and rotation failure reporting" subsection above. |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
@@ -8800,6 +8947,17 @@ as JSON so a pipeline can flag anything that isn't `"allowed"`:
 conduitscope policy validate -r capture.pcap --policy ot_vlans.yaml -T json \
   | jq -r '.ethernet_flows[] | select(.verdict != "allowed") |
            "\(.mac_a) <-> \(.mac_b) (\(.protocol)): \(.reason)"'
+```
+
+Produce a signed, audit-ready evidence pack for a compliance review -- zone/conduit topology,
+policy compliance against IEC 62443 FR5/NIS2 segmentation language, detection findings, a baseline
+check, an operator-declared SL target, and a NERC CIP-007/CIP-015-style monitoring-window note, all
+in one file with a verifiable HMAC-SHA256 signature (see the `evidence` subcommand above for the
+full option reference):
+
+```sh
+conduitscope evidence -r capture.pcap --policy ot_zones.yaml --baseline-file site1_baseline.json \
+  --sl-target SL2 --cip-monitoring-window --sign-key audit_sign.key -o evidence_2026Q1.txt
 ```
 
 ## BUILDING

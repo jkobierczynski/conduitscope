@@ -158,6 +158,7 @@ add_library(conduitscope_core STATIC
   src/baseline.cpp
   src/mitre_attack_ics.cpp
   src/detect_engine.cpp
+  src/evidence_report.cpp
   src/security_event_format.cpp
   src/flow_direction.cpp
   src/live_capture.cpp
@@ -18585,3 +18586,156 @@ add_test(NAME decode_help_protocol_choice_list_wraps_on_commas_at_narrow_termina
   COMMAND bash -c "COLUMNS=90 '$<TARGET_FILE:conduitscope>' decode --help")
 set_tests_properties(decode_help_protocol_choice_list_wraps_on_commas_at_narrow_terminal_width PROPERTIES
   PASS_REGULAR_EXPRESSION "--protocol TEXT:\\{auto, modbus.*\n    [a-z0-9,. -]*homeplug-av\\} \\[auto\\]")
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 117: `evidence` subcommand -- a single-command 62443/NIS2/CIP-007/CIP-015 audit
+# evidence pack. Every test below pins output confirmed against the real built binary first, not
+# assumed -- same discipline as every other subcommand's own test suite -- and every
+# PASS_REGULAR_EXPRESSION below is a single bare ".*" between literal anchors with no nested
+# repeated group, per this codebase's own established cmsys-regex-engine lesson (chained
+# "(.*\n)*" groups hang ctest; `{n}` interval quantifiers are not supported at all).
+#
+# The very first test below is also this feature's own regression test for a real bug caught
+# during development: `rewrite_subcommand_alias`'s own `kBareSubcommands` set did not originally
+# include "evidence", so `conduitscope evidence -r <file>` would have been silently mis-parsed by
+# `inject_default_subcommand`, which would have wrongly injected `decode` in front of it. The
+# FAIL_REGULAR_EXPRESSION guards against that exact regression: if it ever reappears, this run
+# would print decode's own "needs exactly one of -r/--read ... or -i/--interface" error instead of
+# an evidence pack.
+add_test(NAME evidence_kbaresubcommands_fix_no_spurious_decode_injection
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_kbaresubcommands_fix_no_spurious_decode_injection PROPERTIES
+  PASS_REGULAR_EXPRESSION "ConduitScope Evidence Pack"
+  FAIL_REGULAR_EXPRESSION "needs exactly one of -r/--read")
+
+# Confirms every one of the report's 7 sections is present, in order, on a bare invocation (no
+# --policy/--baseline-file/--cip-monitoring-window/--sign-key) -- including that section 5 always
+# prints its own numbered header even when --cip-monitoring-window is not given (a cosmetic fix
+# made during development: the header used to be omitted outright, which made the report jump
+# straight from "4." to "6." -- exactly the kind of gap an audit binder would read as a missing
+# page, the opposite of this feature's whole point).
+add_test(NAME evidence_basic_invocation_prints_all_seven_section_headers_in_order
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_basic_invocation_prints_all_seven_section_headers_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "1\\. OBSERVED ZONE/CONDUIT TOPOLOGY.*2\\. POLICY COMPLIANCE.*3\\. DETECTION FINDINGS.*4\\. BASELINE ANOMALIES.*5\\. CONTINUOUS MONITORING COVERAGE.*6\\. DECODER CONFIDENCE.*7\\. INTEGRITY")
+
+add_test(NAME evidence_scope_and_honesty_note_always_present
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_scope_and_honesty_note_always_present PROPERTIES
+  PASS_REGULAR_EXPRESSION "SCOPE & HONESTY NOTE.*never official conformance determinations")
+
+# Section 2 (policy compliance): omitted vs. supplied --policy.
+add_test(NAME evidence_without_policy_section_2_explains_absence_not_silently_omitted
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_without_policy_section_2_explains_absence_not_silently_omitted PROPERTIES
+  PASS_REGULAR_EXPRESSION "no --policy supplied -- no compliance verdict is included")
+
+add_test(NAME evidence_with_policy_section_2_shows_compliant_verdict
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/compliant.yaml")
+set_tests_properties(evidence_with_policy_section_2_shows_compliant_verdict PROPERTIES
+  PASS_REGULAR_EXPRESSION "result: COMPLIANT")
+
+add_test(NAME evidence_policy_violation_sets_exit_code_3
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --policy '${POLICY_DIR}/wrong_port.yaml'; echo EXITCODE=$?")
+set_tests_properties(evidence_policy_violation_sets_exit_code_3 PROPERTIES
+  PASS_REGULAR_EXPRESSION "result: NON-COMPLIANT.*EXITCODE=3")
+
+# Section 4 (baseline anomalies): omitted vs. supplied --baseline-file. Baseline files are learned
+# fresh into the binary dir, matching every existing `baseline check` test's own convention of
+# never committing a generated baseline file into the source tree.
+add_test(NAME evidence_without_baseline_section_4_explains_absence_not_silently_omitted
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_without_baseline_section_4_explains_absence_not_silently_omitted PROPERTIES
+  PASS_REGULAR_EXPRESSION "no --baseline-file supplied -- this section is intentionally empty")
+
+add_test(NAME evidence_with_baseline_section_4_shows_clean_result
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_clean.json'")
+set_tests_properties(evidence_with_baseline_section_4_shows_clean_result PROPERTIES
+  PASS_REGULAR_EXPRESSION "4\\. BASELINE ANOMALIES \\(no deviations\\).*Result: CLEAN")
+
+add_test(NAME evidence_baseline_anomaly_sets_exit_code_4
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_mutated.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_mutated.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_modbus_mutated.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_mutated.json'; echo EXITCODE=$?")
+set_tests_properties(evidence_baseline_anomaly_sets_exit_code_4 PROPERTIES
+  PASS_REGULAR_EXPRESSION "4\\. BASELINE ANOMALIES \\(deviations found\\).*EXITCODE=4")
+
+# SL target: echoed verbatim vs. "none supplied" -- never computed from traffic.
+add_test(NAME evidence_sl_target_echoed_verbatim
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --sl-target SL2)
+set_tests_properties(evidence_sl_target_echoed_verbatim PROPERTIES
+  PASS_REGULAR_EXPRESSION "operator-declared SL target: SL2 \\(echoed verbatim")
+
+add_test(NAME evidence_without_sl_target_explains_absence
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_without_sl_target_explains_absence PROPERTIES
+  PASS_REGULAR_EXPRESSION "operator-declared SL target: \\(none supplied")
+
+# Section 5 (CIP-007/CIP-015 monitoring coverage): off by default, opt-in via
+# --cip-monitoring-window.
+add_test(NAME evidence_cip_monitoring_window_flag_adds_coverage_detail
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --cip-monitoring-window)
+set_tests_properties(evidence_cip_monitoring_window_flag_adds_coverage_detail PROPERTIES
+  PASS_REGULAR_EXPRESSION "capture window:.*packets observed:.*largest gap between consecutive packets:.*COVERAGE OF THIS CAPTURE FILE ONLY")
+
+add_test(NAME evidence_without_cip_flag_section_5_explains_not_requested
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_without_cip_flag_section_5_explains_not_requested PROPERTIES
+  PASS_REGULAR_EXPRESSION "5\\. CONTINUOUS MONITORING COVERAGE.*not requested -- pass --cip-monitoring-window")
+
+# Integrity / signing: --sign-key produces a verifiable HMAC-SHA256 line; omitted says so plainly.
+add_test(NAME evidence_sign_key_produces_signature_line
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --sign-key "${CMAKE_CURRENT_SOURCE_DIR}/tests/empty_baseline.json")
+set_tests_properties(evidence_sign_key_produces_signature_line PROPERTIES
+  PASS_REGULAR_EXPRESSION "signature: HMAC-SHA256 [0-9a-f][0-9a-f][0-9a-f][0-9a-f]")
+
+add_test(NAME evidence_without_sign_key_signature_none
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap")
+set_tests_properties(evidence_without_sign_key_signature_none PROPERTIES
+  PASS_REGULAR_EXPRESSION "signature: none \\(no --sign-key given")
+
+# -T json: well-shaped, with every optional section correctly null when its input is omitted...
+add_test(NAME evidence_json_format_sections_null_when_inputs_omitted
+  COMMAND conduitscope evidence -r "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --format json)
+set_tests_properties(evidence_json_format_sections_null_when_inputs_omitted PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"policy_compliance\": null.*\"baseline_anomalies\": null.*\"cip_monitoring_coverage\": null.*\"policy_file\": null.*\"signed\": false")
+
+# ...and correctly populated when every optional input is supplied.
+add_test(NAME evidence_json_format_sections_populated_when_inputs_supplied
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' && '$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --policy '${POLICY_DIR}/compliant.yaml' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/evidence_baseline_json.json' --cip-monitoring-window --sign-key '${CMAKE_CURRENT_SOURCE_DIR}/tests/empty_baseline.json' --format json")
+set_tests_properties(evidence_json_format_sections_populated_when_inputs_supplied PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"policy_compliance\": \\{.*\"baseline_anomalies\": \\{.*\"cip_monitoring_coverage\": \\{.*\"policy_file\": \\{.*\"signed\": true")
+
+add_test(NAME evidence_json_format_is_syntactically_valid_json
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --policy '${POLICY_DIR}/compliant.yaml' --cip-monitoring-window --format json | python3 -c 'import json,sys; json.load(sys.stdin); print(\"VALID_JSON\")'")
+set_tests_properties(evidence_json_format_is_syntactically_valid_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "VALID_JSON")
+
+# Clean run (compliant policy, no baseline anomalies) exits 0; a nonexistent capture and a missing
+# required --read both fail the way every other subcommand's own CLI11-validated options do.
+add_test(NAME evidence_clean_run_exits_zero
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --policy '${POLICY_DIR}/compliant.yaml' >/dev/null 2>&1; echo EXITCODE=$?")
+set_tests_properties(evidence_clean_run_exits_zero PROPERTIES
+  PASS_REGULAR_EXPRESSION "EXITCODE=0")
+
+add_test(NAME evidence_nonexistent_capture_file_reports_cli11_error
+  COMMAND conduitscope evidence -r /nonexistent/path/does-not-exist.pcap)
+set_tests_properties(evidence_nonexistent_capture_file_reports_cli11_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "File does not exist")
+
+add_test(NAME evidence_missing_required_read_flag_reports_error
+  COMMAND conduitscope evidence)
+set_tests_properties(evidence_missing_required_read_flag_reports_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "--read is required")
+
+# -o/--output writes the report to a file instead of stdout (same convention as every other
+# subcommand's own -o option).
+add_test(NAME evidence_output_flag_writes_report_to_file
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/evidence_output_test.txt' && '$<TARGET_FILE:conduitscope>' evidence -r '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' -o '${CMAKE_CURRENT_BINARY_DIR}/evidence_output_test.txt' && cat '${CMAKE_CURRENT_BINARY_DIR}/evidence_output_test.txt'")
+set_tests_properties(evidence_output_flag_writes_report_to_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "ConduitScope Evidence Pack")
+
+# --help group headers (Input/output, Output format, Display options, Name resolution), matching
+# every other subcommand's own group-header regression test (ROADMAP items 114/116).
+add_test(NAME evidence_help_group_headers_present_in_order
+  COMMAND conduitscope evidence --help)
+set_tests_properties(evidence_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Output format:.*Display options:.*Name resolution:")

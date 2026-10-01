@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // hkdf.hpp - HMAC-SHA256 (RFC 2104/FIPS 198-1) and HKDF (RFC 5869), plus TLS 1.3's own
 // HKDF-Expand-Label wire format (RFC 8446 section 7.1) -- the exact key-derivation stack RFC 9001
-// section 5.1 builds QUIC's Initial-packet protection keys from. Every function here operates over
-// SHA-256 specifically (QUIC v1/v2 Initial protection is defined only over SHA-256 -- see
-// sha256.hpp), never a general hash-agile interface, since that is the one and only case this
-// codebase has any use for. See quic.hpp for the one caller, and hkdf.cpp's own file header for
-// how this is self-tested against RFC 4231/RFC 5869's own published test vectors.
+// section 5.1 builds QUIC's Initial-packet protection keys from (see quic.hpp for that caller).
+// Every function here operates over SHA-256 specifically (QUIC v1/v2 Initial protection is defined
+// only over SHA-256 -- see sha256.hpp), never a general hash-agile interface. hmac_sha256 alone has
+// a second, deliberate caller: the `evidence` subcommand's own optional --sign-key integrity stamp
+// (evidence_report.cpp's own hmac_sha256_hex) -- HKDF-Extract/-Expand/-Expand-Label stay QUIC-only.
+// See hkdf.cpp's own file header for how this is self-tested against RFC 4231/RFC 5869's own
+// published test vectors.
 #pragma once
 
 #include <cstddef>
