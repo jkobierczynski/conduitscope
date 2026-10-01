@@ -16892,6 +16892,136 @@ it done as its own patch.
     copy of the whole source tree, configure, build, full CTest suite) also passing 2482/2482 with
     zero failures.
 
+119. **Test the four-axis finding model's invariants across every export format.** Jurgen's own
+    direct request, verbatim: "Test the four-axis finding model's invariants across every export
+    format. (patch257 section 3.B) The evidence/novelty/severity separation is already built;
+    what's not yet tested is that a JSON to CEF/LEEF/syslog conversion can never silently upgrade
+    a heuristic finding into a confirmed one or change its severity." Sourced from
+    `docs/reviews/2026-09-chatgpt-security-review-patch257.md` section 3's subsection B, "Four-axis
+    detection model: preserve the separation of evidence and judgment" -- the review's own table
+    names the four axes as protocol evidence, baseline deviation, operational severity, and
+    malicious intent (the last of which this engine deliberately never asserts at all -- see
+    `detect_engine.hpp`'s own "THREE INDEPENDENT DIMENSIONS..." header comment). Exact review
+    wording this item implements: "establish explicit invariants in the finding data model and
+    test them across JSON, CEF, LEEF, syslog, and any future output formats. In particular, verify
+    that a format conversion cannot silently upgrade a heuristic finding into a confirmed finding
+    or change the underlying severity judgment."
+
+    **Shape: an audit-and-test task, matching items 100/107/118's own precedent.** The data model
+    itself (`DetectionEvidence`/`DetectionNovelty`/`DetectionSeverity`, `detect_engine.hpp`) was
+    already correctly designed and already shipped; this item is entirely about proving the
+    four export writers (`write_detection_report_json`/`_cef`/`_leef`/`_syslog`, `detect_engine.cpp`)
+    can never let one axis's value drift, leak into another axis, or get silently dropped between
+    formats -- no production-code change was needed or made.
+
+    **Audit findings.**
+    - **Evidence and novelty are already structurally drift-proof by construction.** JSON's
+      `"evidence"`/`"novelty"` fields and CEF/LEEF's `cs1`/`cs2` extension fields all call the
+      exact same `detection_evidence_name()`/`detection_novelty_name()` functions
+      (`detect_engine.cpp`) -- `detection_finding_extension_fields()`, the one field-list builder
+      shared by both `write_detection_report_cef` and `write_detection_report_leef`, is what makes
+      this true for those two formats specifically. There is no second, independent mapping a
+      future edit could update inconsistently for either of these two axes.
+    - **Severity is the one axis with a real, if currently correct, architectural seam.**
+      `write_detection_report_json` (via `detection_severity_name()`, the enum's own name string)
+      and `write_detection_report_cef`/`_leef`/`_syslog` (via the separate
+      `detection_severity_to_cef()` 0-10 numeric mapping) are two genuinely independent functions
+      over the same `DetectionSeverity` enum. `detection_severity_to_cef()`'s own switch falls
+      through to a default `return 2` (Informational's own value) for anything unhandled -- so a
+      future `DetectionSeverity` enumerator added without updating that switch would silently
+      render as Informational in CEF/LEEF/syslog while JSON correctly showed its real (new) name:
+      a real, if narrow, way severity could silently change across formats. This is the sharpest
+      edge this item's own testing targets.
+    - **No real capture exercises the full cross-product of evidence x novelty x severity.** This
+      engine's type system allows 2 x 3 x 3 = 18 combinations; today's only Heuristic-evidence
+      finding source (`RemoteAccessChannel`) only ever carries Moderate severity, and the existing
+      CEF/LEEF/syslog CTest coverage (`detect_sample_detect_cef_format` and its LEEF/syslog
+      siblings) only ever exercised Critical and Moderate severity, never Informational, and only
+      `NotApplicable`/`FirstOccurrence` novelty, never `ConfirmedNew` -- a pcap-fixture-only test
+      suite can never prove the untouched combinations stay correctly separated, since no fixture
+      happens to produce them.
+
+    **New selftest: `tools/detect_export_invariants_selftest.cpp`.** Modeled on the same "dedicated
+    executable, not more pcap-fixture CTest entries" rationale `resource_limits_selftest.cpp`/
+    `live_capture_stats_selftest.cpp` (item 118) already established, for the same underlying
+    reason: the thing under test here is a property of the DATA MODEL and its export functions,
+    not of any one capture. Builds a synthetic `DetectionReport` directly against the struct --
+    `DetectionFinding` has no construction dependency on packet decoding at all -- covering all 18
+    evidence x novelty x severity combinations, renders it through all four of this codebase's own
+    `write_detection_report_*` functions, and parses each rendered format back apart (a hand-rolled
+    literal-substring JSON scan, since this tool controls write_detection_report_json's own exact
+    output; and a key-marker-aware CEF/LEEF extension parser that scans for the NEXT `"<key>="`
+    marker rather than naively splitting on the space/tab separator -- deliberately, because two of
+    this engine's own real field values contain internal spaces, `"Confirmed New"`/`"First
+    Occurrence"`, and CEF's own spec does not escape spaces inside extension values; a naive
+    space-split was this tool's own first draft and was caught failing 15 of 18 combinations during
+    development, exactly the kind of parsing pitfall a real downstream SIEM's own CEF/LEEF parser
+    has to get right too). Every finding's evidence/novelty/severity, as rendered in JSON/CEF/LEEF/
+    syslog, is cross-checked against what was actually set on the C++ struct -- the ground truth --
+    not against each other, so a bug that moved the same wrong value into every format at once
+    would still be caught. Severity's own expected CEF number and RFC 5424 PRI are independently
+    re-derived in the test itself (Critical=9/Moderate=5/Informational=2, and the facility-13 PRI
+    `cef_severity_to_rfc5424_severity()` produces from it) rather than read from the production
+    code's own anonymous-namespace, uncallable-from-here `detection_severity_to_cef()`, so a
+    regression in that function's own mapping is exactly what this tool catches, not something it
+    could paper over by re-deriving the same (possibly wrong) answer.
+
+    25 checks in total: one per combination (evidence+novelty+severity agree across all four
+    formats, 18 checks), one checking each format renders exactly one line per finding (3 checks,
+    CEF/LEEF/syslog), one explicit "no Heuristic finding is ever rendered as `cs1=Confirmed`"
+    check and its Confirmed-as-Heuristic mirror (2 checks, the review's own literal wording), one
+    "no finding's severity is ever rendered differently than the documented mapping" check, and one
+    checking severity ORDERING itself survives CEF's numeric encoding (Informational < Moderate <
+    Critical, not just each individual value being correct in isolation).
+
+    **Mutation-tested during development, not just written and trusted.** To confirm this selftest
+    would actually catch the exact bug patch257 describes, `detection_finding_extension_fields()`
+    was temporarily edited to hardcode `cs1="Confirmed"` regardless of the finding's own real
+    `evidence` field (the literal "silently upgrade a heuristic finding into a confirmed one"
+    scenario) and the selftest re-run: it failed exactly the expected 9 combination checks plus the
+    "no Heuristic finding is ever rendered as Confirmed" headline check, with every Confirmed-
+    evidence combination still passing (proving the test isn't just failing everything). The
+    mutation was then reverted and the selftest re-confirmed passing before this item's other work
+    continued -- this project's own established verification discipline (see e.g. item 117's
+    independent HMAC-recomputation check of its signing feature) applied to a test's own teeth, not
+    just to production code.
+
+    **New pcap-fixture CTest entries, closing the two concrete real-capture coverage gaps the audit
+    found, `CMakeLists.txt`.** These complement the synthetic selftest with coverage against the
+    actual CLI, not just the library API directly:
+    - `detect_snort_patterns_cef_format`/`_leef_format`/`_syslog_format` (new, against
+      `tests/sample_detect_snort_patterns.pcap`, which this project already had but had never run
+      through any of the three SIEM export formats): pin the first finding (T0855, Critical, CEF/
+      LEEF severity 9, syslog PRI 106) and the first Informational finding (T0831, CEF/LEEF
+      severity 2, syslog PRI 109) -- proving CEF's numeric severity and syslog's PRI both actually
+      vary all the way down to the Informational band in a real run, not just between Critical and
+      Moderate the way every pre-existing CEF/LEEF/syslog test for `detect` did.
+    - `detect_baseline_file_confirmed_new_novelty_cef_format`/`_leef_format`/`_syslog_format` (new,
+      reusing the existing `sample_detect.pcap` + `baseline learn` setup
+      `detect_baseline_file_suppresses_known_and_upgrades_absent_to_confirmed_new`'s own text-
+      format test already established): the one RDP finding this baseline run upgrades to
+      `DetectionNovelty::ConfirmedNew` happens to combine all three of this item's previously-SIEM-
+      export-uncovered axis states at once -- Heuristic evidence, Confirmed New novelty, Moderate
+      severity -- directly the same combination `detect_export_invariants_selftest`'s own
+      combination #13 exercises synthetically, now also proven end-to-end through the real CLI.
+
+    **Docs.** `docs/USER_GUIDE.md` gets a new "`detect`'s evidence/novelty/severity never drift
+    across formats" subsection under SECURITY EVENT EXPORT, documenting the invariant in plain
+    terms (what each format carries each axis as, the documented CEF/LEEF severity numbers and the
+    syslog PRI they produce) and pointing at this ROADMAP entry for the regression-test record.
+
+    **Verification.** Full cycle: default `build` rebuilt clean and the complete CTest suite
+    re-run in full (2489/2489 passing, zero regressions elsewhere, including the 7 new tests
+    above -- 1 selftest CTest case plus 6 new pcap-fixture CEF/LEEF/syslog entries); the new tests
+    re-run under Clang ASan/UBSan (`build-fuzz`, 7/7 passing, zero sanitizer hits); the
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` build (`build_nolive`) rebuilt clean and its complete
+    CTest suite re-run in full (2471/2471 passing -- the selftest links and runs identically here,
+    since it has no `pcap.h` dependency at all); the MinGW cross-compile (`build-mingw`) rebuilt
+    clean (build-only, matching items 117/118's own precedent for a Windows target this sandbox
+    can't execute); and a full clean-room extract-rebuild-test cycle (fresh copy of the whole
+    source tree, configure, build, full CTest suite) also passing 2489/2489 with zero failures,
+    exactly matching the default build's own count.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -6720,6 +6720,34 @@ machine-stable name, e.g. `new-conduit`)/`msg` (a description built from
 the finding's `operation_key`, plus its zone-vouching context for
 `NewConduitKnownZone` or its observed range for `NewTargetRange`)/`cnt`.
 
+### `detect`'s evidence/novelty/severity never drift across formats
+
+`detect`'s own finding model deliberately keeps three independent
+dimensions (ROADMAP item 119; patch257 security review section 3.B,
+"Four-axis detection model" -- see "`detect` -- detection findings OT
+incident-response teams recognize" above, and `docs/design/detection-
+engine.md`, for the full rationale): `evidence` (`Confirmed`/`Heuristic`
+-- how reliably the underlying protocol event itself was observed), `novelty` (`N/A`/
+`Confirmed New`/`First Occurrence` -- whether it's new relative to a
+baseline), and `severity` (`Critical`/`Moderate`/`Informational` -- the
+operational impact if genuine). JSON carries all three as their own
+named string fields; CEF/LEEF carry evidence and novelty as
+`cs1Label="Evidence"`/`cs1`/`cs2Label="Novelty"`/`cs2` (the exact same
+text JSON shows, never a separate re-encoding); CEF/LEEF/syslog carry
+severity as a 0-10 number -- `Critical` -> 9, `Moderate` -> 5,
+`Informational` -> 2 (the middle of CEF's own Low/Medium/Very-High
+bands) -- and syslog additionally folds that same number into its own
+RFC 5424 PRI. **A format conversion can never silently upgrade a
+Heuristic finding into a Confirmed one, or change its severity band**:
+every exporter reads directly off the same `DetectionFinding` fields, and
+this is now a regression-tested invariant, not just an architectural
+intention -- see DEVELOPMENT.md's ROADMAP item 119 for the dedicated
+selftest that checks all 18 evidence x novelty x severity combinations
+this engine's type system allows against all four export formats at
+once, including the specific "Heuristic rendered as Confirmed" and
+"severity band changed" failure modes the external security review named
+by name.
+
 ## CAPTURED FRAME PADDING
 
 Ethernet requires a minimum frame size (60 bytes, excluding the trailing

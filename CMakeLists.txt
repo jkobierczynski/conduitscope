@@ -343,6 +343,26 @@ target_link_libraries(live_capture_stats_selftest PRIVATE conduitscope_core)
 add_test(NAME live_capture_drop_statistics_self_test COMMAND live_capture_stats_selftest)
 
 # --------------------------------------------------------------------------------------------
+# Detect export-format invariants self-test -- see tools/detect_export_invariants_selftest.cpp's
+# own file header for the full rationale (ROADMAP item 119, docs/reviews/2026-09-chatgpt-security-
+# review-patch257.md section 3.B, "Four-axis detection model": "establish explicit invariants in
+# the finding data model and test them across JSON, CEF, LEEF, syslog... verify that a format
+# conversion cannot silently upgrade a heuristic finding into a confirmed finding or change the
+# underlying severity judgment"). A dedicated executable, not more pcap-fixture CTest entries,
+# because the thing under test (every evidence x novelty x severity combination this engine's own
+# type system allows, 18 in total) is a property of the DATA MODEL, not of any one capture -- no
+# real pcap fixture exercises more than a handful of these 18 combinations (today's only Heuristic-
+# evidence finding source, RemoteAccessChannel, only ever carries Moderate severity), so a
+# synthetic DetectionReport built directly against the struct is the only way to cover the full
+# cross-product and prove the four export writers never let one axis's value leak into another's,
+# or drift between formats.
+# --------------------------------------------------------------------------------------------
+add_executable(detect_export_invariants_selftest tools/detect_export_invariants_selftest.cpp)
+target_link_libraries(detect_export_invariants_selftest PRIVATE conduitscope_core)
+
+add_test(NAME detect_export_format_invariants_self_test COMMAND detect_export_invariants_selftest)
+
+# --------------------------------------------------------------------------------------------
 # RotatingPcapWriter rotation/retention self-test -- see tools/rotating_pcap_writer_selftest.cpp's
 # own file header for the full rationale (Grok review item 5, docs/reviews/2026-09-grok-ics-ot-
 # improvement-areas.md: "runs for weeks... rotates captures, does not fill the disk" -- see
@@ -17244,6 +17264,52 @@ add_test(NAME detect_snort_patterns_json_shape
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns.pcap" --format json)
 set_tests_properties(detect_snort_patterns_json_shape PROPERTIES
   PASS_REGULAR_EXPRESSION "\"total_packets\": 16,.*\"summary\": \\{.*\"total\": 8,.*\"critical\": 6,.*\"moderate\": 0,.*\"informational\": 2,.*\"confirmed_evidence\": 8,.*\"heuristic_evidence\": 0,.*\"engineering_station_activity\": 3,.*\"firmware_logic_change\": 2,.*\"remote_access_channel\": 0,.*\"protocol_misuse\": 3.*\"findings\": \\[.*\"category\": \"Protocol Misuse\",.*\"technique_id\": \"T0855\",.*\"technique_name\": \"Unauthorized Command Message\",.*\"evidence\": \"Confirmed\",.*\"novelty\": \"N/A\",.*\"severity\": \"Critical\",.*\"client_ip\": \"192\\.168\\.1\\.70\",.*\"server_ip\": \"192\\.168\\.1\\.71\",.*\"protocol\": \"enip\",.*\"server_port\": 44818,")
+
+# ROADMAP item 119 (patch257 section 3.B, "Four-axis detection model"): CEF/LEEF/syslog format
+# coverage for sample_detect_snort_patterns.pcap -- unlike sample_detect.pcap's own CEF/LEEF/
+# syslog tests above (which cover Critical/Moderate severity and Confirmed/Heuristic evidence, but
+# never Informational severity -- this capture's own 2 Informational findings, T0831/T0888, were
+# never exercised in any of the three SIEM export formats before this item), checked here via the
+# first finding (T0855, Critical, CEF/LEEF severity 9, syslog PRI 106) and the first Informational
+# one (T0831, CEF/LEEF severity 2, syslog PRI 109) -- proving CEF's numeric severity and syslog's
+# PRI both actually vary down to the Informational band, not just between Critical and Moderate.
+add_test(NAME detect_snort_patterns_cef_format
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns.pcap" --format cef)
+set_tests_properties(detect_snort_patterns_cef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0855\\|Unauthorized Command Message\\|9\\|.*cs1=Confirmed cs2Label=Novelty cs2=N/A.*\nCEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0855\\|Unauthorized Command Message\\|9\\|.*\nCEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0831\\|Manipulation of Control\\|2\\|src=192\\.168\\.1\\.70 dst=192\\.168\\.1\\.74.*cs1=Confirmed cs2Label=Novelty cs2=N/A")
+
+add_test(NAME detect_snort_patterns_leef_format
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns.pcap" --format leef)
+set_tests_properties(detect_snort_patterns_leef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^LEEF:2\\.0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0855\\|src=192\\.168\\.1\\.70\tdst=192\\.168\\.1\\.71.*\tsev=9\n.*LEEF:2\\.0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0831\\|src=192\\.168\\.1\\.70\tdst=192\\.168\\.1\\.74.*\tsev=2\n")
+
+add_test(NAME detect_snort_patterns_syslog_format
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect_snort_patterns.pcap" --format syslog)
+set_tests_properties(detect_snort_patterns_syslog_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "^<106>1 - - conduitscope - detect - CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0855\\|Unauthorized Command Message\\|9\\|.*\n.*\n<109>1 - - conduitscope - detect - CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0831\\|Manipulation of Control\\|2\\|")
+
+# ROADMAP item 119: the same --baseline-file run text format already pins above
+# (detect_baseline_file_suppresses_known_and_upgrades_absent_to_confirmed_new) also exercised in
+# CEF/LEEF/syslog -- DetectionNovelty::ConfirmedNew (cs2=Confirmed New) was never checked in any
+# SIEM export format before this item, only in text. This one RDP finding happens to combine all
+# three of this item's previously-uncovered-in-SIEM-exports axis states in a single real capture:
+# Heuristic evidence, ConfirmedNew novelty, Moderate severity -- directly the combination
+# detect_export_invariants_selftest's own combination #13 exercises synthetically, now also proven
+# against a real `baseline learn` + `detect --baseline-file` run through the actual CLI.
+add_test(NAME detect_baseline_file_confirmed_new_novelty_cef_format
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_cef.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_cef.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_cef.json' --format cef")
+set_tests_properties(detect_baseline_file_confirmed_new_novelty_cef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0886\\|Remote Services\\|5\\|src=192\\.168\\.1\\.68 dst=192\\.168\\.1\\.69.*cs1Label=Evidence cs1=Heuristic cs2Label=Novelty cs2=Confirmed New")
+
+add_test(NAME detect_baseline_file_confirmed_new_novelty_leef_format
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_leef.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_leef.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_leef.json' --format leef")
+set_tests_properties(detect_baseline_file_confirmed_new_novelty_leef_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "LEEF:2\\.0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0886\\|src=192\\.168\\.1\\.68.*cs1Label=Evidence\tcs1=Heuristic\tcs2Label=Novelty\tcs2=Confirmed New.*\tsev=5")
+
+add_test(NAME detect_baseline_file_confirmed_new_novelty_syslog_format
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_syslog.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_syslog.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_detect.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/detect_baseline_smoke_syslog.json' --format syslog")
+set_tests_properties(detect_baseline_file_confirmed_new_novelty_syslog_format PROPERTIES
+  PASS_REGULAR_EXPRESSION "<108>1 - - conduitscope - detect - CEF:0\\|conduitscope\\|conduitscope-detect\\|[0-9]+\\.[0-9]+\\.[0-9]+\\|T0886\\|Remote Services\\|5\\|.*cs1=Heuristic cs2Label=Novelty cs2=Confirmed New")
 
 # BACnet Who-Is flood: FLOOD_IP crosses kBacnetWhoIsFloodThreshold (100) and is flagged;
 # QUIET_IP's own 5 Who-Is requests (well under threshold) produce no finding at all -- the "findings:
