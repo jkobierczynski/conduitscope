@@ -63,21 +63,44 @@ actually fix before calling the architecture hardened:
   `--policy` YAML already do; see item 111's own write-up for why F3 (the
   parser's own lack of complexity limits) is the more natural place to
   revisit this, if taken up.
+- **F3 (Medium) -- display-filter parser has no explicit complexity
+  limits** is **confirmed accurate and fixed** -- see
+  [DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP, item 112, for the full
+  write-up: five fixed, non-CLI-configurable ceilings (64 KiB of source
+  text, 4096 AST nodes, 128 levels of combined `(`/`!`/`not` nesting, 512
+  `in {...}` members, 4096-character `matches` patterns -- the review's
+  own suggested starting values, used exactly), each checked once at
+  `compile_display_filter()` time, the same "fail before packet
+  processing" posture F1/F2 already established. Taken up directly after
+  F2 on Jurgen's own instruction, despite being outside the review's own
+  "two findings I'd fix first" framing above -- note that this is this
+  review document's own **F3 body section** (below, "Display-filter
+  parser has no explicit complexity limits," the one actually fixed
+  here); the summary **table**'s one-line F3 description ("Display-filter
+  regexes are not validated at compile time") instead describes half of
+  F2's own finding, already covered by item 111, and the table's F6
+  description ("Deeply nested display-filter expressions can cause
+  excessive recursion") doesn't match F6's own body section either (which
+  is actually the four-axis/observation-completeness architectural
+  question) -- an inconsistency between this review's own table and its
+  own body sections, not something introduced by this write-up, called
+  out here so a reader comparing the table against DEVELOPMENT.md doesn't
+  conclude the wrong finding was fixed.
 
-The remaining six (F3-F8) are lower-priority hardening/architecture
-observations, not confirmed code defects in the same sense as F1/F2:
-display-filter complexity limits (F3), a genuine architectural question
-about whether flow-state eviction under attacker-driven pressure should be
-surfaced as an "observation incomplete" condition the way several engines'
-`kExitObservationIncomplete` already does for other kinds of truncation
-(F4), an unbounded `merge` input-size (F5), the four-axis detection model
-needing a fifth "observation completeness" property rather than a fifth
-detection axis (F6, really an elaboration on F4), release-reproducibility
-hardening lagging the CI workflow's own SHA-pinning (F7), and the
-already-known, already-labeled risk of generated firewall ACLs being
-deployed without review (F8, an accepted design risk, not a new one). None
-of F3-F8 are scheduled against a specific engineering task as of this
-write-up; Jurgen has not yet directed which (if any) to take up after F1.
+The remaining five (F4-F8) are lower-priority hardening/architecture
+observations, not confirmed code defects in the same sense as F1/F2/F3: a
+genuine architectural question about whether flow-state eviction under
+attacker-driven pressure should be surfaced as an "observation incomplete"
+condition the way several engines' `kExitObservationIncomplete` already
+does for other kinds of truncation (F4), an unbounded `merge` input-size
+(F5), the four-axis detection model needing a fifth "observation
+completeness" property rather than a fifth detection axis (F6, really an
+elaboration on F4), release-reproducibility hardening lagging the CI
+workflow's own SHA-pinning (F7), and the already-known, already-labeled
+risk of generated firewall ACLs being deployed without review (F8, an
+accepted design risk, not a new one). None of F4-F8 are scheduled against
+a specific engineering task as of this write-up; Jurgen has not yet
+directed which (if any) to take up after F3.
 
 The commit hash and any line/file references below reflect the reviewer's
 own state at review time; see DEVELOPMENT.md for current figures.

@@ -363,15 +363,30 @@ top-level protocol name rather than a per-protocol field table.
 If a field's protocol layer isn't present on a given packet (e.g.
 `modbus.func_code == 16` against a DNP3 packet), the comparison is simply
 `false`, never an error -- the same as Wireshark. A malformed expression
-(unknown field, type mismatch, unbalanced parens, unterminated string, or an
-invalid regular expression given to `matches`) is reported as a CLI error
-(nonzero exit, before any packet is read, before a live `-i` capture is even
-opened), not a silent no-match.
+(unknown field, type mismatch, unbalanced parens, unterminated string, an
+invalid regular expression given to `matches`, or an expression over one of
+the complexity limits below) is reported as a CLI error (nonzero exit,
+before any packet is read, before a live `-i` capture is even opened), not
+a silent no-match.
 
 `matches`'s own regular expression is compiled exactly once, at the same
 point every other part of the expression is checked (before any packet is
 read) -- not reconstructed on every packet a `matches` clause is evaluated
 against, which would scale `-Y`'s own cost with capture size for no reason.
+
+An expression is also rejected at that same compile-time check if it's
+larger or more deeply nested than a few fixed ceilings: 64 KiB of source
+text, 4096 expression nodes (roughly, 4096 individual comparisons/field
+tests combined via `&&`/`||`/`!`), 128 levels of combined `(`/`!`/`not`
+nesting, 512 members in one `in {...}` clause, or 4096 characters in one
+`matches` pattern. These exist only so a typo'd or script-generated
+oversized `-Y` expression fails fast with a clear error instead of hanging
+or using excessive memory -- they are not a security boundary: a `-Y`
+expression is always operator-authored on the local command line, the same
+trust level as `-f`/BPF and `--policy` YAML, never treated as untrusted
+input the way decoded network traffic is. Ordinary expressions, however
+long or deeply parenthesized a person would realistically write by hand,
+are nowhere near any of these ceilings.
 
 `ip.src`/`ip.dst` compare as exact text only in this pass -- no CIDR or
 range matching (`ip.src == 10.1.2.0/24` is not supported); only `==`/`!=`

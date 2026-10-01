@@ -16119,6 +16119,128 @@ it done as its own patch.
     extract-rebuild-test cycle, before delivery as a zip of touched/new files via the standing
     no-git-commit convention.
 
+112. **Fix F3: the display-filter parser had no explicit complexity limits.** Jurgen's direct
+    request immediately after item 111's own delivery -- "Now do F3: Display-filter regexes are
+    not validated at compile time" -- named F2's own fix (item 111) rather than the review's actual
+    F3; flagged to Jurgen before starting, then implemented the real F3 below, the review's next
+    finding in severity order. F3 (Medium) is `display_filter_parser.cpp`'s recursive-descent
+    lexer/parser having no maximum on a `-Y` expression's own size or shape: no cap on source-text
+    length, on how many `FilterNode` instances one compiled filter may hold, on how deeply `(...)`/
+    `!`/`not` may nest, on how many literals an `in {...}` clause may list, or on how long a
+    `matches` pattern's own source text may be. A pathological expression -- a few hundred KB of
+    source text, thousands of `or`-joined clauses, a few hundred nested parens, an `in {...}` list
+    with tens of thousands of members, or a multi-megabyte `matches` pattern -- could therefore
+    make `compile_display_filter()` itself slow or memory-heavy, and nested `(`/`!`/`not` chains
+    specifically could grow this process's own call stack without bound via `parse_primary()`'s and
+    `parse_unary_expr()`'s own recursive-descent recursion (and, transitively, `evaluate()`'s, since
+    it only ever recurses through whatever AST shape the parser built). None of this is a *remote*
+    DoS -- same trust-boundary point item 111 already made about F2's own regex-engine question,
+    repeated below -- but a typo'd or script-generated `-Y` expression deserves a clean, immediate
+    CLI error, not a hang, a memory balloon, or (worst case) a crashed process from stack
+    exhaustion.
+
+    **The fix, matching the review's own suggested starting values exactly.** Five fixed,
+    non-CLI-configurable constants in `display_filter_parser.cpp`'s own anonymous namespace,
+    checked once at compile time -- the same "fail before packet processing, before a live `-i`
+    interface ever opens" posture every other display-filter validation (unknown field, type
+    mismatch, F2's own invalid-regex check) already has:
+
+    - `kMaxExpressionLength` (64 KiB): the raw `-Y` source text's own byte length, checked in
+      `compile_display_filter()` itself, before the `Parser` is even constructed -- deliberately
+      the one check that runs ahead of everything else, since it bounds the cost of every later
+      step (lexing, parsing, type-checking) in proportion to input size.
+    - `kMaxAstNodes` (4096): the count of `FilterNode` instances one compiled filter may hold.
+      `Parser` gained a `node_count_` member and a `make_node()` helper -- every
+      `std::make_shared<FilterNode>()` call site in the parser (seven of them: `parse_or_expr`,
+      `parse_and_expr`, `parse_unary_expr`, and `parse_primary`'s `in {...}`/`contains`+`matches`/
+      `Exists`/`Compare` branches) now goes through `make_node()`, which throws once the count
+      would exceed the ceiling. A long `a && b && c && ...` chain grows this linearly (`parse_and_
+      expr`/`parse_or_expr`'s own repeated-operator handling is an iterative `while` loop, not
+      recursive, so it doesn't grow nesting depth -- only node count, which this alone is enough to
+      bound).
+    - `kMaxNestingDepth` (128): the combined `(`/`!`/`not` recursion depth. `Parser` gained a
+      `depth_` member and an `enter_nesting()` helper, called immediately after consuming a `(` in
+      `parse_primary()` or a `!`/`not` in `parse_unary_expr()`, each paired with a `--depth_;`
+      immediately after the matching recursive call returns (a thrown `std::runtime_error` inside
+      `enter_nesting()` unwinds straight out through `compile_display_filter()`'s own catch,
+      abandoning this `Parser` -- and `depth_` with it -- entirely, so there's no path where a
+      stale, un-decremented `depth_` could ever be observed by a later call on the same instance).
+      Bounding the parser's own recursion depth transitively bounds `evaluate()`'s recursion too,
+      since `evaluate()` only ever recurses through the AST shape this parser already built.
+    - `kMaxSetMembers` (512): the literal count in one `in {...}` clause, checked inside
+      `parse_primary()`'s own comma-separated member loop as each member is added.
+    - `kMaxRegexLength` (4096): a `matches` pattern's own source-text length (the quoted string
+      itself, not the compiled `std::regex`'s internal state), checked in `parse_primary()`'s
+      `contains`/`matches` branch before the pattern ever reaches F2's own `type_check()`-time
+      `std::regex` construction.
+
+    Every rejection is a `std::runtime_error` caught by `compile_display_filter()`'s existing outer
+    `try`/`catch`, the identical path every other malformed-expression error already takes -- with
+    one deliberate exception: `kMaxExpressionLength`'s own error message does NOT echo the full
+    (potentially 64 KiB+) expression back the way every other error's standard `"error: display
+    filter '" + expr + "' ..."` wrapper does; it reports the byte count and limit and shows only
+    the first 80 characters, so a pasted-in-error multi-kilobyte string doesn't also balloon the
+    CLI's own error output to match.
+
+    **Deliberately fixed, not `--max-*` CLI flags.** Unlike `--max-reassembly-bytes/-segments/
+    --max-recursion-depth/--max-decoded-objects/--max-coalesced-messages` (`decode.hpp`'s own
+    resource-exhaustion family), which bound processing of untrusted, attacker-shaped network
+    traffic and legitimately need per-deployment tuning, a `-Y` expression is operator-authored on
+    the local command line -- the same trust boundary `-f`/BPF and `--policy` YAML already sit
+    inside, and the identical reasoning item 111 already gave for not pursuing F2's own suggested
+    regex-engine hardening. These five numbers exist purely so a typo or a script-generated huge
+    expression fails fast and cleanly instead of hanging or exhausting memory/stack -- not as a
+    security boundary against a hostile expression author, which this tool has never treated `-Y`
+    as being.
+
+    **Tests.** Nine new `CMakeLists.txt` entries, two per limit (one proving the limit fires, one
+    proving an expression safely under that same limit still compiles AND evaluates correctly
+    against `sample_modbus.pcap`'s real packets -- no false-positive rejection of legitimate, if
+    verbose, `-Y` expressions) plus one for `kMaxExpressionLength` alone (no "under the limit" twin
+    needed for it specifically, since every other test below already is a such a case, and a
+    genuine 64 KiB *meaningful* expression would be unreadable in this file):
+    `decode_display_filter_error_expression_too_long`,
+    `decode_display_filter_error_too_many_ast_nodes` /
+    `decode_display_filter_ast_nodes_under_limit_still_works`,
+    `decode_display_filter_error_nested_too_deeply` /
+    `decode_display_filter_nesting_depth_under_limit_still_works`,
+    `decode_display_filter_error_too_many_set_members` /
+    `decode_display_filter_set_members_under_limit_still_works`,
+    `decode_display_filter_error_regex_too_long` /
+    `decode_display_filter_regex_length_under_limit_still_works`. The pathological/boundary
+    expressions themselves (several kilobytes to tens of kilobytes) are built at CMake configure
+    time via `string(REPEAT)`/`string(JOIN)`/`list(APPEND)` rather than hand-typed into
+    `CMakeLists.txt`. Each "under the limit" test was picked to prove real evaluation, not just
+    successful compilation: the AST-node and nesting-depth ones assert on `sample_modbus.pcap`'s
+    own "Read Holding Registers" func-name text actually appearing in the decoded output; the
+    set-members one inserts that exact literal as one of 400 otherwise-unrelated members; the
+    regex-length one wraps a 2000-character filler prefix around a real `^(...)?Read.*` pattern
+    that still has to match. `fuzz_display_filter` (the existing libFuzzer harness,
+    `compile_display_filter()` only) was re-run for 20 seconds (257k+ executions) under
+    `build-fuzz`'s ASan/UBSan instrumentation with zero crashes, confirming the five new throw
+    paths (`make_node()`, `enter_nesting()`, the set-member and regex-length checks, and
+    `compile_display_filter()`'s own new length check) introduce no new crash/UB surface.
+
+    **Docs.** `docs/USER_GUIDE.md`'s "Display filters" section: the "malformed expression" sentence
+    now also names an over-length expression, an over-complex AST, excessive nesting, an oversized
+    `in {...}` list, and an over-length `matches` pattern alongside F1's/F2's own additions, still
+    with the same "before any packet is read, before a live `-i` capture is even opened" guarantee;
+    a short new paragraph gives the five exact ceilings and states plainly that they exist only to
+    fail fast on a malformed/oversized expression, not as a security boundary (`-Y` remains
+    operator-authored CLI input, never treated as adversarial). `docs/reviews/2026-09-chatgpt-
+    security-review-patch282.md`'s own intro paragraph updated to mark F3 confirmed accurate and
+    fixed here, cross-referencing this item.
+
+    **Verification.** Same standing bar as items 105-111: full CTest across all four standing build
+    configs (default GCC `build`: 2423, +9 over item 111's 2414; `-DCONDUITSCOPE_ENABLE_LIVE_
+    CAPTURE=OFF` `build_nolive`: 2408, +9 over 2399; MinGW cross-compile `build-mingw`, build-only,
+    configured test count 2408, +9 over 2399, matching `build_nolive`'s count rather than `build`'s
+    -- both configurations have live capture disabled; Clang ASan/UBSan `build-fuzz`: 2501 total
+    (2423 non-corpus tests, matching `build`'s count, plus the 78 pre-existing `*_corpus_regression`
+    tests unique to this config), all passing, plus the `fuzz_display_filter` corpus re-run noted
+    above) -- confirming zero regressions anywhere, plus a clean-room extract-rebuild-test cycle,
+    before delivery as a zip of touched/new files via the standing no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

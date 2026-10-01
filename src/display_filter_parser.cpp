@@ -283,6 +283,26 @@ namespace conduitscope {
 
 namespace {
 
+// patch-282 security review finding F3 ("Display-filter parser has no explicit complexity
+// limits"): fixed, non-CLI-configurable ceilings on a -Y expression's own size/shape, each checked
+// once at compile time (the same "fail before packet processing" posture every other display-
+// filter validation already has -- type mismatch, unknown field, now these too). Deliberately NOT
+// exposed as --max-* flags the way --max-reassembly-bytes/-segments/--max-recursion-depth/--max-
+// decoded-objects/--max-coalesced-messages are (decode.hpp's own resource-exhaustion family,
+// cli_main.cpp): those bound processing of UNTRUSTED, attacker-shaped network traffic at scale,
+// where different deployments legitimately need different ceilings; a -Y expression is operator-
+// authored on the local command line, the same trust boundary -f/BPF and --policy YAML already sit
+// inside (see this file's own type_check() Matches case, patch-282 finding F2, for the identical
+// reasoning). These five numbers exist purely so a typo or a script-generated huge expression fails
+// fast and cleanly -- a named CLI error -- instead of hanging, ballooning memory, or (nested
+// parens/`!`/`not` chains specifically) overflowing this process's own call stack via unbounded
+// recursive descent. Values match the review's own suggested starting point exactly.
+constexpr size_t kMaxExpressionLength = 64 * 1024;  // bytes of -Y source text
+constexpr size_t kMaxAstNodes = 4096;               // FilterNode instances one compiled filter may hold
+constexpr int kMaxNestingDepth = 128;                // combined '(' / '!'/'not' recursion depth
+constexpr size_t kMaxSetMembers = 512;              // literals in one `in {...}` clause
+constexpr size_t kMaxRegexLength = 4096;             // characters in one `matches "..."` pattern
+
 class Parser {
 public:
     explicit Parser(const std::string& source) : lexer_(source) {
@@ -301,6 +321,19 @@ private:
     Lexer lexer_;
     Token current_;
 
+    // F3's own node-count and nesting-depth ceilings -- see this file's own kMaxAstNodes/
+    // kMaxNestingDepth comment above. node_count_ is incremented once per FilterNode this parser
+    // ever allocates (every call site below goes through make_node(), never std::make_shared
+    // directly); depth_ is incremented/decremented around the two actual recursive-descent entry
+    // points that can nest arbitrarily deep on crafted input -- parse_primary()'s '(' handling and
+    // parse_unary_expr()'s '!'/'not' handling. (A long chain of `a && b && c && ...` does NOT
+    // increase depth_ -- parse_and_expr()/parse_or_expr() consume repeated same-precedence
+    // operators in a plain `while` loop, not recursively -- but it does grow node_count_ linearly,
+    // which kMaxAstNodes alone is enough to bound.) Neither counter is ever reset mid-parse; both
+    // are scoped to one Parser instance, i.e. one compile_display_filter() call.
+    size_t node_count_ = 0;
+    int depth_ = 0;
+
     void advance() { current_ = lexer_.next(); }
 
     [[noreturn]] void fail_token(const Token& t, const std::string& what, const std::string& hint) const {
@@ -315,12 +348,36 @@ private:
         advance();
     }
 
+    // Every FilterNode this parser allocates goes through here -- see node_count_'s own comment.
+    std::shared_ptr<FilterNode> make_node() {
+        if (++node_count_ > kMaxAstNodes) {
+            throw std::runtime_error("is too complex (more than " + std::to_string(kMaxAstNodes) +
+                " expression nodes) -- simplify it, e.g. by combining repeated clauses");
+        }
+        return std::make_shared<FilterNode>();
+    }
+
+    // Called immediately after consuming a '(' or a '!'/'not' token, before recursing -- see
+    // depth_'s own comment. Returning nothing on success (rather than an RAII guard that
+    // decrements on scope exit) is deliberate: a thrown std::runtime_error here unwinds straight
+    // out through compile_display_filter()'s own catch, abandoning this Parser (and therefore
+    // depth_) entirely, so there is no later call on the same Parser that could ever observe a
+    // stale, un-decremented depth_ -- the matching `--depth_;` after each successful recursive
+    // call below is reached, and only reached, exactly when that recursion genuinely returned.
+    void enter_nesting() {
+        if (++depth_ > kMaxNestingDepth) {
+            throw std::runtime_error("is nested too deeply (more than " +
+                std::to_string(kMaxNestingDepth) + " levels of '(' / '!'/'not' combined) -- "
+                "simplify the expression");
+        }
+    }
+
     std::shared_ptr<FilterNode> parse_or_expr() {
         auto lhs = parse_and_expr();
         while (at(TokenKind::OrOr) || at(TokenKind::KwOr)) {
             advance();
             auto rhs = parse_and_expr();
-            auto node = std::make_shared<FilterNode>();
+            auto node = make_node();
             node->kind = FilterNodeKind::Or;
             node->lhs = lhs;
             node->rhs = rhs;
@@ -334,7 +391,7 @@ private:
         while (at(TokenKind::AndAnd) || at(TokenKind::KwAnd)) {
             advance();
             auto rhs = parse_unary_expr();
-            auto node = std::make_shared<FilterNode>();
+            auto node = make_node();
             node->kind = FilterNodeKind::And;
             node->lhs = lhs;
             node->rhs = rhs;
@@ -346,8 +403,10 @@ private:
     std::shared_ptr<FilterNode> parse_unary_expr() {
         if (at(TokenKind::Bang) || at(TokenKind::KwNot)) {
             advance();
+            enter_nesting();  // F3: bounds '!'/'not' chain depth -- see enter_nesting()'s own comment
             auto operand = parse_unary_expr();
-            auto node = std::make_shared<FilterNode>();
+            --depth_;
+            auto node = make_node();
             node->kind = FilterNodeKind::Not;
             node->lhs = operand;
             return node;
@@ -375,7 +434,9 @@ private:
     std::shared_ptr<FilterNode> parse_primary() {
         if (at(TokenKind::LParen)) {
             advance();
+            enter_nesting();  // F3: bounds '(' nesting depth -- see enter_nesting()'s own comment
             auto inner = parse_or_expr();
+            --depth_;
             expect(TokenKind::RParen, "a closing ')'");
             return inner;
         }
@@ -389,12 +450,20 @@ private:
         if (at(TokenKind::KwIn)) {
             advance();
             expect(TokenKind::LBrace, "'{' to start a set, e.g. in {1,2,3}");
-            auto node = std::make_shared<FilterNode>();
+            auto node = make_node();
             node->kind = FilterNodeKind::InSet;
             node->field_name = field_name;
             node->literal_set.push_back(parse_literal());
             while (at(TokenKind::Comma)) {
                 advance();
+                // F3: bounds `in {...}` membership -- see kMaxSetMembers's own comment. Checked
+                // before each additional literal is parsed/pushed, so a set at exactly the limit
+                // (kMaxSetMembers members) is still accepted; the (kMaxSetMembers + 1)-th is not.
+                if (node->literal_set.size() >= kMaxSetMembers) {
+                    throw std::runtime_error("'in {...}' for '" + field_name + "' has too many "
+                        "members (more than " + std::to_string(kMaxSetMembers) + ") -- simplify "
+                        "the expression");
+                }
                 node->literal_set.push_back(parse_literal());
             }
             expect(TokenKind::RBrace, "a closing '}'");
@@ -408,7 +477,16 @@ private:
                 fail_token(current_, "was not expected here",
                            std::string("a \"quoted string\" for ") + (is_matches ? "matches" : "contains"));
             }
-            auto node = std::make_shared<FilterNode>();
+            // F3: bounds a `matches` pattern's own length -- see kMaxRegexLength's own comment.
+            // Checked here, at the source-text level, independent of (and ahead of) type_check()'s
+            // own regex-compilation step (F2, item 111) -- a `contains` string has no such limit,
+            // since it's a plain substring search with no construction cost to bound.
+            if (is_matches && current_.text.size() > kMaxRegexLength) {
+                throw std::runtime_error("'" + field_name + "' matches a regular expression longer "
+                    "than " + std::to_string(kMaxRegexLength) + " characters -- simplify the "
+                    "pattern");
+            }
+            auto node = make_node();
             node->kind = is_matches ? FilterNodeKind::Matches : FilterNodeKind::Contains;
             node->field_name = field_name;
             node->literal = FilterValue::make_string(current_.text);
@@ -429,13 +507,13 @@ private:
         }
         if (!has_op) {
             // Bare field-existence test: `modbus` alone, or `modbus.func_code` alone.
-            auto node = std::make_shared<FilterNode>();
+            auto node = make_node();
             node->kind = FilterNodeKind::Exists;
             node->field_name = field_name;
             return node;
         }
         advance();
-        auto node = std::make_shared<FilterNode>();
+        auto node = make_node();
         node->kind = FilterNodeKind::Compare;
         node->field_name = field_name;
         node->cmp_op = op;
@@ -736,6 +814,25 @@ bool CompiledDisplayFilter::matches(const DecodedPacket& dp) const {
 }
 
 std::optional<CompiledDisplayFilter> compile_display_filter(const std::string& expr, std::string* error) {
+    // F3: the one complexity ceiling checked here rather than inside Parser -- see kMaxExpressionLength's
+    // own comment above (this file's complexity-limits block). It has to be checked before anything else
+    // touches `expr`, for two reasons: (1) it bounds the cost of every later step (lexing, parsing,
+    // type-checking) in proportion to input size, the same "fail before doing any real work" posture
+    // Parser::make_node()/enter_nesting() give the other four limits; (2) unlike every other rejection in
+    // this function, the error message below deliberately does NOT echo `expr` back in full the way the
+    // catch block's standard wrapper does -- an operator who passed a 200KB `-Y` string by mistake (a
+    // shell glob expansion gone wrong, a pasted file instead of an expression) doesn't need that string
+    // reproduced in its entirety in the error output; the first 80 characters are enough to recognize
+    // what was passed and confirm the length, without ballooning the CLI's own stderr/log output to match
+    // the oversized input that triggered the rejection in the first place.
+    if (expr.size() > kMaxExpressionLength) {
+        if (error) {
+            *error = "error: display filter is " + std::to_string(expr.size()) + " bytes long, "
+                "more than the " + std::to_string(kMaxExpressionLength) + "-byte limit -- simplify "
+                "the expression (it starts with: '" + expr.substr(0, 80) + "...')\n";
+        }
+        return std::nullopt;
+    }
     try {
         const FieldRegistry& registry = FieldRegistry::instance();
         Parser parser(expr);

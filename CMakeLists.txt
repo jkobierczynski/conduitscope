@@ -17616,6 +17616,119 @@ set_tests_properties(decode_display_filter_error_invalid_regex_rejected_before_l
   PASS_REGULAR_EXPRESSION "error: display filter '.*' 'modbus\\.func_name' matches \"\\[abc\" is not a valid regular expression"
   FAIL_REGULAR_EXPRESSION "live capture is not available|requires root|Operation not permitted|no such device")
 
+# patch-282 security review finding F3 ("Display-filter parser has no explicit complexity
+# limits"): fixed, non-CLI-configurable ceilings on a -Y expression's own size/shape -- each
+# checked once at compile time, the same "fail before packet processing, before a live -i
+# interface ever opens" posture every other display-filter validation above already has. See
+# display_filter_parser.cpp's own kMaxExpressionLength/kMaxAstNodes/kMaxNestingDepth/
+# kMaxSetMembers/kMaxRegexLength comment for the exact values and the trust-boundary reasoning
+# (a -Y expression is operator-authored CLI input, the same boundary -f/BPF and --policy YAML
+# already sit inside -- not attacker-controlled network traffic). The pathological expressions
+# below are built at CMake configure time (string(REPEAT)/string(JOIN)/list(APPEND)) rather than
+# hand-typed, since several are multiple kilobytes long. Each limit gets two tests: one proving
+# the limit fires with the expected error, one proving an expression safely under that same limit
+# still compiles AND evaluates correctly (no false-positive rejection of legitimate, if verbose,
+# -Y expressions).
+
+# 1. kMaxExpressionLength (65536 bytes). Content is irrelevant, only size -- a 65537-byte
+# nonsense expression is rejected before the parser sees a single token of it. (No "still works
+# under the limit" twin for this one -- every other test below already is an under-the-limit
+# expression that compiles, and a 65536-byte *meaningful* expression would be unreadable here.)
+string(REPEAT "x" 65537 f3_too_long_expr)
+add_test(NAME decode_display_filter_error_expression_too_long
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_too_long_expr}")
+set_tests_properties(decode_display_filter_error_expression_too_long PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter is 65537 bytes long, more than the 65536-byte limit -- simplify the expression \\(it starts with: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\.\\.\\.'\\)")
+
+# 2. kMaxAstNodes (4096): N bare `modbus` existence tests joined by `or` parse into 2N-1
+# FilterNode instances (N Exists nodes + N-1 Or nodes -- parse_or_expr()'s repeated-operator loop
+# is iterative, not recursive, so this grows node_count_ without growing depth_). N=2100 gives
+# 4199 nodes, over the ceiling, while the expression text itself (~21 KB) stays well under
+# kMaxExpressionLength, so this test isolates the AST-node ceiling specifically.
+string(REPEAT "modbus or " 2099 f3_many_nodes_expr)
+string(APPEND f3_many_nodes_expr "modbus")
+add_test(NAME decode_display_filter_error_too_many_ast_nodes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_many_nodes_expr}")
+set_tests_properties(decode_display_filter_error_too_many_ast_nodes PROPERTIES
+  PASS_REGULAR_EXPRESSION "is too complex \\(more than 4096 expression nodes\\) -- simplify it")
+
+# 2b. The same shape, N=1000 (1999 nodes, safely under the ceiling) -- still compiles and
+# evaluates correctly.
+string(REPEAT "modbus or " 999 f3_ok_many_nodes_expr)
+string(APPEND f3_ok_many_nodes_expr "modbus")
+add_test(NAME decode_display_filter_ast_nodes_under_limit_still_works
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_ok_many_nodes_expr}")
+set_tests_properties(decode_display_filter_ast_nodes_under_limit_still_works PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers"
+  FAIL_REGULAR_EXPRESSION "^error:")
+
+# 3. kMaxNestingDepth (128): 150 levels of parens around one bare field test -- over the ceiling.
+# (A chain of `!`/`not` would grow depth_ identically -- see enter_nesting()'s own comment -- so
+# only one shape needs a regression test here.)
+string(REPEAT "(" 150 f3_deep_open)
+string(REPEAT ")" 150 f3_deep_close)
+set(f3_too_deep_expr "${f3_deep_open}modbus${f3_deep_close}")
+add_test(NAME decode_display_filter_error_nested_too_deeply
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_too_deep_expr}")
+set_tests_properties(decode_display_filter_error_nested_too_deeply PROPERTIES
+  PASS_REGULAR_EXPRESSION "is nested too deeply \\(more than 128 levels of '\\(' / '!'/'not' combined\\) -- simplify")
+
+# 3b. 100 levels -- safely under the ceiling -- still compiles and evaluates correctly.
+string(REPEAT "(" 100 f3_ok_deep_open)
+string(REPEAT ")" 100 f3_ok_deep_close)
+set(f3_ok_deep_expr "${f3_ok_deep_open}modbus${f3_ok_deep_close}")
+add_test(NAME decode_display_filter_nesting_depth_under_limit_still_works
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_ok_deep_expr}")
+set_tests_properties(decode_display_filter_nesting_depth_under_limit_still_works PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers"
+  FAIL_REGULAR_EXPRESSION "^error:")
+
+# 4. kMaxSetMembers (512): an `in {...}` clause with 600 literal members -- over the ceiling.
+set(f3_too_many_set_members "")
+foreach(f3_i RANGE 1 600)
+  list(APPEND f3_too_many_set_members "\"V${f3_i}\"")
+endforeach()
+string(JOIN "," f3_too_many_set_members_joined ${f3_too_many_set_members})
+set(f3_too_many_members_expr "modbus.func_name in {${f3_too_many_set_members_joined}}")
+add_test(NAME decode_display_filter_error_too_many_set_members
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_too_many_members_expr}")
+set_tests_properties(decode_display_filter_error_too_many_set_members PROPERTIES
+  PASS_REGULAR_EXPRESSION "'in \\{\\.\\.\\.\\}' for 'modbus\\.func_name' has too many members \\(more than 512\\) -- simplify")
+
+# 4b. 400 members -- safely under the ceiling -- one of which ("Read Holding Registers") actually
+# matches sample_modbus.pcap's packets, proving the filter doesn't just compile but still
+# evaluates correctly against real traffic.
+set(f3_ok_set_members "")
+foreach(f3_i RANGE 1 399)
+  list(APPEND f3_ok_set_members "\"V${f3_i}\"")
+endforeach()
+list(INSERT f3_ok_set_members 200 "\"Read Holding Registers\"")
+string(JOIN "," f3_ok_set_members_joined ${f3_ok_set_members})
+set(f3_ok_set_expr "modbus.func_name in {${f3_ok_set_members_joined}}")
+add_test(NAME decode_display_filter_set_members_under_limit_still_works
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_ok_set_expr}")
+set_tests_properties(decode_display_filter_set_members_under_limit_still_works PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers"
+  FAIL_REGULAR_EXPRESSION "^error:")
+
+# 5. kMaxRegexLength (4096): a `matches` pattern 5000 characters long -- over the ceiling.
+string(REPEAT "a" 5000 f3_long_regex)
+set(f3_too_long_regex_expr "modbus.func_name matches \"${f3_long_regex}\"")
+add_test(NAME decode_display_filter_error_regex_too_long
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_too_long_regex_expr}")
+set_tests_properties(decode_display_filter_error_regex_too_long PROPERTIES
+  PASS_REGULAR_EXPRESSION "'modbus\\.func_name' matches a regular expression longer than 4096 characters -- simplify the pattern")
+
+# 5b. a 2000-character pattern wrapped around the real "Read" prefix -- safely under the ceiling
+# -- still compiles and evaluates correctly (actually matches sample_modbus.pcap's packets).
+string(REPEAT "a" 2000 f3_ok_regex)
+set(f3_ok_regex_expr "modbus.func_name matches \"^(${f3_ok_regex})?Read.*\"")
+add_test(NAME decode_display_filter_regex_length_under_limit_still_works
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_ok_regex_expr}")
+set_tests_properties(decode_display_filter_regex_length_under_limit_still_works PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers"
+  FAIL_REGULAR_EXPRESSION "^error:")
+
 # Numeric-field-mirroring regression tests (display_filter.hpp's Phase-4 fix: S7CommResult/
 # Dnp3Result/Iec104Result/MmsFrame each previously exposed only a rendered name string, no raw
 # numeric code) -- confirms both the new -T json field and the corresponding -Y filter field work.
