@@ -53,6 +53,8 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace conduitscope {
 
@@ -236,5 +238,61 @@ public:
 private:
     ResourceLimits previous_;
 };
+
+// patch282 security review finding F4 ("resource limits are much better, but eviction can damage
+// analytical correctness", docs/reviews/2026-09-chatgpt-security-review-patch282.md): a thread-
+// local, per-Decoder-instance counter of how many times DecodeContext::flow_state<T>()
+// (protocol_decoder.hpp) has had to EVICT an existing flow-state entry to make room for a new one,
+// because resource_limits().max_flow_state_entries (default kDefaultMaxFlowStateEntries above) was
+// already at its ceiling. Same "global accessor, not threaded through DecodeContext" rationale as
+// resource_limits() itself (this file's own header comment) -- for the identical reason: the
+// eviction site has no access to whichever of the four report engines (DetectEngine/
+// BaselineEngine/PolicyEngine/AssetInventoryEngine) is consuming this run's own decoded packets,
+// so there is no object to hand a counter reference to without threading one through roughly three
+// dozen `ctx.flow_states = &registry_flow_state_;` call sites (decoder.cpp) for a piece of state
+// those call sites otherwise have no reason to know about.
+//
+// WHY THIS NEEDS SURFACING AT ALL (unlike a plain refusal): DetectEngineLimits/PolicyEngineLimits/
+// AssetInventoryEngineLimits' own growth ceilings already refuse to track a new entry past their
+// limit and call mark_truncated() right at the refusal site -- refusal only ever produces an
+// incomplete but still-coherent view (a finding this engine never got tracking-state room to
+// notice). Flow-state eviction is different in kind: it doesn't just fail to track something new,
+// it actively DESTROYS an existing, legitimate session's state to make room, so that session's
+// NEXT packet looks exactly like a brand-new one -- a false "new originator" finding, a broken
+// request/response pairing, an incorrect protocol re-interpretation. The review's own words: "an
+// attacker can deliberately cause state eviction" by flooding fake sessions until the cap is
+// reached, pushing a legitimate session's state out; the eviction code's own prior comment
+// ("indistinguishable from the state never having existed") is exactly the gap F4 asks to close --
+// that indistinguishability is an acceptable, well-documented tradeoff for an ordinary parser, not
+// for an intrusion-detection sensor whose findings/baseline/policy verdicts depend on session
+// continuity.
+//
+// Reset to 0 by Decoder's own constructor (decoder.hpp) -- the same per-Decoder-instance lifetime
+// resource_limits() itself gets via set_resource_limits() there -- so a process that constructs
+// multiple Decoder instances in sequence (e.g. `baseline learn`'s own one-Decoder-per-input-file
+// loop, cli_main.cpp) never carries a stale count from an earlier file/run into a later one's own
+// report.
+size_t flow_state_evictions();
+
+// Called from exactly one place -- DecodeContext::flow_state<T>()'s own eviction branch
+// (protocol_decoder.hpp), at the point an existing entry is actually erased, never merely
+// considered for eviction.
+void note_flow_state_eviction();
+
+// Called from exactly one place -- Decoder's own constructor (decoder.hpp) -- see
+// flow_state_evictions()'s own comment above for why.
+void reset_flow_state_evictions();
+
+// Shared by all four report engines' own finish()/report-construction code (every one of them
+// `const`, so none can mutate its own truncated_/truncation_reasons_ private members the way
+// mark_truncated() does elsewhere -- this free function sidesteps that by appending directly to
+// the CALLER's own output `reasons` vector instead, which a const method is free to do) plus
+// `baseline learn`'s own per-input-file diagnostic (cli_main.cpp), which has no Report struct to
+// populate at all. Appends one human-readable reason line (naming --max-flow-state-entries, the
+// exact eviction count, and the correctness consequence) to `reasons` iff flow_state_evictions()
+// is nonzero for the currently-active Decoder run, returning whether it did -- callers OR this
+// into their own observation_truncated flag. Centralized here, rather than duplicated at each of
+// the four call sites, so the exact wording can never drift between engines.
+bool append_flow_state_eviction_reason(std::vector<std::string>& reasons);
 
 }  // namespace conduitscope

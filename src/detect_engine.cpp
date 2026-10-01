@@ -20,6 +20,7 @@
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/resource_limits.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/time_format.hpp"
 
@@ -1873,6 +1874,12 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
     report.total_packets = total_packets_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
+    // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
+    // append_flow_state_eviction_reason's own comment (resource_limits.hpp). truncated_/
+    // truncation_reasons_ above only ever reflect this engine's own three DetectEngineLimits
+    // growth ceilings; flow-state eviction is a decode()-layer condition this engine has no direct
+    // visibility into otherwise.
+    if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
 
     auto in_baseline = [&](const std::string& client_ip, const std::string& server_ip,
                             const std::string& protocol, uint16_t server_port) {
@@ -2359,6 +2366,15 @@ std::vector<std::pair<std::string, std::string>> detection_finding_extension_fie
 }  // namespace
 
 void write_detection_report_cef(std::ostream& out, const DetectionReport& report) {
+    // F4 fix: see observation_incomplete_extension_fields's own comment (security_event_format.hpp)
+    // for why this sentinel line must come first, unconditionally on observation_truncated alone --
+    // a truncated run with zero findings would otherwise emit nothing here at all.
+    if (report.observation_truncated) {
+        out << render_cef_line("conduitscope-detect", "ObservationIncomplete", "Observation incomplete",
+                                kObservationIncompleteCefSeverity,
+                                observation_incomplete_extension_fields(report.truncation_reasons))
+            << "\n";
+    }
     for (const auto& f : report.findings) {
         out << render_cef_line("conduitscope-detect", f.technique.id, f.technique.name,
                                 detection_severity_to_cef(f.severity), detection_finding_extension_fields(f))
@@ -2367,6 +2383,11 @@ void write_detection_report_cef(std::ostream& out, const DetectionReport& report
 }
 
 void write_detection_report_leef(std::ostream& out, const DetectionReport& report) {
+    if (report.observation_truncated) {
+        out << render_leef_line("conduitscope-detect", "ObservationIncomplete",
+                                 observation_incomplete_extension_fields(report.truncation_reasons))
+            << "\n";
+    }
     for (const auto& f : report.findings) {
         auto fields = detection_finding_extension_fields(f);
         fields.emplace_back("sev", std::to_string(detection_severity_to_cef(f.severity)));
@@ -2375,6 +2396,13 @@ void write_detection_report_leef(std::ostream& out, const DetectionReport& repor
 }
 
 void write_detection_report_syslog(std::ostream& out, const DetectionReport& report) {
+    if (report.observation_truncated) {
+        std::string cef_payload =
+            render_cef_line("conduitscope-detect", "ObservationIncomplete", "Observation incomplete",
+                             kObservationIncompleteCefSeverity,
+                             observation_incomplete_extension_fields(report.truncation_reasons));
+        out << render_rfc5424_line(kObservationIncompleteCefSeverity, "detect", cef_payload) << "\n";
+    }
     for (const auto& f : report.findings) {
         int cef_severity = detection_severity_to_cef(f.severity);
         std::string cef_payload = render_cef_line("conduitscope-detect", f.technique.id, f.technique.name,

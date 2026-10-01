@@ -268,6 +268,13 @@ struct DecodeContext {
                     for (auto& [id, inner] : *flow_states) {
                         if (!inner.empty()) {
                             inner.erase(inner.begin());
+                            // F4 fix (patch282 security review, docs/reviews/2026-09-chatgpt-
+                            // security-review-patch282.md): record that an eviction genuinely
+                            // happened, not merely that the cap was reached -- see
+                            // flow_state_evictions()'s own comment (resource_limits.hpp) for why
+                            // this can no longer be as silent as the "indistinguishable from the
+                            // state never having existed" comment above once implied.
+                            note_flow_state_eviction();
                             break;
                         }
                     }

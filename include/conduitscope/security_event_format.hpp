@@ -128,4 +128,30 @@ std::string render_leef_line(const std::string& device_product, const std::strin
 // `msgid` is the emitting subcommand's own name ("detect"/"policy"/"baseline").
 std::string render_rfc5424_line(int severity_0_10, const std::string& msgid, const std::string& cef_payload);
 
+// F4 fix (patch282 security review, docs/reviews/2026-09-chatgpt-security-review-patch282.md):
+// before this, each of the three `write_..._report_cef/_leef/_syslog` functions below only ever
+// emitted one line per CURATED FINDING -- so a run whose own report had observation_truncated set
+// but zero findings (exactly the condition the review's own words describe: "'No finding observed'
+// is not equivalent to 'Finding engine had complete state'") produced ZERO SIEM events, completely
+// indistinguishable, to anything watching only this export stream, from a genuinely clean, COMPLETE
+// run. Each writer below now emits exactly one additional sentinel line FIRST, iff its own report's
+// observation_truncated is true, built from this shared helper plus the existing render_cef_line/
+// render_leef_line/render_rfc5424_line primitives (device_event_class_id/event_id fixed
+// "ObservationIncomplete", severity fixed at kObservationIncompleteCefSeverity below) -- shared here
+// so the field shape/wording can never drift between the three engines the way three independent
+// copies risked.
+//
+// `msg` joins every distinct truncation reason into one semicolon-separated line (CEF/LEEF
+// extension values are single-line); `reasonCount` carries the exact number separately so a SIEM
+// rule can threshold/alert on it without parsing `msg`.
+std::vector<std::pair<std::string, std::string>> observation_incomplete_extension_fields(
+    const std::vector<std::string>& truncation_reasons);
+
+// CEF/LEEF severity for the sentinel event above -- fixed, not derived from any curated finding's
+// own severity (there may be zero findings in the very report this event is warning about). Set at
+// CEF's own Medium band (its 4-6 range -- see cef_severity_to_rfc5424_severity's own band table):
+// not itself an attack finding, but operationally significant enough that a SIEM rule filtering on
+// severity thresholds alone still sees it, not only one filtering on device_event_class_id/EventID.
+inline constexpr int kObservationIncompleteCefSeverity = 5;
+
 }  // namespace conduitscope

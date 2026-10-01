@@ -86,21 +86,47 @@ actually fix before calling the architecture hardened:
   own body sections, not something introduced by this write-up, called
   out here so a reader comparing the table against DEVELOPMENT.md doesn't
   conclude the wrong finding was fixed.
+- **F4 (Medium) -- resource-state eviction can silently destroy protocol/
+  detection context** is **confirmed accurate and fixed** -- see
+  [DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP, item 113, for the full
+  write-up: a thread-local eviction counter (mirroring this codebase's own
+  pre-existing `resource_limits()` global-accessor pattern exactly), reset
+  per-`Decoder`-instance lifetime, incremented at the one place
+  `DecodeContext::flow_state<T>()` evicts an existing entry to make room
+  under `--max-flow-state-entries`, and folded into `DetectEngine`'s,
+  `BaselineEngine`'s (both `check` and `learn`), `PolicyEngine`'s, and
+  `AssetInventoryEngine`'s own existing `observation_truncated`/
+  `truncation_reasons` machinery through one shared free function so the
+  wording can never drift between engines -- directly implementing the
+  review's own "What I would add" suggestion, extending the existing
+  `kExitObservationIncomplete` philosophy from outright-refused
+  observations to state eviction as well. Taken up directly on Jurgen's
+  own instruction, quoting this finding verbatim, immediately after item
+  112's own delivery. Closed a related, previously-undiscovered gap found
+  during implementation along the way: none of Detect's/Baseline's/
+  Policy's CEF/LEEF/syslog exporters ever represented `observation_
+  truncated` at all before this fix, so a truncated-but-zero-findings run
+  emitted zero SIEM events -- a new shared sentinel "ObservationIncomplete"
+  event closes this for all three. Unlike F3 above, this finding's own
+  review **table** row ("Resource-state eviction can silently destroy
+  protocol/detection context") and **body** section ("Resource limits are
+  much better, but eviction can damage analytical correctness") describe
+  the same finding consistently, so no table-vs-body discrepancy note is
+  needed here.
 
-The remaining five (F4-F8) are lower-priority hardening/architecture
-observations, not confirmed code defects in the same sense as F1/F2/F3: a
-genuine architectural question about whether flow-state eviction under
-attacker-driven pressure should be surfaced as an "observation incomplete"
-condition the way several engines' `kExitObservationIncomplete` already
-does for other kinds of truncation (F4), an unbounded `merge` input-size
-(F5), the four-axis detection model needing a fifth "observation
-completeness" property rather than a fifth detection axis (F6, really an
-elaboration on F4), release-reproducibility hardening lagging the CI
-workflow's own SHA-pinning (F7), and the already-known, already-labeled
-risk of generated firewall ACLs being deployed without review (F8, an
-accepted design risk, not a new one). None of F4-F8 are scheduled against
-a specific engineering task as of this write-up; Jurgen has not yet
-directed which (if any) to take up after F3.
+The remaining four (F5-F8) are lower-priority hardening/architecture
+observations, not confirmed code defects in the same sense as F1/F2/F3/F4:
+an unbounded `merge` input-size (F5), the four-axis detection model
+needing a fifth "observation completeness" property rather than a fifth
+detection axis (F6, really an elaboration on F4's own idea -- now that F4
+is fixed, F6 is best read as asking whether that same observation-
+completeness treatment should extend beyond flow-state eviction to other
+engines/axes, not as a separate defect), release-reproducibility hardening
+lagging the CI workflow's own SHA-pinning (F7), and the already-known,
+already-labeled risk of generated firewall ACLs being deployed without
+review (F8, an accepted design risk, not a new one). None of F5-F8 are
+scheduled against a specific engineering task as of this write-up; Jurgen
+has not yet directed which (if any) to take up after F4.
 
 The commit hash and any line/file references below reflect the reviewer's
 own state at review time; see DEVELOPMENT.md for current figures.

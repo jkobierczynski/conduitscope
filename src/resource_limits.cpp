@@ -21,6 +21,13 @@ ResourceLimits& mutable_resource_limits() {
     return limits;
 }
 
+// F4 fix: the same Meyers-singleton-style thread_local pattern as mutable_resource_limits() above,
+// for the same reason -- see flow_state_evictions()'s own comment (resource_limits.hpp).
+size_t& mutable_flow_state_eviction_count() {
+    static thread_local size_t count = 0;
+    return count;
+}
+
 }  // namespace
 
 const ResourceLimits& resource_limits() { return mutable_resource_limits(); }
@@ -57,6 +64,23 @@ void set_resource_limits(const ResourceLimits& limits) {
         normalized.max_active_fragment_groups.reset();
     }
     mutable_resource_limits() = normalized;
+}
+
+size_t flow_state_evictions() { return mutable_flow_state_eviction_count(); }
+
+void note_flow_state_eviction() { ++mutable_flow_state_eviction_count(); }
+
+void reset_flow_state_evictions() { mutable_flow_state_eviction_count() = 0; }
+
+bool append_flow_state_eviction_reason(std::vector<std::string>& reasons) {
+    const size_t n = flow_state_evictions();
+    if (n == 0) return false;
+    reasons.push_back(
+        "flow-state eviction limit reached -- " + std::to_string(n) + " state entr" + (n == 1 ? "y" : "ies") +
+        " evicted during this capture (--max-flow-state-entries); an evicted session's next packet looks "
+        "exactly like a brand-new one, so detection/baseline/policy results for affected sessions may be "
+        "incomplete or misclassified");
+    return true;
 }
 
 }  // namespace conduitscope

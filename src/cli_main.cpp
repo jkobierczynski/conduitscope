@@ -2068,11 +2068,22 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
             // rather than silently baking an incomplete observation into the baseline file. Always
             // printed, even under -q/--quiet -- unlike an ordinary parse warning, this affects the
             // CORRECTNESS of the baseline file being written, not just diagnostic noise.
-            if (engine.truncated()) {
+            // F4 fix (patch282 security review): fold in any flow-state evictions from this
+            // file's own decode pass too -- see append_flow_state_eviction_reason's own comment
+            // (resource_limits.hpp). `learn` has no Report struct to attach this to the way
+            // `check`/`detect`/`policy validate`/`inventory` do (see their own identical
+            // comments), so it's collected into its own local vector and printed alongside
+            // engine.truncation_reasons() in the SAME warning block below instead.
+            std::vector<std::string> flow_state_eviction_reasons;
+            bool flow_state_evicted = append_flow_state_eviction_reason(flow_state_eviction_reasons);
+            if (engine.truncated() || flow_state_evicted) {
                 diag << "warning: baseline observation of '" << input
                      << "' is INCOMPLETE -- the merged baseline may be missing some of this "
                         "capture's own conduits/operations/ranges:\n";
                 for (const std::string& reason : engine.truncation_reasons()) {
+                    diag << "  - " << reason << "\n";
+                }
+                for (const std::string& reason : flow_state_eviction_reasons) {
                     diag << "  - " << reason << "\n";
                 }
             }
@@ -2164,6 +2175,12 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         // (baseline.hpp) and kExitBaselineIncomplete's own comment below for what this changes.
         report.observation_truncated = engine.truncated();
         report.truncation_reasons = engine.truncation_reasons();
+        // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
+        // DetectEngine::finish()'s own identical comment (detect_engine.cpp) and
+        // append_flow_state_eviction_reason's own comment (resource_limits.hpp). `baseline check`
+        // builds its own report here rather than inside BaselineEngine itself (unlike Detect/
+        // Policy/AssetInventory), so this fold-in lives here instead of baseline.cpp.
+        if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
         if (format == "json") {
             write_baseline_check_report_json(*out, report, symbolic_addresses);
         } else if (format == "cef") {

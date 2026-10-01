@@ -23,6 +23,7 @@
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/portable_time.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/resource_limits.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
 #include "conduitscope/time_format.hpp"
@@ -970,6 +971,12 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
     report.zone_prefix_len = zone_prefix_len_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
+    // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
+    // DetectEngine::finish()'s own identical comment (detect_engine.cpp) and
+    // append_flow_state_eviction_reason's own comment (resource_limits.hpp). A flow-state eviction
+    // during `inventory` specifically risks a legitimate asset/edge appearing to vanish and then
+    // reappear as a "new" one once its session state is evicted and re-created from scratch.
+    if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
 
     // Assets, sorted numerically by address (not first-seen order, not lexicographically -- a
     // lexicographic sort would put "192.168.1.100" before "192.168.1.50") for a report that's

@@ -16,6 +16,7 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/resource_limits.hpp"
 #include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
@@ -684,6 +685,10 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
     report.skipped_non_tcp = skipped_non_tcp_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
+    // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
+    // DetectEngine::finish()'s own identical comment (detect_engine.cpp) and
+    // append_flow_state_eviction_reason's own comment (resource_limits.hpp).
+    if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
 
     std::unordered_set<std::string> exercised_conduits;
 
@@ -2256,6 +2261,15 @@ std::vector<std::pair<std::string, std::string>> ethernet_flow_violation_extensi
 }  // namespace
 
 void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
+    // F4 fix: see observation_incomplete_extension_fields's own comment (security_event_format.hpp)
+    // for why this sentinel line must come first, unconditionally on observation_truncated alone --
+    // a truncated run with zero violations would otherwise emit nothing here at all.
+    if (report.observation_truncated) {
+        out << render_cef_line("conduitscope-policy", "ObservationIncomplete", "Observation incomplete",
+                                kObservationIncompleteCefSeverity,
+                                observation_incomplete_extension_fields(report.truncation_reasons))
+            << "\n";
+    }
     for (const auto& f : report.flows) {
         if (f.verdict != FlowVerdict::Violation) continue;
         out << render_cef_line("conduitscope-policy", kPolicyViolationEventClassId, kPolicyViolationName,
@@ -2277,6 +2291,11 @@ void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
 }
 
 void write_policy_report_leef(std::ostream& out, const PolicyReport& report) {
+    if (report.observation_truncated) {
+        out << render_leef_line("conduitscope-policy", "ObservationIncomplete",
+                                 observation_incomplete_extension_fields(report.truncation_reasons))
+            << "\n";
+    }
     for (const auto& f : report.flows) {
         if (f.verdict != FlowVerdict::Violation) continue;
         auto fields = flow_violation_extension_fields(f);
@@ -2303,6 +2322,13 @@ void write_policy_report_syslog(std::ostream& out, const PolicyReport& report) {
                                                     kPolicyViolationName, kPolicyViolationCefSeverity, fields);
         out << render_rfc5424_line(kPolicyViolationCefSeverity, "policy", cef_payload) << "\n";
     };
+    if (report.observation_truncated) {
+        std::string cef_payload =
+            render_cef_line("conduitscope-policy", "ObservationIncomplete", "Observation incomplete",
+                             kObservationIncompleteCefSeverity,
+                             observation_incomplete_extension_fields(report.truncation_reasons));
+        out << render_rfc5424_line(kObservationIncompleteCefSeverity, "policy", cef_payload) << "\n";
+    }
     for (const auto& f : report.flows) {
         if (f.verdict == FlowVerdict::Violation) emit(flow_violation_extension_fields(f));
     }

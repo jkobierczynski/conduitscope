@@ -85,6 +85,19 @@ std::string render_leef_line(const std::string& device_product, const std::strin
     return out.str();
 }
 
+std::vector<std::pair<std::string, std::string>> observation_incomplete_extension_fields(
+    const std::vector<std::string>& truncation_reasons) {
+    std::ostringstream joined;
+    for (size_t i = 0; i < truncation_reasons.size(); ++i) {
+        if (i > 0) joined << "; ";
+        joined << truncation_reasons[i];
+    }
+    std::vector<std::pair<std::string, std::string>> fields;
+    fields.emplace_back("msg", joined.str());
+    fields.emplace_back("reasonCount", std::to_string(truncation_reasons.size()));
+    return fields;
+}
+
 std::string render_rfc5424_line(int severity_0_10, const std::string& msgid, const std::string& cef_payload) {
     constexpr int kFacilityLogAudit = 13;  // RFC 5424 section 6.2.1 -- see this file's header's own comment
     int pri = kFacilityLogAudit * 8 + cef_severity_to_rfc5424_severity(severity_0_10);

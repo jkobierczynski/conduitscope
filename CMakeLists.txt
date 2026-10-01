@@ -12467,6 +12467,101 @@ set_tests_properties(max_flow_state_entries_unset_still_pairs PROPERTIES
   PASS_REGULAR_EXPRESSION "authoritative pairing: response to transaction id 100"
   FAIL_REGULAR_EXPRESSION "no outstanding request found")
 
+# patch282 security review finding F4 ("resource limits are much better, but eviction can damage
+# analytical correctness"): the flow-state eviction `decode --max-flow-state-entries 1` already
+# proves above (session 2's request evicting session 1's ModbusFlowState) must ALSO surface as a
+# persistent, run-level OBSERVATION INCOMPLETE condition on every one of the four report engines
+# (DetectEngine/BaselineEngine/PolicyEngine/AssetInventoryEngine) -- not just as decode()'s own
+# per-session "no outstanding request found" symptom -- because an evicted session's next packet
+# looks exactly like a brand-new one to whichever of these engines is watching: a false "new
+# originator"/"new conduit" finding, a baseline/policy verdict that can't be trusted. Reusing
+# sample_resource_exhaustion_flow_state.pcap (build_resource_exhaustion_flow_state_sample,
+# tools/make_sample_pcap.py) rather than a new fixture -- same "evict session 1's state, then
+# session 1's own response re-creates and evicts session 2's state" cascade --max-flow-state-
+# entries 1 already produces above, which is why the eviction COUNT below is 2, not 1 (confirmed
+# against the real built binary, not assumed -- see append_flow_state_eviction_reason's own
+# comment, resource_limits.hpp, for why this is a single, centrally-worded reason line shared by
+# every call site below, so the wording can never drift between engines).
+#
+# `bash -c "...; echo EXITCODE=$?"` plus a PASS_REGULAR_EXPRESSION spanning from "OBSERVATION
+# INCOMPLETE" through to "EXITCODE=<N>" is this codebase's own established pattern for proving a
+# resource-limit ceiling's exit code (see detect_engine_limits_tracked_keys_cap_marks_detect_
+# incomplete and its siblings above) -- reused here rather than invented fresh.
+
+add_test(NAME detect_flow_state_eviction_marks_observation_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --max-flow-state-entries 1; echo EXITCODE=$?")
+set_tests_properties(detect_flow_state_eviction_marks_observation_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=6")
+
+add_test(NAME detect_flow_state_eviction_in_json_report
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --max-flow-state-entries 1 --format json)
+set_tests_properties(detect_flow_state_eviction_in_json_report PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"observation_truncated\": true,\n *\"truncation_reasons\": \\[\"flow-state eviction limit reached -- 2 state entries evicted")
+
+# F4 fix: before this, write_detection_report_cef (and its LEEF/syslog siblings) only ever emitted
+# one line per curated finding -- a truncated run with zero findings (exactly this fixture's own
+# case: eviction, not a detection technique, is what's being reported) would otherwise emit
+# NOTHING here at all, indistinguishable from a genuinely clean, complete run to anything watching
+# only this export stream. See observation_incomplete_extension_fields' own comment
+# (security_event_format.hpp).
+add_test(NAME detect_flow_state_eviction_in_cef_report
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --max-flow-state-entries 1 --format cef)
+set_tests_properties(detect_flow_state_eviction_in_cef_report PROPERTIES
+  PASS_REGULAR_EXPRESSION "CEF:0\\|conduitscope\\|conduitscope-detect\\|[^|]+\\|ObservationIncomplete\\|Observation incomplete\\|5\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1")
+
+add_test(NAME baseline_check_flow_state_eviction_marks_observation_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' baseline check '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --baseline-file '${CMAKE_CURRENT_SOURCE_DIR}/tests/empty_baseline.json' --max-flow-state-entries 1 2>&1; echo EXITCODE=$?")
+set_tests_properties(baseline_check_flow_state_eviction_marks_observation_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=5")
+
+add_test(NAME baseline_check_flow_state_eviction_in_leef_report
+  COMMAND conduitscope baseline check "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --baseline-file "${CMAKE_CURRENT_SOURCE_DIR}/tests/empty_baseline.json" --max-flow-state-entries 1 --format leef)
+set_tests_properties(baseline_check_flow_state_eviction_in_leef_report PROPERTIES
+  PASS_REGULAR_EXPRESSION "LEEF:2\\.0\\|conduitscope\\|conduitscope-baseline\\|[^|]+\\|ObservationIncomplete\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1")
+
+# `baseline learn` has no Report struct of its own to attach observation_truncated/
+# truncation_reasons to (it absorbs best-effort and writes the merged baseline file either way,
+# same Item 64 fix posture as engine.truncated() already has for its OWN three growth ceilings --
+# see run_baseline_learn's own comment, cli_main.cpp) -- so this is a diagnostic warning on
+# stderr, not an exit-code/report-field change, proven here against the identical wording the
+# other four engines share.
+add_test(NAME baseline_learn_flow_state_eviction_warns_diagnostically
+  COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/flow_state_eviction_baseline_learn_scratch.json' && '$<TARGET_FILE:conduitscope>' baseline learn '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/flow_state_eviction_baseline_learn_scratch.json' --max-flow-state-entries 1")
+set_tests_properties(baseline_learn_flow_state_eviction_warns_diagnostically PROPERTIES
+  PASS_REGULAR_EXPRESSION "warning: baseline observation of '.*' is INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted")
+
+add_test(NAME policy_validate_flow_state_eviction_marks_observation_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --policy '${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/compliant.yaml' --max-flow-state-entries 1; echo EXITCODE=$?")
+set_tests_properties(policy_validate_flow_state_eviction_marks_observation_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=6")
+
+add_test(NAME policy_validate_flow_state_eviction_in_syslog_report
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --policy "${CMAKE_CURRENT_SOURCE_DIR}/tests/policies/compliant.yaml" --max-flow-state-entries 1 --format syslog)
+set_tests_properties(policy_validate_flow_state_eviction_in_syslog_report PROPERTIES
+  PASS_REGULAR_EXPRESSION "<108>1 - - conduitscope - policy - CEF:0\\|conduitscope\\|conduitscope-policy\\|[^|]+\\|ObservationIncomplete\\|Observation incomplete\\|5\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1")
+
+add_test(NAME inventory_flow_state_eviction_marks_observation_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --max-flow-state-entries 1; echo EXITCODE=$?")
+set_tests_properties(inventory_flow_state_eviction_marks_observation_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=6")
+
+add_test(NAME inventory_flow_state_eviction_in_json_report
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --max-flow-state-entries 1 --format json)
+set_tests_properties(inventory_flow_state_eviction_in_json_report PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"observation_truncated\": true,\n *\"truncation_reasons\": \\[\"flow-state eviction limit reached -- 2 state entries evicted")
+
+# Unset (the default), across all four report engines: no eviction occurred, so none of them may
+# ever mention it -- byte-identical to this feature's absence, the same bar every other
+# resource_limits() field is held to (see max_flow_state_entries_unset_still_pairs above for
+# decode's own equivalent). One representative engine (detect) suffices: the fold-in is the exact
+# same append_flow_state_eviction_reason() call, reading the exact same global counter, at every
+# one of the four call sites.
+add_test(NAME detect_flow_state_eviction_unset_no_mention
+  COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap")
+set_tests_properties(detect_flow_state_eviction_unset_no_mention PROPERTIES
+  PASS_REGULAR_EXPRESSION "no findings"
+  FAIL_REGULAR_EXPRESSION "flow-state eviction|OBSERVATION INCOMPLETE")
+
 # ============================================================================================
 # IPv4/IPv6 fragment reassembly (Decoder::reassemble_ip_fragment, decoder.cpp; ROADMAP item 102).
 # tests/sample_ip_fragment_reassembly.pcap (tools/make_sample_pcap.py's own

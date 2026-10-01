@@ -2100,6 +2100,17 @@ std::vector<std::pair<std::string, std::string>> baseline_finding_extension_fiel
 }  // namespace
 
 void write_baseline_check_report_cef(std::ostream& out, const BaselineCheckReport& report) {
+    // F4 fix (patch282 security review): see observation_incomplete_extension_fields's own
+    // comment (security_event_format.hpp) for why this sentinel line must come first,
+    // unconditionally on observation_truncated alone -- a truncated run with zero findings
+    // (exactly the "CLEAN" case this engine's own text report already refuses to let read as an
+    // unqualified all-clear, above) would otherwise emit nothing here at all.
+    if (report.observation_truncated) {
+        out << render_cef_line("conduitscope-baseline", "ObservationIncomplete", "Observation incomplete",
+                                kObservationIncompleteCefSeverity,
+                                observation_incomplete_extension_fields(report.truncation_reasons))
+            << "\n";
+    }
     for (const auto& f : report.findings) {
         out << render_cef_line("conduitscope-baseline", baseline_verdict_name(f.verdict),
                                 baseline_verdict_display_name(f.verdict), baseline_verdict_to_cef_severity(f.verdict),
@@ -2109,6 +2120,11 @@ void write_baseline_check_report_cef(std::ostream& out, const BaselineCheckRepor
 }
 
 void write_baseline_check_report_leef(std::ostream& out, const BaselineCheckReport& report) {
+    if (report.observation_truncated) {
+        out << render_leef_line("conduitscope-baseline", "ObservationIncomplete",
+                                 observation_incomplete_extension_fields(report.truncation_reasons))
+            << "\n";
+    }
     for (const auto& f : report.findings) {
         auto fields = baseline_finding_extension_fields(f);
         fields.emplace_back("sev", std::to_string(baseline_verdict_to_cef_severity(f.verdict)));
@@ -2117,6 +2133,13 @@ void write_baseline_check_report_leef(std::ostream& out, const BaselineCheckRepo
 }
 
 void write_baseline_check_report_syslog(std::ostream& out, const BaselineCheckReport& report) {
+    if (report.observation_truncated) {
+        std::string cef_payload =
+            render_cef_line("conduitscope-baseline", "ObservationIncomplete", "Observation incomplete",
+                             kObservationIncompleteCefSeverity,
+                             observation_incomplete_extension_fields(report.truncation_reasons));
+        out << render_rfc5424_line(kObservationIncompleteCefSeverity, "baseline", cef_payload) << "\n";
+    }
     for (const auto& f : report.findings) {
         int cef_severity = baseline_verdict_to_cef_severity(f.verdict);
         std::string cef_payload =

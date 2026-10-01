@@ -16241,6 +16241,128 @@ it done as its own patch.
     above) -- confirming zero regressions anywhere, plus a clean-room extract-rebuild-test cycle,
     before delivery as a zip of touched/new files via the standing no-git-commit convention.
 
+113. **Fix F4: resource limits are much better, but eviction can damage analytical correctness.**
+    Jurgen's direct request immediately after item 112's own delivery, quoting the review's own
+    finding title verbatim: "Can you do F4 Resource limits are much better, but eviction can
+    damage analytical correctness." F4 (Medium, the review's own table labels it an "Architectural
+    weakness" rather than "Confirmed," since it isn't a bug in the sense F1/F2/F3 were) is the main
+    architectural issue the review found remaining after the resource-hardening work covered by
+    items 93-99/102-103 and others: `DecodeContext::flow_state<T>()`
+    (`protocol_decoder.hpp`) already caps total flow-state entries across every protocol's own
+    flow-state map at `kDefaultMaxFlowStateEntries` (250000, CLI-overridable via
+    `--max-flow-state-entries`), and once that cap is reached it evicts an arbitrary existing entry
+    -- the code's own comment is explicit that this is "not necessarily the oldest or
+    least-recently-used one," just the first entry found in the first non-empty bucket -- to make
+    room for a new one. That eviction policy is the right one for the memory-exhaustion problem
+    it solves, but the review's own words identify the different problem it creates: an attacker
+    who opens a flood of fake sessions can deliberately force a legitimate, in-progress session's
+    own flow state to be evicted, so that session's next real packet looks exactly like a
+    brand-new one to whatever is downstream -- a false "new originator"/"new conduit" finding,
+    missed request/response correlation, broken transaction pairing, or an incorrect baseline/
+    policy verdict, with nothing anywhere telling the operator that any of this happened. The
+    review's own "What I would add": when eviction occurs, create a persistent run-level
+    condition -- "OBSERVATION INCOMPLETE / flow-state limit reached / N state entries evicted" --
+    and propagate it into text, JSON, detect, baseline, policy, SIEM exports, and exit status,
+    extending the existing `kExitObservationIncomplete = 6` philosophy (already covering several
+    engines' own outright-refused observations) to state eviction as well.
+
+    **The fix, implementing the review's own suggestion directly.** A new thread-local eviction
+    counter in `resource_limits.hpp`/`.cpp` -- `flow_state_evictions()` / `note_flow_state_
+    eviction()` / `reset_flow_state_evictions()` -- deliberately mirrors this codebase's own
+    pre-existing `resource_limits()` global-accessor pattern exactly, for the same structural
+    reason that pattern exists in the first place: `ctx.flow_states = &registry_flow_state_;` is
+    set at roughly 34 separate call sites across `decoder.cpp`, so threading a new counter pointer
+    through `DecodeContext` itself would mean touching all 34; a thread-local accessor needs none
+    of them touched. `note_flow_state_eviction()` is called from the one place that matters --
+    `DecodeContext::flow_state<T>()`'s own eviction loop, immediately after the arbitrary entry is
+    erased -- and `reset_flow_state_evictions()` is called from `Decoder`'s constructor, right
+    alongside the pre-existing `set_resource_limits(options_.limits)` call, giving it the same
+    per-`Decoder`-instance lifetime that call already has. This was checked specifically against
+    `baseline learn`'s own multi-file loop (`run_baseline_learn`, `cli_main.cpp`), which constructs
+    a fresh `Decoder` (and a fresh `BaselineEngine`) per input file and already prints a per-file
+    `engine.truncated()`-based diagnostic warning immediately after that file's own packet loop --
+    confirming a per-Decoder-construction reset aligns exactly with that existing per-file
+    semantics, with no cross-file leakage.
+
+    A new free function, `append_flow_state_eviction_reason(std::vector<std::string>& reasons)`
+    (`resource_limits.cpp`), is the single source of the reason text every call site below shares,
+    so the wording can never drift between engines: "flow-state eviction limit reached -- N state
+    entr{y,ies} evicted during this capture (--max-flow-state-entries); an evicted session's next
+    packet looks exactly like a brand-new one, so detection/baseline/policy results for affected
+    sessions may be incomplete or misclassified." It appends directly to the caller's own output
+    vector and returns whether anything was appended, rather than being a method on any one
+    engine, because `DetectEngine::finish()`, `PolicyEngine::finish()`, and `AssetInventoryEngine::
+    finish()` are all `const` and so cannot call their own private, non-const `mark_truncated()`
+    -- but a `const` method mutating a vector passed to it by the caller (not `this`) is
+    perfectly fine. Each of the four engines' `finish()` (or, for baseline check,
+    `run_baseline_check` in `cli_main.cpp`, which builds `BaselineCheckReport` externally) now
+    folds this in right after copying its own existing `truncation_reasons_`, OR-ing the result
+    into `report.observation_truncated`. `run_baseline_learn` gained the identical fold-in as a
+    diagnostic stderr warning alongside its own pre-existing `engine.truncated()` warning, since
+    `baseline learn` has no `Report` struct of its own to attach a field to.
+
+    **A related gap found and closed along the way.** Auditing all three CEF/LEEF/syslog exporters
+    (`write_detection_report_*`/`write_baseline_check_report_*`/`write_policy_report_*`) while
+    wiring this up found that none of them had ever represented `observation_truncated`/
+    `truncation_reasons` at all -- each only ever iterated its own findings/flows list, so a
+    truncated run with zero findings produced zero SIEM events, silently indistinguishable from a
+    genuinely clean, complete run to anything watching only that export stream. A new shared
+    helper, `observation_incomplete_extension_fields()` (`security_event_format.hpp`/`.cpp`),
+    joins the truncation reasons into one `msg` field plus a `reasonCount` field; all three
+    exporters now emit one `ObservationIncomplete` sentinel event (CEF/LEEF "Medium" severity 5,
+    a fixed severity reflecting that eviction is a data-completeness condition, not itself a
+    finding to score) ahead of their own normal per-finding/per-flow lines whenever `report.
+    observation_truncated` is true. `AssetInventoryEngine` has no CEF/LEEF/syslog export at all
+    (confirmed via grep -- text/JSON only), so it needed no exporter change, only the `finish()`
+    fold-in above.
+
+    **Deliberately left alone.** `inventory_merge.cpp`'s `merge` command already generically
+    merges `truncation_reasons`/`observation_truncated` across input JSON reports by exact-text
+    dedup -- the new eviction-reason line merges correctly through that existing logic with zero
+    code changes, since it is just one more string in the same vector by the time `merge` ever
+    sees it.
+
+    **Tests.** Eleven new `CMakeLists.txt` entries against `sample_resource_exhaustion_flow_
+    state.pcap` (its own existing two-session fixture) with `--max-flow-state-entries 1`, which was
+    confirmed against the real built binary -- not assumed -- to produce exactly **2** evictions,
+    not 1: session 2's request evicts session 1's state, then session 1's own later response,
+    finding its own state gone, creates a new entry for itself that itself evicts session 2's
+    just-created state. `detect_flow_state_eviction_marks_observation_incomplete` (text, OBSERVATION
+    INCOMPLETE through exit code 6), `detect_flow_state_eviction_in_json_report`,
+    `detect_flow_state_eviction_in_cef_report` (the new sentinel event), `baseline_check_flow_
+    state_eviction_marks_observation_incomplete` (exit code 5, `kExitBaselineIncomplete`'s own
+    priority), `baseline_check_flow_state_eviction_in_leef_report`, `baseline_learn_flow_state_
+    eviction_warns_diagnostically` (the stderr-only path, writing its scratch baseline file under
+    `${CMAKE_CURRENT_BINARY_DIR}` with an `rm -f` guard, matching this codebase's own established
+    scratch-output-file convention), `policy_validate_flow_state_eviction_marks_observation_
+    incomplete` / `policy_validate_flow_state_eviction_in_syslog_report` (both reusing the existing
+    `tests/policies/compliant.yaml` fixture, already confirmed to permit this pcap's own
+    HMI(192.168.1.50)->PLC(192.168.1.10) Modbus/502 traffic), `inventory_flow_state_eviction_
+    marks_observation_incomplete` / `inventory_flow_state_eviction_in_json_report`, and one
+    regression/sanity test, `detect_flow_state_eviction_unset_no_mention`, proving that with
+    `--max-flow-state-entries` left at its default (no eviction possible), none of the four engines
+    ever mentions flow-state eviction -- byte-identical to this feature's absence, the same bar
+    every other `resource_limits()` field is already held to.
+
+    **Docs.** `docs/reviews/2026-09-chatgpt-security-review-patch282.md`'s own intro paragraph
+    updated to mark F4 confirmed accurate and fixed here, cross-referencing this item, and noting
+    (unlike F3's own write-up) that F4's review table row and body section already agree with each
+    other, so no table-vs-body discrepancy note was needed for this one.
+
+    **Verification.** Same standing bar as items 105-112: full CTest across all four standing
+    build configs (default GCC `build`: 2434, +11 over item 112's 2423; `-DCONDUITSCOPE_ENABLE_
+    LIVE_CAPTURE=OFF` `build_nolive`: 2419, +11 over 2408; MinGW cross-compile `build-mingw`,
+    build-only, configured test count 2419, +11 over 2408, matching `build_nolive`'s count rather
+    than `build`'s -- both configurations have live capture disabled; Clang ASan/UBSan `build-fuzz`:
+    2512 total (2434 non-corpus tests, matching `build`'s count, plus the 78 pre-existing `*_
+    corpus_regression` tests unique to this config, including `fuzz_packet_decode_corpus_
+    regression` and `fuzz_modbus_corpus_regression` -- both of which exercise the exact
+    `DecodeContext::flow_state<T>()` eviction path this fix touches), all passing clean under
+    ASan/UBSan) -- confirming zero regressions anywhere and no new crash/UB surface from the new
+    thread-local counter, plus a clean-room extract-rebuild-test cycle (2434/2434, matching
+    `build`'s count exactly), before delivery as a zip of touched/new files via the standing
+    no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

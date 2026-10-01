@@ -1410,6 +1410,12 @@ public:
     // comment and docs/reviews/2026-09-chatgpt-security-review-patch160.md's finding 5.
     explicit Decoder(DecodeOptions options) : options_(std::move(options)) {
         set_resource_limits(options_.limits);
+        // F4 fix (patch282 security review): give flow-state-eviction tracking the same per-
+        // Decoder-instance lifetime resource_limits() itself just got above -- see
+        // flow_state_evictions()'s own comment (resource_limits.hpp) for why this must reset here
+        // rather than accumulate indefinitely across every Decoder a long-running process (e.g.
+        // `baseline learn`'s own one-Decoder-per-input-file loop) ever constructs.
+        reset_flow_state_evictions();
         attack_state_.flood_threshold = options_.flood_threshold;
         ipv6_attack_state_.flood_threshold = options_.flood_threshold;
     }

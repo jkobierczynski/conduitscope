@@ -294,7 +294,7 @@ flag on `decode`; see `info` below.
 | `--max-decoded-objects N` | `0` (leave every site at its own default) | Override every per-message decoded-object/value/list-entry cap at once (~43 individually-named constants across DNP3/IEC104/GOOSE/EtherNet-IP/S7comm-Plus/MQTT/decoder.cpp's own summary lists, plus the 9 duplicated 50-entry list caps shared by EIGRP/OSPF/PIM/IGMP/ICMP/IGRP/RIP/VRRP/HSRP). Too many constants to enumerate here -- see docs/DEVELOPMENT.md item 7 for the full mapping. |
 | `--max-coalesced-messages N` | `0` (leave every site at its own default) | Override every "N application-layer messages found coalesced in one TCP/UDP payload" cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, and OPC UA (all default 50). |
 | `--max-active-flows N` | `0` (built-in default 100,000) | Cap the number of distinct TCP flows the general cross-segment reassembly path (decoder.cpp) tracks state for at once, regardless of how many distinct flows the capture contains -- an existing flow's own state being updated never counts against this. A flow that never needs reassembly at all is never tracked in the first place either way. See docs/DEVELOPMENT.md's security review write-up. |
-| `--max-flow-state-entries N` | `0` (built-in default 250,000) | Cap the TOTAL number of distinct sessions/flows tracked at once across every protocol's own state (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM, Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and more), combined. |
+| `--max-flow-state-entries N` | `0` (built-in default 250,000) | Cap the TOTAL number of distinct sessions/flows tracked at once across every protocol's own state (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM, Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and more), combined. Past this cap, an arbitrary existing entry (not necessarily the oldest) is evicted to make room for a new one -- see `detect`'s "Flow-state eviction is a second, separate way..." paragraph below for how this is now also surfaced as `*** OBSERVATION INCOMPLETE ***`/`observation_truncated` in `detect`/`baseline check`/`baseline learn`/`policy validate`/`inventory` (patch282 security review finding F4). |
 | `--max-active-fragment-groups N` | `0` (built-in default 5,000) | Cap the number of distinct in-progress IP fragment reassembly groups (decoder.cpp) tracked at once, regardless of how many distinct fragmented datagrams the capture contains -- an existing group's own state being updated never counts against this. See "IP fragment reassembly" under OUTPUT FORMATS below. |
 
 Every option in this block is a decode-time resource-exhaustion safety valve, not
@@ -676,7 +676,10 @@ text, and the process exits `kExitObservationIncomplete` (6) -- **taking priorit
 alongside `observation_truncated: true` means the capture was only PARTLY observed, not confirmed
 clean -- always check this exit code (or `observation_truncated` in JSON) before trusting a
 `COMPLIANT` verdict. The compiled defaults are sized generously above what this project's own
-fixtures and any reasonably-sized single-capture `policy validate` run need.
+fixtures and any reasonably-sized single-capture `policy validate` run need. Flow-state eviction
+(`--max-flow-state-entries`) marks `policy validate`'s own report incomplete the same way,
+independently of these four ceilings -- see `detect`'s "Resource bounds and OBSERVATION
+INCOMPLETE" above, "Flow-state eviction is a second, separate way..." paragraph.
 
 With `-i`, the report's `capture:` line shows `live:<interface>` in place of a
 file path, and Ctrl+C (or `--duration` elapsing) stops the capture and still
@@ -816,7 +819,10 @@ which flag raises it, the JSON report gets `observation_truncated: true` plus a
 (6) -- taking priority over `inventory`'s own ordinary exit code 0 (see EXIT STATUS below). Always
 check this exit code (or `observation_truncated` in JSON) before trusting an `inventory` report as
 a complete picture of the capture. The compiled defaults are sized generously above what this
-project's own fixtures and any reasonably-sized single-capture `inventory` run need.
+project's own fixtures and any reasonably-sized single-capture `inventory` run need. Flow-state
+eviction (`--max-flow-state-entries`) marks `inventory`'s own report incomplete the same way,
+independently of these four ceilings -- see `detect`'s "Resource bounds and OBSERVATION
+INCOMPLETE" above, "Flow-state eviction is a second, separate way..." paragraph.
 
 Like `policy validate`, `inventory` decodes the capture exactly as `decode`
 would and does not change or duplicate any decoding logic -- see
@@ -1627,6 +1633,31 @@ can be misled into reading an incomplete capture as a clean one; always check th
 compiled defaults are sized generously above what this project's own fixtures and any
 reasonably-sized single-capture `detect` run need -- raise the relevant `--max-detect-*` flag
 and re-run only if a real, very large or very address-diverse capture legitimately needs it.
+
+**Flow-state eviction is a second, separate way a report can be marked incomplete.**
+`--max-flow-state-entries` (shared with `decode`, see `decode`'s own OPTIONS above) caps the
+TOTAL number of per-protocol session/flow-state entries tracked across the whole capture --
+unlike every ceiling above, which only ever refuses a genuinely *new* key once hit, this one
+instead *evicts* an arbitrary already-tracked entry (not necessarily the oldest one) to make room
+for a new session once the cap is reached, so that legitimate memory use stays bounded even under
+a sustained flood of distinct sessions. The cost of that eviction policy: an evicted session's own
+state is gone, so its next real packet looks exactly like the start of a brand-new session to
+whatever is watching -- a false "new originator"/"new conduit" finding, a missed request/response
+pairing, or an incorrect baseline/policy verdict for that one session, with no guarantee the
+eviction even involved an attacker (a legitimately huge number of concurrent sessions can trigger
+it too). Because of this, a flow-state eviction ALSO marks the run as `*** OBSERVATION
+INCOMPLETE ***`/`observation_truncated: true` (with a `truncation_reasons` entry naming the
+exact eviction count and `--max-flow-state-entries`) and returns `kExitObservationIncomplete` (6)
+here, in `baseline check` (priority 5, see below), and in `inventory` and `policy validate` (see
+each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection) -- identically and
+independently of whether that subcommand's own engine-specific ceilings above were ever reached.
+`baseline learn` has no report of its own to mark, so it instead prints the same wording as a
+`warning: ... is INCOMPLETE` line to stderr, alongside its own pre-existing truncation warning.
+Each of detect's/baseline's/policy's own CEF/LEEF/syslog exports also gains a dedicated
+`ObservationIncomplete` sentinel event under this condition, so a truncated-but-otherwise-clean
+run is never silently invisible to a SIEM watching only that export stream (previously, a run with
+zero findings produced zero SIEM events regardless of completeness; `inventory` has no CEF/LEEF/
+syslog export to extend).
 
 #### Two kinds of finding, three independent dimensions
 
@@ -8075,8 +8106,8 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
 | 2 | *(currently unused)* Reserved rather than reused: an earlier groundwork release used this for `policy validate` while it was still a documented stub with no evaluation engine behind it. Nothing returns it now that `policy validate` is fully implemented, but the value is left unclaimed in case a future documented-stub command needs it again. |
 | 3 | `policy validate` only: the capture and policy file were both readable and valid, but the capture is NON-COMPLIANT -- `PolicyReport::compliant()` is false (at least one violation and/or unclassified flow was found), OR `--strict-it-protocols` was given and the report's `notable_protocols` finding is non-empty (see POLICY FILE FORMAT's "Notable IT protocols" subsection -- `compliant()` itself is never affected by that finding; this exit code is the only place `--strict-it-protocols` has any effect). Distinct from 1 specifically so a script can tell "ran fine, found problems" apart from "couldn't even run". Never returned by `inventory`/`detect` (see code 0 above); superseded by code 6 when the observation was also truncated (code 6 takes priority -- see below). |
 | 4 | `baseline check` only: the capture and baseline file were both readable and valid, but `BaselineCheckReport::compliant()` is false (at least one finding -- a control-plane operation, a new conduit, or a new/out-of-range operation not covered by the baseline). Deliberately its own value rather than reusing code 3 -- a caller scripting against both subcommands needs to tell which one flagged something without also parsing output. Superseded by code 5 when the observation was also truncated. |
-| 5 | `baseline check` only: `BaselineCheckReport::observation_truncated` is true -- this run's own `BaselineEngine` hit at least one of its four internal growth ceilings (`--max-baseline-tcp-sessions`/`--max-baseline-conduits`/`--max-baseline-operations-per-conduit`/`--max-baseline-ranges-per-operation`), so the capture was only PARTLY observed. Takes priority over both 0 and 4: a truncated observation can only ever produce false negatives, so a plain 0/4 here would risk reading a truncated capture as a clean or fully-characterized one. Treat this as "re-run with a higher `--max-baseline-*` limit," not as clean and not as an ordinary anomaly (code 4). `baseline learn` itself always exits 0 on success (it writes a best-effort, possibly-partial baseline rather than failing outright) but still prints a `warning: ... is INCOMPLETE` line to stderr under the same truncation condition -- check stderr, not the exit code, for `learn`. |
-| 6 | `detect`, `inventory`, and `policy validate` only: the equivalent of code 5 above for these three subcommands' own engines (patch257 security review finding 3) -- `DetectEngine`/`AssetInventoryEngine`/`PolicyEngine` hit at least one of their own internal growth ceilings (`--max-detect-*`/`--max-inventory-*`/`--max-policy-*` respectively -- see each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection above), so the report reflects only PART of what the capture actually contains. Takes priority over every other exit code these three subcommands return, including 0, 3, and (implicitly) a `policy validate` "COMPLIANT" verdict -- the same "truncation can only produce false negatives, so it must never be masked by a clean-looking result" reasoning as code 5. Not returned by `baseline check`, which keeps its own pre-existing code 5 for this condition (an already-shipped exit code's value is never repurposed once released, to avoid breaking scripted callers). |
+| 5 | `baseline check` only: `BaselineCheckReport::observation_truncated` is true -- this run's own `BaselineEngine` hit at least one of its four internal growth ceilings (`--max-baseline-tcp-sessions`/`--max-baseline-conduits`/`--max-baseline-operations-per-conduit`/`--max-baseline-ranges-per-operation`), **or** `--max-flow-state-entries` was reached and a flow-state entry was evicted (patch282 security review finding F4 -- see `detect`'s "Flow-state eviction is a second, separate way..." paragraph above), so the capture was only PARTLY observed. Takes priority over both 0 and 4: a truncated observation can only ever produce false negatives, so a plain 0/4 here would risk reading a truncated capture as a clean or fully-characterized one. Treat this as "re-run with a higher `--max-baseline-*`/`--max-flow-state-entries` limit," not as clean and not as an ordinary anomaly (code 4). `baseline learn` itself always exits 0 on success (it writes a best-effort, possibly-partial baseline rather than failing outright) but still prints a `warning: ... is INCOMPLETE` line to stderr under either truncation condition -- check stderr, not the exit code, for `learn`. |
+| 6 | `detect`, `inventory`, and `policy validate` only: the equivalent of code 5 above for these three subcommands' own engines (patch257 security review finding 3) -- `DetectEngine`/`AssetInventoryEngine`/`PolicyEngine` hit at least one of their own internal growth ceilings (`--max-detect-*`/`--max-inventory-*`/`--max-policy-*` respectively -- see each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection above), **or** `--max-flow-state-entries` was reached and a flow-state entry was evicted (patch282 security review finding F4), so the report reflects only PART of what the capture actually contains. Takes priority over every other exit code these three subcommands return, including 0, 3, and (implicitly) a `policy validate` "COMPLIANT" verdict -- the same "truncation can only produce false negatives, so it must never be masked by a clean-looking result" reasoning as code 5. Not returned by `baseline check`, which keeps its own pre-existing code 5 for this condition (an already-shipped exit code's value is never repurposed once released, to avoid breaking scripted callers). |
 | 7 | `capture` only (patch257 security review finding 2): the run stopped because the write side failed mid-capture -- `RotatingPcapWriter::write_packet` threw, e.g. the disk filled up, a permission changed, or the target directory disappeared out from under an unattended run -- rather than because the requested stop condition (Ctrl+C, `--duration`, `--max-packets`) was reached. A prominent `*** CAPTURE INCOMPLETE ***` banner on stderr names the underlying problem; every already-rotated file up to that point is intact. Distinct from code 1: code 1 means this run never produced any evidence at all (bad arguments, the interface couldn't be opened, the initial `--directory` didn't exist), while code 7 means real capture happened first and then coverage was lost partway through. See `capture`'s own "Disk and rotation failure reporting" subsection above. |
 
 Non-fatal per-packet parse issues (without `--strict`) do not affect the exit
