@@ -363,9 +363,15 @@ top-level protocol name rather than a per-protocol field table.
 If a field's protocol layer isn't present on a given packet (e.g.
 `modbus.func_code == 16` against a DNP3 packet), the comparison is simply
 `false`, never an error -- the same as Wireshark. A malformed expression
-(unknown field, type mismatch, unbalanced parens, unterminated string) is
-reported as a CLI error (nonzero exit, before any packet is read), not a
-silent no-match.
+(unknown field, type mismatch, unbalanced parens, unterminated string, or an
+invalid regular expression given to `matches`) is reported as a CLI error
+(nonzero exit, before any packet is read, before a live `-i` capture is even
+opened), not a silent no-match.
+
+`matches`'s own regular expression is compiled exactly once, at the same
+point every other part of the expression is checked (before any packet is
+read) -- not reconstructed on every packet a `matches` clause is evaluated
+against, which would scale `-Y`'s own cost with capture size for no reason.
 
 `ip.src`/`ip.dst` compare as exact text only in this pass -- no CIDR or
 range matching (`ip.src == 10.1.2.0/24` is not supported); only `==`/`!=`

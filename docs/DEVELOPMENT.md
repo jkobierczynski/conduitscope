@@ -16021,6 +16021,104 @@ it done as its own patch.
     test cycle and a manual real-capture smoke test confirming the new filename format end to end,
     before delivery as a zip of touched/new files via the standing no-git-commit convention.
 
+111. **Fix F2: display-filter `matches` recompiled its regex every packet, and an invalid regex
+    survived compilation.** Jurgen's direct request, immediately after item 110's own delivery:
+    "Now do F2." F2 (Medium/High) is the review's own second-most-urgent finding, right behind F1:
+    `CompiledDisplayFilter`'s own name implies a `matches` clause's regex is compiled once, but
+    `evaluate()`'s `Matches` case (`display_filter_parser.cpp`) actually did `std::regex
+    re(node.literal.string_value);` -- reconstructing the regex from its source text -- on every
+    single call, i.e. once per packet a `matches` clause was evaluated against. For a
+    million-packet capture, that is a million redundant regex constructions for one filter
+    expression, exactly the opposite of what the `CompiledDisplayFilter` abstraction's own name
+    promises. Worse, `type_check()` (the function `compile_display_filter()` already runs once,
+    before any packet is read, to catch an unknown field or a type mismatch) never validated the
+    regex's own syntax -- an invalid regex compiled fine, then failed silently (caught by a
+    per-packet `catch (const std::regex_error&) { return false; }` inside `evaluate()`) on every
+    packet for the rest of the run, with no error ever surfaced to the operator.
+
+    **The fix, exactly as the review itself suggested.** `FilterNode` (the AST node type,
+    `display_filter_parser.cpp`) gained one new field: `std::optional<std::regex>
+    compiled_regex;` -- set once, in `type_check()`'s own `Matches` case, the same place every
+    other `matches`/`contains` type/field check already happens. `type_check()`'s signature
+    changed from `const FilterNode&` to `FilterNode&` (every caller -- its own recursive calls, and
+    `compile_display_filter()`'s initial call against the still-mutable parsed AST -- already held
+    a non-const reference at that point regardless, so this costs nothing) specifically so this one
+    case can write into the node it is checking. Compiling the regex here means a syntactically
+    invalid one now throws `std::runtime_error` immediately -- caught by `compile_display_filter()`'s
+    own existing outer `try`/`catch (const std::exception&)`, the same path every other compile-time
+    display-filter error already takes -- so it is rejected before `run_decode` is even called,
+    which in turn means before a live `-i` interface is ever opened, not merely before the packet
+    loop starts. `evaluate()`'s own `Matches` case shrank to a single line,
+    `std::regex_search(v->string_value, *node.compiled_regex)` -- no construction, no try/catch, no
+    per-packet cost at all. `node.compiled_regex` is safe to dereference unconditionally there: a
+    `CompiledDisplayFilter` can only ever be produced by `compile_display_filter()` (confirmed by
+    grep -- its constructor is public, but `FilterNode` itself is forward-declared outside this one
+    translation unit, so nothing else can fabricate one), and `compile_display_filter()` always
+    runs `type_check()` first, which throws (so `compile_display_filter()` returns `std::nullopt`
+    instead) for any `Matches` node whose regex failed to compile.
+
+    **Scope.** `Contains` (the `contains` substring operator, a different `FilterNodeKind`) was
+    already a plain `std::string::find` with no construction cost at all and needed no change --
+    only `Matches`'s own `type_check` case gained the new regex-compilation step; `Contains`'s case
+    is untouched, just split back out into its own `switch` arm (the two were previously combined
+    in one `case FilterNodeKind::Contains: case FilterNodeKind::Matches:` block, sharing only the
+    field-lookup/kind-check logic that both still need).
+
+    **Deliberately not pursued: F2's own "one further hardening point."** The review separately
+    suggests restricting `matches`'s own regex syntax, or swapping `std::regex` for a bounded/
+    linear-time engine, as defense against a pathological (catastrophic-backtracking) pattern
+    pinning CPU -- but immediately qualifies this itself: "The regex itself isn't supplied by the
+    network attacker... this isn't a remote RCE/DoS." A `-Y` expression is operator-authored and
+    supplied on the local command line, the same trust boundary this tool's own `-f`/BPF filter,
+    `--policy` YAML, and `-d/--decode-as` rules already sit inside -- not something the codebase
+    treats as adversarial input anywhere else. Tracked as a deliberately-scoped-out hardening idea
+    (not a confirmed defect, matching this review's own severity framing for it), not acted on
+    here; F3 (the parser's own lack of explicit nesting/length complexity limits, the review's own
+    next finding, directly related to this same "operator-authored expression, not yet treated as
+    adversarial input" question) is the more natural place to revisit this, if and when it's taken
+    up.
+
+    **Tests.** Two new `CMakeLists.txt` entries, both using a deliberately-invalid, unterminated
+    character class (`"[abc"`, invalid in `std::regex`'s own default ECMAScript grammar) as the
+    malformed pattern: `decode_display_filter_error_invalid_regex_rejected_at_compile_time` (an
+    offline `-r` read -- the regex error is reported, exit code 1, before any packet line is
+    printed, joining the existing unknown-field/type-mismatch/unbalanced-paren/unterminated-string
+    block of malformed-expression regression tests); and
+    `decode_display_filter_error_invalid_regex_rejected_before_live_interface_opens` (the identical
+    expression against `-i lo` instead of `-r`, deliberately with no `CONDUITSCOPE_HAVE_PCAP`/`UNIX`
+    gate unlike every real-capture test elsewhere in this file, specifically BECAUSE this must never
+    reach libpcap at all if the fix is correct -- a `FAIL_REGULAR_EXPRESSION` rules out every
+    message a live-capture attempt could otherwise produce instead (`"live capture is not
+    available|requires root|Operation not permitted|no such device"`), so this test would fail
+    loudly, not silently, if the ordering ever regressed). The existing
+    `decode_display_filter_matches_regex` CTest case (a valid regex, unchanged behavior) continues
+    to pass unmodified, confirming the fix is purely structural -- no change in which packets a
+    valid `matches` expression actually matches. No dedicated performance/timing regression test
+    was added -- this codebase's own testing conventions deliberately avoid timing-based CTest
+    assertions (see `RotationPolicy::rotate_seconds`'s own comment, item 110's own `now_source` test
+    seam, for the identical reasoning) -- so the "compiled once, not once per packet" claim is
+    verified by code inspection (the single `std::regex_search` line left in `evaluate()`, with no
+    construction anywhere in it) rather than a benchmark. `fuzz_display_filter` (already-existing
+    libFuzzer harness, `compile_display_filter` only) was re-run against its full seed corpus
+    (62k+ executions, 20 seconds, under `build-fuzz`'s ASan/UBSan instrumentation) to confirm the
+    new `type_check()` throw path and the `FilterNode::compiled_regex` field introduce no new
+    crash/UB surface.
+
+    **Docs.** `docs/USER_GUIDE.md`'s "Display filters" section: the "malformed expression" sentence
+    now names an invalid `matches` regex alongside unknown-field/type-mismatch/unbalanced-paren/
+    unterminated-string, and explicitly states rejection happens before a live `-i` capture is even
+    opened; a new short paragraph notes the regex is compiled once, not per packet.
+    `docs/reviews/2026-09-chatgpt-security-review-patch282.md`'s own intro paragraph updated to mark
+    F2 confirmed accurate and fixed here, cross-referencing this item.
+
+    **Verification.** Same standing bar as items 105-110: full CTest across all four standing build
+    configs (default GCC `build`; Clang ASan/UBSan `build-fuzz`, plus the `fuzz_display_filter`
+    corpus re-run noted above; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`; MinGW
+    cross-compile `build-mingw`, build-only), confirming the exact expected +2 test count with zero
+    regressions (2414/2399/2414/2492 across the four configs respectively), plus a clean-room
+    extract-rebuild-test cycle, before delivery as a zip of touched/new files via the standing
+    no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

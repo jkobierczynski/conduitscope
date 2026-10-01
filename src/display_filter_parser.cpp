@@ -264,6 +264,15 @@ public:
     CompareOp cmp_op = CompareOp::Eq;        // Compare only
     FilterValue literal;                     // Compare/Contains/Matches rhs
     std::vector<FilterValue> literal_set;    // InSet
+    // patch-282 security review finding F2 ("matches regex is compiled once per packet, not once
+    // per filter"): Matches only. Compiled exactly once, in type_check() below, at
+    // compile_display_filter() time -- before a single packet is read, let alone the capture
+    // opened -- rather than reconstructed from `literal.string_value` on every evaluate() call.
+    // std::nullopt for every OTHER node kind, and for a Matches node whose regex failed to compile
+    // (type_check() throws in that case, so compile_display_filter() returns std::nullopt and no
+    // CompiledDisplayFilter holding this node is ever handed back to a caller -- see evaluate()'s
+    // own Matches case for why it can therefore dereference this unconditionally).
+    std::optional<std::regex> compiled_regex;
 };
 
 namespace conduitscope {
@@ -465,10 +474,18 @@ const char* kind_text(FilterValueKind k) {
     return "?";
 }
 
-// Type-checks one AST node (recursively) against the field registry. Throws std::runtime_error
-// with an already-formatted message on any mismatch -- see this file's own compile_display_filter
-// for how the message is finished and returned to the caller.
-void type_check(const FilterNode& node, const FieldRegistry& registry, const std::string& expr) {
+// Type-checks one AST node (recursively) against the field registry, AND -- for a Matches node
+// only -- compiles its regex into node.compiled_regex (patch-282 security review finding F2: a
+// regex literal is compiled here, exactly once, rather than reconstructed from source text on
+// every evaluate() call in the packet loop; an invalid regex is therefore also rejected here,
+// before a single packet is read, rather than merely caught-and-silently-failed per packet as it
+// used to be). Throws std::runtime_error with an already-formatted message on any mismatch -- see
+// this file's own compile_display_filter for how the message is finished and returned to the
+// caller. Takes `node` by non-const reference specifically so the Matches case below can write
+// into it -- every caller (this function's own recursive calls, and compile_display_filter()'s
+// initial call against the still-mutable `root` before it is wrapped in `shared_ptr<const
+// FilterNode>`) already holds a non-const FilterNode at this point, so this costs nothing.
+void type_check(FilterNode& node, const FieldRegistry& registry, const std::string& expr) {
     switch (node.kind) {
         case FilterNodeKind::And:
         case FilterNodeKind::Or:
@@ -492,7 +509,20 @@ void type_check(const FilterNode& node, const FieldRegistry& registry, const std
             }
             return;
         }
-        case FilterNodeKind::Contains:
+        case FilterNodeKind::Contains: {
+            const FieldExtractor* ext = registry.lookup(node.field_name);
+            if (!ext) {
+                throw std::runtime_error("field '" + node.field_name + "' is not a recognized "
+                    "display-filter field");
+            }
+            FilterValueKind fk = registry.kind_of(node.field_name);
+            if (fk != FilterValueKind::String) {
+                throw std::runtime_error("'" + node.field_name + "' is a " + std::string(kind_text(fk)) +
+                    " field and does not support contains/matches (only a string field does, e.g. "
+                    "modbus.func_name contains \"Read\")");
+            }
+            return;
+        }
         case FilterNodeKind::Matches: {
             const FieldExtractor* ext = registry.lookup(node.field_name);
             if (!ext) {
@@ -504,6 +534,19 @@ void type_check(const FilterNode& node, const FieldRegistry& registry, const std
                 throw std::runtime_error("'" + node.field_name + "' is a " + std::string(kind_text(fk)) +
                     " field and does not support contains/matches (only a string field does, e.g. "
                     "modbus.func_name contains \"Read\")");
+            }
+            // F2 fix: compile the regex HERE, once, rather than leaving it to be reconstructed from
+            // node.literal.string_value on every evaluate() call in the packet loop (the actual bug
+            // this finding names) -- and, as a direct consequence, an invalid regex is now rejected
+            // right here, before compile_display_filter() ever returns successfully, rather than
+            // surviving compilation and then silently failing (via evaluate()'s old per-packet
+            // try/catch) on every single packet for the rest of the run.
+            try {
+                node.compiled_regex.emplace(node.literal.string_value);
+            } catch (const std::regex_error& e) {
+                throw std::runtime_error("'" + node.field_name + "' matches \"" +
+                    node.literal.string_value + "\" is not a valid regular expression (" +
+                    e.what() + ")");
             }
             return;
         }
@@ -595,15 +638,14 @@ bool evaluate(const FilterNode& node, const DecodedPacket& dp, const FieldRegist
             if (!ext) return false;
             std::optional<FilterValue> v = (*ext)(dp);
             if (!v) return false;
-            try {
-                std::regex re(node.literal.string_value);
-                return std::regex_search(v->string_value, re);
-            } catch (const std::regex_error&) {
-                // An invalid regex was already caught at compile time (type_check doesn't validate
-                // regex syntax today -- see this function's own limitation note) -- fail closed
-                // (no match) rather than propagating an exception out of the packet loop.
-                return false;
-            }
+            // F2 fix: node.compiled_regex was compiled exactly once, in type_check(), at
+            // compile_display_filter() time -- never reconstructed here, in the packet loop.
+            // Unconditionally set for any Matches node reachable here: type_check() throws (so
+            // compile_display_filter() returns std::nullopt, and no CompiledDisplayFilter wrapping
+            // this node is ever produced) if the regex failed to compile, and FilterNode has no
+            // public constructor outside this translation unit for a caller to fabricate one that
+            // skipped type_check() -- see CompiledDisplayFilter's own constructor comment.
+            return std::regex_search(v->string_value, *node.compiled_regex);
         }
         case FilterNodeKind::InSet: {
             const FieldExtractor* ext = registry.lookup(node.field_name);

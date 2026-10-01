@@ -17587,6 +17587,35 @@ add_test(NAME decode_display_filter_error_unterminated_string
 set_tests_properties(decode_display_filter_error_unterminated_string PROPERTIES
   PASS_REGULAR_EXPRESSION "error: display filter '.*' '.*abc' has an unterminated string literal")
 
+# patch-282 security review finding F2's own second half ("regex syntax isn't validated during
+# compilation... reject invalid regex syntax before opening the capture"): an invalid regex now
+# fails compile_display_filter() itself -- the same "fail fast, once, before the loop" pass that
+# already catches an unknown field/type mismatch above -- rather than surviving compilation and
+# then silently failing (no match, no error) on every single packet for the rest of the run, which
+# is what it did before this fix (see the Matches case's own std::regex_error catch that used to
+# live in evaluate(), now removed). "[abc" is an unterminated character class, invalid in
+# std::regex's own ECMAScript grammar (the default, and this codebase's choice -- see
+# display_filter_parser.cpp's own Matches case in type_check()).
+add_test(NAME decode_display_filter_error_invalid_regex_rejected_at_compile_time
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "modbus.func_name matches \"[abc\"")
+set_tests_properties(decode_display_filter_error_invalid_regex_rejected_at_compile_time PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter '.*' 'modbus\\.func_name' matches \"\\[abc\" is not a valid regular expression")
+
+# The identical compile-time rejection applies whether the filter will run against an offline read
+# (-r, above) or a live interface (-i) -- proving this by reaching for -i lo specifically (rather
+# than asserting on ordering with -r alone) confirms the invalid regex is caught before `capture`'s
+# own libpcap interface-open step ever runs at all, not merely before the packet loop starts: if
+# compile_display_filter() ran AFTER opening the interface, this exact command line would instead
+# either hang waiting for loopback traffic (no --duration/--max-packets given) or, without root/
+# CAP_NET_RAW, fail with a permissions error first -- neither of which this regex error could ever
+# be confused with. Unconditional (no CONDUITSCOPE_HAVE_PCAP/UNIX gate, unlike every actual-capture
+# test elsewhere in this file) because this never reaches libpcap at all if the fix is correct.
+add_test(NAME decode_display_filter_error_invalid_regex_rejected_before_live_interface_opens
+  COMMAND conduitscope decode --interface lo -Y "modbus.func_name matches \"[abc\"")
+set_tests_properties(decode_display_filter_error_invalid_regex_rejected_before_live_interface_opens PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: display filter '.*' 'modbus\\.func_name' matches \"\\[abc\" is not a valid regular expression"
+  FAIL_REGULAR_EXPRESSION "live capture is not available|requires root|Operation not permitted|no such device")
+
 # Numeric-field-mirroring regression tests (display_filter.hpp's Phase-4 fix: S7CommResult/
 # Dnp3Result/Iec104Result/MmsFrame each previously exposed only a rendered name string, no raw
 # numeric code) -- confirms both the new -T json field and the corresponding -Y filter field work.

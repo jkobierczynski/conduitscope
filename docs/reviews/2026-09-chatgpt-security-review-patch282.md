@@ -41,11 +41,28 @@ actually fix before calling the architecture hardened:
   this finding: "the only finding here I'd call a release-blocking
   evidence-integrity bug for continuous capture." Jurgen asked for this one
   to be fixed immediately, ahead of every other finding in this review.
-- **F2 (Medium/High) -- `matches`'s regex is recompiled every packet**, a
-  genuine performance/DoS-shaped bug in the display-filter subsystem
-  (`CompiledDisplayFilter` doesn't actually compile the regex once, despite
-  its own name), plus a related gap that invalid regex syntax isn't
-  rejected until the packet loop is already running.
+- **F2 (Medium/High) -- `matches`'s regex is recompiled every packet** is
+  **confirmed accurate and fixed** -- see [DEVELOPMENT.md](../DEVELOPMENT.md)'s
+  ROADMAP, item 111, for the full write-up: root cause
+  (`CompiledDisplayFilter` didn't actually compile the regex once, despite
+  its own name -- `evaluate()`'s `Matches` case reconstructed `std::regex`
+  from source text on every packet), the fix (the compiled regex now lives
+  on the AST node itself, `FilterNode::compiled_regex`, set exactly once by
+  `type_check()` at `compile_display_filter()` time), the related gap this
+  same fix closes as a direct consequence (an invalid regex is now rejected
+  at compile time -- before a single packet is read, before a live `-i`
+  interface is even opened -- rather than surviving compilation and then
+  silently failing on every packet for the rest of the run), and the new
+  regression coverage. The review's own further-hardening suggestion in
+  this finding (restricting `matches`'s regex syntax, or swapping in a
+  bounded/linear-time engine, against a pathological pattern pinning CPU)
+  was deliberately not pursued here -- the review's own words acknowledge
+  "the regex itself isn't supplied by the network attacker... this isn't a
+  remote RCE/DoS," and a `-Y` expression sits at the same operator-authored,
+  local-command-line trust boundary this tool's `-f`/BPF filter and
+  `--policy` YAML already do; see item 111's own write-up for why F3 (the
+  parser's own lack of complexity limits) is the more natural place to
+  revisit this, if taken up.
 
 The remaining six (F3-F8) are lower-priority hardening/architecture
 observations, not confirmed code defects in the same sense as F1/F2:
