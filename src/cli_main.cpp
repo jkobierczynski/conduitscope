@@ -8,12 +8,15 @@
 // the protocol-detection heuristics, which --help intentionally keeps brief.
 #include <CLI11.hpp>
 
+#include <algorithm>
 #include <atomic>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <csignal>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -38,6 +41,7 @@
 #include <io.h>
 #include <windows.h>  // SetConsoleCtrlHandler -- see SigintGuard's own comment for why
 #else
+#include <sys/ioctl.h>  // ioctl(TIOCGWINSZ) -- see terminal_width() below
 #include <unistd.h>
 #endif
 
@@ -77,6 +81,253 @@ bool stdout_is_terminal() {
     return isatty(fileno(stdout)) != 0;
 #endif
 }
+
+// --------------------------------------------------------------------------------------------
+// Friendlier --help: word-wrapping and option grouping.
+//
+// Jurgen's direct request -- "make the output of --help way more friendlier to read" -- after
+// which this file was audited to find out WHY it wasn't: CLI11's own stock help formatter
+// (detail::format_help in CLI11.hpp) never word-wraps an option's description to any width at
+// all. It only re-indents a LITERAL '\n' already embedded in the description string (there are
+// none in this file -- every description here is deliberately one complete, long prose
+// paragraph, matching docs/USER_GUIDE.md's own depth, see this file's own top-of-file comment);
+// with no embedded newline, the whole description prints as one single unbroken line that simply
+// runs off the right edge of whatever terminal is showing it. The second readability problem is
+// structural, not textual: every option in a subcommand was registered into CLI11's single
+// default "Options" group, so `decode --help` alone dumped ~190 options (counting the ~45
+// `--*-port` protocol-port overrides most users will never touch) in one flat, undifferentiated
+// list, with no visual separation between "you'll use this every time" (-r/-i/-f/-o/-T) and
+// "advanced, rarely needed" (the port overrides, the dozen `--max-*` resource-limit flags).
+//
+// Both are fixed here without touching a single description's own wording (no information is
+// lost, nothing here changes WHAT --help says, only how it's laid out):
+//   1. terminal_width() + wrap_text() + WrappingHelpFormatter below replace CLI11's stock
+//      line-assembly step with one that actually wraps long text to the real terminal width (or
+//      a generous fallback when not a terminal -- --help piped to a pager or redirected to a
+//      file is at least as common as --help read directly off an 80-column terminal).
+//   2. Every add_option()/add_flag() call across every subcommand below was given an explicit
+//      ->group("...") (see the many ->group(...) calls throughout this file) sorting it into one
+//      of a small, consistent set of named sections -- "Input/output", "Filtering", "Output
+//      format", "Protocol port overrides (rarely needed)", "Resource limits (advanced)", "Name
+//      resolution", and so on, reused identically across subcommands wherever the same kind of
+//      option recurs. CLI11 buckets and prints each group as its own labeled, blank-line-
+//      separated section (Formatter::make_groups) automatically once options declare different
+//      group names -- no further plumbing needed beyond tagging each option with the right one.
+// --------------------------------------------------------------------------------------------
+
+// The column width used to word-wrap --help's option descriptions: the real terminal width when
+// stdout is an interactive terminal (ioctl(TIOCGWINSZ) on POSIX, GetConsoleScreenBufferInfo on
+// Windows -- the same stdout_is_terminal() platform split just above decides which path runs),
+// an explicit COLUMNS environment variable override when stdout is NOT a terminal at all (--help
+// | less, --help > file.txt -- the same variable most shells export and the one coreutils/git/
+// etc. already honor in this situation), and a generous fixed fallback (100) when neither is
+// available -- --help piped or redirected is read at least as often as --help typed straight at
+// an interactive terminal, and 100 columns reads far better than defaulting to a cautious 80.
+// Clamped to [60, 200] so a pathological or misreported terminal size (0, or some environment's
+// idea of 20000) can never collapse the help text into an unreadable sliver or balloon back into
+// the single-unbroken-line problem this whole mechanism exists to fix.
+unsigned terminal_width() {
+    constexpr unsigned kMinWidth = 60;
+    constexpr unsigned kMaxWidth = 200;
+    constexpr unsigned kFallbackWidth = 100;
+
+    unsigned width = 0;
+    if (stdout_is_terminal()) {
+#ifdef _WIN32
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) {
+            width = static_cast<unsigned>(info.srWindow.Right - info.srWindow.Left + 1);
+        }
+#else
+        struct winsize ws {};
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+            width = static_cast<unsigned>(ws.ws_col);
+        }
+#endif
+    }
+    if (width == 0) {
+        if (const char* columns_env = std::getenv("COLUMNS")) {
+            int parsed = std::atoi(columns_env);
+            if (parsed > 0) width = static_cast<unsigned>(parsed);
+        }
+    }
+    if (width == 0) width = kFallbackWidth;
+    return std::min(kMaxWidth, std::max(kMinWidth, width));
+}
+
+// Greedy word-wrap: break `text` into lines of at most `width` characters, breaking only at
+// whitespace (never splitting a single word/token, even one longer than `width` -- rare in
+// practice here, and an over-wide single line for one pathological token is a far smaller
+// readability problem than silently corrupting the token by hyphen-splitting it mid-word). This
+// is the one piece of logic the stock CLI11 formatter has no equivalent of at all -- everything
+// else WrappingHelpFormatter below does is just re-arranging CLI11's own existing building
+// blocks (make_option_name/make_option_opts/make_option_desc, get_column_width()).
+std::vector<std::string> wrap_text(const std::string& text, std::size_t width) {
+    std::vector<std::string> lines;
+    std::string current;
+    std::istringstream words(text);
+    std::string word;
+    while (words >> word) {
+        if (current.empty()) {
+            current = word;
+        } else if (current.size() + 1 + word.size() <= width) {
+            current += ' ';
+            current += word;
+        } else {
+            lines.push_back(current);
+            current = word;
+        }
+    }
+    if (!current.empty() || lines.empty()) lines.push_back(current);
+    return lines;
+}
+
+// Same idea as wrap_text, but for the NAME/OPTS column instead of the description column --
+// e.g. `--protocol TEXT:{auto,modbus,dnp3,...,homeplug-av} [auto]`, whose `{...}` choice list
+// (CLI11's own rendering of a CLI::IsMember validator, built from make_option_opts()) is nearly
+// 500 characters with no whitespace anywhere in it, so wrap_text()'s own whitespace-only
+// breaking can't help at all -- it would stay one giant unbroken token. This loosens exactly
+// that one case by treating ", " as an equally valid break point alongside plain spaces (a comma
+// not already followed by a space first gets one inserted, which also makes a long enum list
+// read better even on a wide terminal, not just a wrapped one), while leaving every other
+// character of the name/opts string untouched.
+std::vector<std::string> wrap_name_opts(const std::string& text, std::size_t width) {
+    std::string loosened;
+    loosened.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        loosened += text[i];
+        if (text[i] == ',' && (i + 1 >= text.size() || text[i + 1] != ' ')) loosened += ' ';
+    }
+    return wrap_text(loosened, width);
+}
+
+// Replaces CLI11's own Formatter::make_option AND make_subcommand (the two places
+// detail::format_help -- see CLI11.hpp -- assembles one printed line with no word-wrapping at
+// all: one for an option's own name/opts + description, the other for a subcommand's own name +
+// description under a "Subcommands:" heading, e.g. `baseline --help`'s "learn"/"check" entries)
+// with a version that wraps both the name/opts column and the description column to
+// terminal_width(), while reusing every other CLI11 building block (make_option_name/
+// make_option_opts/make_option_desc, get_column_width() for the aligned left column) completely
+// unchanged. Everything else this class doesn't override -- grouping, usage line, footer,
+// positionals -- is exactly CLI11's own stock behavior.
+class WrappingHelpFormatter : public CLI::Formatter {
+public:
+    std::string make_option(const CLI::Option* opt, bool is_positional) const override {
+        return wrap_help_line(make_option_name(opt, is_positional) + make_option_opts(opt), make_option_desc(opt));
+    }
+
+    // CLI11's own stock Formatter::make_subcommand (CLI11.hpp) has the exact same no-wrapping
+    // problem make_option does above -- it also goes through detail::format_help directly -- and
+    // this codebase's own subcommand descriptions (`baseline learn`'s/`baseline check`'s own, in
+    // particular) are just as long as the longest option descriptions, so `baseline --help`'s
+    // "Subcommands:" listing needs the identical fix.
+    std::string make_subcommand(const CLI::App* sub) const override {
+        return wrap_help_line(sub->get_display_name(true) + (sub->get_required() ? " " + get_label("REQUIRED") : ""),
+                               sub->get_description());
+    }
+
+    // The one line of free text at the very top of any --help (this codebase's own App/
+    // subcommand descriptions, e.g. decode's "Decode a pcap/pcapng capture and print each
+    // recognized packet" or baseline's considerably longer one) has the same no-wrapping
+    // problem as make_option/make_subcommand above, but isn't in the two-column name+desc
+    // layout those share -- it's a single block of text with no left column to align under, so
+    // it gets its own override wrapping to the FULL terminal_width() rather than desc_width
+    // (which is sized to leave room for get_column_width()'s left column -- irrelevant here).
+    // The REQUIRED/min-max suffix logic below is copied verbatim from CLI11's own stock
+    // Formatter::make_description (CLI11.hpp) -- this project never actually uses
+    // require_option_min/max at the App level (only require_subcommand), so it's dead code for
+    // every --help this binary prints today, but kept for correctness rather than assuming that
+    // never changes.
+    std::string make_description(const CLI::App* app) const override {
+        std::string desc = app->get_description();
+        const std::size_t min_options = app->get_require_option_min();
+        const std::size_t max_options = app->get_require_option_max();
+        if (app->get_required()) {
+            desc += " " + get_label("REQUIRED") + " ";
+        }
+        if ((max_options == min_options) && (min_options > 0)) {
+            if (min_options == 1) {
+                desc += " \n[Exactly 1 of the following options is required]";
+            } else {
+                desc += " \n[Exactly " + std::to_string(min_options) + " options from the following list are required]";
+            }
+        } else if (max_options > 0) {
+            if (min_options > 0) {
+                desc += " \n[Between " + std::to_string(min_options) + " and " + std::to_string(max_options) +
+                        " of the follow options are required]";
+            } else {
+                desc += " \n[At most " + std::to_string(max_options) + " of the following options are allowed]";
+            }
+        } else if (min_options > 0) {
+            desc += " \n[At least " + std::to_string(min_options) + " of the following options are required]";
+        }
+        if (desc.empty()) return {};
+        // Split on any literal '\n' first (the REQUIRED/min-max suffix above can add one) and
+        // wrap each resulting paragraph independently -- wrap_text()'s own whitespace tokenizer
+        // would otherwise treat an embedded '\n' as just another space and silently collapse a
+        // deliberate line break into the ordinary wrapped flow.
+        std::ostringstream out;
+        std::string paragraph;
+        std::istringstream paragraphs(desc);
+        while (std::getline(paragraphs, paragraph, '\n')) {
+            for (const std::string& line : wrap_text(paragraph, terminal_width())) {
+                out << line << "\n";
+            }
+        }
+        return out.str();
+    }
+
+private:
+    // Shared by make_option and make_subcommand above -- both are "a name/opts column, aligned
+    // to get_column_width(), followed by a word-wrapped description" with nothing else
+    // different between them, so this is the one place the actual wrapping/alignment logic
+    // lives.
+    std::string wrap_help_line(const std::string& name, const std::string& desc) const {
+        const std::size_t col = get_column_width();
+        const unsigned term_width = terminal_width();
+        // Leave at least 40 columns for the description even on a narrow terminal where `col`
+        // alone would otherwise eat nearly the whole line -- 40 is still enough for real prose
+        // to wrap sensibly rather than degenerating into a near-one-word-per-line column.
+        const std::size_t desc_width =
+            (term_width > col + 40) ? static_cast<std::size_t>(term_width) - col : 40;
+
+        std::ostringstream out;
+        // Wrap the UN-indented name/opts text first -- wrap_text/wrap_name_opts tokenize on
+        // whitespace via istringstream's own operator>>, which silently eats any leading
+        // whitespace it's given, so baking the indent into the string before wrapping would
+        // just lose it off the front of the first line. Indentation is added back below, after
+        // wrapping: "  " (matching CLI11's own stock indent) on the first line, a fixed "    "
+        // on every later fragment -- still "the option itself" overflowing (e.g. a long
+        // `{a,b,c,...}` choice list), not the aligned description column, so it gets its own
+        // light indent rather than lining up under get_column_width().
+        const std::size_t name_wrap_width = (term_width > 6) ? static_cast<std::size_t>(term_width) - 2 : 40;
+        std::vector<std::string> name_lines = (name.size() + 2 > term_width)
+                                                   ? wrap_name_opts(name, name_wrap_width)
+                                                   : std::vector<std::string>{name};
+        std::string last_name_line;
+        for (std::size_t i = 0; i < name_lines.size(); ++i) {
+            std::string line = (i == 0 ? "  " : "    ") + name_lines[i];
+            if (i + 1 < name_lines.size()) {
+                out << line << "\n";
+            } else {
+                last_name_line = line;
+            }
+        }
+        out << std::left << std::setw(static_cast<int>(col)) << last_name_line;
+        if (!desc.empty()) {
+            if (last_name_line.size() >= col) out << "\n" << std::setw(static_cast<int>(col)) << "";
+            bool first_line = true;
+            for (const std::string& line : wrap_text(desc, desc_width)) {
+                if (!first_line) out << std::setw(static_cast<int>(col)) << "";
+                out << line << "\n";
+                first_line = false;
+            }
+        } else {
+            out << "\n";
+        }
+        return out.str();
+    }
+};
 
 // --------------------------------------------------------------------------------------------
 // Live capture plumbing shared by `decode -i` and `policy validate -i`. See live_capture.hpp for
@@ -447,7 +698,7 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "TSDU reassembly (default 1 MiB), OPC UA's/FF-HSE's own declared-length plausibility "
            "ceiling (default 16 MiB each), and IPv4/IPv6 fragment reassembly's own per-datagram "
            "ceiling (default 65,535 bytes). 0 = leave every site at its own default (see "
-           "docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping)")
+           "docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping)")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-reassembly-segments", vars.max_reassembly_segments,
@@ -455,14 +706,14 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "reassembly path (default 20,000 segments), DNP3 fragment reassembly (default 500 "
            "frames), COTP TSDU reassembly (default 2,000 frames), and IPv4/IPv6 fragment "
            "reassembly's own per-datagram fragment-count ceiling (default 8,192 fragments). 0 = "
-           "leave every site at its own default")
+           "leave every site at its own default")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-recursion-depth", vars.max_recursion_depth,
            "Override every recursive-decode depth cap at once: MMS Data-value nesting (default "
            "32), EtherNet/IP CIP Multiple_Service_Packet/Unconnected_Send nesting (default 4), "
            "MPLS label-stack depth (default 16), S7comm-Plus struct/item nesting (default 16), "
-           "and GOOSE Data ASN.1 nesting (default 6). 0 = leave every site at its own default")
+           "and GOOSE Data ASN.1 nesting (default 6). 0 = leave every site at its own default")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-decoded-objects", vars.max_decoded_objects,
@@ -471,13 +722,13 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "decoder.cpp's own summary lists, plus the 9 duplicated 50-entry list caps shared by "
            "EIGRP/OSPF/PIM/IGMP/ICMP/IGRP/RIP/VRRP/HSRP). 0 = leave every site at its own "
            "default; too many constants to enumerate here -- see docs/DEVELOPMENT.md item 7 for "
-           "the full mapping")
+           "the full mapping")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-coalesced-messages", vars.max_coalesced_messages,
            "Override every 'N application-layer messages found coalesced in one TCP/UDP "
            "payload' cap at once: FF-HSE, HART-IP, MQTT, EtherNet/IP, and OPC UA (all default "
-           "50). 0 = leave every site at its own default")
+           "50). 0 = leave every site at its own default")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-active-flows", vars.max_active_flows,
@@ -486,21 +737,21 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "capture contains -- an existing flow's own state being updated never counts against "
            "this. 0 (the default) applies the built-in default of 100,000; a flow that never "
            "needs reassembly at all is never tracked in the first place either way (see "
-           "docs/DEVELOPMENT.md's security review write-up)")
+           "docs/DEVELOPMENT.md's security review write-up)")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-flow-state-entries", vars.max_flow_state_entries,
            "Cap the TOTAL number of distinct sessions/flows tracked at once across every "
            "protocol's own state (SMB pipes, DCE/RPC interfaces, Kerberos, LDAP, WinRM, DCOM, "
            "Modbus/TwinCAT/MELSEC/MQTT, DNP3/COTP reassembly, and more), combined. 0 (the "
-           "default) applies the built-in default of 250,000")
+           "default) applies the built-in default of 250,000")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-active-fragment-groups", vars.max_active_fragment_groups,
            "Cap the number of distinct in-progress IP fragment reassembly groups (decoder.cpp) "
            "tracked at once, regardless of how many distinct fragmented datagrams the capture "
            "contains -- an existing group's own state being updated never counts against this. "
-           "0 (the default) applies the built-in default of 5,000")
+           "0 (the default) applies the built-in default of 5,000")->group("Resource limits (advanced)")
         ->capture_default_str();
 }
 
@@ -533,27 +784,27 @@ void add_baseline_engine_limit_options(CLI::App* cmd, size_t& max_tcp_sessions, 
            "client/server direction inference (default 50,000). 0 = leave it at its own default; "
            "past this, further new sessions fall back to the known-port heuristic instead of "
            "SYN/SYN-ACK tracking and the baseline is marked incomplete (see docs/DEVELOPMENT.md's "
-           "security review write-up)")
+           "security review write-up)")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-baseline-conduits", max_conduits,
            "Cap the number of distinct conduits (client, server, protocol, port) BaselineEngine "
            "records per capture (default 20,000). 0 = leave it at its own default; past this, "
            "further new conduits observed in the capture are not recorded and the baseline is "
-           "marked incomplete")
+           "marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-baseline-operations-per-conduit", max_operations_per_conduit,
            "Cap the number of distinct operation keys BaselineEngine records per conduit (default "
            "5,000). 0 = leave it at its own default; past this, further new operations on that "
-           "conduit are not recorded and the baseline is marked incomplete")
+           "conduit are not recorded and the baseline is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-baseline-ranges-per-operation", max_ranges_per_operation,
            "Cap the number of distinct (coalesced) target-address ranges BaselineEngine records "
            "per operation (default 1,000). 0 = leave it at its own default; past this, further "
            "new, disjoint ranges for that operation are not recorded and the baseline is marked "
-           "incomplete")
+           "incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
 }
 
@@ -584,21 +835,21 @@ void add_detect_engine_limit_options(CLI::App* cmd, size_t& max_findings, size_t
            "Cap the number of distinct findings (always-notable findings and new-conduit "
            "candidates, checked independently) DetectEngine records per capture (default "
            "20,000). 0 = leave it at its own default; past this, further genuinely new findings "
-           "of that kind are not recorded and the observation is marked incomplete")
+           "of that kind are not recorded and the observation is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-detect-tracked-keys-per-map", max_tracked_keys_per_map,
            "Cap the number of distinct keys DetectEngine tracks in any one of its per-source/"
            "per-server novelty/burst-tracking maps (default 50,000, applied identically and "
            "independently to each map). 0 = leave it at its own default; past this, further new "
-           "keys in that map are not tracked and the observation is marked incomplete")
+           "keys in that map are not tracked and the observation is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-detect-originators-per-server", max_originators_per_server,
            "Cap the number of distinct originator IPs DetectEngine tracks per server key inside "
            "its nine per-server originator/writer maps (default 2,000). 0 = leave it at its own "
            "default; past this, further new originators for that server are not tracked and the "
-           "observation is marked incomplete")
+           "observation is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
 }
 
@@ -623,28 +874,28 @@ void add_inventory_engine_limit_options(CLI::App* cmd, size_t& max_assets, size_
            "--max-inventory-assets", max_assets,
            "Cap the number of distinct IP addresses AssetInventoryEngine records as assets per "
            "capture (default 200,000). 0 = leave it at its own default; past this, further new "
-           "assets observed in the capture are not recorded and the inventory is marked incomplete")
+           "assets observed in the capture are not recorded and the inventory is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-inventory-edges", max_edges,
            "Cap the number of distinct (client, server, protocol, port) edges AssetInventoryEngine "
            "records per capture (default 200,000). 0 = leave it at its own default; past this, "
            "further new edges observed in the capture are not recorded and the inventory is marked "
-           "incomplete")
+           "incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-inventory-tcp-sessions", max_tcp_sessions,
            "Cap the number of distinct TCP sessions AssetInventoryEngine tracks per capture for "
            "client/server direction inference (default 50,000). 0 = leave it at its own default; "
            "past this, further new sessions fall back to the known-port heuristic instead of "
-           "SYN/SYN-ACK tracking and the inventory is marked incomplete")
+           "SYN/SYN-ACK tracking and the inventory is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-inventory-notable-protocols", max_notable_protocols,
            "Cap the number of distinct notable-IT-protocol observations (ROADMAP item 18) "
            "AssetInventoryEngine records per capture (default 50,000). 0 = leave it at its own "
            "default; past this, further new combinations are not recorded and the inventory is "
-           "marked incomplete")
+           "marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
 }
 
@@ -672,28 +923,28 @@ void add_policy_engine_limit_options(CLI::App* cmd, size_t& max_tcp_flows, size_
            "--max-policy-tcp-flows", max_tcp_flows,
            "Cap the number of distinct TCP flows PolicyEngine tracks per capture (default "
            "200,000). 0 = leave it at its own default; past this, further new flows observed in "
-           "the capture are not evaluated and the result is marked incomplete")
+           "the capture are not evaluated and the result is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-policy-udp-flows", max_udp_flows,
            "Cap the number of distinct UDP flows (BACnet/IP, CIP I/O, HART-IP, FF-HSE) PolicyEngine "
            "tracks per capture (default 100,000). 0 = leave it at its own default; past this, "
            "further new flows observed in the capture are not evaluated and the result is marked "
-           "incomplete")
+           "incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-policy-ethernet-flows", max_ethernet_flows,
            "Cap the number of distinct raw-Ethernet L2 flows (PROFINET RT/GOOSE/SV/EtherCAT) "
            "PolicyEngine tracks per capture (default 100,000). 0 = leave it at its own default; "
            "past this, further new flows observed in the capture are not evaluated and the result "
-           "is marked incomplete")
+           "is marked incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-policy-notable-protocols", max_notable_protocols,
            "Cap the number of distinct notable-IT-protocol observations (ROADMAP item 18) "
            "PolicyEngine records per capture (default 50,000). 0 = leave it at its own default; "
            "past this, further new combinations are not recorded and the result is marked "
-           "incomplete")
+           "incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
 }
 
@@ -725,14 +976,14 @@ void add_conversation_stats_options(CLI::App* cmd, size_t& max_conversations, si
            "Conversations tables (IPv4 and Ethernet, each capped independently; default "
            "200,000). 0 = leave it at its own default; past this, a packet between a new, "
            "not-yet-seen address pair is dropped from these tables only (every other -z/info "
-           "counter is unaffected), and a warning line is printed")
+           "counter is unaffected), and a warning line is printed")->group("Resource limits (advanced)")
         ->capture_default_str();
     cmd->add_option(
            "--max-endpoints", max_endpoints,
            "Cap the number of distinct addresses tracked for the Endpoints tables (IPv4 and "
            "Ethernet, each capped independently; default 200,000). 0 = leave it at its own "
            "default; past this, a packet naming a new, not-yet-seen address is dropped from "
-           "these tables only, and a warning line is printed")
+           "these tables only, and a warning line is printed")->group("Resource limits (advanced)")
         ->capture_default_str();
 }
 
@@ -2582,6 +2833,16 @@ int main(int argc, char** argv) {
         "COMMAND may be omitted: it then defaults to 'decode', or to 'info' if -z/--stat appears\n"
         "anywhere on the line (ROADMAP item 109) -- e.g. 'conduitscope -r FILE' is 'decode -r FILE',\n"
         "and 'conduitscope -r FILE -z conv,tcp' is 'info -r FILE -z conv,tcp'.");
+    // Friendlier --help (Jurgen's direct request): word-wrap long option descriptions to the
+    // real terminal width and sort options into named sections instead of one flat list -- see
+    // WrappingHelpFormatter's own comment, above stdout_is_terminal(), for the full rationale.
+    // Set BEFORE any add_subcommand() call below: CLI11's own App constructor copies its
+    // parent's formatter_ at subcommand-creation time (see CLI11.hpp's own `formatter_ =
+    // parent_->formatter_;`), so every subcommand -- and every nested subcommand created from
+    // one of those, like `policy validate`/`baseline learn`/`baseline check`/`merge inventory`
+    // -- inherits this same formatter automatically, with nothing to repeat at each add_
+    // subcommand() call site below.
+    app.formatter(std::make_shared<WrappingHelpFormatter>());
 
     bool quiet = false;
     bool no_color = false;
@@ -2647,20 +2908,20 @@ int main(int argc, char** argv) {
 
     auto* decode_input_opt =
         decode_cmd->add_option("-r,--read", decode_input,
-                                "Input capture file (classic pcap or pcapng, auto-detected)")
+                                "Input capture file (classic pcap or pcapng, auto-detected)")->group("Input/output")
             ->check(CLI::ExistingFile);
     auto* decode_interface_opt = decode_cmd->add_option(
         "-i,--interface", decode_interface,
         "Capture live from this network interface instead of reading a file (see "
         "'conduitscope interfaces'); requires this build to have been compiled with libpcap/Npcap "
-        "support -- exactly one of -r/-i is required");
+        "support -- exactly one of -r/-i is required")->group("Input/output");
     decode_input_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_input_opt);
     decode_cmd->add_option("-f,--filter", decode_filter,
                             "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; with -r, "
                             "applied per-packet after reading the file (same filter syntax either way); "
                             "requires this build to have been compiled with libpcap/Npcap support in "
-                            "both cases -- mirrors tshark's own -f");
+                            "both cases -- mirrors tshark's own -f")->group("Filtering");
     decode_cmd->add_option("-Y,--display-filter", decode_display_filter,
                             "Display filter (Wireshark display-filter syntax), e.g. "
                             "'modbus.func_code == 16 && ip.src == 10.1.2.3'. Unlike -f/--filter (a BPF "
@@ -2675,25 +2936,27 @@ int main(int argc, char** argv) {
                             "S7comm-Plus, DNP3, EtherNet/IP, BACnet, IEC104, GOOSE, SV, HART-IP, OPC "
                             "UA, MMS, UMAS) -- see docs/USER_GUIDE.md for the full field list. A "
                             "malformed expression is a CLI error (nonzero exit) before any packet is "
-                            "processed.");
+                            "processed. '@<path>' reads the expression from a file instead (one "
+                            "trailing line ending trimmed, if present) -- useful for a long, "
+                            "generated, or shell-generation-fragile expression.")->group("Filtering");
     decode_cmd->add_option("-a,--duration", decode_duration,
                             "Stop a live capture (-i) after this many seconds (0 = unlimited; stop "
                             "with Ctrl+C or --max-packets instead) -- mirrors tshark's own -a "
-                            "autostop condition, specialized here to duration only")
+                            "autostop condition, specialized here to duration only")->group("Live capture (-i only)")
         ->capture_default_str();
     decode_cmd->add_option("--snaplen", decode_snaplen,
-                            "Maximum bytes captured per packet with -i")
+                            "Maximum bytes captured per packet with -i")->group("Live capture (-i only)")
         ->capture_default_str();
     decode_cmd->add_flag("!--no-promiscuous", decode_promiscuous,
                           "With -i, don't put the interface into promiscuous mode (by default it "
                           "is, since the main use case -- watching a mirrored/SPAN switch port -- "
-                          "needs traffic not addressed to this host)");
+                          "needs traffic not addressed to this host)")->group("Live capture (-i only)");
     decode_cmd->add_option("-o,--output", decode_output,
                             "Write output here instead of stdout. Caution: a single-dash "
                             "long-option typo glues onto this flag (e.g. a typo of a double-dash "
                             "long option, typed with only one dash, is parsed as -o followed by "
                             "the rest of that typo as this flag's own filename value) -- always "
-                            "use the double dash for a long option name");
+                            "use the double dash for a long option name")->group("Input/output");
     decode_cmd
         ->add_option("-T,--format", decode_format,
                       "Output format: text, json, csv, fields, or zeek (fields mirrors tshark's own -T "
@@ -2701,7 +2964,7 @@ int main(int argc, char** argv) {
                       "zeek writes a real Zeek conn.log -- one row per TCP/UDP connection, not per "
                       "packet, in Zeek's own TSV envelope, with `service` naming whichever protocol "
                       "conduitscope decoded -- see docs/USER_GUIDE.md's Zeek export section for exactly "
-                      "which conn.log fields this first pass populates versus leaves unset)")
+                      "which conn.log fields this first pass populates versus leaves unset)")->group("Output format")
         ->transform(CLI::IsMember({"text", "json", "csv", "fields", "zeek"}))
         ->capture_default_str();
     decode_cmd
@@ -2711,7 +2974,7 @@ int main(int argc, char** argv) {
                       "seconds since the Unix epoch), d/delta (elapsed since the previous packet), "
                       "a/absolute (HH:MM:SS.ffffff), ad/absolute-date (YYYY-MM-DD HH:MM:SS.ffffff) "
                       "-- see --time-offset for absolute/absolute-date's timezone, and docs/"
-                      "MANUAL.md's OUTPUT FORMATS section")
+                      "MANUAL.md's OUTPUT FORMATS section")->group("Output format")
         ->transform(CLI::IsMember({"e", "epoch", "r", "relative", "d", "delta", "a", "absolute", "ad",
                                     "absolute-date"}))
         ->capture_default_str();
@@ -2722,134 +2985,134 @@ int main(int argc, char** argv) {
                       "offset -- e.g. to read a capture in the timezone of the site it came from "
                       "regardless of where you're analyzing it; neither tshark nor tcpdump offers this "
                       "beyond UTC-vs-local, so this is conduitscope's own extension -- ignored by every "
-                      "other --time-format value")
+                      "other --time-format value")->group("Output format")
         ->capture_default_str();
     decode_cmd
         ->add_option("--protocol", decode_protocol,
-                      "Restrict decoding to one protocol instead of auto-detecting all of them")
+                      "Restrict decoding to one protocol instead of auto-detecting all of them")->group("Protocol selection")
         ->transform(CLI::IsMember({"auto", "modbus", "dnp3", "s7comm", "mms", "iec104", "enip", "profinet", "goose", "sv", "ethercat", "stp", "devicenet", "canopen", "j1939", "bacnet", "hartip", "opcua", "mqtt", "s7comm-plus", "ff-hse", "dns", "mdns", "llmnr", "nbns", "doh", "rip", "icmp", "igmp", "vrrp", "hsrp", "igrp", "pim", "eigrp", "ospf", "remote-access", "lateral-movement", "enterprise-trust", "eapol", "wireless-backhaul", "pppoe", "tunnel-vpn", "mpls", "arp", "lldp", "twincat", "kerberos", "ldap", "smb", "melsec", "fins", "bgp", "slow-protocols", "winrm", "dcom", "ge-srtp", "bsap", "cclink-ie", "codesys", "coap", "zigbee", "cdp", "asf", "ipmi", "rmcp", "amqp091", "amqp10", "dicom", "powerlink", "fox", "icmpv6", "dhcpv6", "homeplug-av"}))
         ->capture_default_str();
     decode_cmd->add_option("--modbus-port", decode_modbus_ports,
                             "Additional TCP port to treat as expected for Modbus (repeatable); "
-                            "does not change detection, only whether the port is flagged as unexpected");
+                            "does not change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--dnp3-port", decode_dnp3_ports,
                             "Additional TCP port to treat as expected for DNP3 (repeatable); "
-                            "does not change detection, only whether the port is flagged as unexpected");
+                            "does not change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--s7comm-port", decode_s7comm_ports,
                             "Additional TCP port to treat as expected for COTP/S7comm, MMS, and "
                             "S7comm-Plus (repeatable, shared -- all three ride the identical "
                             "TPKT/COTP transport and TCP port); does not change detection, only "
-                            "whether the port is flagged as unexpected");
+                            "whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--iec104-port", decode_iec104_ports,
                             "Additional TCP port to treat as expected for IEC 104 (repeatable); "
-                            "does not change detection, only whether the port is flagged as unexpected");
+                            "does not change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--enip-port", decode_enip_ports,
                             "Additional TCP port to treat as expected for EtherNet/IP explicit "
                             "messaging (repeatable); does not change detection, only whether the "
-                            "port is flagged as unexpected");
+                            "port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--enip-io-port", decode_enip_io_ports,
                             "Additional UDP port to treat as expected for EtherNet/IP CIP I/O "
                             "implicit messaging (repeatable); does not change detection, only "
-                            "whether the port is flagged as unexpected");
+                            "whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--bacnet-port", decode_bacnet_ports,
                             "Additional UDP port to treat as expected for BACnet/IP (repeatable); "
                             "does not change detection, only whether the port is flagged as "
-                            "unexpected");
+                            "unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--hartip-port", decode_hartip_ports,
                             "Additional TCP or UDP port to treat as expected for HART-IP "
                             "(repeatable); does not change detection, only whether the port is "
-                            "flagged as unexpected");
+                            "flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--kerberos-port", decode_kerberos_ports,
                             "Additional TCP or UDP port to treat as expected for Kerberos "
                             "(repeatable); does not change detection, only whether the port is "
-                            "flagged as unexpected");
+                            "flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--melsec-port", decode_melsec_ports,
                             "Additional TCP or UDP port to treat as expected for MELSEC "
                             "Communication Protocol (MC Protocol/SLMP, repeatable); applies to both "
                             "transports even though their conventional defaults differ (5001/TCP, "
                             "5000/UDP); does not change detection, only whether the port is "
-                            "flagged as unexpected");
+                            "flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--fins-port", decode_fins_ports,
                             "Additional TCP or UDP port to treat as expected for FINS (Omron, "
                             "repeatable); applies to both transports, which share the same "
                             "conventional default (9600) unlike MELSEC's own split ports; does not "
-                            "change detection, only whether the port is flagged as unexpected");
+                            "change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--bgp-port", decode_bgp_ports,
                             "Additional TCP port to treat as expected for BGP (repeatable); "
-                            "does not change detection, only whether the port is flagged as unexpected");
+                            "does not change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--ldap-port", decode_ldap_ports,
                             "Additional TCP port to treat as expected for LDAP (repeatable); does "
-                            "not change detection, only whether the port is flagged as unexpected");
+                            "not change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--smb-port", decode_smb_ports,
                             "Additional TCP port to treat as expected for SMB (repeatable); does "
-                            "not change detection, only whether the port is flagged as unexpected");
+                            "not change detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--opcua-port", decode_opcua_ports,
                             "Additional TCP port to treat as expected for OPC UA (repeatable); "
                             "does not change detection, only whether the port is flagged as "
-                            "unexpected");
+                            "unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--mqtt-port", decode_mqtt_ports,
                             "Additional TCP port to treat as expected for MQTT (repeatable); "
                             "does not change detection, only whether the port is flagged as "
-                            "unexpected");
+                            "unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--ffhse-port", decode_ffhse_ports,
                             "Additional TCP or UDP port to treat as expected for FOUNDATION "
                             "Fieldbus HSE (repeatable, shared across FDA/SM/FMS/LAN Redundancy -- "
                             "the sub-protocol is signaled in-band, not by port); does not change "
-                            "detection, only whether the port is flagged as unexpected");
+                            "detection, only whether the port is flagged as unexpected")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--dns-port", decode_dns_ports,
                             "Additional UDP port to treat as expected for DNS (repeatable); UNLIKE "
                             "every --*-port option above, this DOES widen detection in Auto mode, "
                             "not just the 'expected port' annotation -- DNS has no self-describing "
                             "wire format at all, so it is normally only attempted on port 53 (see "
-                            "docs/MANUAL.md)");
+                            "docs/MANUAL.md)")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--mdns-port", decode_mdns_ports,
                             "Additional UDP port to treat as expected for Multicast DNS "
                             "(repeatable); widens detection in Auto mode, same caveat as "
-                            "--dns-port -- normally only attempted on port 5353");
+                            "--dns-port -- normally only attempted on port 5353")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--llmnr-port", decode_llmnr_ports,
                             "Additional UDP port to treat as expected for LLMNR (repeatable); "
                             "widens detection in Auto mode, same caveat as --dns-port -- normally "
-                            "only attempted on port 5355");
+                            "only attempted on port 5355")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--nbns-port", decode_nbns_ports,
                             "Additional UDP port to treat as expected for NetBIOS Name Service/"
                             "NBT-NS (repeatable); widens detection in Auto mode, same caveat as "
-                            "--dns-port -- normally only attempted on port 137");
+                            "--dns-port -- normally only attempted on port 137")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--doh-port", decode_doh_ports,
                             "Additional TCP port to check for a DNS-over-HTTPS TLS ClientHello "
                             "(repeatable); widens detection in Auto mode, same caveat as "
                             "--dns-port -- normally only attempted on port 443. Detection only -- "
-                            "see docs/MANUAL.md; the DNS message itself is never visible");
+                            "see docs/MANUAL.md; the DNS message itself is never visible")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--winrm-port", decode_winrm_ports,
                             "Additional TCP port to treat as expected for WS-Management (WinRM) "
                             "(repeatable); widens detection in Auto mode, same caveat as "
                             "--dns-port -- normally only attempted on port 5985 (plaintext; TLS-"
-                            "wrapped port 5986 is out of scope, see docs/MANUAL.md)");
+                            "wrapped port 5986 is out of scope, see docs/MANUAL.md)")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--dcom-port", decode_dcom_ports,
                             "Additional TCP port to treat as expected for DCOM activation "
                             "(repeatable); widens detection in Auto mode, same caveat as "
                             "--dns-port -- normally only attempted on port 135. Structural "
-                            "activation/OXID-resolution recognition only, see docs/MANUAL.md");
+                            "activation/OXID-resolution recognition only, see docs/MANUAL.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--ge-srtp-port", decode_ge_srtp_ports,
                             "Additional TCP port to treat as expected for GE SRTP (GE Fanuc/GE "
                             "Intelligent Platforms PLC protocol) (repeatable); widens detection in "
                             "Auto mode, same caveat as --dns-port -- normally only attempted on "
-                            "port 18245, see docs/MANUAL.md");
+                            "port 18245, see docs/MANUAL.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--rip-port", decode_rip_ports,
                             "Additional UDP port to treat as expected for RIP (repeatable); widens "
                             "detection in Auto mode, same caveat as --dns-port -- normally only "
-                            "attempted on port 520");
+                            "attempted on port 520")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--hsrp-port", decode_hsrp_ports,
                             "Additional UDP port to treat as expected for HSRP (repeatable); "
                             "widens detection in Auto mode, same caveat as --dns-port -- normally "
                             "only attempted on port 1985. IGMP and VRRP need no port option at all "
                             "-- both are dispatched purely by IP protocol number, see docs/"
-                            "MANUAL.md");
+                            "MANUAL.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--bsap-port", decode_bsap_ports,
                             "Additional UDP port to treat as expected for BSAP (Bristol Standard "
                             "Asynchronous/Synchronous Protocol, Bristol Babcock/Emerson RTU "
                             "protocol) (repeatable); widens detection in Auto mode, same caveat as "
                             "--dns-port -- normally only attempted on port 1234, see docs/"
-                            "MANUAL.md");
+                            "MANUAL.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--cclink-ie-port", decode_cclink_ie_ports,
                             "Additional UDP port to treat as expected for CC-Link IE Field Network "
                             "Basic (CCIEFB cyclic data / SLMP node search / set IP address) "
@@ -2857,7 +3120,7 @@ int main(int argc, char** argv) {
                             "detection (CC-Link IE is tried on every UDP port in Auto mode, like "
                             "MELSEC) -- it only widens which port(s) count as expected rather than "
                             "flagged as non-standard. Normally 61450 (cyclic) and 61451 (node "
-                            "search/set IP address), see docs/PROTOCOL_COVERAGE.md");
+                            "search/set IP address), see docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--codesys-port", decode_codesys_ports,
                             "Additional TCP or UDP port to treat as expected for CODESYS V3 (3S-"
                             "Smart/CODESYS GmbH's PLC runtime protocol) (repeatable); UNLIKE most "
@@ -2865,14 +3128,14 @@ int main(int argc, char** argv) {
                             "every TCP and UDP port in Auto mode, like CC-Link IE) -- it only "
                             "widens which port(s) count as expected rather than flagged as "
                             "non-standard. Normally 11740/1217 (TCP) and 1740-1743 (UDP), see docs/"
-                            "PROTOCOL_COVERAGE.md");
+                            "PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--coap-port", decode_coap_ports,
                             "Additional UDP port to treat as expected for CoAP (Constrained "
                             "Application Protocol, RFC 7252) (repeatable); UNLIKE most --x-port "
                             "options this DOES gate detection (CoAP is only tried on this port, "
                             "like BSAP/RIP/HSRP/DNS -- its own shortest legal messages are too "
                             "weak a structural signal to try on every UDP port). Normally 5683, "
-                            "see docs/PROTOCOL_COVERAGE.md");
+                            "see docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--rmcp-port", decode_rmcp_ports,
                             "Additional UDP port to treat as expected for RMCP/ASF/IPMI (Remote "
                             "Management Control Protocol / Alert Standard Format / Intelligent "
@@ -2881,7 +3144,7 @@ int main(int argc, char** argv) {
                             "wire-format construction) (repeatable); UNLIKE most --x-port options "
                             "this DOES gate detection (like BSAP/CoAP/RIP/HSRP -- no magic-byte-"
                             "strength structural gate). Normally 623, see docs/"
-                            "PROTOCOL_COVERAGE.md");
+                            "PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--amqp-port", decode_amqp_ports,
                             "Additional TCP port to treat as expected for AMQP 0-9-1/1.0 "
                             "(Advanced Message Queuing Protocol -- two wire-INCOMPATIBLE "
@@ -2889,7 +3152,7 @@ int main(int argc, char** argv) {
                             "shared list, see amqp_common.hpp) (repeatable); in Auto mode this "
                             "DOES gate detection (like WinRM/DCOM/GE SRTP -- no magic-byte-"
                             "strength structural gate on every frame, only on a connection's "
-                            "very first message). Normally 5672, see docs/PROTOCOL_COVERAGE.md");
+                            "very first message). Normally 5672, see docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--dicom-port", decode_dicom_ports,
                             "Additional TCP port to treat as expected for DICOM (Digital Imaging "
                             "and Communications in Medicine, NEMA/ACR PS3.x -- PACS/modality "
@@ -2900,14 +3163,14 @@ int main(int argc, char** argv) {
                             "no flag needed -- 104 (IANA-registered, rare in practice) AND 11112 "
                             "(the de facto real-world default for modern PACS/dcm4che/Orthanc/most "
                             "vendor software); neither is \"the\" default the other merely widens. "
-                            "See docs/PROTOCOL_COVERAGE.md");
+                            "See docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--fox-port", decode_fox_ports,
                             "Additional TCP port to treat as expected for Tridium Niagara Fox "
                             "(building-automation-system station protocol -- see the unauthenticated "
                             "'fox hello' system-identity-disclosure finding, CISA ICSA-12-228-01A) "
                             "(repeatable); in Auto mode this DOES gate detection (like WinRM/DCOM/"
                             "GE SRTP/AMQP/DICOM -- no magic-byte-strength structural gate). "
-                            "Normally 1911, see docs/PROTOCOL_COVERAGE.md");
+                            "Normally 1911, see docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--powerlink-sdo-port", decode_powerlink_sdo_ports,
                             "Additional UDP port to treat as expected for Ethernet POWERLINK's "
                             "SDO-over-UDP secondary gate (EPSG DS301 non-cyclic/out-of-band SDO "
@@ -2915,13 +3178,13 @@ int main(int argc, char** argv) {
                             "0x88AB, and has no port concept at all) (repeatable); UNLIKE most "
                             "--x-port options this DOES gate detection (like BSAP/CoAP/RIP/HSRP -- "
                             "an SDO Sequence Layer header is too weak a structural signal to try on "
-                            "every UDP port). Normally 3819, see docs/PROTOCOL_COVERAGE.md");
+                            "every UDP port). Normally 3819, see docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--dhcpv6-port", decode_dhcpv6_ports,
                             "Additional UDP port to treat as expected for DHCPv6 (repeatable); "
                             "UNLIKE most --x-port options this DOES gate detection (like BSAP/CoAP/"
                             "RIP/HSRP/DNS -- no magic-byte-strength structural gate). Applies to "
                             "BOTH of DHCPv6's own default ports at once (546 client, 547 server), "
-                            "see docs/PROTOCOL_COVERAGE.md");
+                            "see docs/PROTOCOL_COVERAGE.md")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option(
         "-d,--decode-as", decode_as_raw,
         "Force a specific decoder onto traffic on a given port that wouldn't otherwise be "
@@ -2945,7 +3208,7 @@ int main(int argc, char** argv) {
         "ge-srtp, bsap, coap, rmcp, amqp, dicom, fox, powerlink-sdo, dhcpv6 -- each restricted to "
         "that name's own real transport, e.g. dns/udp, doh/tcp). Example: "
         "-d tcp.port==8443,ldaps forces port 8443/TCP to be reported as LDAPS even though it "
-        "isn't one of LDAPS's own configured ports");
+        "isn't one of LDAPS's own configured ports")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("--flood-threshold", decode_flood_threshold,
                             "Per-destination packet count that trips a SYN/ACK/TCP/ICMP/UDP flood "
                             "note (see docs/PROTOCOL_COVERAGE.md's Attack Detection section) -- a "
@@ -2957,14 +3220,14 @@ int main(int argc, char** argv) {
                             "second IPv6-specific concept. Default: " +
                                 std::to_string(DEFAULT_FLOOD_THRESHOLD) +
                                 " (a deliberately small, documented-as-arbitrary illustrative "
-                                "value, not sourced from any vendor's own default)");
+                                "value, not sourced from any vendor's own default)")->group("Resource limits (advanced)");
     decode_cmd->add_option(
         "--remote-access-port", decode_remote_access_ports,
         "Additional TCP or UDP port to treat as expected for the Tier 1 \"IT protocols an OT "
         "auditor flags\" family (RDP/VNC/TeamViewer/AnyDesk/Zoom -- see docs/MANUAL.md's ROADMAP "
         "item 18); widens detection in Auto mode for RDP's COTP-gated check and the three port-only "
         "protocols (TeamViewer/AnyDesk/Zoom), same caveat as --dns-port -- VNC's own RFB banner "
-        "check is never port-gated regardless, see it_protocols.hpp");
+        "check is never port-gated regardless, see it_protocols.hpp")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option(
         "--lateral-movement-port", decode_lateral_movement_ports,
         "Additional TCP or UDP port to treat as expected for the Tier 2 \"IT protocols an OT "
@@ -2972,7 +3235,7 @@ int main(int argc, char** argv) {
         "its own dedicated decoder, see --smb-port -- see docs/MANUAL.md's ROADMAP item 18); "
         "widens detection in Auto mode for SNMP/Telnet/FTP/TFTP's own port-gated checks and "
         "HTTPS's port-only fallback, same caveat as --dns-port -- SSH's version-exchange banner "
-        "and HTTP's request-line/status-line are never port-gated regardless, see it_protocols.hpp");
+        "and HTTP's request-line/status-line are never port-gated regardless, see it_protocols.hpp")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option(
         "--enterprise-trust-port", decode_enterprise_trust_ports,
         "Additional TCP or UDP port to treat as expected for the Tier 3 \"IT protocols an OT "
@@ -2980,7 +3243,7 @@ int main(int argc, char** argv) {
         "item 18); widens detection in Auto mode for NTP/LDAP/RADIUS/TACACS+'s own port-gated checks "
         "and LDAPS's port-only fallback, same caveat as --dns-port -- DHCP's magic cookie is never "
         "port-gated regardless, see it_protocols.hpp. IEEE 802.1X/EAPOL needs no port option at all "
-        "-- it has no port, see docs/MANUAL.md and eapol.hpp");
+        "-- it has no port, see docs/MANUAL.md and eapol.hpp")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option(
         "--wireless-backhaul-port", decode_wireless_backhaul_ports,
         "Additional UDP port to treat as expected for the Tier 4 \"IT protocols an OT auditor "
@@ -2988,7 +3251,7 @@ int main(int argc, char** argv) {
         "ROADMAP item 18); widens detection in Auto mode for all five, since none of this tier's "
         "own structural checks are strong enough to run port-independently, same caveat as "
         "--dns-port -- see it_protocols.hpp. PPPoE needs no port option at all -- it has no port, "
-        "see docs/MANUAL.md and pppoe.hpp");
+        "see docs/MANUAL.md and pppoe.hpp")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option(
         "--tunnel-vpn-port", decode_tunnel_vpn_ports,
         "Additional TCP or UDP port to treat as expected for the Tier 5 \"IT protocols an OT "
@@ -2997,10 +3260,10 @@ int main(int argc, char** argv) {
         "detection in Auto mode for every port-based protocol here EXCEPT dtls-tunnel, whose own "
         "DTLS record structural check is never port-gated regardless, same caveat as --dns-port -- "
         "see tunnel_vpn.hpp. GRE/ESP/AH/IP-in-IP/6in4/L2TP's own IP-protocol-number-keyed forms, and "
-        "MPLS, need no port option at all -- see docs/MANUAL.md, tunnel_vpn.hpp, and mpls.hpp");
+        "MPLS, need no port option at all -- see docs/MANUAL.md, tunnel_vpn.hpp, and mpls.hpp")->group("Protocol port overrides (rarely needed)");
     decode_cmd->add_option("-c,--max-packets", decode_max_packets,
                             "Stop after decoding this many packets (0 = unlimited) -- mirrors "
-                            "tshark's own -c")
+                            "tshark's own -c")->group("Input/output")
         ->capture_default_str();
     auto* decode_range_opt = decode_cmd->add_option(
         "--range", decode_range,
@@ -3009,20 +3272,20 @@ int main(int argc, char** argv) {
         "syntax and numbering as Wireshark's editcap (and this tool's own '#<n>' packet index in "
         "decode's text output); -r only. Combines with -f/--filter (both must match) and with "
         "-c/--max-packets (which caps the number of packets taken from the selection, same as it "
-        "always has)");
+        "always has)")->group("Input/output");
     decode_range_opt->excludes(decode_interface_opt);
     decode_interface_opt->excludes(decode_range_opt);
     add_resource_limit_options(decode_cmd, decode_limit_vars);
     decode_cmd->add_flag("--strict", decode_strict,
-                          "Abort on the first malformed packet instead of reporting it and continuing");
+                          "Abort on the first malformed packet instead of reporting it and continuing")->group("Display options");
     decode_cmd->add_flag("!--no-vlan", decode_show_vlan,
                           "Disable display of the 802.1Q VLAN ID for VLAN-tagged packets, on by "
-                          "default -- see docs/MANUAL.md's OUTPUT FORMATS section");
+                          "default -- see docs/MANUAL.md's OUTPUT FORMATS section")->group("Display options");
     decode_cmd->add_flag(
         "!--no-direction", decode_show_direction,
         "Disable display of per-packet TCP flow direction (client/server determination and which "
         "tier decided it -- handshake/content/port-heuristic), on by default -- see docs/MANUAL.md's "
-        "OUTPUT FORMATS section and ROADMAP item 19");
+        "OUTPUT FORMATS section and ROADMAP item 19")->group("Display options");
     decode_cmd->add_flag(
         "--ether", decode_show_mac,
         "For a packet with an IP layer, show its Ethernet header (source/destination MAC "
@@ -3034,7 +3297,7 @@ int main(int argc, char** argv) {
         "LLDP/EAPOL/PPPoE/MPLS/etc.), since its MAC address pair is already shown on its own "
         "head line unconditionally. Only affects text output -- JSON/CSV always include "
         "src_mac/dst_mac as base fields, same as src_ip/dst_ip -- see docs/MANUAL.md's OUTPUT "
-        "FORMATS section");
+        "FORMATS section")->group("Display options");
     decode_cmd->add_flag(
         "-v,--verbose", decode_verbose,
         "Show per-packet notes (the longer-form contextual/security observations) and the "
@@ -3044,7 +3307,7 @@ int main(int argc, char** argv) {
         "default) -- JSON/CSV always include notes/direction fields unconditionally, same as "
         "every other field; --no-direction still suppresses the direction suffix even under "
         "-v, since that flag turns off direction detection display entirely rather than just "
-        "its verbosity");
+        "its verbosity")->group("Display options");
     decode_cmd->add_flag(
         "--redact,!--no-redact", decode_redact,
         "Mask cleartext authentication secrets found while decoding (HSRP/VRRP authentication "
@@ -3053,7 +3316,7 @@ int main(int argc, char** argv) {
         "fields alike -- so output can be shared safely by default. On by default; pass "
         "--no-redact to see the real cleartext values (useful for local triage/incident "
         "response where the analyst is already trusted with the capture itself). Usernames "
-        "are never redacted, only passwords/authentication data -- see docs/MANUAL.md");
+        "are never redacted, only passwords/authentication data -- see docs/MANUAL.md")->group("Display options");
     decode_cmd->add_flag(
         "--detect-highlight,!--no-detect-highlight", decode_detect_highlight,
         "Highlight (bold red in text output; a detect_finding/detect_finding_technique/"
@@ -3068,7 +3331,7 @@ int main(int argc, char** argv) {
         "Communication probing, the download-then-restart composite) -- those need the complete "
         "capture (or a baseline) to resolve and cannot be decided live, one packet at a time; use "
         "the 'detect' subcommand itself for those. See docs/MANUAL.md's own \"Always-notable "
-        "highlighting\" subsection under decode");
+        "highlighting\" subsection under decode")->group("Display options");
     decode_cmd->add_option(
         "-e,--field", decode_fields,
         "With -T fields, print this field's value (repeatable, printed in the order given, "
@@ -3076,19 +3339,19 @@ int main(int argc, char** argv) {
         "this tool's own --format json output for that packet (e.g. src_ip, dst_port, "
         "modbus_function_code); a field absent for a given packet (wrong protocol, optional "
         "field not present) prints as an empty column rather than an error. Requires -T fields; "
-        "see --format");
+        "see --format")->group("Output format");
     decode_cmd->add_option(
         "-w,--write", decode_write,
         "Write every packet that reaches this run (after -f/--filter, if given) to this path as "
         "a new classic-pcap capture file, raw and unmodified -- mirrors tshark/tcpdump's own -w. "
         "Works identically whether packets come from a live capture (-i) or an offline read "
         "(-r); does not change or replace the normal --format output, which continues to stdout/"
-        "-o exactly as without -w");
+        "-o exactly as without -w")->group("Input/output");
     decode_cmd->add_flag(
         "-x,--hex", decode_hex,
         "Print a hex+ASCII dump of each packet's raw bytes below its normal decode line -- "
         "mirrors tshark's own -x. Text output only (--format text, the default); ignored under "
-        "--format json/csv/fields");
+        "--format json/csv/fields")->group("Display options");
     decode_cmd->add_flag(
         "-V,--details", decode_details,
         "Print the complete protocol breakdown of each packet, layer by layer, instead of the "
@@ -3101,7 +3364,7 @@ int main(int argc, char** argv) {
         "always shown here regardless of -v/--verbose, since completeness is this flag's whole "
         "point. Text output only (--format text, the default); ignored under --format "
         "json/csv/fields/zeek, the same posture -x/--hex already has. Composes with -x: the hex "
-        "dump, when also given, still appears below this packet's own layer breakdown");
+        "dump, when also given, still appears below this packet's own layer breakdown")->group("Display options");
     decode_cmd->add_flag("--mac-vendor", decode_mac_vendor,
                           "Enable OUI (MAC vendor) resolution and show it next to each MAC "
                           "address; off by default to keep output compact. Implies --ether -- "
@@ -3109,23 +3372,23 @@ int main(int argc, char** argv) {
                           "not --oui, specifically so a single-dash typo of this flag reports a "
                           "clean \"argument not expected\" error instead of silently gluing onto "
                           "-o/--output the way a single-dash -oui used to -- see -o's own help "
-                          "text and docs/DEVELOPMENT.md's ROADMAP for the full story)");
+                          "text and docs/DEVELOPMENT.md's ROADMAP for the full story)")->group("Name resolution");
     decode_cmd->add_flag(
         "--resolve", decode_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts); off by "
         "default; NEVER performs live DNS -- file-only, see docs/MANUAL.md's OUTPUT FORMATS "
-        "section");
+        "section")->group("Name resolution");
     decode_cmd
         ->add_option("--hosts", decode_hosts_file,
-                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")->group("Name resolution")
         ->check(CLI::ExistingFile);
     decode_cmd->add_flag("!--nn", decode_service_names,
                           "Disable service name resolution (built-in table plus --services), on "
-                          "by default");
+                          "by default")->group("Name resolution");
     decode_cmd
         ->add_option("--services", decode_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
-                      "port->service-name table")
+                      "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
     // --- info -------------------------------------------------------------
@@ -3135,7 +3398,7 @@ int main(int argc, char** argv) {
         "Typing 'info' isn't actually required to use this subcommand's own -z/--stat -- see "
         "-z's own help text below, and docs/DEVELOPMENT.md's ROADMAP item 109");
     std::string info_input;
-    info_cmd->add_option("-r,--read", info_input, "Input capture file (classic pcap or pcapng, auto-detected)")
+    info_cmd->add_option("-r,--read", info_input, "Input capture file (classic pcap or pcapng, auto-detected)")->group("Input/output")
         ->required()
         ->check(CLI::ExistingFile);
     std::vector<std::string> info_stat_values;
@@ -3162,7 +3425,7 @@ int main(int argc, char** argv) {
             "appears anywhere on the line (decode otherwise). Also item 109: once -z is given at "
             "all (however the subcommand was reached), 'info' prints ONLY the table(s)/stream(s) "
             "actually requested here -- no file metadata, no packet count, no protocol histogram, "
-            "none of info's other usual output")
+            "none of info's other usual output")->group("Output format")
         ->check(validate_stat_value);
     size_t info_max_conversations = 0, info_max_endpoints = 0;
     add_conversation_stats_options(info_cmd, info_max_conversations, info_max_endpoints);
@@ -3175,7 +3438,7 @@ int main(int argc, char** argv) {
             "general TCP reassembly cap -- see resource_limits.hpp's max_reassembly_bytes). 0 = "
             "leave it at its own default; past this, that direction's own stream is truncated (not "
             "the whole capture's read -- every other -z/info counter is unaffected) and a warning "
-            "line is printed")
+            "line is printed")->group("Resource limits (advanced)")
         ->capture_default_str();
 
     // --- interfaces -----------------------------------------------------------
@@ -3203,50 +3466,50 @@ int main(int argc, char** argv) {
            policy_max_notable_protocols = 0;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
-                                         "Input capture file (classic pcap or pcapng, auto-detected)")
+                                         "Input capture file (classic pcap or pcapng, auto-detected)")->group("Input/output")
             ->check(CLI::ExistingFile);
     auto* policy_interface_opt = policy_validate_cmd->add_option(
         "-i,--interface", policy_interface,
         "Check live traffic from this network interface instead of reading a file (see "
         "'conduitscope interfaces'); requires this build to have been compiled with libpcap/Npcap "
-        "support -- exactly one of -r/-i is required");
+        "support -- exactly one of -r/-i is required")->group("Input/output");
     policy_input_opt->excludes(policy_interface_opt);
     policy_interface_opt->excludes(policy_input_opt);
     policy_validate_cmd->add_option("-f,--filter", policy_filter,
                                      "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
                                      "with -r, applied per-packet after reading the file (same filter syntax "
                                      "either way); requires this build to have been compiled with libpcap/Npcap "
-                                     "support in both cases -- mirrors tshark's own -f, and `decode`'s -f/--filter");
+                                     "support in both cases -- mirrors tshark's own -f, and `decode`'s -f/--filter")->group("Filtering");
     policy_validate_cmd
         ->add_option("--duration", policy_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
-                      "Ctrl+C instead)")
+                      "Ctrl+C instead)")->group("Live capture (-i only)")
         ->capture_default_str();
-    policy_validate_cmd->add_option("--snaplen", policy_snaplen, "Maximum bytes captured per packet with -i")
+    policy_validate_cmd->add_option("--snaplen", policy_snaplen, "Maximum bytes captured per packet with -i")->group("Live capture (-i only)")
         ->capture_default_str();
     policy_validate_cmd->add_flag(
         "!--no-promiscuous", policy_promiscuous,
         "With -i, don't put the interface into promiscuous mode (by default it is, since the main "
-        "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)");
+        "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)")->group("Live capture (-i only)");
     policy_validate_cmd
         ->add_option("--policy", policy_file,
                       "Zone/conduit policy file (a restricted YAML subset -- see docs/MANUAL.md's "
-                      "POLICY FILE FORMAT section)")
+                      "POLICY FILE FORMAT section)")->group("Input/output")
         ->required()
         ->check(CLI::ExistingFile);
     policy_validate_cmd->add_option(
         "-o,--output", policy_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
-        "glues onto this flag -- always use the double dash for a long option name");
+        "glues onto this flag -- always use the double dash for a long option name")->group("Input/output");
     policy_validate_cmd
         ->add_option("-T,--format", policy_format,
                      "Report format: text/json (the full report), or cef/leef/syslog (curated "
                      "one-liners, one per FlowVerdict::Violation only -- see docs/USER_GUIDE.md's "
-                     "SECURITY EVENT EXPORT section)")
+                     "SECURITY EVENT EXPORT section)")->group("Output format")
         ->transform(CLI::IsMember({"text", "json", "cef", "leef", "syslog"}))
         ->capture_default_str();
     policy_validate_cmd->add_flag("--strict", policy_strict,
-                                   "Abort on the first malformed packet instead of reporting it and continuing");
+                                   "Abort on the first malformed packet instead of reporting it and continuing")->group("Display options");
     add_resource_limit_options(policy_validate_cmd, policy_limit_vars);
     add_policy_engine_limit_options(policy_validate_cmd, policy_max_tcp_flows, policy_max_udp_flows,
                                      policy_max_ethernet_flows, policy_max_notable_protocols);
@@ -3257,7 +3520,7 @@ int main(int argc, char** argv) {
         "report's own \"notable protocols\" section) was observed, even on an otherwise COMPLIANT "
         "capture -- off by default: the \"notable protocols\" section is always populated regardless "
         "of this flag, so nothing is hidden without it; this flag only controls whether that finding "
-        "additionally affects the exit code, for a CI/audit pipeline that wants to gate on it");
+        "additionally affects the exit code, for a CI/audit pipeline that wants to gate on it")->group("Display options");
     policy_validate_cmd->add_flag(
         "--summarize-unclassified", policy_summarize_unclassified,
         "Collapse UNCLASSIFIED TRAFFIC (and, if present, ETHERNET UNCLASSIFIED TRAFFIC) entries that "
@@ -3269,29 +3532,29 @@ int main(int argc, char** argv) {
         "make a text report unnecessarily huge; VIOLATIONS and ALLOWED are never summarized, only "
         "the unclassified groups. Only affects --format text -- the JSON report always lists every "
         "flow individually, since it's already structured data a script can group/deduplicate on its "
-        "own with more precision than any one fixed grouping key here could offer");
+        "own with more precision than any one fixed grouping key here could offer")->group("Display options");
     policy_validate_cmd->add_flag("--mac-vendor", policy_mac_vendor,
                                    "Enable OUI (MAC vendor) resolution in the report; off by "
                                    "default to keep output compact -- see docs/MANUAL.md's "
                                    "OUTPUT FORMATS section. (Named --mac-vendor, not --oui, so a "
                                    "single-dash typo errors cleanly instead of silently gluing "
-                                   "onto -o/--output -- see decode's --mac-vendor help text)");
+                                   "onto -o/--output -- see decode's --mac-vendor help text)")->group("Name resolution");
     policy_validate_cmd->add_flag(
         "--resolve", policy_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
         "off by default; NEVER performs live DNS -- file-only, see docs/MANUAL.md's OUTPUT FORMATS "
-        "section");
+        "section")->group("Name resolution");
     policy_validate_cmd
         ->add_option("--hosts", policy_hosts_file,
-                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")->group("Name resolution")
         ->check(CLI::ExistingFile);
     policy_validate_cmd->add_flag("!--nn", policy_service_names,
                                    "Disable service name resolution (built-in table plus --services) "
-                                   "in the report, on by default");
+                                   "in the report, on by default")->group("Name resolution");
     policy_validate_cmd
         ->add_option("--services", policy_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
-                      "port->service-name table")
+                      "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
     // --- inventory ------------------------------------------------------------
@@ -3322,105 +3585,105 @@ int main(int argc, char** argv) {
 
     auto* inventory_input_opt =
         inventory_cmd->add_option("-r,--read", inventory_input,
-                                   "Input capture file (classic pcap or pcapng, auto-detected)")
+                                   "Input capture file (classic pcap or pcapng, auto-detected)")->group("Input/output")
             ->check(CLI::ExistingFile);
     auto* inventory_interface_opt = inventory_cmd->add_option(
         "-i,--interface", inventory_interface,
         "Build the inventory from live traffic on this network interface instead of reading a "
         "file (see 'conduitscope interfaces'); requires this build to have been compiled with "
-        "libpcap/Npcap support -- exactly one of -r/-i is required");
+        "libpcap/Npcap support -- exactly one of -r/-i is required")->group("Input/output");
     inventory_input_opt->excludes(inventory_interface_opt);
     inventory_interface_opt->excludes(inventory_input_opt);
     inventory_cmd->add_option("-f,--filter", inventory_filter,
                                "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
                                "with -r, applied per-packet after reading the file (same filter syntax "
                                "either way); requires this build to have been compiled with libpcap/Npcap "
-                               "support in both cases -- mirrors tshark's own -f, and `decode`'s -f/--filter");
+                               "support in both cases -- mirrors tshark's own -f, and `decode`'s -f/--filter")->group("Filtering");
     inventory_cmd
         ->add_option("--duration", inventory_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
-                      "Ctrl+C instead)")
+                      "Ctrl+C instead)")->group("Live capture (-i only)")
         ->capture_default_str();
-    inventory_cmd->add_option("--snaplen", inventory_snaplen, "Maximum bytes captured per packet with -i")
+    inventory_cmd->add_option("--snaplen", inventory_snaplen, "Maximum bytes captured per packet with -i")->group("Live capture (-i only)")
         ->capture_default_str();
     inventory_cmd->add_flag(
         "!--no-promiscuous", inventory_promiscuous,
         "With -i, don't put the interface into promiscuous mode (by default it is, since the main "
-        "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)");
+        "use case -- watching a mirrored/SPAN switch port -- needs traffic not addressed to this host)")->group("Live capture (-i only)");
     inventory_cmd->add_option(
         "-o,--output", inventory_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
-        "glues onto this flag -- always use the double dash for a long option name");
+        "glues onto this flag -- always use the double dash for a long option name")->group("Input/output");
     inventory_cmd
         ->add_option("-T,--format", inventory_format,
                       "Report format: text, json, csv, or stix (csv and stix are both deliberately "
                       "asset-only -- one row/object per device, for CMDB import or a STIX 2.1 "
-                      "bundle; use text/json for the full communications/zones/conduits picture)")
+                      "bundle; use text/json for the full communications/zones/conduits picture)")->group("Output format")
         ->transform(CLI::IsMember({"text", "json", "csv", "stix"}))
         ->capture_default_str();
     inventory_cmd->add_flag("--strict", inventory_strict,
-                             "Abort on the first malformed packet instead of reporting it and continuing");
+                             "Abort on the first malformed packet instead of reporting it and continuing")->group("Display options");
     add_resource_limit_options(inventory_cmd, inventory_limit_vars);
     add_inventory_engine_limit_options(inventory_cmd, inventory_max_assets, inventory_max_edges,
                                         inventory_max_tcp_sessions, inventory_max_notable_protocols);
     inventory_cmd
         ->add_option("--zone-prefix", inventory_zone_prefix,
                       "CIDR prefix length ([0, 32]) used to group observed asset IPs into "
-                      "inferred zones -- see docs/MANUAL.md's ROADMAP item 17")
+                      "inferred zones -- see docs/MANUAL.md's ROADMAP item 17")->group("Zone & conduit output")
         ->capture_default_str()
         ->check(CLI::Range(0, 32));
     inventory_cmd->add_option("--diagram", inventory_diagram_file,
-                               "Also write a zone/conduit diagram here (see --diagram-format)");
+                               "Also write a zone/conduit diagram here (see --diagram-format)")->group("Zone & conduit output");
     inventory_cmd
         ->add_option("--diagram-format", inventory_diagram_format,
-                      "Diagram format for --diagram: a Mermaid flowchart or Graphviz DOT")
+                      "Diagram format for --diagram: a Mermaid flowchart or Graphviz DOT")->group("Zone & conduit output")
         ->transform(CLI::IsMember({"mermaid", "dot"}))
         ->capture_default_str();
     inventory_cmd->add_option(
         "--policy-out", inventory_policy_out,
         "Also write the inferred zone/conduit model as a policy YAML file here, directly loadable "
-        "by 'policy validate --policy' -- closes the discover-then-enforce loop");
+        "by 'policy validate --policy' -- closes the discover-then-enforce loop")->group("Zone & conduit output");
     inventory_cmd->add_option(
         "--acl-out", inventory_acl_out,
         "Also write the inferred zone/conduit model as a firewall ACL DRAFT here (see --acl-format) "
-        "-- a starting point for a human to review, never something to deploy as-is");
+        "-- a starting point for a human to review, never something to deploy as-is")->group("Zone & conduit output");
     inventory_cmd
         ->add_option("--acl-format", inventory_acl_format,
                       "ACL dialect for --acl-out: Cisco IOS/ASA object-group + extended ACL, "
-                      "FortiGate 'config firewall' blocks, or Palo Alto PAN-OS 'set' commands")
+                      "FortiGate 'config firewall' blocks, or Palo Alto PAN-OS 'set' commands")->group("Zone & conduit output")
         ->transform(CLI::IsMember({"cisco", "fortinet", "paloalto"}))
         ->capture_default_str();
     inventory_cmd->add_option(
         "--edges-csv", inventory_edges_csv,
         "Also write the host-to-host communication matrix (report.edges) as a SEPARATE CSV file "
         "here, one row per client/server/protocol/port pair -- --format csv's own CSV is "
-        "deliberately asset-only and never includes this");
+        "deliberately asset-only and never includes this")->group("Zone & conduit output");
     inventory_cmd->add_option(
         "--conduits-csv", inventory_conduits_csv,
         "Also write the inferred zone-to-zone conduit summary (report.conduits) as a CSV file "
-        "here, one row per (from_zone, to_zone, protocol, port)");
+        "here, one row per (from_zone, to_zone, protocol, port)")->group("Zone & conduit output");
     inventory_cmd->add_flag("--mac-vendor", inventory_mac_vendor,
                              "Enable OUI (MAC vendor) resolution in the report; off by default to "
                              "keep output compact -- see docs/MANUAL.md's OUTPUT FORMATS section. "
                              "(Named --mac-vendor, not --oui, so a single-dash typo errors cleanly "
                              "instead of silently gluing onto -o/--output -- see decode's "
-                             "--mac-vendor help text)");
+                             "--mac-vendor help text)")->group("Name resolution");
     inventory_cmd->add_flag(
         "--resolve", inventory_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the report; "
         "off by default; NEVER performs live DNS -- file-only, see docs/MANUAL.md's OUTPUT FORMATS "
-        "section");
+        "section")->group("Name resolution");
     inventory_cmd
         ->add_option("--hosts", inventory_hosts_file,
-                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")->group("Name resolution")
         ->check(CLI::ExistingFile);
     inventory_cmd->add_flag("!--nn", inventory_service_names,
                              "Disable service name resolution (built-in table plus --services) in "
-                             "the report, on by default");
+                             "the report, on by default")->group("Name resolution");
     inventory_cmd
         ->add_option("--services", inventory_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
-                      "port->service-name table")
+                      "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
     // --- detect ------------------------------------------------------------------
@@ -3449,42 +3712,42 @@ int main(int argc, char** argv) {
 
     auto* detect_input_opt =
         detect_cmd->add_option("-r,--read", detect_input,
-                                "Input capture file (classic pcap or pcapng, auto-detected)")
+                                "Input capture file (classic pcap or pcapng, auto-detected)")->group("Input/output")
             ->check(CLI::ExistingFile);
     auto* detect_interface_opt = detect_cmd->add_option(
         "-i,--interface", detect_interface,
         "Run detection against live traffic on this network interface instead of reading a file "
         "(see 'conduitscope interfaces'); requires this build to have been compiled with "
-        "libpcap/Npcap support -- exactly one of -r/-i is required");
+        "libpcap/Npcap support -- exactly one of -r/-i is required")->group("Input/output");
     detect_input_opt->excludes(detect_interface_opt);
     detect_interface_opt->excludes(detect_input_opt);
     detect_cmd->add_option("-f,--filter", detect_filter,
                             "BPF filter (tcpdump syntax) -- with -i, applied by libpcap at capture time; "
                             "with -r, applied per-packet after reading the file; requires this build to "
-                            "have been compiled with libpcap/Npcap support in both cases");
+                            "have been compiled with libpcap/Npcap support in both cases")->group("Filtering");
     detect_cmd
         ->add_option("--duration", detect_duration,
                       "Stop a live capture (-i) after this many seconds (0 = unlimited; stop with "
-                      "Ctrl+C instead)")
+                      "Ctrl+C instead)")->group("Live capture (-i only)")
         ->capture_default_str();
-    detect_cmd->add_option("--snaplen", detect_snaplen, "Maximum bytes captured per packet with -i")
+    detect_cmd->add_option("--snaplen", detect_snaplen, "Maximum bytes captured per packet with -i")->group("Live capture (-i only)")
         ->capture_default_str();
     detect_cmd->add_flag(
         "!--no-promiscuous", detect_promiscuous,
-        "With -i, don't put the interface into promiscuous mode (by default it is)");
+        "With -i, don't put the interface into promiscuous mode (by default it is)")->group("Live capture (-i only)");
     detect_cmd->add_option(
         "-o,--output", detect_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
-        "glues onto this flag -- always use the double dash for a long option name");
+        "glues onto this flag -- always use the double dash for a long option name")->group("Input/output");
     detect_cmd
         ->add_option("-T,--format", detect_format,
                      "Report format: text/json (the full report), or cef/leef/syslog (curated "
                      "one-liners, one per finding -- see docs/USER_GUIDE.md's SECURITY EVENT "
-                     "EXPORT section)")
+                     "EXPORT section)")->group("Output format")
         ->transform(CLI::IsMember({"text", "json", "cef", "leef", "syslog"}))
         ->capture_default_str();
     detect_cmd->add_flag("--strict", detect_strict,
-                          "Abort on the first malformed packet instead of reporting it and continuing");
+                          "Abort on the first malformed packet instead of reporting it and continuing")->group("Display options");
     add_resource_limit_options(detect_cmd, detect_limit_vars);
     add_detect_engine_limit_options(detect_cmd, detect_max_findings, detect_max_tracked_keys_per_map,
                                      detect_max_originators_per_server);
@@ -3493,7 +3756,7 @@ int main(int argc, char** argv) {
                       "Policy YAML file (see 'policy validate') -- used only to tell a new "
                       "remote-access session that stays within one declared zone (MITRE ATT&CK for "
                       "ICS T0886, Remote Services) from one that crosses a zone boundary (T0822, "
-                      "External Remote Services); every other finding is unaffected by this flag")
+                      "External Remote Services); every other finding is unaffected by this flag")->group("Policy & baseline inputs (optional)")
         ->check(CLI::ExistingFile);
     detect_cmd
         ->add_option("--baseline-file", detect_baseline_file,
@@ -3504,30 +3767,30 @@ int main(int argc, char** argv) {
                       "flagged at all; one genuinely absent gets novelty 'Confirmed New'. Without "
                       "this flag, a new-vs-known finding gets novelty 'First Occurrence' (first "
                       "occurrence within this capture only) -- either way, the finding's own "
-                      "evidence and severity are unaffected by this flag")
+                      "evidence and severity are unaffected by this flag")->group("Policy & baseline inputs (optional)")
         ->check(CLI::ExistingFile);
     detect_cmd
         ->add_option("--max-baseline-file-bytes", detect_max_baseline_file_bytes,
                       "Cap how large --baseline-file may be before it's read into memory (default "
-                      "256 MiB)")
+                      "256 MiB)")->group("Policy & baseline inputs (optional)")
         ->capture_default_str();
     detect_cmd->add_flag("--mac-vendor", detect_mac_vendor,
-                          "Enable OUI (MAC vendor) resolution in the report; off by default");
+                          "Enable OUI (MAC vendor) resolution in the report; off by default")->group("Name resolution");
     detect_cmd->add_flag(
         "--resolve", detect_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the "
-        "report; off by default; NEVER performs live DNS");
+        "report; off by default; NEVER performs live DNS")->group("Name resolution");
     detect_cmd
         ->add_option("--hosts", detect_hosts_file,
-                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")->group("Name resolution")
         ->check(CLI::ExistingFile);
     detect_cmd->add_flag("!--nn", detect_service_names,
                           "Disable service name resolution (built-in table plus --services) in "
-                          "the report, on by default");
+                          "the report, on by default")->group("Name resolution");
     detect_cmd
         ->add_option("--services", detect_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
-                      "port->service-name table")
+                      "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
     // --- baseline learn / baseline check ---------------------------------------
@@ -3558,14 +3821,14 @@ int main(int argc, char** argv) {
            baseline_learn_max_operations_per_conduit = 0, baseline_learn_max_ranges_per_operation = 0;
     baseline_learn_cmd
         ->add_option("--baseline-file", baseline_learn_file,
-                      "Baseline JSON file to read (if it exists) and write back. Required")
+                      "Baseline JSON file to read (if it exists) and write back. Required")->group("Input/output")
         ->required();
     baseline_learn_cmd
         ->add_option("--max-baseline-file-bytes", baseline_learn_max_file_bytes,
                       "Cap how large --baseline-file may be before it's read into memory (default "
                       "256 MiB). 0 = leave it at its own default; a baseline file this large "
                       "genuinely being legitimate is essentially always a sign something else is "
-                      "wrong (see docs/DEVELOPMENT.md's security review write-up)")
+                      "wrong (see docs/DEVELOPMENT.md's security review write-up)")->group("Input/output")
         ->capture_default_str();
     add_baseline_engine_limit_options(baseline_learn_cmd, baseline_learn_max_tcp_sessions,
                                         baseline_learn_max_conduits, baseline_learn_max_operations_per_conduit,
@@ -3575,11 +3838,11 @@ int main(int argc, char** argv) {
                       "One or more pcap/pcapng capture files to learn from, in order (classic "
                       "pcap or pcapng, auto-detected) -- repeatable (-r a.pcap -r b.pcap) or "
                       "positional (a.pcap b.pcap), matching every other file-reading subcommand's "
-                      "own -r/--read spelling")
+                      "own -r/--read spelling")->group("Input/output")
         ->required()
         ->check(CLI::ExistingFile);
     baseline_learn_cmd->add_flag("--strict", baseline_learn_strict,
-                                  "Abort on the first malformed packet instead of warning and continuing");
+                                  "Abort on the first malformed packet instead of warning and continuing")->group("Display options");
     add_resource_limit_options(baseline_learn_cmd, baseline_learn_limit_vars);
 
     auto* baseline_check_cmd = baseline_cmd->add_subcommand(
@@ -3596,7 +3859,7 @@ int main(int argc, char** argv) {
     size_t baseline_check_max_tcp_sessions = 0, baseline_check_max_conduits = 0,
            baseline_check_max_operations_per_conduit = 0, baseline_check_max_ranges_per_operation = 0;
     baseline_check_cmd
-        ->add_option("--baseline-file", baseline_check_file, "Baseline JSON file to check against. Required")
+        ->add_option("--baseline-file", baseline_check_file, "Baseline JSON file to check against. Required")->group("Input/output")
         ->required()
         ->check(CLI::ExistingFile);
     baseline_check_cmd
@@ -3604,7 +3867,7 @@ int main(int argc, char** argv) {
                       "Cap how large --baseline-file may be before it's read into memory (default "
                       "256 MiB). 0 = leave it at its own default; a baseline file this large "
                       "genuinely being legitimate is essentially always a sign something else is "
-                      "wrong (see docs/DEVELOPMENT.md's security review write-up)")
+                      "wrong (see docs/DEVELOPMENT.md's security review write-up)")->group("Input/output")
         ->capture_default_str();
     add_baseline_engine_limit_options(baseline_check_cmd, baseline_check_max_tcp_sessions,
                                         baseline_check_max_conduits, baseline_check_max_operations_per_conduit,
@@ -3613,28 +3876,28 @@ int main(int argc, char** argv) {
         ->add_option("-r,--read,capture", baseline_check_input,
                       "The pcap/pcapng capture file to check (classic pcap or pcapng, "
                       "auto-detected) -- -r/--read or positional, matching every other "
-                      "file-reading subcommand's own -r/--read spelling")
+                      "file-reading subcommand's own -r/--read spelling")->group("Input/output")
         ->required()
         ->check(CLI::ExistingFile);
     baseline_check_cmd->add_option(
         "-o,--output", baseline_check_output,
         "Write the report here instead of stdout. Caution: a single-dash long-option typo "
-        "glues onto this flag -- always use the double dash for a long option name");
+        "glues onto this flag -- always use the double dash for a long option name")->group("Input/output");
     baseline_check_cmd
         ->add_option("-T,--format", baseline_check_format,
                      "Report format: text/json (the full report), or cef/leef/syslog (curated "
                      "one-liners, one per finding -- see docs/USER_GUIDE.md's SECURITY EVENT "
-                     "EXPORT section)")
+                     "EXPORT section)")->group("Output format")
         ->transform(CLI::IsMember({"text", "json", "cef", "leef", "syslog"}))
         ->capture_default_str();
     baseline_check_cmd->add_flag("--strict", baseline_check_strict,
-                                  "Abort on the first malformed packet instead of warning and continuing");
+                                  "Abort on the first malformed packet instead of warning and continuing")->group("Display options");
     baseline_check_cmd->add_flag(
         "--symbolic-addresses", baseline_check_symbolic_addresses,
         "Also render S7comm ranges in Step7 byte/word/bit notation (e.g. \"MB10-MB19\", \"M10.3\") "
         "alongside the existing raw numeric range_start/range_end fields, for NewTargetRange "
         "findings. Default off -- output is unchanged unless this is passed. No effect on any "
-        "other protocol's findings");
+        "other protocol's findings")->group("Display options");
     baseline_check_cmd
         ->add_option("--policy", baseline_check_policy_file,
                       "Zone/conduit policy file (same format and option name as 'policy validate --policy' "
@@ -3648,7 +3911,7 @@ int main(int argc, char** argv) {
                       "even with --policy given. Leaves 'baseline learn' and every 'baseline check' run "
                       "without this flag completely unchanged -- zones are resolved fresh from the policy "
                       "file at check time only, never persisted into the baseline file itself, so swapping "
-                      "in an updated policy later needs no re-learn")
+                      "in an updated policy later needs no re-learn")->group("Policy & baseline inputs (optional)")
         ->check(CLI::ExistingFile);
     add_resource_limit_options(baseline_check_cmd, baseline_check_limit_vars);
 
@@ -3692,32 +3955,32 @@ int main(int argc, char** argv) {
                       "Capture live from this network interface (see 'conduitscope interfaces'); "
                       "requires this build to have been compiled with libpcap/Npcap support. "
                       "Required -- unlike 'decode'/'policy validate'/'inventory', 'capture' has no "
-                      "-r/--read offline-file mode at all (see this subcommand's own --help header)")
+                      "-r/--read offline-file mode at all (see this subcommand's own --help header)")->group("Input/output")
         ->required();
     capture_cmd->add_option("-f,--filter", capture_filter,
                              "BPF filter (tcpdump syntax), applied by libpcap at capture time -- "
                              "same syntax and meaning as 'decode'/'policy validate'/'inventory''s "
-                             "own -f");
+                             "own -f")->group("Filtering");
     capture_cmd->add_option("-a,--duration", capture_duration,
                              "Stop after this many seconds (0 = unlimited; stop with Ctrl+C or "
-                             "--max-packets instead)")
+                             "--max-packets instead)")->group("Live capture (-i only)")
         ->capture_default_str();
-    capture_cmd->add_option("--snaplen", capture_snaplen, "Maximum bytes captured per packet")
+    capture_cmd->add_option("--snaplen", capture_snaplen, "Maximum bytes captured per packet")->group("Live capture (-i only)")
         ->capture_default_str();
     capture_cmd->add_flag("!--no-promiscuous", capture_promiscuous,
                            "Don't put the interface into promiscuous mode (by default it is, since "
                            "the main use case -- watching a mirrored/SPAN switch port -- needs "
-                           "traffic not addressed to this host)");
+                           "traffic not addressed to this host)")->group("Live capture (-i only)");
     capture_cmd->add_option("-c,--max-packets", capture_max_packets,
                              "Stop after capturing this many packets total, across every rotated "
                              "file (0 = unlimited, the default -- the normal setting for a "
                              "long-running sensor; a nonzero value is mainly useful for a bounded "
-                             "test/smoke run)")
+                             "test/smoke run)")->group("Input/output")
         ->capture_default_str();
     capture_cmd
         ->add_option("-d,--directory", capture_directory,
                       "Directory to write rotated capture files into. Must already exist -- this "
-                      "subcommand never creates it")
+                      "subcommand never creates it")->group("Capture rotation")
         ->capture_default_str()
         ->check(CLI::ExistingDirectory);
     capture_cmd->add_option(
@@ -3725,12 +3988,12 @@ int main(int argc, char** argv) {
         "Filename prefix for every rotated file (default: -i/--interface's own name, sanitized -- "
         "see this subcommand's own --help header). Useful to give a shorter/friendlier name than "
         "a raw platform interface identifier, especially on Windows/Npcap where interface names "
-        "can be long GUID-style strings");
+        "can be long GUID-style strings")->group("Capture rotation");
     capture_cmd
         ->add_option("--rotate-bytes", capture_rotate_bytes,
                       "Rotate to a new file once the current one reaches roughly this many bytes "
                       "(0 = no size-based rotation, the default). See rotating_pcap_writer.hpp's "
-                      "own RotationPolicy::rotate_bytes for the exact boundary behavior")
+                      "own RotationPolicy::rotate_bytes for the exact boundary behavior")->group("Capture rotation")
         ->capture_default_str();
     capture_cmd
         ->add_option("--rotate-seconds", capture_rotate_seconds,
@@ -3738,7 +4001,7 @@ int main(int argc, char** argv) {
                       "many seconds past the current file's first packet (0 = no time-based "
                       "rotation, the default). Checked against each packet's own capture timestamp, "
                       "not wall-clock -- see rotating_pcap_writer.hpp's own RotationPolicy::"
-                      "rotate_seconds for why")
+                      "rotate_seconds for why")->group("Capture rotation")
         ->capture_default_str();
     capture_cmd
         ->add_option("--max-total-bytes", capture_max_total_bytes,
@@ -3748,14 +4011,14 @@ int main(int argc, char** argv) {
                       "(0 = no size-based retention cap, the default). Requires --rotate-bytes "
                       "and/or --rotate-seconds to be set too -- with no rotation there is only ever "
                       "one file, which is always the active file, and the active file is never "
-                      "deleted, so this could never actually bound disk use on its own")
+                      "deleted, so this could never actually bound disk use on its own")->group("Capture rotation")
         ->capture_default_str();
     capture_cmd
         ->add_option("--max-files", capture_max_files,
                       "Delete the oldest already-rotated file(s) so this run has at most this many "
                       "files on disk IN TOTAL, counting the file currently being written (0 = no "
                       "count-based retention cap, the default). Same --rotate-bytes/--rotate-seconds "
-                      "requirement as --max-total-bytes above")
+                      "requirement as --max-total-bytes above")->group("Capture rotation")
         ->capture_default_str();
 
     // --- merge ------------------------------------------------------------
@@ -3784,18 +4047,18 @@ int main(int argc, char** argv) {
         ->add_option("reports", merge_inventory_inputs,
                       "One or more 'inventory --format json' report files, one per tap point "
                       "(merging just one is also legal -- e.g. to re-derive zones at a different "
-                      "--zone-prefix)")
+                      "--zone-prefix)")->group("Input/output")
         ->required()
         ->check(CLI::ExistingFile);
     merge_inventory_cmd->add_option(
         "-o,--output", merge_inventory_output,
         "Write the merged report here instead of stdout. Caution: a single-dash long-option typo "
-        "glues onto this flag -- always use the double dash for a long option name");
+        "glues onto this flag -- always use the double dash for a long option name")->group("Input/output");
     merge_inventory_cmd
         ->add_option("-T,--format", merge_inventory_format,
                       "Merged report format: text, json, or csv (csv is deliberately asset-only, "
                       "same as 'inventory --format csv' -- see write_inventory_report_csv's own "
-                      "doc comment)")
+                      "doc comment)")->group("Output format")
         ->transform(CLI::IsMember({"text", "json", "csv"}))
         ->capture_default_str();
     merge_inventory_cmd
@@ -3804,31 +4067,49 @@ int main(int argc, char** argv) {
                       "zones -- independent of whatever --zone-prefix, if any, each individual "
                       "input report was itself generated with; zones/conduits are always freshly "
                       "re-derived from the merged assets/edges, never merged from the inputs' own "
-                      "zones/conduits arrays (which are ignored entirely -- see inventory_merge.hpp)")
+                      "zones/conduits arrays (which are ignored entirely -- see inventory_merge.hpp)")->group("Zone & conduit output")
         ->capture_default_str()
         ->check(CLI::Range(0, 32));
     merge_inventory_cmd->add_flag("--mac-vendor", merge_inventory_mac_vendor,
                                    "Enable OUI (MAC vendor) resolution in the merged report; off by "
-                                   "default, same as 'inventory' itself");
+                                   "default, same as 'inventory' itself")->group("Name resolution");
     merge_inventory_cmd->add_flag(
         "--resolve", merge_inventory_resolve,
         "Enable hostname resolution from an explicitly-supplied hosts file (--hosts) in the merged "
-        "report; off by default; NEVER performs live DNS");
+        "report; off by default; NEVER performs live DNS")->group("Name resolution");
     merge_inventory_cmd
         ->add_option("--hosts", merge_inventory_hosts_file,
-                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")
+                      "Unix /etc/hosts-style file to resolve IP addresses from, for --resolve")->group("Name resolution")
         ->check(CLI::ExistingFile);
     merge_inventory_cmd->add_flag("!--nn", merge_inventory_service_names,
                                    "Disable service name resolution (built-in table plus --services) "
-                                   "in the merged report, on by default");
+                                   "in the merged report, on by default")->group("Name resolution");
     merge_inventory_cmd
         ->add_option("--services", merge_inventory_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
-                      "port->service-name table")
+                      "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
     // --- version ------------------------------------------------------------
     app.add_subcommand("version", "Print version and build information");
+
+    // A bare invocation -- no arguments at all -- prints the top-level --help and exits cleanly,
+    // rather than falling into ROADMAP item 109's own default-subcommand behavior just below
+    // (which would inject `decode` and then immediately fail with decode's own "needs exactly
+    // one of -r/--read or -i/--interface" error). That error is the right one for e.g.
+    // `conduitscope -r FILE` -- there IS something on the line for `decode` to act on, just
+    // missing a required option -- but it's a confusing first impression for anyone who ran the
+    // bare executable with nothing else typed (including, on Windows, simply double-clicking
+    // conduitscope.exe from Explorer) expecting to see what the tool does, not an error about a
+    // subcommand they never typed at all. `argc == 1` (program name only, no other tokens) is
+    // deliberately the exact and only case this short-circuits -- `conduitscope -q` or any other
+    // explicit flag with no subcommand still falls through to item 109's default exactly as
+    // before, since the operator did type something and decode's own error remains the correct,
+    // specific diagnosis there.
+    if (argc == 1) {
+        std::cout << app.help();
+        return 0;
+    }
 
     // --decode/--info/--interfaces/--policy/--inventory/--detect/--baseline/--capture/--merge:
     // every subcommand above is also selectable via a double-dashed flag of its own name -- see
@@ -3937,6 +4218,38 @@ int main(int argc, char** argv) {
         // parse_decode_as_rules above -- see display_filter.hpp's own compile_display_filter comment.
         std::optional<CompiledDisplayFilter> decode_display_filter_compiled;
         if (!decode_display_filter.empty()) {
+            // '@<path>' reads the actual expression from a file instead of the command line. Not
+            // just a convenience: on Windows, CreateProcess's own ~32767-character total
+            // command-line length limit makes a multi-kilobyte -Y expression impossible to pass as
+            // a literal argv entry at all -- this is exactly how CTest's own decode_display_filter_
+            // error_expression_too_long regression test, which deliberately exercises a 65537-byte
+            // expression to exercise kMaxExpressionLength, invokes this flag (see CMakeLists.txt).
+            // A single leading '@' is unambiguous: every real display-filter field reference is a
+            // bare identifier/keyword (e.g. 'modbus.func_code'), never a '@'-prefixed token, so this
+            // can never collide with a real filter expression.
+            if (decode_display_filter.front() == '@') {
+                const std::string display_filter_path = decode_display_filter.substr(1);
+                std::ifstream display_filter_file(display_filter_path, std::ios::binary);
+                if (!display_filter_file) {
+                    std::cerr << "error: cannot open display filter file '" << display_filter_path
+                               << "' for reading\n";
+                    return 1;
+                }
+                std::ostringstream display_filter_buf;
+                display_filter_buf << display_filter_file.rdbuf();
+                decode_display_filter = display_filter_buf.str();
+                // Trim exactly one trailing line ending -- near-universal in a file written by an
+                // editor or a shell redirection -- so the expression's own length/content checks
+                // (and any error message that echoes it back) see exactly what the author meant,
+                // not one incidental extra byte they almost certainly never intended as part of the
+                // filter itself.
+                if (!decode_display_filter.empty() && decode_display_filter.back() == '\n') {
+                    decode_display_filter.pop_back();
+                    if (!decode_display_filter.empty() && decode_display_filter.back() == '\r') {
+                        decode_display_filter.pop_back();
+                    }
+                }
+            }
             std::string display_filter_error;
             decode_display_filter_compiled = compile_display_filter(decode_display_filter, &display_filter_error);
             if (!decode_display_filter_compiled) {

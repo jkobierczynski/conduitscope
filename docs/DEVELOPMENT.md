@@ -16363,6 +16363,194 @@ it done as its own patch.
     `build`'s count exactly), before delivery as a zip of touched/new files via the standing
     no-git-commit convention.
 
+114. **Make `--help` far friendlier to read.** Jurgen's direct request, verbatim: "Can you make
+    the output of the --help way more friendlier to read?" -- followed by his own scope choice,
+    "Wrap + group (recommended)," over two narrower alternatives (wrap-only, and wrap+group+
+    shorten-the-text): "Fix the formatter to properly word-wrap every description to the terminal
+    width, AND organize each subcommand's options into labeled sections ... so related flags sit
+    together and the common ones surface first. No information is removed -- same content, far
+    easier to scan."
+
+    **Root cause, found by reading CLI11 itself (`third_party/CLI11/CLI11.hpp`).** Two independent
+    problems, not one: (1) `detail::format_help`, the stock formatter's own line-assembly routine,
+    pads the name column and re-indents only a LITERAL embedded `\n` already present in a
+    description string -- it never measures the terminal and never actually wraps a long
+    description to fit it, so every one of this tool's (often multi-sentence, rationale-heavy)
+    option descriptions printed as one single unbroken line, however long; (2) every option across
+    every subcommand sat in CLI11's single default "Options" group, so `decode --help` alone dumped
+    roughly 190 options in source-declaration order with no visual separation between, say, the
+    handful of flags someone reaches for constantly (`-r`, `-o`, `-f`) and the rarely-touched
+    resource-limit/port-override knobs -- both failures compounding: a wall of unwrapped, ungrouped
+    text.
+
+    **The fix: `WrappingHelpFormatter` (`src/cli_main.cpp`), plus systematic option grouping.**
+    `terminal_width()` detects the real terminal width (`ioctl(TIOCGWINSZ)` on POSIX,
+    `GetConsoleScreenBufferInfo` on Windows -- mirroring the existing `stdout_is_terminal()`
+    cross-platform pattern this file already had), falls back to the `COLUMNS` environment variable
+    when stdout isn't a tty (piped output, `--help | less`, `--help > file.txt`), then a hardcoded
+    100-column default if neither is available, and finally clamps the result to `[60, 200]` --
+    never an unreadably narrow wrap, never one absurdly long line again at a huge/unset width.
+    `wrap_text()` is a plain greedy whitespace word-wrapper; `wrap_name_opts()` additionally loosens
+    `,` into an equally valid break point for the one name/opts-column case long enough to need it
+    with no whitespace anywhere in it at all: `--protocol`'s `{auto,modbus,dnp3,...,homeplug-av}`
+    choice list, close to 500 characters, rendered by CLI11's own `CLI::IsMember` validator.
+    `WrappingHelpFormatter` subclasses `CLI::Formatter` and overrides `make_option` (per-option
+    lines), `make_subcommand` (the "Subcommands:" listing under e.g. `baseline --help`), and
+    `make_description` (the app/subcommand's own top description paragraph) -- each now wraps its
+    text to `terminal_width()` instead of CLI11's unwrapped stock behavior. `app.formatter(std::
+    make_shared<WrappingHelpFormatter>())` is called once, in `main()`, right after the pre-existing
+    `app.footer(...)` call and deliberately BEFORE any `add_subcommand()` call: `CLI::App`'s
+    constructor copies its parent's `formatter_` at subcommand-creation time
+    (`formatter_ = parent_->formatter_;`), so calling `app.formatter(...)` before any subcommand
+    exists is what makes every subcommand (and nested subcommand) inherit the same formatter
+    automatically, with no per-subcommand wiring needed.
+
+    Separately, `->group("...")` was applied to 191 of the 195 `add_option`/`add_flag` call sites
+    across every subcommand (`decode`, `info`, `policy validate`, `inventory`, `detect`,
+    `baseline learn`, `baseline check`, `capture`, `merge inventory`, and the shared `add_*_limit_
+    options`/`add_conversation_stats_options` helpers several of them call into), using consistent
+    group names across subcommands wherever the same option recurs -- "Input/output," "Filtering,"
+    "Live capture (-i only)," "Output format," "Protocol selection"/"Protocol port overrides
+    (rarely needed)" (decode only), "Resource limits (advanced)," "Display options," "Name
+    resolution," "Zone & conduit output" (inventory/merge inventory), "Policy & baseline inputs
+    (optional)" (detect/baseline check), "Capture rotation" (capture only). `App::get_groups()`
+    returns names in first-insertion order (the order options were added in source, not
+    alphabetically), which is what fixes each section's print order and is why the common,
+    frequently-touched options were deliberately declared first within each subcommand. The 4
+    options left in CLI11's default "Options" group are deliberate, not missed: the top-level-only
+    `-q/--quiet`, `--no-color`, `--color`, `--log-file`, which sit above every subcommand and needed
+    no section of their own.
+
+    **Two real bugs found and fixed during manual verification**, both in `wrap_help_line()` (the
+    shared per-line layout helper `make_option`/`make_subcommand` both call): the loop originally
+    applied the 4-space continuation indent to every wrapped name/opts fragment except the LAST one
+    (so e.g. a long `--protocol` line's trailing `[auto]` fragment printed flush against the margin,
+    misaligned under its own siblings) -- fixed by computing the last line separately and applying
+    the indent uniformly across all of them; and the leading 2-space indent was originally baked
+    into the name string BEFORE wrapping, but `wrap_text()`'s `istringstream >> word` tokenizer
+    silently strips leading whitespace, so that indent was being eaten on the first wrapped line --
+    fixed by wrapping the un-indented text first and adding the indent to each resulting line
+    afterward.
+
+    **Tests: 13 new `CMakeLists.txt` entries**, plus a real lesson in CTest's own
+    `PASS_REGULAR_EXPRESSION` regex dialect (`cmsys::RegularExpression`, an old AT&T-derived engine,
+    confirmed by direct experimentation to differ from CMake's own `string(REGEX MATCH ...)` engine
+    used by `cmake -P` -- the latter is NOT a reliable stand-in for predicting real `ctest` regex
+    behavior and was abandoned as a debugging tool partway through this item once the discrepancy
+    was confirmed): this engine does not support `{n}`/`{n,m}` interval quantifiers at all -- even
+    `{2}` matches nothing, not just large counts -- so an exact run-length of spaces must be written
+    out as that many literal space characters, never `{n}`; and a literal `\n` in a
+    `PASS_REGULAR_EXPRESSION` string must be written as a single backslash (CMake's own string-
+    literal escaping converts `\n` to an actual embedded newline byte at configure time, which this
+    engine then matches as a literal character) -- writing `\\n` instead produces the two literal
+    characters backslash-then-n, which never appears in real program output and silently never
+    matches. Eight group-header-presence tests (one per subcommand with enough options to be
+    grouped: `decode`, `policy validate`, `inventory`, `detect`, `baseline learn`, `baseline check`,
+    `capture`, `merge inventory`) and the `--protocol` comma-wrap test initially chained multiple
+    `(.*\n)*` repeated groups in one pattern to check several section headers appear in order --
+    this causes genuine catastrophic/exponential backtracking in this engine and hangs `ctest`
+    outright (confirmed: each one individually timed out under a `timeout 8` guard); replaced with
+    this codebase's own already-proven-safe style elsewhere (a single bare `.*`, no enclosing group,
+    no repetition operator on the group itself, between each anchor). Two line-count tests
+    (`decode_help_wraps_into_far_more_lines_at_narrow_terminal_width`,
+    `baseline_help_subcommand_listing_wraps_at_narrow_terminal_width`) originally anchored a digit
+    range with `^...$` against `wc -l`-style single-number output and failed outright (not hung) --
+    the trailing newline after the number means `$` never lands where expected in this engine, so
+    both were rewritten to anchor only `^` and drop the trailing `$`, relying on the leading digit
+    run itself being distinctive enough. `decode_help_group_headers_present_in_order` additionally
+    carries a `FAIL_REGULAR_EXPRESSION` proving `decode --help` never shows `inventory`/`capture`/
+    `detect`-only group names, confirming groups are genuinely per-subcommand and not a single
+    global list; the seven sibling subcommand tests carry the equivalent negative check for their
+    own command. `decode_help_clamps_tiny_terminal_width_to_60_column_floor` and
+    `decode_help_clamps_huge_terminal_width_to_200_column_ceiling` each pin one exact wrapped-text
+    shape confirmed byte-for-byte against the real built binary at `COLUMNS=5` and `COLUMNS=99999`
+    respectively, proving `terminal_width()`'s own documented `[60, 200]` clamp actually holds at
+    both extremes.
+
+    **Docs.** No `docs/USER_GUIDE.md`/`docs/MANUAL.md` change -- this is a pure CLI-ergonomics/
+    layout fix with no behavioral change and no change to any documented output format (JSON/CSV/
+    fields/zeek/CEF/LEEF/syslog are all untouched; only the human-facing `--help` text itself
+    re-flows).
+
+    **Verification.** Full CTest across all four standing build configs (default GCC `build`:
+    2447, +13 over item 113's 2434; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2432,
+    +13 over 2419; MinGW cross-compile `build-mingw`, build-only, configured test count 2432, +13
+    over 2419, matching `build_nolive`'s count rather than `build`'s -- both configurations have
+    live capture disabled; Clang ASan/UBSan `build-fuzz`: 2525 total (2447 non-corpus tests,
+    matching `build`'s count, plus the 78 pre-existing `*_corpus_regression` tests unique to this
+    config), all passing clean under ASan/UBSan) -- confirming zero regressions anywhere, plus
+    extensive manual verification against the real built binary (`COLUMNS=100/80/60/40/5/99999`,
+    unset/piped, and `diff`-based proof that the floor/ceiling clamps are byte-for-byte identical
+    to their nearest in-range width), plus a clean-room extract-rebuild-test cycle (2447/2447,
+    matching `build`'s count exactly), before delivery as a zip of touched/new files via the
+    standing no-git-commit convention.
+
+115. **CI fix: Windows CTest launch failure on `decode_display_filter_error_expression_too_long`.**
+    Windows CI reported this test as "Not Run" with a launch-level "name too long" failure rather
+    than a normal pass/fail -- not a product bug: this test deliberately passes a 65537-byte `-Y`
+    expression (to exercise F3's `kMaxExpressionLength` rejection, item 113's sibling fix) as a
+    single argv entry, which fits fine in a Linux/macOS process launch but blows straight through
+    Windows' own `CreateProcess` ~32767-character TOTAL command-line length limit (every argument
+    combined, not per-argument) -- CTest could not even launch the process at all, before the
+    product's own argument parsing ever ran.
+
+    **The fix.** `-Y/--display-filter` (`src/cli_main.cpp`) now also accepts `@<path>`, reading the
+    actual expression from a file instead of the command line (one trailing line ending trimmed, if
+    present, matching how a file saved by an editor or shell redirection would end) -- unambiguous,
+    since no real display-filter expression begins with `@` (every field reference is a bare
+    identifier/keyword). The failing CTest entry now writes its 65537-byte expression to a generated
+    file at configure time (`file(WRITE ...)`, under `${CMAKE_CURRENT_BINARY_DIR}`) and passes
+    `-Y "@<path>"` -- a short, fixed-length argument regardless of the file's own size, so the
+    Windows command-line limit is never in play. Two new tests cover the mechanism itself:
+    `decode_display_filter_at_file_trims_trailing_newline` (a real file ending in `\n`, proving the
+    trim and that the filter still compiles and matches) and `decode_display_filter_at_file_missing_
+    is_clean_error` (a nonexistent path is a clean CLI error, not a crash). This is a generically
+    useful capability on its own, not only a test-harness workaround: any operator with a long,
+    generated, or shell-quoting-fragile `-Y` expression can now put it in a file instead.
+
+    **Verification.** Scoped to this fix, at Jurgen's own explicit request not to re-run the full
+    verification battery: default `build` rebuilt and the full `display_filter`-tagged CTest subset
+    re-run (46/46 passing, including the 3 new/changed tests above). The full four-config/clean-room
+    verification cycle was deliberately not repeated for this change.
+
+116. **A bare invocation now prints top-level `--help` instead of defaulting to `decode` and
+    failing.** Jurgen's own direct report: running the plain Windows executable with nothing else
+    typed (e.g. `conduitscope.exe` alone, including by double-clicking it from Explorer) printed
+    `error: 'decode' needs exactly one of -r/--read ... or -i/--interface` -- technically correct
+    (ROADMAP item 109's own no-subcommand default genuinely does inject `decode`, which genuinely
+    does need one of those two), but a poor first impression for anyone who just ran the tool with
+    nothing else on the line expecting to see what it does, not an error about a subcommand they
+    never typed.
+
+    **The fix.** `main()` (`src/cli_main.cpp`) now checks `argc == 1` -- program name only, no
+    other tokens at all -- immediately after the app and every subcommand/option are fully
+    configured, and before item 109's own `rewrite_subcommand_alias`/`inject_default_subcommand`
+    pipeline ever runs: on that exact condition, it prints `app.help()` (byte-identical to what
+    `-h`/`--help` itself shows) and returns 0, short-circuiting item 109's default-`decode`
+    injection entirely. Deliberately narrow: typing anything else at all -- even a bare global flag
+    like `-q` with nothing else -- still falls through to item 109's existing behavior unchanged,
+    since the operator did type something and decode's own specific missing-source error remains
+    the correct diagnosis there, not a usage-text dump.
+
+    **Tests.** The pre-existing `bare_invocation_reports_decode_missing_source_error` (which
+    pinned the now-replaced behavior) is renamed `bare_invocation_prints_top_level_help` and now
+    asserts the help-text usage line instead, plus a `FAIL_REGULAR_EXPRESSION` guarding against the
+    old error text ever reappearing; `bare_invocation_exits_zero` confirms this is a genuine clean
+    exit, not an error that happens to also print usage text; `bare_invocation_with_explicit_flag_
+    still_reports_decode_missing_source_error` (`conduitscope -q`) confirms the narrow scoping --
+    one explicit token on the line is enough to fall through to item 109's unchanged behavior.
+
+    **Docs.** `docs/USER_GUIDE.md`'s own no-subcommand-default section, which previously stated a
+    truly bare invocation "is whatever `decode` itself reports for being given neither `-r` nor
+    `-i`," is corrected to describe the new help-and-exit-0 behavior instead.
+
+    **Verification.** Scoped to this change, at Jurgen's own explicit request not to re-test
+    everything, only what changed: default `build` rebuilt, and the directly affected CTest subset
+    re-run (`bare_invocation*`/`no_subcommand*`/`*help*`-tagged tests, 16 tests across three
+    targeted runs, all passing, including the 3 new/renamed tests above and confirming the
+    pre-existing item 109/--help tests are unaffected). The full four-config/clean-room
+    verification cycle was deliberately not repeated for this change.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

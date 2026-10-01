@@ -112,10 +112,17 @@ global flag (`-q`, `--no-color`, etc.) is still allowed to come first, the
 same as it always could; it's skipped over when deciding which default
 applies, exactly as it's skipped when resolving a `--decode`/`--info`/...
 alias flag above. If `<command>` is left off AND no arguments follow it at
-all, the result is whatever `decode` itself reports for being given neither
-`-r` nor `-i` (see `decode` below) -- there's nothing `info`-specific about
-a truly bare `conduitscope` invocation, since there's no `-z` on the line
-to trigger it.
+all -- a truly bare `conduitscope` invocation, nothing else typed -- the
+no-subcommand default above is skipped entirely and the top-level
+`--help` is printed instead (exit code 0), the same text `conduitscope -h`
+shows. This is deliberately different from every other no-subcommand case
+on this page: injecting `decode` and then immediately failing on its own
+missing `-r`/`-i` requirement would be a confusing first impression for
+anyone who ran the bare executable with nothing else typed, e.g. by
+double-clicking `conduitscope.exe` from Explorer on Windows. Type anything
+else at all on the line -- even just a global flag like `-q` -- and the
+no-subcommand default behaves exactly as described above, `decode`'s own
+missing-source error included.
 
 Once `-z`/`--stat` is given at all -- whether `info` was reached this way
 or typed explicitly -- `info`'s own output changes too: see "TCP

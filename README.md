@@ -221,7 +221,7 @@ tunneling) shows up on a segment that shouldn't carry it:
 
 ## Status
 
-Groundwork / v0.3.0. Every protocol named above is implemented, decoding real
+Groundwork / v0.3.1. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
 automated test suite -- 2223 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public

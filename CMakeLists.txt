@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.16)
-project(conduitscope VERSION 0.3.0 LANGUAGES CXX)
+project(conduitscope VERSION 0.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,7 +14,7 @@ endif()
 # is meaningless for a multi-config generator (Visual Studio, Xcode: CMAKE_CONFIGURATION_TYPES is
 # set instead, and the actual configuration is picked at BUILD time via --config, not here at
 # configure time), so it's always empty in that case -- confirmed on a real Windows/MSVC build,
-# which without this fallback reports "conduitscope 0.3.0  [MSVC ..., Windows,  build, ...]" (note
+# which without this fallback reports "conduitscope 0.3.1  [MSVC ..., Windows,  build, ...]" (note
 # the double space where an empty CMAKE_BUILD_TYPE left a hole). "multi-config" is honest about why
 # no single value is available here, rather than guessing a config that may not be the one actually
 # built.
@@ -17729,11 +17729,42 @@ set_tests_properties(decode_display_filter_error_invalid_regex_rejected_before_l
 # nonsense expression is rejected before the parser sees a single token of it. (No "still works
 # under the limit" twin for this one -- every other test below already is an under-the-limit
 # expression that compiles, and a 65536-byte *meaningful* expression would be unreadable here.)
+#
+# Written to a file and passed as -Y "@<path>" rather than embedded directly in COMMAND: a 65537-
+# byte single argv entry is fine on Linux/macOS, but blows straight through Windows' own
+# CreateProcess ~32767-character TOTAL command-line length limit (every argument combined, not
+# per-argument) -- CTest cannot even launch the process at all in that case (observed in CI as
+# this test going "Not Run" with a "name too long"-style launch failure, not as a normal test
+# failure). -Y's own '@<path>' file-reading support (cli_main.cpp) exists specifically so this
+# exact scenario -- and any real multi-kilobyte -Y expression an operator might have -- never has
+# to touch the OS command-line length limit at all.
 string(REPEAT "x" 65537 f3_too_long_expr)
+set(f3_too_long_expr_file "${CMAKE_CURRENT_BINARY_DIR}/f3_too_long_display_filter_expr.txt")
+file(WRITE "${f3_too_long_expr_file}" "${f3_too_long_expr}")
 add_test(NAME decode_display_filter_error_expression_too_long
-  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "${f3_too_long_expr}")
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "@${f3_too_long_expr_file}")
 set_tests_properties(decode_display_filter_error_expression_too_long PROPERTIES
   PASS_REGULAR_EXPRESSION "error: display filter is 65537 bytes long, more than the 65536-byte limit -- simplify the expression \\(it starts with: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\.\\.\\.'\\)")
+
+# The '@<path>' file-reading mechanism itself, independent of the length-limit scenario above:
+# a trailing newline (as a real file saved by an editor, or `file(WRITE ...)` with an explicit
+# "\n", would have) must be trimmed, not counted as part of the expression -- proven by checking
+# the compiled filter actually matches (a bare 'modbus' existence test on a known-Modbus capture),
+# which would fail if the trailing '\n' were still part of the expression text being parsed as a
+# field/keyword token.
+set(f3_at_file_with_trailing_newline "${CMAKE_CURRENT_BINARY_DIR}/f3_at_file_trailing_newline.txt")
+file(WRITE "${f3_at_file_with_trailing_newline}" "modbus\n")
+add_test(NAME decode_display_filter_at_file_trims_trailing_newline
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "@${f3_at_file_with_trailing_newline}")
+set_tests_properties(decode_display_filter_at_file_trims_trailing_newline PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers"
+  FAIL_REGULAR_EXPRESSION "^error:")
+
+# A missing '@<path>' file is a clean CLI error, not an unhandled exception/crash.
+add_test(NAME decode_display_filter_at_file_missing_is_clean_error
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" -Y "@${CMAKE_CURRENT_BINARY_DIR}/does_not_exist_f3_display_filter.txt")
+set_tests_properties(decode_display_filter_at_file_missing_is_clean_error PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: cannot open display filter file '.*does_not_exist_f3_display_filter\\.txt' for reading")
 
 # 2. kMaxAstNodes (4096): N bare `modbus` existence tests joined by `or` parse into 2N-1
 # FilterNode instances (N Exists nodes + N-1 Or nodes -- parse_or_expr()'s repeated-operator loop
@@ -18322,13 +18353,32 @@ add_test(NAME no_subcommand_global_flag_before_stat_flag_still_defaults_to_info
 add_test(NAME no_subcommand_follow_stream_matches_explicit_info
   COMMAND bash -c "diff <('$<TARGET_FILE:conduitscope>' --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z follow,tcp,stream,0) <('$<TARGET_FILE:conduitscope>' info --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_follow_stream.pcap' -z follow,tcp,stream,0)")
 
-# A bare invocation with no arguments at all still fails cleanly (exactly the same required-
-# -r/-i error `decode` itself would give), rather than CLI11's old, less specific "a subcommand is
-# required" message -- confirms the injected default participates in decode's own existing
-# argument validation, not some separate code path.
-add_test(NAME bare_invocation_reports_decode_missing_source_error
+# A bare invocation with no arguments at all now prints the top-level --help and exits cleanly
+# (Jurgen's own direct request -- this used to default-inject `decode`, same as item 109's other
+# cases, and then immediately fail with decode's own "needs exactly one of -r/--read or
+# -i/--interface" error: a confusing first impression for anyone who ran the bare executable with
+# nothing else typed, e.g. by double-clicking conduitscope.exe from Explorer on Windows, expecting
+# to see what the tool does). main()'s own `argc == 1` short-circuit (cli_main.cpp) deliberately
+# sits before item 109's default-subcommand injection and only ever fires on this exact case.
+add_test(NAME bare_invocation_prints_top_level_help
   COMMAND conduitscope)
-set_tests_properties(bare_invocation_reports_decode_missing_source_error PROPERTIES
+set_tests_properties(bare_invocation_prints_top_level_help PROPERTIES
+  PASS_REGULAR_EXPRESSION "Usage: conduitscope \\[OPTIONS\\] SUBCOMMAND"
+  FAIL_REGULAR_EXPRESSION "needs exactly one of -r/--read")
+
+# Confirms the bare-invocation case above exits 0 (a genuine --help display, not an error that
+# happens to also print usage text) -- distinct from the regex check above, which only inspects
+# stdout content and would equally pass whether the process exited 0 or non-zero.
+add_test(NAME bare_invocation_exits_zero
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' >/dev/null; exit $?")
+
+# A bare invocation plus one explicit global flag (no subcommand, but something WAS typed) is
+# unaffected by the argc==1 short-circuit above -- item 109's own default-subcommand injection
+# still applies and decode's own specific missing-source error is still the right diagnosis,
+# since the operator did type something on the line.
+add_test(NAME bare_invocation_with_explicit_flag_still_reports_decode_missing_source_error
+  COMMAND conduitscope -q)
+set_tests_properties(bare_invocation_with_explicit_flag_still_reports_decode_missing_source_error PROPERTIES
   PASS_REGULAR_EXPRESSION "'decode' needs exactly one of -r/--read.*or -i/--interface")
 
 # --decode/--info alias flags (already resolved to a bare subcommand word by
@@ -18396,3 +18446,142 @@ add_test(NAME stat_flag_no_info_needed_documented_in_info_help
   COMMAND conduitscope info --help)
 set_tests_properties(stat_flag_no_info_needed_documented_in_info_help PROPERTIES
   PASS_REGULAR_EXPRESSION "-z doesn't need 'info' typed at all")
+
+# ============================================================================================
+# Friendlier --help (Jurgen's direct request: "make the output of --help way more friendlier to
+# read"). Two separate, pre-existing readability problems were found and fixed in cli_main.cpp,
+# neither one touching a single option's own description TEXT (no information removed or
+# reworded, only how it's laid out -- see WrappingHelpFormatter's own comment, above
+# stdout_is_terminal() in cli_main.cpp, for the full writeup):
+#
+#   1. CLI11's own stock Formatter::make_option/make_subcommand/make_description (detail::
+#      format_help, CLI11.hpp) never word-wrap a description to any width at all -- a long one
+#      (and this file deliberately writes long, complete ones, matching docs/USER_GUIDE.md's own
+#      depth) printed as one single unbroken line that just ran off the terminal. A new
+#      WrappingHelpFormatter (cli_main.cpp) overrides all three to wrap to terminal_width() (real
+#      terminal size via ioctl(TIOCGWINSZ)/GetConsoleScreenBufferInfo, a COLUMNS env var override
+#      when not a terminal, clamped to [60, 200]) while reusing every other CLI11 building block
+#      unchanged.
+#   2. Every option in every subcommand previously shared CLI11's single default "Options" group
+#      -- `decode --help` alone dumped ~190 options in one flat list, with no separation between
+#      "used every time" (-r/-i/-f/-o/-T) and "advanced, rarely touched" (the ~45 `--*-port`
+#      protocol-port overrides, the dozen `--max-*` resource-limit flags). Every add_option()/
+#      add_flag() call across every subcommand in cli_main.cpp now carries an explicit
+#      ->group("...") sorting it into one of a small, consistent, reused-by-name set of sections
+#      ("Input/output", "Filtering", "Output format", "Protocol port overrides (rarely needed)",
+#      "Resource limits (advanced)", "Name resolution", and a few subcommand-specific ones) --
+#      CLI11 buckets and labels each group as its own section automatically (Formatter::
+#      make_groups) once options declare different group names.
+#
+# Both are proven below: group-header presence/order per subcommand (one test each, the eight
+# subcommands with enough options to be grouped at all), the line-count explosion a genuinely
+# wrapped --help produces versus a flat one, the exact wrap-width clamp floor/ceiling, and the
+# `--protocol` choice-list's own comma-boundary wrapping (the one name/opts-column case long
+# enough, with no whitespace anywhere in it, that plain word-wrapping alone can't help it).
+#
+# `bash -c "COLUMNS=<n> '$<TARGET_FILE:conduitscope>' ..."` is required (not plain `COMMAND
+# conduitscope ...`) everywhere a specific width matters: CTest itself runs this binary with
+# stdout piped (never a real terminal), so terminal_width() would otherwise fall through straight
+# to its own COLUMNS-env-var/fallback path regardless -- setting COLUMNS explicitly in the same
+# subshell is what actually controls which width is exercised.
+
+add_test(NAME decode_help_group_headers_present_in_order
+  COMMAND conduitscope decode --help)
+set_tests_properties(decode_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Filtering:.*Live capture \\(-i only\\):.*Output format:.*Protocol selection:.*Protocol port overrides \\(rarely needed\\):.*Resource limits \\(advanced\\):.*Display options:.*Name resolution:"
+  FAIL_REGULAR_EXPRESSION "Zone & conduit output:|Capture rotation:|Policy & baseline inputs")
+
+add_test(NAME policy_validate_help_group_headers_present_in_order
+  COMMAND conduitscope policy validate --help)
+set_tests_properties(policy_validate_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Filtering:.*Live capture \\(-i only\\):.*Output format:.*Display options:.*Resource limits \\(advanced\\):.*Name resolution:"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Zone & conduit output:|Capture rotation:")
+
+add_test(NAME inventory_help_group_headers_present_in_order
+  COMMAND conduitscope inventory --help)
+set_tests_properties(inventory_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Filtering:.*Live capture \\(-i only\\):.*Output format:.*Display options:.*Resource limits \\(advanced\\):.*Zone & conduit output:.*Name resolution:"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Capture rotation:|Policy & baseline inputs")
+
+add_test(NAME detect_help_group_headers_present_in_order
+  COMMAND conduitscope detect --help)
+set_tests_properties(detect_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Filtering:.*Live capture \\(-i only\\):.*Output format:.*Display options:.*Resource limits \\(advanced\\):.*Policy & baseline inputs \\(optional\\):.*Name resolution:"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Zone & conduit output:|Capture rotation:")
+
+add_test(NAME baseline_learn_help_group_headers_present_in_order
+  COMMAND conduitscope baseline learn --help)
+set_tests_properties(baseline_learn_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Resource limits \\(advanced\\):.*Display options:"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Zone & conduit output:|Capture rotation:|Policy & baseline inputs")
+
+add_test(NAME baseline_check_help_group_headers_present_in_order
+  COMMAND conduitscope baseline check --help)
+set_tests_properties(baseline_check_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Resource limits \\(advanced\\):.*Output format:.*Display options:.*Policy & baseline inputs \\(optional\\):"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Zone & conduit output:|Capture rotation:")
+
+add_test(NAME capture_help_group_headers_present_in_order
+  COMMAND conduitscope capture --help)
+set_tests_properties(capture_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Filtering:.*Live capture \\(-i only\\):.*Capture rotation:"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Zone & conduit output:|Policy & baseline inputs|Name resolution:")
+
+add_test(NAME merge_inventory_help_group_headers_present_in_order
+  COMMAND conduitscope merge inventory --help)
+set_tests_properties(merge_inventory_help_group_headers_present_in_order PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input/output:.*Output format:.*Zone & conduit output:.*Name resolution:"
+  FAIL_REGULAR_EXPRESSION "Protocol port overrides|Capture rotation:|Policy & baseline inputs")
+
+# decode --help has ~190 options; printed as CLI11's own stock flat, one-group, no-wrap list
+# this would be on the order of 115-130 lines (confirmed against this project's own pre-fix
+# output). Wrapped to a deliberately narrow 80-column terminal, the same content runs past 500
+# lines -- proving real word-wrapping is actually happening at scale, not just on one or two
+# hand-picked options.
+add_test(NAME decode_help_wraps_into_far_more_lines_at_narrow_terminal_width
+  COMMAND bash -c "COLUMNS=80 '$<TARGET_FILE:conduitscope>' decode --help | wc -l")
+set_tests_properties(decode_help_wraps_into_far_more_lines_at_narrow_terminal_width PROPERTIES
+  PASS_REGULAR_EXPRESSION "^[5-9][0-9][0-9]|^[0-9][0-9][0-9][0-9]")
+
+# make_subcommand (the "Subcommands:" listing under e.g. `baseline --help`) gets the identical
+# wrapping fix make_option does -- proven separately here since it's a different override with
+# its own previously-missing word-wrap, not exercised by any of the make_option-focused tests
+# above. `learn`'s own description is long enough to still require 5+ wrapped lines even at a
+# narrow 60-column width.
+add_test(NAME baseline_help_subcommand_listing_wraps_at_narrow_terminal_width
+  COMMAND bash -c "COLUMNS=60 '$<TARGET_FILE:conduitscope>' baseline --help | wc -l")
+set_tests_properties(baseline_help_subcommand_listing_wraps_at_narrow_terminal_width PROPERTIES
+  PASS_REGULAR_EXPRESSION "^[3-9][0-9]|^[0-9][0-9][0-9]")
+
+# terminal_width()'s own documented clamp floor: a COLUMNS/terminal size far below 60 (5, here)
+# must still wrap exactly as if it were 60, not attempt an unreadably narrow actual wrap -- this
+# exact two-line split ("...classic pcap or" / 30-space-padded "pcapng, auto-detected)") was
+# confirmed to appear byte-for-byte identically at COLUMNS=5 and COLUMNS=60 against the real
+# built binary before being pinned here.
+add_test(NAME decode_help_clamps_tiny_terminal_width_to_60_column_floor
+  COMMAND bash -c "COLUMNS=5 '$<TARGET_FILE:conduitscope>' decode --help")
+set_tests_properties(decode_help_clamps_tiny_terminal_width_to_60_column_floor PROPERTIES
+  PASS_REGULAR_EXPRESSION "Input capture file \\(classic pcap or\n                              pcapng, auto-detected\\)")
+
+# terminal_width()'s own documented clamp ceiling: a COLUMNS/terminal size far above 200 (99999,
+# here) must still wrap exactly as if it were 200, not run the whole description out as one
+# arbitrarily long unbroken line again (the very problem this entire mechanism exists to fix) --
+# this exact phrase was confirmed to stay on one unbroken line at COLUMNS=200/99999 but split
+# across multiple lines at COLUMNS=100, against the real built binary, before being pinned here.
+add_test(NAME decode_help_clamps_huge_terminal_width_to_200_column_ceiling
+  COMMAND bash -c "COLUMNS=99999 '$<TARGET_FILE:conduitscope>' decode --help")
+set_tests_properties(decode_help_clamps_huge_terminal_width_to_200_column_ceiling PROPERTIES
+  PASS_REGULAR_EXPRESSION "this network interface instead of reading a file \\(see 'conduitscope interfaces'\\); requires this build to have been compiled with libpcap/Npcap support")
+
+# --protocol's own `{auto,modbus,dnp3,...,homeplug-av}` choice list (CLI11's own rendering of a
+# CLI::IsMember validator) is close to 500 characters with no whitespace anywhere in it at all --
+# wrap_text()'s plain whitespace-only breaking can't help here, which is exactly why
+# wrap_name_opts() separately loosens ',' into an equally valid break point (see its own comment,
+# cli_main.cpp). Proven at a narrow 90-column width: the choice list must actually split across
+# multiple comma-bounded lines (not stay one unbroken line), every wrapped continuation line must
+# carry the fixed 4-space indent, and both the first ("auto") and last ("homeplug-av") protocol
+# names must still be present -- content preserved, only re-flowed.
+add_test(NAME decode_help_protocol_choice_list_wraps_on_commas_at_narrow_terminal_width
+  COMMAND bash -c "COLUMNS=90 '$<TARGET_FILE:conduitscope>' decode --help")
+set_tests_properties(decode_help_protocol_choice_list_wraps_on_commas_at_narrow_terminal_width PROPERTIES
+  PASS_REGULAR_EXPRESSION "--protocol TEXT:\\{auto, modbus.*\n    [a-z0-9,. -]*homeplug-av\\} \\[auto\\]")
