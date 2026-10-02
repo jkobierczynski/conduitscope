@@ -58,6 +58,8 @@
 #include <utility>
 #include <vector>
 
+#include "conduitscope/resource_limits.hpp"  // ObservationIncompleteReason -- observation_incomplete_extension_fields below
+
 namespace conduitscope {
 
 // Escapes a CEF HEADER field (Device Vendor/Product/Version/Device Event Class ID/Name):
@@ -143,9 +145,14 @@ std::string render_rfc5424_line(int severity_0_10, const std::string& msgid, con
 //
 // `msg` joins every distinct truncation reason into one semicolon-separated line (CEF/LEEF
 // extension values are single-line); `reasonCount` carries the exact number separately so a SIEM
-// rule can threshold/alert on it without parsing `msg`.
+// rule can threshold/alert on it without parsing `msg`. `cat` (patch282 finding 6 fix, item 123,
+// docs/DEVELOPMENT.md) carries `categories`' own comma-joined, closed-enum names
+// (join_observation_incomplete_reason_names, resource_limits.hpp) -- e.g. "resource_limit" or
+// "resource_limit,flow_state_eviction" -- so a SIEM rule can group/alert on the CATEGORY without
+// parsing `msg`'s free text either.
 std::vector<std::pair<std::string, std::string>> observation_incomplete_extension_fields(
-    const std::vector<std::string>& truncation_reasons);
+    const std::vector<std::string>& truncation_reasons,
+    const std::vector<ObservationIncompleteReason>& categories);
 
 // CEF/LEEF severity for the sentinel event above -- fixed, not derived from any curated finding's
 // own severity (there may be zero findings in the very report this event is warning about). Set at

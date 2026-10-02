@@ -5,6 +5,7 @@
 #include <cctype>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -377,6 +378,26 @@ AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& te
                 report.skipped_packets = static_cast<size_t>(c.parse_integer());
             } else if (key == "observation_truncated") {
                 report.observation_truncated = c.parse_bool();
+            } else if (key == "observation_reasons") {
+                // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- "observation_status" is
+                // not read back here: it's a redundant, human/SIEM-convenience echo of
+                // observation_truncated this report format already carries (see
+                // write_inventory_report_json's own comment), so an unrecognized key here falls
+                // through to the generic c.skip_value() branch below the same as any other field
+                // this merge doesn't need. An unrecognized reason TOKEN inside this array (e.g. one
+                // a newer/older build emitted) is silently dropped rather than failing the parse --
+                // see parse_observation_incomplete_reason_name's own comment (resource_limits.hpp).
+                c.expect('[');
+                if (!c.consume_if(']')) {
+                    while (true) {
+                        std::optional<ObservationIncompleteReason> parsed =
+                            parse_observation_incomplete_reason_name(c.parse_string());
+                        if (parsed) report.observation_incomplete_reasons.push_back(*parsed);
+                        if (c.consume_if(',')) continue;
+                        c.expect(']');
+                        break;
+                    }
+                }
             } else if (key == "truncation_reasons") {
                 c.expect('[');
                 if (!c.consume_if(']')) {
@@ -478,6 +499,11 @@ AssetInventoryReport merge_inventory_reports(const std::vector<AssetInventoryRep
                     }
                 }
                 if (!already) merged.truncation_reasons.push_back(reason);
+            }
+            // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md): the categorized reasons
+            // union the identical way the free-text reasons just above do.
+            for (ObservationIncompleteReason category : report.observation_incomplete_reasons) {
+                append_observation_incomplete_reason(merged.observation_incomplete_reasons, category);
             }
         }
         for (const auto& a : report.assets) {
@@ -625,8 +651,27 @@ AssetInventoryReport merge_inventory_reports(const std::vector<AssetInventoryRep
         auto cip = parse_ipv4_string(e.client_ip);
         auto sip = parse_ipv4_string(e.server_ip);
         if (!cip || !sip) continue;
-        ConduitKey key{zone_name_for_network.at(*cip & mask), zone_name_for_network.at(*sip & mask), e.protocol,
-                       e.server_port};
+        // Bug fix (item 123, docs/DEVELOPMENT.md, found while verifying patch282 finding 6):
+        // AssetInventoryEngine's own assets_/edges_ containers are capped INDEPENDENTLY (two
+        // separate growth ceilings, each refusing further growth on its own -- see
+        // AssetInventoryEngineLimits' own comment, asset_inventory.hpp), so a TRUNCATED
+        // AssetInventoryReport's edges array can legitimately name a client_ip/server_ip that
+        // never made it into that same report's own (also-truncated) assets array, and therefore
+        // never made it into merged.assets / by_network / zone_name_for_network above either.
+        // AssetInventoryEngine::finish's own, original version of this exact grouping
+        // (asset_inventory.cpp) already handles this with find()-and-skip; this reimplementation
+        // used .at() instead, which threw std::out_of_range (an unhandled exception -> SIGABRT)
+        // the moment ANY truncated report -- even a single one, merge's own one-input "just
+        // re-derive zones" legal use (see merge_inventory_cmd's own --help text) -- was ever fed
+        // through `merge inventory`. Fixed by matching the original's own safe pattern exactly:
+        // an edge whose endpoint's network has no corresponding zone (because that endpoint's own
+        // asset was never admitted) contributes no conduit for this edge, rather than crashing the
+        // whole merge over a gap this report's own observation_truncated/truncation_reasons
+        // already disclose.
+        auto cz = zone_name_for_network.find(*cip & mask);
+        auto sz = zone_name_for_network.find(*sip & mask);
+        if (cz == zone_name_for_network.end() || sz == zone_name_for_network.end()) continue;
+        ConduitKey key{cz->second, sz->second, e.protocol, e.server_port};
         ConduitAgg& agg = conduit_agg[key];
         ++agg.edge_count;
         agg.packet_count += e.packet_count;

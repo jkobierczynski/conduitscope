@@ -72,7 +72,50 @@ void note_flow_state_eviction() { ++mutable_flow_state_eviction_count(); }
 
 void reset_flow_state_evictions() { mutable_flow_state_eviction_count() = 0; }
 
-bool append_flow_state_eviction_reason(std::vector<std::string>& reasons) {
+const char* observation_incomplete_reason_name(ObservationIncompleteReason reason) {
+    switch (reason) {
+        case ObservationIncompleteReason::ResourceLimit: return "resource_limit";
+        case ObservationIncompleteReason::FlowStateEviction: return "flow_state_eviction";
+        case ObservationIncompleteReason::CaptureWriteFailure: return "capture_write_failure";
+        case ObservationIncompleteReason::CapturePermissionFailure: return "capture_permission_failure";
+        case ObservationIncompleteReason::UnsupportedProtocol: return "unsupported_protocol";
+        case ObservationIncompleteReason::PacketTruncation: return "packet_truncation";
+    }
+    return "resource_limit";  // unreachable -- every enumerator handled above; a defensive
+                               // fallback return rather than falling off the end, matching this
+                               // codebase's own enum-to-string precedent (e.g. detect_engine.cpp's
+                               // detection_evidence_name/detection_novelty_name).
+}
+
+std::string join_observation_incomplete_reason_names(const std::vector<ObservationIncompleteReason>& categories) {
+    std::string out;
+    for (size_t i = 0; i < categories.size(); ++i) {
+        if (i) out += ", ";
+        out += observation_incomplete_reason_name(categories[i]);
+    }
+    return out;
+}
+
+std::optional<ObservationIncompleteReason> parse_observation_incomplete_reason_name(const std::string& name) {
+    if (name == "resource_limit") return ObservationIncompleteReason::ResourceLimit;
+    if (name == "flow_state_eviction") return ObservationIncompleteReason::FlowStateEviction;
+    if (name == "capture_write_failure") return ObservationIncompleteReason::CaptureWriteFailure;
+    if (name == "capture_permission_failure") return ObservationIncompleteReason::CapturePermissionFailure;
+    if (name == "unsupported_protocol") return ObservationIncompleteReason::UnsupportedProtocol;
+    if (name == "packet_truncation") return ObservationIncompleteReason::PacketTruncation;
+    return std::nullopt;
+}
+
+void append_observation_incomplete_reason(std::vector<ObservationIncompleteReason>& categories,
+                                           ObservationIncompleteReason category) {
+    for (ObservationIncompleteReason existing : categories) {
+        if (existing == category) return;
+    }
+    categories.push_back(category);
+}
+
+bool append_flow_state_eviction_reason(std::vector<std::string>& reasons,
+                                        std::vector<ObservationIncompleteReason>& categories) {
     const size_t n = flow_state_evictions();
     if (n == 0) return false;
     reasons.push_back(
@@ -80,6 +123,7 @@ bool append_flow_state_eviction_reason(std::vector<std::string>& reasons) {
         " evicted during this capture (--max-flow-state-entries); an evicted session's next packet looks "
         "exactly like a brand-new one, so detection/baseline/policy results for affected sessions may be "
         "incomplete or misclassified");
+    append_observation_incomplete_reason(categories, ObservationIncompleteReason::FlowStateEviction);
     return true;
 }
 

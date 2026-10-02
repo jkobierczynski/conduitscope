@@ -164,6 +164,8 @@ void write_evidence_report_text(std::ostream& out, const EvidenceReportInputs& i
         body << "  *** OBSERVATION INCOMPLETE -- this capture hit at least one inventory limit; "
                 "the topology\n";
         body << "      below reflects only PART of what the capture actually contains. ***\n";
+        body << "      categories: "
+             << join_observation_incomplete_reason_names(in.inventory->observation_incomplete_reasons) << "\n";
         for (const std::string& reason : in.inventory->truncation_reasons) body << "    - " << reason << "\n";
     }
     body << "\n  Mermaid diagram (render with any Mermaid-compatible viewer, e.g. "
@@ -474,7 +476,31 @@ void write_evidence_report_json(std::ostream& out, const EvidenceReportInputs& i
                            (in.policy_report && in.policy_report->observation_truncated) ||
                            in.detection->observation_truncated ||
                            (in.baseline && in.baseline->observation_truncated);
-    body << "    \"any_engine_observation_truncated\": " << (any_truncation ? "true" : "false") << "\n";
+    body << "    \"any_engine_observation_truncated\": " << (any_truncation ? "true" : "false") << ",\n";
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md): the UNION of every engine's own
+    // categorized reasons, deduped the same way each individual engine already dedups its own list
+    // -- this is the one place in the whole evidence report that answers "why is ANY of this
+    // incomplete" in one machine-readable list, without a reader having to OR together four
+    // separate per-engine observation_reasons arrays themselves.
+    std::vector<ObservationIncompleteReason> any_categories;
+    for (ObservationIncompleteReason c : in.inventory->observation_incomplete_reasons)
+        append_observation_incomplete_reason(any_categories, c);
+    if (in.policy_report) {
+        for (ObservationIncompleteReason c : in.policy_report->observation_incomplete_reasons)
+            append_observation_incomplete_reason(any_categories, c);
+    }
+    for (ObservationIncompleteReason c : in.detection->observation_incomplete_reasons)
+        append_observation_incomplete_reason(any_categories, c);
+    if (in.baseline) {
+        for (ObservationIncompleteReason c : in.baseline->observation_incomplete_reasons)
+            append_observation_incomplete_reason(any_categories, c);
+    }
+    body << "    \"any_engine_observation_reasons\": [";
+    for (size_t i = 0; i < any_categories.size(); ++i) {
+        if (i) body << ", ";
+        body << "\"" << observation_incomplete_reason_name(any_categories[i]) << "\"";
+    }
+    body << "]\n";
     body << "  },\n";
 
     if (!in.policy_path.empty()) {

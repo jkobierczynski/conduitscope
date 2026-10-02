@@ -693,12 +693,22 @@ PacketSource open_packet_source(const std::string& input, const std::string& int
 // zero drops -- returns false in both cases, leaving `reasons` untouched; `decode`, which has no
 // Report/truncation_reasons of its own, calls LiveCapture::stats() directly instead (see
 // run_decode) rather than through this helper.
-bool append_live_capture_drop_reason(const PacketSource& source, std::vector<std::string>& reasons) {
+bool append_live_capture_drop_reason(const PacketSource& source, std::vector<std::string>& reasons,
+                                      std::vector<ObservationIncompleteReason>& categories) {
     LiveCapture* live = source.live_ptr();
     if (live == nullptr) return false;
     std::optional<std::string> reason = format_live_capture_drop_reason(live->stats());
     if (!reason) return false;
     reasons.push_back(*reason);
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md): categorized as ResourceLimit, not a
+    // new category of its own -- libpcap/Npcap's own ring buffer filling up before this process
+    // could read it out is a capacity/resource condition in exactly the same sense an engine's own
+    // tracked-key ceiling is, even though the resource being exceeded (the OS/driver's capture
+    // buffer) sits below this codebase's own code. See ObservationIncompleteReason's own comment
+    // (resource_limits.hpp) for why this is deliberately NOT categorized as PacketTruncation --
+    // that name is reserved for an individual packet's own bytes being cut off, which is a
+    // different condition this codebase doesn't detect this way.
+    append_observation_incomplete_reason(categories, ObservationIncompleteReason::ResourceLimit);
     return true;
 }
 
@@ -1983,7 +1993,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         PolicyReport report = engine.finish(resolver);
         // See append_live_capture_drop_reason's own comment (above open_packet_source) -- a no-op
         // for an offline `-r` read.
-        if (append_live_capture_drop_reason(source, report.truncation_reasons)) {
+        if (append_live_capture_drop_reason(source, report.truncation_reasons, report.observation_incomplete_reasons)) {
             report.observation_truncated = true;
         }
         if (format == "json") {
@@ -2101,7 +2111,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         AssetInventoryReport report = engine.finish();
         // See append_live_capture_drop_reason's own comment (above open_packet_source) -- a no-op
         // for an offline `-r` read.
-        if (append_live_capture_drop_reason(source, report.truncation_reasons)) {
+        if (append_live_capture_drop_reason(source, report.truncation_reasons, report.observation_incomplete_reasons)) {
             report.observation_truncated = true;
         }
         if (format == "json") {
@@ -2283,7 +2293,7 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
         // completeness" finding's own "packet loss... must be distinguishable from a clean
         // capture with no findings": a live `detect` run that silently dropped packets at the OS
         // level must never come back as a trustworthy "no findings".
-        if (append_live_capture_drop_reason(source, report.truncation_reasons)) {
+        if (append_live_capture_drop_reason(source, report.truncation_reasons, report.observation_incomplete_reasons)) {
             report.observation_truncated = true;
         }
         if (format == "json") {
@@ -2413,9 +2423,15 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
             // (resource_limits.hpp). `learn` has no Report struct to attach this to the way
             // `check`/`detect`/`policy validate`/`inventory` do (see their own identical
             // comments), so it's collected into its own local vector and printed alongside
-            // engine.truncation_reasons() in the SAME warning block below instead.
+            // engine.truncation_reasons() in the SAME warning block below instead. `learn` prints
+            // plain text only (no JSON/CEF output of its own), so the categorized
+            // ObservationIncompleteReason list has nothing to be surfaced in -- collected into its
+            // own throwaway local the same way, never read back, since append_flow_state_eviction_
+            // reason now always requires both vectors.
             std::vector<std::string> flow_state_eviction_reasons;
-            bool flow_state_evicted = append_flow_state_eviction_reason(flow_state_eviction_reasons);
+            std::vector<ObservationIncompleteReason> flow_state_eviction_categories;
+            bool flow_state_evicted =
+                append_flow_state_eviction_reason(flow_state_eviction_reasons, flow_state_eviction_categories);
             if (engine.truncated() || flow_state_evicted) {
                 diag << "warning: baseline observation of '" << input
                      << "' is INCOMPLETE -- the merged baseline may be missing some of this "
@@ -2515,12 +2531,14 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         // (baseline.hpp) and kExitBaselineIncomplete's own comment below for what this changes.
         report.observation_truncated = engine.truncated();
         report.truncation_reasons = engine.truncation_reasons();
+        report.observation_incomplete_reasons = engine.truncation_categories();
         // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
         // DetectEngine::finish()'s own identical comment (detect_engine.cpp) and
         // append_flow_state_eviction_reason's own comment (resource_limits.hpp). `baseline check`
         // builds its own report here rather than inside BaselineEngine itself (unlike Detect/
         // Policy/AssetInventory), so this fold-in lives here instead of baseline.cpp.
-        if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
+        if (append_flow_state_eviction_reason(report.truncation_reasons, report.observation_incomplete_reasons))
+            report.observation_truncated = true;
         if (format == "json") {
             write_baseline_check_report_json(*out, report, symbolic_addresses);
         } else if (format == "cef") {
@@ -2736,6 +2754,7 @@ int run_evidence(const std::string& input, const std::string& policy_path,
                 check_baseline(*baseline_store, engine.finish(), input, policy ? &*policy : nullptr);
             baseline_report->observation_truncated = engine.truncated();
             baseline_report->truncation_reasons = engine.truncation_reasons();
+            baseline_report->observation_incomplete_reasons = engine.truncation_categories();
         }
 
         std::string inventory_diagram;

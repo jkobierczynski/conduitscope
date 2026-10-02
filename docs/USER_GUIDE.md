@@ -1660,6 +1660,27 @@ each subcommand's own "Resource bounds and OBSERVATION INCOMPLETE" subsection) -
 independently of whether that subcommand's own engine-specific ceilings above were ever reached.
 `baseline learn` has no report of its own to mark, so it instead prints the same wording as a
 `warning: ... is INCOMPLETE` line to stderr, alongside its own pre-existing truncation warning.
+
+**A closed-enum category alongside the free text, for machine consumption.** Every text report's
+`*** OBSERVATION INCOMPLETE ***` banner also prints a `categories:` line, and every JSON report
+adds `observation_status` ("complete"/"incomplete", alongside the pre-existing boolean
+`observation_truncated` -- a caller may check either) and `observation_reasons` (an array of
+machine-filterable tokens, alongside the pre-existing free-text `truncation_reasons`) --
+docs/reviews/2026-09-chatgpt-security-review-patch282.md's finding 6 (see docs/DEVELOPMENT.md's
+ROADMAP item 123): a SIEM/dashboard can group or alert on the category without parsing prose. Two
+tokens are ever actually emitted by this build: `resource_limit` (every ceiling above, plus an
+OS/driver-level live-capture packet drop) and `flow_state_eviction` (the eviction case just
+above, kept distinct because it destroys already-tracked state rather than merely refusing to
+track something new). Four more tokens from the review's own proposed vocabulary
+(`capture_write_failure`, `capture_permission_failure`, `unsupported_protocol`,
+`packet_truncation`) are reserved in the enum for forward compatibility but have no current
+emitter in this codebase -- see `ObservationIncompleteReason`'s own comment
+(`include/conduitscope/resource_limits.hpp`) for exactly why each one doesn't apply today, rather
+than silently omitting them with no explanation. The SIEM export formats (`-T cef`/`leef`/
+`syslog`, see SECURITY EVENT EXPORT below) carry the same categories in a dedicated `cat` field,
+comma-joined with no spaces, alongside the pre-existing `msg`/`reasonCount`. `merge inventory`
+reads `observation_reasons` back from each input report and unions it (deduplicated) into the
+merged report's own, the same way it already unions `truncation_reasons`.
 Each of detect's/baseline's/policy's own CEF/LEEF/syslog exports also gains a dedicated
 `ObservationIncomplete` sentinel event under this condition, so a truncated-but-otherwise-clean
 run is never silently invisible to a SIEM watching only that export stream (previously, a run with

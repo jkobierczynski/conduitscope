@@ -527,6 +527,9 @@ struct DetectionReport {
     // One line per distinct ceiling that was hit -- see DetectEngine::truncation_reasons()' own
     // comment. Empty iff observation_truncated is false.
     std::vector<std::string> truncation_reasons;
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- see
+    // AssetInventoryReport::observation_incomplete_reasons' own identical comment (asset_inventory.hpp).
+    std::vector<ObservationIncompleteReason> observation_incomplete_reasons;
 };
 
 // Growth ceilings on DetectEngine's own per-capture state -- patch257 security review, finding 3
@@ -658,6 +661,12 @@ public:
     // raises it. Empty iff truncated() is false.
     const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
 
+    // The ObservationIncompleteReason categorization of truncation_reasons() above -- patch282
+    // finding 6 (item 123, docs/DEVELOPMENT.md). Always ObservationIncompleteReason::ResourceLimit
+    // (deduped to one entry) for this engine -- see AssetInventoryEngine::truncation_categories()'s
+    // own identical comment. Empty iff truncated() is false.
+    const std::vector<ObservationIncompleteReason>& truncation_categories() const { return truncation_categories_; }
+
     // Produces the final report. `policy`: optional (nullptr when `detect --policy` wasn't given) --
     // used only to resolve a RemoteAccessChannel finding's technique between T0886 (Remote Services,
     // no zone crossing) and T0822 (External Remote Services, crosses a zone boundary): when both
@@ -728,6 +737,7 @@ private:
     std::function<void(const AlwaysNotableHit&)> on_always_notable_hit_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;
+    std::vector<ObservationIncompleteReason> truncation_categories_;
 
     // Keyed by "<category>|<technique-id>|<client_ip>|<server_ip>|<protocol>|<server_port>" -- see
     // detect_engine.cpp's own always_notable_key(). Insertion order preserved via

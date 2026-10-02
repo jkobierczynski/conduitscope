@@ -392,6 +392,9 @@ struct BaselineCheckReport {
     // kExitBaselineIncomplete's own comment (cli_main.cpp).
     bool observation_truncated = false;
     std::vector<std::string> truncation_reasons;
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- see
+    // AssetInventoryReport::observation_incomplete_reasons' own identical comment (asset_inventory.hpp).
+    std::vector<ObservationIncompleteReason> observation_incomplete_reasons;
 };
 
 // Compares `observed` (one capture's own BaselineEngine::finish() output) against `baseline` and
@@ -543,6 +546,12 @@ public:
     // the CLI flag that raises it. Empty iff truncated() is false.
     const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
 
+    // The ObservationIncompleteReason categorization of truncation_reasons() above -- patch282
+    // finding 6 (item 123, docs/DEVELOPMENT.md). Always ObservationIncompleteReason::ResourceLimit
+    // (deduped to one entry) for this engine -- see AssetInventoryEngine::truncation_categories()'s
+    // own identical comment. Empty iff truncated() is false.
+    const std::vector<ObservationIncompleteReason>& truncation_categories() const { return truncation_categories_; }
+
 private:
     struct OperationState {
         bool has_target_range = false;
@@ -583,6 +592,7 @@ private:
     BaselineEngineLimits limits_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;
+    std::vector<ObservationIncompleteReason> truncation_categories_;
 
     std::unordered_map<std::string, ConduitState> conduits_;
     std::vector<std::string> conduit_order_;  // conduit keys, first-seen order

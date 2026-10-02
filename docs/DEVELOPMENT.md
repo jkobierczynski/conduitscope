@@ -17266,10 +17266,153 @@ it done as its own patch.
     matching this project's own standing rule that every CTest assertion is written only after
     observing the real binary's actual output, never assumed.
 
-    **Remaining from patch282:** F6 (an `observation_status`/`reasons` property, not a defect),
-    F7 (build/dependency-version pinning and SBOM, future hardening), and F8 (an even louder
-    "NOT VALIDATED" banner on generated firewall ACLs) are still open and unscheduled -- Jurgen
-    has not yet directed which, if any, to take up next.
+    **Remaining from patch282:** F6 (an `observation_status`/`reasons` property, not a defect --
+    fixed next, item 123), F7 (build/dependency-version pinning and SBOM, future hardening), and
+    F8 (an even louder "NOT VALIDATED" banner on generated firewall ACLs) are still open and
+    unscheduled -- Jurgen has not yet directed which, if any, to take up next.
+
+123. **A closed-enum `observation_status`/`observation_reasons` property across every report
+    engine, plus a `merge inventory` crash found while building it.**
+    `docs/reviews/2026-09-chatgpt-security-review-patch282.md`'s finding 6: not a defect in the
+    existing four-axis detection model (evidence/novelty/severity/category) -- the review's own
+    words, "I would not call this a fifth detection axis, that would muddy your conceptual
+    model" -- but a request to formalize "observation completeness" (already present as the
+    existing `observation_truncated` boolean plus free-text `truncation_reasons` on every one of
+    `PolicyReport`/`AssetInventoryReport`/`DetectionReport`/`BaselineCheckReport`) as a property
+    with a closed, machine-filterable reason vocabulary, proposed as six tokens:
+    `flow_state_eviction`, `capture_write_failure`, `capture_permission_failure`,
+    `unsupported_protocol`, `packet_truncation`, `resource_limit`.
+
+    **What's real vs. declared-but-unemitted, and why -- decided deliberately, not by omission.**
+    `ObservationIncompleteReason` (`include/conduitscope/resource_limits.hpp`, new) defines all
+    six tokens verbatim, but an audit of every place this codebase actually sets
+    `observation_truncated` found only two genuine categories:
+      - `resource_limit`: every one of the four engines' own `admit_tracked_key()`-style ceiling
+        refusals (all of them -- `DetectEngine`/`PolicyEngine`/`AssetInventoryEngine`'s four
+        growth caps, `BaselineEngine`'s four), AND an OS/driver-level live-capture packet drop
+        (`append_live_capture_drop_reason`, `cli_main.cpp` -- libpcap/Npcap's own ring buffer is a
+        resource too, deliberately NOT categorized as `packet_truncation`; see below).
+      - `flow_state_eviction`: `--max-flow-state-entries` forcibly evicting an existing session's
+        state (`append_flow_state_eviction_reason`, already existed from item 97/F4) -- kept
+        distinct from `resource_limit`, matching the review's own taxonomy, because eviction
+        destroys already-tracked state (active misclassification risk) rather than merely
+        refusing to track something new (an incomplete-but-coherent view).
+
+      The other four tokens are declared but have no emitter in this codebase today, and the
+      header comment says exactly why rather than leaving the gap implicit: `capture_write_
+      failure`/`capture_permission_failure` are real, already-detected failure modes (the
+      `capture` subcommand's own disk-write failure path, `*** CAPTURE INCOMPLETE ***`/exit 7),
+      but `capture` is the write-side sensor, not an analysis-report-producing subcommand -- it
+      has no `Report` struct of its own to attach these to. `unsupported_protocol` is deliberately
+      NOT wired to the existing `skipped_packets` counter: skipping an unrecognized protocol is
+      ordinary, expected behavior on every normal capture, and `DetectionReport::parse_error_
+      packets`'s own existing comment already states this codebase "cannot and does not try to
+      tell apart" genuine corruption from a simply-unimplemented decoder -- treating either as an
+      "observation incomplete" category would fire on nearly every run and make the signal
+      worthless. `packet_truncation` has no emitter because every truncated/corrupt packet or
+      capture-file record this codebase encounters today (`pcap_reader.cpp`'s `ParseError` sites)
+      is a hard abort of that read, never a "continue in a degraded-but-coherent state" condition.
+      Inventing emitters for these four just to fill out the enum would be exactly the kind of
+      not-actually-real example this project's own testing/manual conventions (item 121) forbid.
+
+    **The mechanism.** Each engine's own `mark_truncated()` now also appends
+    `ObservationIncompleteReason::ResourceLimit` to a new, parallel, identically-deduped
+    `truncation_categories_` member (every call site is a ceiling refusal, so this is
+    unconditional inside `mark_truncated()` itself -- no call site needed to change).
+    `append_flow_state_eviction_reason`/`append_live_capture_drop_reason` gained a
+    `categories` output parameter alongside their existing `reasons` one. Every report struct
+    gained `observation_incomplete_reasons` (`std::vector<ObservationIncompleteReason>`),
+    populated the same places `truncation_reasons` already is. New shared helpers in
+    `resource_limits.hpp`/`.cpp`: `observation_incomplete_reason_name`/
+    `parse_observation_incomplete_reason_name` (the token round-trip),
+    `join_observation_incomplete_reason_names` (", "-joined, for text banners),
+    `append_observation_incomplete_reason` (the dedup-append, shared the same way
+    `append_flow_state_eviction_reason` already was).
+
+    **Where it surfaces.** Every `*** OBSERVATION INCOMPLETE ***` text banner (inventory, policy
+    validate, detect, baseline check, and the inventory section of `evidence`) gained a
+    `categories: <names>` line. Every JSON report gained `observation_status`
+    ("complete"/"incomplete", added alongside the pre-existing `observation_truncated` boolean
+    rather than replacing it -- no existing consumer/test breaks) and `observation_reasons` (the
+    token array, alongside the pre-existing `truncation_reasons`). `observation_incomplete_
+    extension_fields` (`security_event_format.hpp`/`.cpp`) gained a `cat` field for `-T cef`/
+    `leef`/`syslog`, comma-joined with NO space (unlike the human-readable `, ` join) since CEF/
+    LEEF extension values aren't quoted. `merge inventory` reads `observation_reasons` back
+    (`read_inventory_report_file_for_merge`'s own parser, tolerant of an unrecognized token the
+    same way it already tolerates any other unrecognized JSON key) and unions it into the merged
+    report exactly the way it already unions `truncation_reasons`. `evidence`'s own
+    `decoder_confidence` JSON block gained `any_engine_observation_reasons`, the UNION of all four
+    embedded engines' own categories -- the one place in the whole evidence report that answers
+    "why is ANY of this incomplete" without a reader ORing four separate arrays themselves
+    (`evidence`'s pre-existing sibling field, `any_engine_observation_truncated`, has no CLI flag
+    to trigger it either, since `evidence` exposes no `--max-*` overrides at all -- both fields are
+    verified by code inspection/compilation and by every embedded engine's own independent
+    coverage, disclosed here rather than left unstated, since there is no way to drive this
+    specific aggregation through the `evidence` CLI directly).
+
+    **A real crash found and fixed while verifying this.** While merging two inventory reports to
+    prove the category union, `merge inventory` aborted with `std::out_of_range`
+    (`unordered_map::at`, SIGABRT) -- reproducible with a SINGLE truncated input, no second report
+    needed. Root cause: `AssetInventoryEngine`'s `assets_`/`edges_` containers are capped
+    INDEPENDENTLY (two separate growth ceilings), so a truncated report's own `edges` array can
+    legitimately name a `client_ip`/`server_ip` that never made it into that same report's own
+    (also-truncated) `assets` array. `merge_inventory_reports`'s zone/conduit-rederivation step
+    (`inventory_merge.cpp`) is a reimplementation of `AssetInventoryEngine::finish`'s own identical
+    grouping logic (`asset_inventory.cpp`) -- the original already handles a missing zone with
+    `find()`-and-`continue`; the reimplementation used `.at()` instead, which throws on exactly
+    that gap. Fixed by matching the original's own safe pattern verbatim. This is a genuine,
+    unauthenticated DoS on `merge`'s own explicitly-named trust boundary (inventory_merge.hpp's
+    own file header; see item 122's F5 writeup above for the same "merge is an analysis boundary,
+    not just self-generated input" framing) -- reachable by the entirely ordinary sequence "run
+    `inventory` with a tight `--max-inventory-*` limit, then `merge` the result," not a contrived
+    adversarial construction.
+
+    **New/changed tests.** `tests/merge_inventory_truncated_input_smoke.sh` (new;
+    `merge_inventory_truncated_input_does_not_crash_and_unions_categories`) proves both the crash
+    fix (a single truncated report merges without aborting) and the category union (two
+    differently-truncated reports -- one `resource_limit` via `--max-inventory-assets`, one
+    `flow_state_eviction` via `--max-flow-state-entries` against
+    `sample_resource_exhaustion_flow_state.pcap`, the same fixture the existing `detect_flow_
+    state_eviction_*` tests already use -- merge into `observation_reasons: ["resource_limit",
+    "flow_state_eviction"]`, not just one or the other). Extended seven existing tests' own
+    `PASS_REGULAR_EXPRESSION`s (not fabricated fresh, since the scenarios they already exercise are
+    the right ones) to also assert the new fields: `baseline_engine_limits_conduit_cap_marks_
+    check_incomplete`/`inventory_engine_limits_assets_cap_marks_inventory_incomplete`/`policy_
+    engine_limits_tcp_flows_cap_marks_validate_incomplete` (text `categories: resource_limit`),
+    `baseline_engine_limits_conduit_cap_json_fields`/`inventory_json_report_shape`/`baseline_
+    check_unmodified_fixture_zero_findings_json` (JSON `observation_status`/`observation_reasons`
+    in both the truncated-true and untruncated-false/empty shapes), `detect_flow_state_eviction_
+    marks_observation_incomplete`/`_in_json_report`/`_in_cef_report` and `baseline_check_flow_
+    state_eviction_marks_observation_incomplete`/`_in_leef_report` (text `categories:
+    flow_state_eviction`, JSON `observation_reasons: ["flow_state_eviction"]`, CEF/LEEF `cat=
+    flow_state_eviction`).
+
+    **Docs.** `docs/USER_GUIDE.md`'s `detect` "Resource bounds and OBSERVATION INCOMPLETE"
+    subsection (the fullest of the three near-identical ones) gained a new paragraph covering
+    `observation_status`/`observation_reasons`/`cat`, which of the six tokens are real today and
+    why, and `merge inventory`'s union behavior.
+
+    **Verification.** Default build: full CTest suite, 2491/2491 passing (2490 before this item,
+    +1 for the new merge crash-fix/category-union test, zero regressions -- seven existing tests'
+    regexes were extended in place, not counted as new). Clang ASan/UBSan (`build-fuzz`):
+    2569/2569, zero sanitizer hits -- notably exercises the exact crash path this item fixed, with
+    no heap-corruption/UB flagged either before or after (the bug was a clean, deterministic
+    `std::out_of_range` throw, not memory corruption, so ASan's silence here corroborates the fix
+    rather than substituting for the dedicated regression test). `-DCONDUITSCOPE_ENABLE_LIVE_
+    CAPTURE=OFF` (`build_nolive`): 2473/2473, zero regressions. MinGW cross-compile
+    (`build-mingw`): rebuilt clean, build-only as usual for that config. A full clean-room extract-
+    rebuild-test cycle (fresh copy excluding build directories, configure, build, full CTest):
+    2491/2491, zero failures. Every new/changed scenario (both categories, across all four engines,
+    every output format, the crash fix, the merge union) was manually run against the real built
+    binary first and its actual output copied into each test's regex, matching this project's own
+    standing rule -- including catching, mid-verification, that this project's own established
+    LEEF-field-separator convention is a literal embedded tab character, not a `\t`/`\\t` escape
+    sequence (cmsys' regex engine doesn't interpret the latter as one), by cross-checking three
+    other already-passing LEEF tests' own regex literals before guessing.
+
+    **Remaining from patch282:** F7 (build/dependency-version pinning and SBOM, future hardening)
+    and F8 (an even louder "NOT VALIDATED" banner on generated firewall ACLs) are still open and
+    unscheduled -- Jurgen has not yet directed which, if any, to take up next.
 
 ### Protocols not covered at all
 

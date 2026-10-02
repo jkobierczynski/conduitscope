@@ -19,6 +19,7 @@
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/opcua.hpp"
 #include "conduitscope/policy.hpp"
+#include "conduitscope/resource_limits.hpp"  // ObservationIncompleteReason/append_observation_incomplete_reason
 #include "conduitscope/s7comm.hpp"
 
 namespace conduitscope {
@@ -965,6 +966,7 @@ bool is_baseline_protocol(const std::string& protocol) {
 
 void BaselineEngine::mark_truncated(const std::string& reason) {
     truncated_ = true;
+    append_observation_incomplete_reason(truncation_categories_, ObservationIncompleteReason::ResourceLimit);
     for (const std::string& existing : truncation_reasons_) {
         if (existing == reason) return;  // already recorded this exact ceiling -- see this
                                           // method's own comment in baseline.hpp for why
@@ -1923,6 +1925,8 @@ void write_baseline_check_report_text(std::ostream& out, const BaselineCheckRepo
                "internal limits, so the result above reflects only PART of what the capture "
                "actually contains. Any \"CLEAN\"/compliant result is NOT trustworthy until this is "
                "resolved (raise the relevant --max-baseline-* limit and re-run). ***\n";
+        out << "  categories: " << join_observation_incomplete_reason_names(report.observation_incomplete_reasons)
+            << "\n";
         for (const std::string& reason : report.truncation_reasons) {
             out << "  - " << reason << "\n";
         }
@@ -1981,6 +1985,15 @@ void write_baseline_check_report_json(std::ostream& out, const BaselineCheckRepo
     // matched the baseline because BaselineEngine couldn't fully observe it, not that it was
     // confirmed clean; a caller parsing this JSON must check both fields, not "compliant" alone.
     out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- see
+    // write_inventory_report_json's own identical comment (asset_inventory.cpp).
+    out << "  \"observation_status\": \"" << (report.observation_truncated ? "incomplete" : "complete") << "\",\n";
+    out << "  \"observation_reasons\": [";
+    for (size_t i = 0; i < report.observation_incomplete_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << observation_incomplete_reason_name(report.observation_incomplete_reasons[i]) << "\"";
+    }
+    out << "],\n";
     out << "  \"truncation_reasons\": [";
     for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
         if (i) out << ", ";
@@ -2108,7 +2121,7 @@ void write_baseline_check_report_cef(std::ostream& out, const BaselineCheckRepor
     if (report.observation_truncated) {
         out << render_cef_line("conduitscope-baseline", "ObservationIncomplete", "Observation incomplete",
                                 kObservationIncompleteCefSeverity,
-                                observation_incomplete_extension_fields(report.truncation_reasons))
+                                observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons))
             << "\n";
     }
     for (const auto& f : report.findings) {
@@ -2122,7 +2135,7 @@ void write_baseline_check_report_cef(std::ostream& out, const BaselineCheckRepor
 void write_baseline_check_report_leef(std::ostream& out, const BaselineCheckReport& report) {
     if (report.observation_truncated) {
         out << render_leef_line("conduitscope-baseline", "ObservationIncomplete",
-                                 observation_incomplete_extension_fields(report.truncation_reasons))
+                                 observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons))
             << "\n";
     }
     for (const auto& f : report.findings) {
@@ -2137,7 +2150,7 @@ void write_baseline_check_report_syslog(std::ostream& out, const BaselineCheckRe
         std::string cef_payload =
             render_cef_line("conduitscope-baseline", "ObservationIncomplete", "Observation incomplete",
                              kObservationIncompleteCefSeverity,
-                             observation_incomplete_extension_fields(report.truncation_reasons));
+                             observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons));
         out << render_rfc5424_line(kObservationIncompleteCefSeverity, "baseline", cef_payload) << "\n";
     }
     for (const auto& f : report.findings) {

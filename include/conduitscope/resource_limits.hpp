@@ -274,6 +274,84 @@ private:
 // report.
 size_t flow_state_evictions();
 
+// A closed, machine-filterable category for WHY a report's observation_truncated/
+// observation_status is incomplete -- docs/reviews/2026-09-chatgpt-security-review-patch282.md's
+// finding 6 (item 123, docs/DEVELOPMENT.md): the existing free-text truncation_reasons strings
+// (below, and on every one of the four report engines) make a human-readable report, but not
+// something a downstream SIEM/dashboard can group or alert on without parsing prose. F6's own
+// proposed wording suggests six category names; every enumerator here uses one of those exact six
+// (so a future emitter needs no new vocabulary), but only two are ever actually produced by this
+// codebase today -- see each enumerator's own comment for which, and why the rest are declared for
+// schema completeness rather than invented behavior this codebase doesn't really have:
+//   - ResourceLimit: by far the common case -- every one of the four report engines' own
+//     admit_tracked_key()-style ceiling refusals (DetectEngine/PolicyEngine/AssetInventoryEngine/
+//     BaselineEngine's own ...Limits growth caps), AND an OS/driver-level live-capture packet drop
+//     (append_live_capture_drop_reason, cli_main.cpp -- libpcap/Npcap's own ring buffer is a
+//     resource too). Real, wired, tested.
+//   - FlowStateEviction: --max-flow-state-entries forcibly evicting an EXISTING flow/session's
+//     state to make room for a new one (append_flow_state_eviction_reason below) -- kept distinct
+//     from ResourceLimit, matching the review's own taxonomy, because it doesn't just fail to
+//     track something new (ResourceLimit's effect): it destroys already-tracked state, which can
+//     produce active misclassification (a false "new originator"), not merely an incomplete view.
+//     Real, wired, tested.
+//   - CaptureWriteFailure / CapturePermissionFailure: the `capture` subcommand's own disk-write
+//     failure path (RotatingPcapWriter::write_packet -- disk full, a permission revoked mid-run,
+//     the target directory disappearing; see kExitCaptureIncomplete's own comment, cli_main.cpp)
+//     is a REAL failure mode this codebase already detects and reports loudly (the "*** CAPTURE
+//     INCOMPLETE ***" banner, exit code 7) -- but `capture` is the write-side sensor, not an
+//     analysis-report-producing subcommand (it has no PolicyReport/AssetInventoryReport/
+//     DetectionReport/BaselineCheckReport of its own to attach an observation_incomplete_reasons
+//     entry to), so there is deliberately no emitter for these two values yet. A reasonable follow-
+//     up if `capture`'s own exit-7 path is ever given a structured (JSON) report of its own.
+//   - UnsupportedProtocol: deliberately NOT wired to the existing skipped_packets counter
+//     (AssetInventoryReport and friends) -- skipping a packet whose protocol this tool doesn't
+//     recognize is ordinary, expected behavior on every single real-world capture, not a resource/
+//     capacity failure; treating it as an "observation incomplete" category would make
+//     observation_status fire on nearly every normal run and would make the signal worthless. See
+//     DetectionReport::parse_error_packets' own comment (detect_engine.hpp) for this codebase's
+//     existing, explicit position that it "cannot and does not try to tell apart" genuine capture
+//     corruption from a simply-unimplemented decoder -- the same reason this category has no
+//     honest emitter today.
+//   - PacketTruncation: every place this codebase encounters a genuinely truncated/corrupt packet
+//     or capture-file record today (pcap_reader.cpp's ParseError sites) treats it as a hard abort
+//     of that read, not a "continue in a degraded-but-coherent state" condition the way a ceiling
+//     refusal is -- so there is no live code path that would ever produce this value either,
+//     without inventing new truncation-tolerance behavior this codebase doesn't have. Declared for
+//     the same forward-compatibility reason as the two capture_* values above.
+enum class ObservationIncompleteReason {
+    ResourceLimit,
+    FlowStateEviction,
+    CaptureWriteFailure,
+    CapturePermissionFailure,
+    UnsupportedProtocol,
+    PacketTruncation,
+};
+
+// The exact lowercase_with_underscores token this report's own JSON/CEF/LEEF writers use for
+// `reason` -- matching finding 6's own proposed vocabulary verbatim (flow_state_eviction,
+// capture_write_failure, capture_permission_failure, unsupported_protocol, packet_truncation,
+// resource_limit) so a downstream consumer that already knows the review's own wording needs no
+// translation table.
+const char* observation_incomplete_reason_name(ObservationIncompleteReason reason);
+
+// "resource_limit, flow_state_eviction" -- `categories` joined with ", ", each rendered via
+// observation_incomplete_reason_name() above, in whatever order `categories` itself holds (every
+// producer here already dedups via append_observation_incomplete_reason, so this never needs to
+// dedup again). Shared by every one of the four report engines' own "*** OBSERVATION INCOMPLETE
+// ***" text-report banner (write_inventory_report_text/write_baseline_check_report_text/
+// write_detection_report_text/write_policy_report_text) so the exact wording/separator can never
+// drift between them. Returns "" for an empty `categories` (never called in that case -- each
+// banner is itself gated on observation_truncated, which implies at least one category -- but
+// defined for an empty input rather than left undefined).
+std::string join_observation_incomplete_reason_names(const std::vector<ObservationIncompleteReason>& categories);
+
+// The reverse of observation_incomplete_reason_name() above -- std::nullopt for anything that
+// isn't one of the six exact tokens, rather than throwing: a round-trip consumer (merge inventory,
+// inventory_merge.cpp) reading a report's own JSON back should tolerate an unrecognized token
+// (e.g. one a newer/older build emitted that this build doesn't know) the same forgiving way it
+// already tolerates any other unrecognized JSON key, rather than failing the whole parse over it.
+std::optional<ObservationIncompleteReason> parse_observation_incomplete_reason_name(const std::string& name);
+
 // Called from exactly one place -- DecodeContext::flow_state<T>()'s own eviction branch
 // (protocol_decoder.hpp), at the point an existing entry is actually erased, never merely
 // considered for eviction.
@@ -283,16 +361,27 @@ void note_flow_state_eviction();
 // flow_state_evictions()'s own comment above for why.
 void reset_flow_state_evictions();
 
+// Appends `category` to `categories` the first time it's seen (a no-op on every later call with
+// the same value) -- the ObservationIncompleteReason equivalent of each report engine's own
+// mark_truncated() dedup rule for truncation_reasons, shared here since this one is appended to
+// from outside any single engine (see append_flow_state_eviction_reason below, and cli_main.cpp's
+// append_live_capture_drop_reason).
+void append_observation_incomplete_reason(std::vector<ObservationIncompleteReason>& categories,
+                                           ObservationIncompleteReason category);
+
 // Shared by all four report engines' own finish()/report-construction code (every one of them
 // `const`, so none can mutate its own truncated_/truncation_reasons_ private members the way
 // mark_truncated() does elsewhere -- this free function sidesteps that by appending directly to
-// the CALLER's own output `reasons` vector instead, which a const method is free to do) plus
-// `baseline learn`'s own per-input-file diagnostic (cli_main.cpp), which has no Report struct to
-// populate at all. Appends one human-readable reason line (naming --max-flow-state-entries, the
-// exact eviction count, and the correctness consequence) to `reasons` iff flow_state_evictions()
-// is nonzero for the currently-active Decoder run, returning whether it did -- callers OR this
-// into their own observation_truncated flag. Centralized here, rather than duplicated at each of
-// the four call sites, so the exact wording can never drift between engines.
-bool append_flow_state_eviction_reason(std::vector<std::string>& reasons);
+// the CALLER's own output `reasons`/`categories` vectors instead, which a const method is free to
+// do) plus `baseline learn`'s own per-input-file diagnostic (cli_main.cpp), which has no Report
+// struct to populate at all (that call site passes a throwaway local `categories` vector it never
+// reads back, since `learn` has no JSON output to put it in). Appends one human-readable reason
+// line (naming --max-flow-state-entries, the exact eviction count, and the correctness
+// consequence) to `reasons`, and ObservationIncompleteReason::FlowStateEviction to `categories`,
+// iff flow_state_evictions() is nonzero for the currently-active Decoder run, returning whether it
+// did -- callers OR this into their own observation_truncated flag. Centralized here, rather than
+// duplicated at each of the four call sites, so the exact wording can never drift between engines.
+bool append_flow_state_eviction_reason(std::vector<std::string>& reasons,
+                                        std::vector<ObservationIncompleteReason>& categories);
 
 }  // namespace conduitscope

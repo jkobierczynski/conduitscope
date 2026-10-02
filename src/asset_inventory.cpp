@@ -368,6 +368,7 @@ AssetInventoryEngine::AssetInventoryEngine(uint8_t zone_prefix_len, AssetInvento
 // (detect_engine.cpp).
 void AssetInventoryEngine::mark_truncated(const std::string& reason) {
     truncated_ = true;
+    append_observation_incomplete_reason(truncation_categories_, ObservationIncompleteReason::ResourceLimit);
     for (const std::string& existing : truncation_reasons_) {
         if (existing == reason) return;
     }
@@ -971,12 +972,14 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
     report.zone_prefix_len = zone_prefix_len_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
+    report.observation_incomplete_reasons = truncation_categories_;
     // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
     // DetectEngine::finish()'s own identical comment (detect_engine.cpp) and
     // append_flow_state_eviction_reason's own comment (resource_limits.hpp). A flow-state eviction
     // during `inventory` specifically risks a legitimate asset/edge appearing to vanish and then
     // reappear as a "new" one once its session state is evicted and re-created from scratch.
-    if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
+    if (append_flow_state_eviction_reason(report.truncation_reasons, report.observation_incomplete_reasons))
+        report.observation_truncated = true;
 
     // Assets, sorted numerically by address (not first-seen order, not lexicographically -- a
     // lexicographic sort would put "192.168.1.100" before "192.168.1.50") for a report that's
@@ -1254,6 +1257,8 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
         out << "*** OBSERVATION INCOMPLETE -- this capture hit at least one of AssetInventoryEngine's "
                "internal limits, so the inventory above reflects only PART of what the capture "
                "actually contains. (raise the relevant --max-inventory-* limit and re-run). ***\n";
+        out << "  categories: " << join_observation_incomplete_reason_names(report.observation_incomplete_reasons)
+            << "\n";
         for (const std::string& reason : report.truncation_reasons) {
             out << "  - " << reason << "\n";
         }
@@ -1376,6 +1381,19 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
     // Same shape as BaselineCheckReport's own observation_truncated/truncation_reasons JSON fields
     // (write_baseline_check_report_json, baseline.cpp).
     out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md): observation_status is the review's
+    // own literal property name, added alongside observation_truncated above rather than replacing
+    // it (every existing consumer/test already keys on observation_truncated); observation_reasons
+    // is truncation_reasons' closed-enum categorization -- see ObservationIncompleteReason's own
+    // comment (resource_limits.hpp). Same shape repeated identically in
+    // write_baseline_check_report_json/write_detection_report_json/write_policy_report_json.
+    out << "  \"observation_status\": \"" << (report.observation_truncated ? "incomplete" : "complete") << "\",\n";
+    out << "  \"observation_reasons\": [";
+    for (size_t i = 0; i < report.observation_incomplete_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << observation_incomplete_reason_name(report.observation_incomplete_reasons[i]) << "\"";
+    }
+    out << "],\n";
     out << "  \"truncation_reasons\": [";
     for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
         if (i) out << ", ";

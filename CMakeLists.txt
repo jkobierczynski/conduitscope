@@ -10293,7 +10293,7 @@ set_tests_properties(inventory_bacnet_unicast_registers_client_and_server_not_br
 add_test(NAME inventory_json_report_shape
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap" --format json)
 set_tests_properties(inventory_json_report_shape PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"total_packets\": 14,\n *\"skipped_packets\": 0,\n *\"observation_truncated\": false,\n *\"truncation_reasons\": \\[\\],\n *\"assets\": \\[.*\"protocols\": \\[\"dnp3\", \"s7comm\"\\],\n *\"role\": \"client\",.*\"edges\": \\[.*\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,.*\"zones\": \\[.*\"name\": \"zone_10_0_5_0_24\",\n *\"network\": \"10\\.0\\.5\\.0/24\",.*\"conduits\": \\[.*\"from_zone\": \"zone_10_0_5_0_24\",\n *\"to_zone\": \"zone_192_168_1_0_24\",\n *\"protocol\": \"dnp3\",\n *\"port\": 20000,")
+  PASS_REGULAR_EXPRESSION "\"total_packets\": 14,\n *\"skipped_packets\": 0,\n *\"observation_truncated\": false,\n *\"observation_status\": \"complete\",\n *\"observation_reasons\": \\[\\],\n *\"truncation_reasons\": \\[\\],\n *\"assets\": \\[.*\"protocols\": \\[\"dnp3\", \"s7comm\"\\],\n *\"role\": \"client\",.*\"edges\": \\[.*\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"protocol\": \"modbus\",\n *\"server_port\": 502,.*\"zones\": \\[.*\"name\": \"zone_10_0_5_0_24\",\n *\"network\": \"10\\.0\\.5\\.0/24\",.*\"conduits\": \\[.*\"from_zone\": \"zone_10_0_5_0_24\",\n *\"to_zone\": \"zone_192_168_1_0_24\",\n *\"protocol\": \"dnp3\",\n *\"port\": 20000,")
 
 # A BACnet edge has no server_port_service field (mirrors the resolver's own miss-vs-disabled
 # convention: the annotation is simply omitted, never emitted as null) -- port 47808/tcp isn't in
@@ -12217,6 +12217,18 @@ add_test(NAME inventory_merge_combines_two_reports_into_one_site_wide_matrix
 set_tests_properties(inventory_merge_combines_two_reports_into_one_site_wide_matrix PROPERTIES
   TIMEOUT 20)
 
+# Crash-fix regression (item 123, docs/DEVELOPMENT.md, found while verifying patch282 finding 6):
+# merge_inventory_reports' own zone/conduit re-derivation used to throw std::out_of_range
+# (SIGABRT) on ANY truncated input report, including a single one -- see
+# tests/merge_inventory_truncated_input_smoke.sh's own file header for the full root cause -- and
+# separately proves the patch282 finding 6 category-union behavior this script was originally
+# written to verify (two differently-truncated inputs union into BOTH distinct categories).
+add_test(NAME merge_inventory_truncated_input_does_not_crash_and_unions_categories
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_inventory_truncated_input_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(merge_inventory_truncated_input_does_not_crash_and_unions_categories PROPERTIES
+  TIMEOUT 20)
+
 # ---------------------------------------------------------------------------------------------
 # ROADMAP item 18, second half: `policy validate`/`inventory` surfacing the mere PRESENCE of any
 # of the 42 "IT protocols an OT auditor flags" (notable_it_protocols.hpp) as their own finding --
@@ -12544,12 +12556,12 @@ set_tests_properties(max_flow_state_entries_unset_still_pairs PROPERTIES
 add_test(NAME detect_flow_state_eviction_marks_observation_incomplete
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --max-flow-state-entries 1; echo EXITCODE=$?")
 set_tests_properties(detect_flow_state_eviction_marks_observation_incomplete PROPERTIES
-  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=6")
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*categories: flow_state_eviction.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=6")
 
 add_test(NAME detect_flow_state_eviction_in_json_report
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --max-flow-state-entries 1 --format json)
 set_tests_properties(detect_flow_state_eviction_in_json_report PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"observation_truncated\": true,\n *\"truncation_reasons\": \\[\"flow-state eviction limit reached -- 2 state entries evicted")
+  PASS_REGULAR_EXPRESSION "\"observation_truncated\": true,\n *\"observation_status\": \"incomplete\",\n *\"observation_reasons\": \\[\"flow_state_eviction\"\\],\n *\"truncation_reasons\": \\[\"flow-state eviction limit reached -- 2 state entries evicted")
 
 # F4 fix: before this, write_detection_report_cef (and its LEEF/syslog siblings) only ever emitted
 # one line per curated finding -- a truncated run with zero findings (exactly this fixture's own
@@ -12560,17 +12572,17 @@ set_tests_properties(detect_flow_state_eviction_in_json_report PROPERTIES
 add_test(NAME detect_flow_state_eviction_in_cef_report
   COMMAND conduitscope detect --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --max-flow-state-entries 1 --format cef)
 set_tests_properties(detect_flow_state_eviction_in_cef_report PROPERTIES
-  PASS_REGULAR_EXPRESSION "CEF:0\\|conduitscope\\|conduitscope-detect\\|[^|]+\\|ObservationIncomplete\\|Observation incomplete\\|5\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1")
+  PASS_REGULAR_EXPRESSION "CEF:0\\|conduitscope\\|conduitscope-detect\\|[^|]+\\|ObservationIncomplete\\|Observation incomplete\\|5\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1 cat=flow_state_eviction")
 
 add_test(NAME baseline_check_flow_state_eviction_marks_observation_incomplete
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' baseline check '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap' --baseline-file '${CMAKE_CURRENT_SOURCE_DIR}/tests/empty_baseline.json' --max-flow-state-entries 1 2>&1; echo EXITCODE=$?")
 set_tests_properties(baseline_check_flow_state_eviction_marks_observation_incomplete PROPERTIES
-  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=5")
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*categories: flow_state_eviction.*flow-state eviction limit reached -- 2 state entries evicted.*--max-flow-state-entries.*EXITCODE=5")
 
 add_test(NAME baseline_check_flow_state_eviction_in_leef_report
   COMMAND conduitscope baseline check "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --baseline-file "${CMAKE_CURRENT_SOURCE_DIR}/tests/empty_baseline.json" --max-flow-state-entries 1 --format leef)
 set_tests_properties(baseline_check_flow_state_eviction_in_leef_report PROPERTIES
-  PASS_REGULAR_EXPRESSION "LEEF:2\\.0\\|conduitscope\\|conduitscope-baseline\\|[^|]+\\|ObservationIncomplete\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1")
+  PASS_REGULAR_EXPRESSION "LEEF:2\\.0\\|conduitscope\\|conduitscope-baseline\\|[^|]+\\|ObservationIncomplete\\|msg=flow-state eviction limit reached -- 2 state entries evicted.*reasonCount=1	cat=flow_state_eviction")
 
 # `baseline learn` has no Report struct of its own to attach observation_truncated/
 # truncation_reasons to (it absorbs best-effort and writes the merged baseline file either way,
@@ -12601,7 +12613,7 @@ set_tests_properties(inventory_flow_state_eviction_marks_observation_incomplete 
 add_test(NAME inventory_flow_state_eviction_in_json_report
   COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_resource_exhaustion_flow_state.pcap" --max-flow-state-entries 1 --format json)
 set_tests_properties(inventory_flow_state_eviction_in_json_report PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"observation_truncated\": true,\n *\"truncation_reasons\": \\[\"flow-state eviction limit reached -- 2 state entries evicted")
+  PASS_REGULAR_EXPRESSION "\"observation_truncated\": true,\n *\"observation_status\": \"incomplete\",\n *\"observation_reasons\": \\[\"flow_state_eviction\"\\],\n *\"truncation_reasons\": \\[\"flow-state eviction limit reached -- 2 state entries evicted")
 
 # Unset (the default), across all four report engines: no eviction occurred, so none of them may
 # ever mention it -- byte-identical to this feature's absence, the same bar every other
@@ -15141,7 +15153,7 @@ set_tests_properties(baseline_check_unmodified_fixture_zero_findings_json PROPER
   # truncation_reasons right after "compliant" (see BaselineCheckReport::observation_truncated's
   # own comment, baseline.hpp) -- this small, un-truncated fixture never hits any of
   # BaselineEngine's four ceilings, so both stay at their "nothing was truncated" defaults.
-  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"observation_truncated\": false,\n *\"truncation_reasons\": \\[\\],\n *\"conduits_observed\": 1,\n *\"operations_observed\": 1,\n *\"known_operation_count\": 1,\n *\"findings\": \\[\n *\\]")
+  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"observation_truncated\": false,\n *\"observation_status\": \"complete\",\n *\"observation_reasons\": \\[\\],\n *\"truncation_reasons\": \\[\\],\n *\"conduits_observed\": 1,\n *\"operations_observed\": 1,\n *\"known_operation_count\": 1,\n *\"findings\": \\[\n *\\]")
 
 # `check` against the deliberately mutated fixture -> exactly one NewOperation finding (Write
 # Multiple Registers, a function code never learned) and exactly one NewTargetRange finding (Read
@@ -15352,7 +15364,7 @@ set_tests_properties(baseline_max_file_bytes_default_does_not_reject_a_normal_fi
 add_test(NAME baseline_engine_limits_conduit_cap_marks_check_incomplete
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit.json' --max-baseline-conduits 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'; echo EXITCODE=$?")
 set_tests_properties(baseline_engine_limits_conduit_cap_marks_check_incomplete PROPERTIES
-  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*conduit limit \\(1\\) reached.*--max-baseline-conduits.*EXITCODE=5")
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*categories: resource_limit.*conduit limit \\(1\\) reached.*--max-baseline-conduits.*EXITCODE=5")
 
 # Same scenario, --format json: observation_truncated/truncation_reasons both populated, compliant
 # still reads true (no findings -- the whole point is that a caller must check BOTH fields, not
@@ -15360,7 +15372,7 @@ set_tests_properties(baseline_engine_limits_conduit_cap_marks_check_incomplete P
 add_test(NAME baseline_engine_limits_conduit_cap_json_fields
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit_json.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit_json.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' >/dev/null && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_engine_limits_conduit_json.json' --format json --max-baseline-conduits 1 '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_baseline_two_conduit.pcap'; echo EXITCODE=$?")
 set_tests_properties(baseline_engine_limits_conduit_cap_json_fields PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"observation_truncated\": true,\n *\"truncation_reasons\": \\[\"conduit limit \\(1\\) reached.*EXITCODE=5")
+  PASS_REGULAR_EXPRESSION "\"compliant\": true,\n *\"observation_truncated\": true,\n *\"observation_status\": \"incomplete\",\n *\"observation_reasons\": \\[\"resource_limit\"\\],\n *\"truncation_reasons\": \\[\"conduit limit \\(1\\) reached.*EXITCODE=5")
 
 # tests/sample_baseline_modbus_mutated.pcap (used by the *_mutated_* tests above) has 2 distinct
 # operation_keys on its one conduit ("Read Holding Registers", "Write Multiple Registers") --
@@ -15428,7 +15440,7 @@ set_tests_properties(detect_engine_limits_defaults_do_not_trip_on_a_normal_captu
 add_test(NAME inventory_engine_limits_assets_cap_marks_inventory_incomplete
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' inventory --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_inventory.pcap' --max-inventory-assets 1; echo EXITCODE=$?")
 set_tests_properties(inventory_engine_limits_assets_cap_marks_inventory_incomplete PROPERTIES
-  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on assets_.*--max-inventory-assets.*EXITCODE=6")
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*categories: resource_limit.*tracked-key limit \\(1\\) reached on assets_.*--max-inventory-assets.*EXITCODE=6")
 
 # Same fixture, forcing edges_ (independently capped from assets_) to refuse instead.
 add_test(NAME inventory_engine_limits_edges_cap_marks_inventory_incomplete
@@ -15467,7 +15479,7 @@ set_tests_properties(inventory_engine_limits_defaults_do_not_trip_on_a_normal_ca
 add_test(NAME policy_engine_limits_tcp_flows_cap_marks_validate_incomplete
   COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_engine.pcap' --policy '${POLICY_DIR}/policy_engine_sample.yaml' --max-policy-tcp-flows 1; echo EXITCODE=$?")
 set_tests_properties(policy_engine_limits_tcp_flows_cap_marks_validate_incomplete PROPERTIES
-  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on flows_.*--max-policy-tcp-flows.*EXITCODE=6")
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*categories: resource_limit.*tracked-key limit \\(1\\) reached on flows_.*--max-policy-tcp-flows.*EXITCODE=6")
 
 # sample_policy_udp_bacnet_cip_io.pcap carries multiple distinct UDP BACnet/CIP-I/O flows --
 # --max-policy-udp-flows 1 forces every flow after the first to be refused on udp_flows_.

@@ -518,6 +518,11 @@ struct AssetInventoryReport {
     // raises it -- same dedup rule as BaselineEngine::mark_truncated. Empty iff observation_truncated
     // is false.
     std::vector<std::string> truncation_reasons;
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md): the closed-enum categorization of
+    // truncation_reasons above -- see ObservationIncompleteReason's own comment (resource_limits.hpp)
+    // for the full rationale and which categories this engine can actually produce. Deduped, same
+    // rule as truncation_reasons; empty iff observation_truncated is false.
+    std::vector<ObservationIncompleteReason> observation_incomplete_reasons;
 };
 
 // Item 64-style fix (patch257 finding 3, patch209 finding 1's own precedent for BaselineEngine) --
@@ -562,6 +567,13 @@ public:
     // One human-readable line per DISTINCT ceiling that was hit -- same dedup rule as
     // BaselineEngine::mark_truncated. Empty iff truncated() is false.
     const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
+
+    // The ObservationIncompleteReason categorization of truncation_reasons() above -- patch282
+    // finding 6 (item 123, docs/DEVELOPMENT.md). Always ObservationIncompleteReason::ResourceLimit
+    // (and only that, deduped to one entry) for this engine, since every one of its own ceilings is
+    // a tracked-key growth-ceiling refusal -- see mark_truncated()'s own comment. Empty iff
+    // truncated() is false.
+    const std::vector<ObservationIncompleteReason>& truncation_categories() const { return truncation_categories_; }
 
     // Folds one already-decoded packet into this engine's asset/edge state. Call once per packet,
     // in capture order (same discipline as Decoder::decode/PolicyEngine::observe). A packet whose
@@ -775,7 +787,11 @@ private:
 
     // Appends `reason` to truncation_reasons_ (and sets truncated_) the first time it's seen; a
     // no-op on every later call with the same text -- identical dedup rule to
-    // BaselineEngine::mark_truncated (baseline.cpp).
+    // BaselineEngine::mark_truncated (baseline.cpp). Also appends
+    // ObservationIncompleteReason::ResourceLimit to truncation_categories_ (patch282 finding 6,
+    // item 123, docs/DEVELOPMENT.md) -- every call site below is a tracked-key growth-ceiling
+    // refusal, so this is unconditional rather than a parameter every call site would otherwise
+    // have to pass identically.
     void mark_truncated(const std::string& reason);
 
     // Shared by every one of this engine's four growth-capped containers' own "have I seen this key
@@ -793,6 +809,7 @@ private:
     AssetInventoryEngineLimits limits_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;
+    std::vector<ObservationIncompleteReason> truncation_categories_;
     std::unordered_map<std::string, AssetState> assets_;
     std::vector<std::string> asset_order_;
     std::unordered_map<std::string, EdgeState> edges_;

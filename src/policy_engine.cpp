@@ -213,6 +213,7 @@ std::string json_escape(const std::string& s) {
 // Identical dedup rule to BaselineEngine::mark_truncated (baseline.cpp).
 void PolicyEngine::mark_truncated(const std::string& reason) {
     truncated_ = true;
+    append_observation_incomplete_reason(truncation_categories_, ObservationIncompleteReason::ResourceLimit);
     for (const std::string& existing : truncation_reasons_) {
         if (existing == reason) return;
     }
@@ -685,10 +686,12 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
     report.skipped_non_tcp = skipped_non_tcp_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
+    report.observation_incomplete_reasons = truncation_categories_;
     // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
     // DetectEngine::finish()'s own identical comment (detect_engine.cpp) and
     // append_flow_state_eviction_reason's own comment (resource_limits.hpp).
-    if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
+    if (append_flow_state_eviction_reason(report.truncation_reasons, report.observation_incomplete_reasons))
+        report.observation_truncated = true;
 
     std::unordered_set<std::string> exercised_conduits;
 
@@ -1665,6 +1668,8 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
                "internal limits, so the result above reflects only PART of what the capture "
                "actually contains. Any \"COMPLIANT\" result is NOT trustworthy until this is "
                "resolved (raise the relevant --max-policy-* limit and re-run). ***\n";
+        out << "  categories: " << join_observation_incomplete_reason_names(report.observation_incomplete_reasons)
+            << "\n";
         for (const std::string& reason : report.truncation_reasons) {
             out << "  - " << reason << "\n";
         }
@@ -1871,6 +1876,15 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
     // observation_truncated, not "compliant" alone, since "compliant": true alongside
     // "observation_truncated": true means the capture was only PARTLY observed, not confirmed clean.
     out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- see
+    // write_inventory_report_json's own identical comment (asset_inventory.cpp).
+    out << "  \"observation_status\": \"" << (report.observation_truncated ? "incomplete" : "complete") << "\",\n";
+    out << "  \"observation_reasons\": [";
+    for (size_t i = 0; i < report.observation_incomplete_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << observation_incomplete_reason_name(report.observation_incomplete_reasons[i]) << "\"";
+    }
+    out << "],\n";
     out << "  \"truncation_reasons\": [";
     for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
         if (i) out << ", ";
@@ -2267,7 +2281,7 @@ void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
     if (report.observation_truncated) {
         out << render_cef_line("conduitscope-policy", "ObservationIncomplete", "Observation incomplete",
                                 kObservationIncompleteCefSeverity,
-                                observation_incomplete_extension_fields(report.truncation_reasons))
+                                observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons))
             << "\n";
     }
     for (const auto& f : report.flows) {
@@ -2293,7 +2307,7 @@ void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
 void write_policy_report_leef(std::ostream& out, const PolicyReport& report) {
     if (report.observation_truncated) {
         out << render_leef_line("conduitscope-policy", "ObservationIncomplete",
-                                 observation_incomplete_extension_fields(report.truncation_reasons))
+                                 observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons))
             << "\n";
     }
     for (const auto& f : report.flows) {
@@ -2326,7 +2340,7 @@ void write_policy_report_syslog(std::ostream& out, const PolicyReport& report) {
         std::string cef_payload =
             render_cef_line("conduitscope-policy", "ObservationIncomplete", "Observation incomplete",
                              kObservationIncompleteCefSeverity,
-                             observation_incomplete_extension_fields(report.truncation_reasons));
+                             observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons));
         out << render_rfc5424_line(kObservationIncompleteCefSeverity, "policy", cef_payload) << "\n";
     }
     for (const auto& f : report.flows) {

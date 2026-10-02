@@ -86,7 +86,7 @@ std::string render_leef_line(const std::string& device_product, const std::strin
 }
 
 std::vector<std::pair<std::string, std::string>> observation_incomplete_extension_fields(
-    const std::vector<std::string>& truncation_reasons) {
+    const std::vector<std::string>& truncation_reasons, const std::vector<ObservationIncompleteReason>& categories) {
     std::ostringstream joined;
     for (size_t i = 0; i < truncation_reasons.size(); ++i) {
         if (i > 0) joined << "; ";
@@ -95,6 +95,19 @@ std::vector<std::pair<std::string, std::string>> observation_incomplete_extensio
     std::vector<std::pair<std::string, std::string>> fields;
     fields.emplace_back("msg", joined.str());
     fields.emplace_back("reasonCount", std::to_string(truncation_reasons.size()));
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md): the closed-enum categorization,
+    // comma-joined with NO space (unlike join_observation_incomplete_reason_names' human-readable
+    // ", " separator, resource_limits.hpp) -- CEF/LEEF extension values are not quoted, and this
+    // codebase's own cef_extension_escape/leef_extension_escape deliberately don't escape a plain
+    // space (matching `msg` above, which already contains spaces), so a space-free value here keeps
+    // `cat` unambiguous for a SIEM rule parsing on whitespace, the way a free-text `msg` value
+    // cannot be.
+    std::ostringstream cat;
+    for (size_t i = 0; i < categories.size(); ++i) {
+        if (i > 0) cat << ",";
+        cat << observation_incomplete_reason_name(categories[i]);
+    }
+    fields.emplace_back("cat", cat.str());
     return fields;
 }
 

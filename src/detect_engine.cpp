@@ -241,6 +241,7 @@ bool raw_pdu_matches(const ByteSpan& span, std::initializer_list<uint8_t> expect
 // doc comment (detect_engine.hpp) for why.
 void DetectEngine::mark_truncated(const std::string& reason) {
     truncated_ = true;
+    append_observation_incomplete_reason(truncation_categories_, ObservationIncompleteReason::ResourceLimit);
     for (const std::string& existing : truncation_reasons_) {
         if (existing == reason) return;
     }
@@ -1880,12 +1881,14 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
     report.parse_error_packets = parse_error_packets_;
     report.observation_truncated = truncated_;
     report.truncation_reasons = truncation_reasons_;
+    report.observation_incomplete_reasons = truncation_categories_;
     // F4 fix (patch282 security review): fold in any flow-state evictions from this run -- see
     // append_flow_state_eviction_reason's own comment (resource_limits.hpp). truncated_/
     // truncation_reasons_ above only ever reflect this engine's own three DetectEngineLimits
     // growth ceilings; flow-state eviction is a decode()-layer condition this engine has no direct
     // visibility into otherwise.
-    if (append_flow_state_eviction_reason(report.truncation_reasons)) report.observation_truncated = true;
+    if (append_flow_state_eviction_reason(report.truncation_reasons, report.observation_incomplete_reasons))
+        report.observation_truncated = true;
 
     auto in_baseline = [&](const std::string& client_ip, const std::string& server_ip,
                             const std::string& protocol, uint16_t server_port) {
@@ -2253,6 +2256,8 @@ void write_detection_report_text(std::ostream& out, const DetectionReport& repor
                "internal limits, so the findings above reflect only PART of what the capture "
                "actually contains. Any \"no findings\" result is NOT trustworthy until this is "
                "resolved (raise the relevant --max-detect-* limit and re-run). ***\n";
+        out << "  categories: " << join_observation_incomplete_reason_names(report.observation_incomplete_reasons)
+            << "\n";
         for (const std::string& reason : report.truncation_reasons) {
             out << "  - " << reason << "\n";
         }
@@ -2326,6 +2331,15 @@ void write_detection_report_json(std::ostream& out, const DetectionReport& repor
     // (write_baseline_check_report_json, baseline.cpp) -- a caller parsing this JSON must check
     // observation_truncated, not just an empty findings array, to know the report is complete.
     out << "  \"observation_truncated\": " << (report.observation_truncated ? "true" : "false") << ",\n";
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- see
+    // write_inventory_report_json's own identical comment (asset_inventory.cpp).
+    out << "  \"observation_status\": \"" << (report.observation_truncated ? "incomplete" : "complete") << "\",\n";
+    out << "  \"observation_reasons\": [";
+    for (size_t i = 0; i < report.observation_incomplete_reasons.size(); ++i) {
+        if (i) out << ", ";
+        out << "\"" << observation_incomplete_reason_name(report.observation_incomplete_reasons[i]) << "\"";
+    }
+    out << "],\n";
     out << "  \"truncation_reasons\": [";
     for (size_t i = 0; i < report.truncation_reasons.size(); ++i) {
         if (i) out << ", ";
@@ -2413,7 +2427,7 @@ void write_detection_report_cef(std::ostream& out, const DetectionReport& report
     if (report.observation_truncated) {
         out << render_cef_line("conduitscope-detect", "ObservationIncomplete", "Observation incomplete",
                                 kObservationIncompleteCefSeverity,
-                                observation_incomplete_extension_fields(report.truncation_reasons))
+                                observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons))
             << "\n";
     }
     for (const auto& f : report.findings) {
@@ -2426,7 +2440,7 @@ void write_detection_report_cef(std::ostream& out, const DetectionReport& report
 void write_detection_report_leef(std::ostream& out, const DetectionReport& report) {
     if (report.observation_truncated) {
         out << render_leef_line("conduitscope-detect", "ObservationIncomplete",
-                                 observation_incomplete_extension_fields(report.truncation_reasons))
+                                 observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons))
             << "\n";
     }
     for (const auto& f : report.findings) {
@@ -2441,7 +2455,7 @@ void write_detection_report_syslog(std::ostream& out, const DetectionReport& rep
         std::string cef_payload =
             render_cef_line("conduitscope-detect", "ObservationIncomplete", "Observation incomplete",
                              kObservationIncompleteCefSeverity,
-                             observation_incomplete_extension_fields(report.truncation_reasons));
+                             observation_incomplete_extension_fields(report.truncation_reasons, report.observation_incomplete_reasons));
         out << render_rfc5424_line(kObservationIncompleteCefSeverity, "detect", cef_payload) << "\n";
     }
     for (const auto& f : report.findings) {

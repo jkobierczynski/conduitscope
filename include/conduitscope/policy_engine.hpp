@@ -396,6 +396,9 @@ struct PolicyReport {
     // raises it -- same dedup rule as BaselineEngine::mark_truncated. Empty iff observation_truncated
     // is false.
     std::vector<std::string> truncation_reasons;
+    // patch282 finding 6 fix (item 123, docs/DEVELOPMENT.md) -- see
+    // AssetInventoryReport::observation_incomplete_reasons' own identical comment (asset_inventory.hpp).
+    std::vector<ObservationIncompleteReason> observation_incomplete_reasons;
 };
 
 // patch257 finding 3 fix -- PolicyEngine's four accumulating containers (flows_/ethernet_flows_/
@@ -433,6 +436,12 @@ public:
 
     // One human-readable line per DISTINCT ceiling that was hit. Empty iff truncated() is false.
     const std::vector<std::string>& truncation_reasons() const { return truncation_reasons_; }
+
+    // The ObservationIncompleteReason categorization of truncation_reasons() above -- patch282
+    // finding 6 (item 123, docs/DEVELOPMENT.md). Always ObservationIncompleteReason::ResourceLimit
+    // (deduped to one entry) for this engine -- see AssetInventoryEngine::truncation_categories()'s
+    // own identical comment. Empty iff truncated() is false.
+    const std::vector<ObservationIncompleteReason>& truncation_categories() const { return truncation_categories_; }
 
     // Folds one already-decoded packet into this engine's per-flow state. Call once per packet, in
     // capture order (same discipline as Decoder::decode).
@@ -662,6 +671,7 @@ private:
     PolicyEngineLimits limits_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;
+    std::vector<ObservationIncompleteReason> truncation_categories_;
     std::unordered_map<std::string, FlowState> flows_;  // keyed by canonical session key
     std::vector<std::string> flow_order_;                // session keys, first-seen order
     std::unordered_map<std::string, UdpFlowState> udp_flows_;  // keyed by protocol + canonical
