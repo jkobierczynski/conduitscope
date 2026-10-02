@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
@@ -417,6 +418,36 @@ AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& te
         c.expect('}');
     }
     return report;
+}
+
+AssetInventoryReport read_inventory_report_file_for_merge(const std::string& path, size_t max_file_bytes) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw InventoryMergeError("report file '" + path + "': cannot open for reading");
+    }
+    // Size ceiling BEFORE reading anything into memory (finding 5, docs/reviews/2026-09-chatgpt-
+    // security-review-patch282.md; item 122, docs/DEVELOPMENT.md) -- seek-to-end/tellg, exactly
+    // mirroring load_baseline_store's own identical check (baseline.cpp) for the identical reason:
+    // a truncated or oversized report would fail parse_inventory_report_json_for_merge's own
+    // structural checks anyway, so there is no partial-success case worth preserving by reading it
+    // first.
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    if (size < 0) {
+        throw InventoryMergeError("report file '" + path + "': read error (could not determine size)");
+    }
+    if (static_cast<size_t>(size) > max_file_bytes) {
+        throw InventoryMergeError("report file '" + path + "': " + std::to_string(size) +
+                                   " byte(s) exceeds the " + std::to_string(max_file_bytes) +
+                                   " byte limit (--max-inventory-file-bytes to override)");
+    }
+    in.seekg(0, std::ios::beg);
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    if (!in.good() && !in.eof()) {
+        throw InventoryMergeError("report file '" + path + "': read error");
+    }
+    return parse_inventory_report_json_for_merge(buf.str());
 }
 
 AssetInventoryReport merge_inventory_reports(const std::vector<AssetInventoryReport>& reports,

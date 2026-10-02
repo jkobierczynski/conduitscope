@@ -12187,6 +12187,21 @@ add_test(NAME merge_inventory_malformed_json_reports_clearly
 set_tests_properties(merge_inventory_malformed_json_reports_clearly PROPERTIES
   PASS_REGULAR_EXPRESSION "malformed JSON")
 
+# docs/reviews/2026-09-chatgpt-security-review-patch282.md finding 5 (item 122, DEVELOPMENT.md):
+# --max-inventory-file-bytes, the same shape as --max-baseline-file-bytes (item 68), rejects an
+# oversized input report BEFORE it's read into memory rather than silently allocating without a
+# ceiling. tests/merge_inventory_oversize_smoke.sh generates one real 'inventory --format json'
+# report with the CLI itself (so this doesn't depend on a checked-in fixture staying in sync with
+# the report schema), then proves: (1) merging it still succeeds under the default 256 MiB
+# ceiling, and (2) a --max-inventory-file-bytes set below that report's own real size is rejected
+# with a clear error naming the byte count/limit/override flag, and exits non-zero, before any
+# "merged:"/report output is produced.
+add_test(NAME merge_inventory_oversize_rejected_before_read
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_inventory_oversize_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(merge_inventory_oversize_rejected_before_read PROPERTIES
+  TIMEOUT 20)
+
 add_test(NAME merge_needs_a_subcommand
   COMMAND conduitscope merge)
 set_tests_properties(merge_needs_a_subcommand PROPERTIES
