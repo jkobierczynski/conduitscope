@@ -281,7 +281,18 @@ pre.term {
 }
 pre.term code { background: none; border: none; padding: 0; font-size: inherit; }
 .ln-cmd { color: var(--prompt); font-weight: 600; }
-.ln-cmd .prompt-mark { color: var(--fg-muted); font-weight: 400; margin-right: 0.4em; }
+.ln-cmd .prompt-mark {
+  color: var(--fg-muted);
+  font-weight: 400;
+  margin-right: 0.4em;
+  /* The "Copy" button already strips this element before writing to the clipboard (see
+     script.js); this covers the other path -- a plain mouse drag-select across a command
+     block -- so a manually selected/copied "$ conduitscope ..." or "PS> conduitscope ..."
+     line pastes as just "conduitscope ...", not a string starting with a shell prompt that
+     has to be hand-edited out before it'll run. */
+  -webkit-user-select: none;
+  user-select: none;
+}
 .ln-out { color: var(--out); }
 .ln-comment { color: var(--comment); font-style: italic; }
 .ln-dim { color: var(--fg-muted); }

@@ -11,7 +11,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a class="brand" href="index.html">conduitscope</a>
-    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <span class="brand-sub">extended manual &middot; v0.3.2</span>
     <nav>
 <div class="nav-group-title">Start here</div><ul>
 <li><a  href="index.html">Overview</a></li>
@@ -60,11 +60,21 @@ where most copy-pasted commands actually break.</p>
 <strong class="label">Every example below was actually run</strong>
 <p>Against <code>tests/sample_modbus.pcap</code>, <code>tests/sample_inventory.pcap</code>,
 <code>tests/sample_enip.pcap</code>, and <code>tests/sample_detect.pcap</code> with
-<code>jq 1.7</code> on Linux. The PowerShell column shows the idiomatic native-cmdlet equivalent
-for each -- written to the same semantics, since this manual's build environment has no Windows
-shell to execute them against; where a PowerShell-specific quoting quirk is involved
-(the <code>jq</code>-on-Windows section below), it's called out as such rather than presented as
-independently verified.</p>
+<code>jq 1.7</code> on Linux -- and every jq example's own output on this page has just been
+re-verified against the current binary (two had gone stale after fixtures grew: the protocol
+histogram below was missing a <code>cotp</code> entry, and the Critical-findings list was
+missing two BACnet findings -- both fixed). The PowerShell column was originally written as the
+idiomatic native-cmdlet equivalent for each, without being run against a real Windows shell. A
+reader actually running several of these on real Windows PowerShell (thank you) turned up a
+genuine pipeline-chaining pitfall, confirmed twice independently (once with <code>Group-Object</code>,
+once with <code>Select-Object | ConvertTo-Csv</code>): chaining anything directly onto
+<code>ConvertFrom-Json</code>'s output in one pipeline statement reading from a native command is
+unreliable on Windows PowerShell -- it can silently come back empty or collapsed to one item.
+Every PowerShell example on this page now saves <code>ConvertFrom-Json</code>'s output to a
+variable first and operates on <em>that</em>, which was confirmed working in both cases where the
+direct-chain form broke -- see each section's own note for specifics. Where a PowerShell-specific
+quoting quirk is involved (the <code>jq</code>-on-Windows section below), it's called out as
+such.</p>
 </div>
 
 <h2>The baseline: pretty-printing</h2>
@@ -94,7 +104,8 @@ independently verified.</p>
 <div class="term-wrap">
 <div class="term-label"><span class="chip fmt">PowerShell</span>ConvertFrom-Json / ConvertTo-Json needs no extra install -- it ships with PowerShell</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_modbus.pcap -T json | ConvertFrom-Json | ConvertTo-Json -Depth 10</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_modbus.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | ConvertTo-Json -Depth 10</span>
 <span class="ln-out">[</span>
 <span class="ln-out">  {</span>
 <span class="ln-out">    "index":  1,</span>
@@ -132,10 +143,10 @@ Always pass an explicit <code>-Depth</code> generous enough for the report you'r
 </div>
 <div class="os-panel" data-os="windows">
 <div class="term-wrap">
-<div class="term-label"><span class="chip fmt">PowerShell</span>Where-Object + Select-Object with a calculated property for renaming</div>
+<div class="term-label"><span class="chip fmt">PowerShell</span>Where-Object + Select-Object with a calculated property for renaming -- save to a variable first</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_inventory.pcap -T json | ConvertFrom-Json |</span>
-<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Where-Object { $_.protocol -eq "modbus" } |</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_inventory.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Where-Object { $_.protocol -eq "modbus" } |</span>
 <span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object @{n="src"; e={$_.src_ip}}, @{n="dst"; e={$_.dst_ip}}, summary</span>
 
 <span class="ln-out">src           dst            summary</span>
@@ -158,29 +169,61 @@ Always pass an explicit <code>-Depth</code> generous enough for the report you'r
 <pre class="term"><code>
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_inventory.pcap -T json | jq '[.[] | .protocol] | group_by(.) | map({protocol: .[0], count: length})'</span>
 <span class="ln-out">[</span>
-<span class="ln-out">  { "protocol": "bacnet", "count": 2 },</span>
-<span class="ln-out">  { "protocol": "dnp3", "count": 2 },</span>
-<span class="ln-out">  { "protocol": "enip", "count": 4 },</span>
-<span class="ln-out">  { "protocol": "modbus", "count": 2 },</span>
-<span class="ln-out">  { "protocol": "s7comm", "count": 2 }</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "protocol": "bacnet",</span>
+<span class="ln-out">    "count": 2</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "protocol": "cotp",</span>
+<span class="ln-out">    "count": 2</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "protocol": "dnp3",</span>
+<span class="ln-out">    "count": 2</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "protocol": "enip",</span>
+<span class="ln-out">    "count": 4</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "protocol": "modbus",</span>
+<span class="ln-out">    "count": 2</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "protocol": "s7comm",</span>
+<span class="ln-out">    "count": 2</span>
+<span class="ln-out">  }</span>
 <span class="ln-out">]</span>
 </code></pre></div>
 </div>
 <div class="os-panel" data-os="windows">
 <div class="term-wrap">
-<div class="term-label"><span class="chip fmt">PowerShell</span>Group-Object does this natively, no manual grouping logic needed</div>
+<div class="term-label"><span class="chip fmt">PowerShell</span>Group-Object does this natively, no manual grouping logic needed -- save to a variable first</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_inventory.pcap -T json | ConvertFrom-Json |</span>
-<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Group-Object protocol | Select-Object Name, Count</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_inventory.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Group-Object protocol | Select-Object Name, Count</span>
 
 <span class="ln-out">Name     Count</span>
 <span class="ln-out">----     -----</span>
-<span class="ln-out">bacnet   2</span>
-<span class="ln-out">dnp3     2</span>
-<span class="ln-out">enip     4</span>
 <span class="ln-out">modbus   2</span>
+<span class="ln-out">dnp3     2</span>
+<span class="ln-out">cotp     2</span>
 <span class="ln-out">s7comm   2</span>
+<span class="ln-out">enip     4</span>
+<span class="ln-out">bacnet   2</span>
 </code></pre></div>
+<p style="margin-top:0.6em">Save to <code>$report</code> first, then pipe <em>that</em> into
+<code>Group-Object</code> -- don't chain anything directly onto <code>ConvertFrom-Json</code> in
+the same pipeline that's reading a native command's output. Confirmed on real Windows
+PowerShell: a single-statement <code>conduitscope ... | ConvertFrom-Json | Group-Object
+protocol | Select-Object Name, Count</code> reliably came back with exactly one group (a blank
+name, count 1) instead of the six shown above, while assigning the parsed array to a variable
+first and then grouping <em>that</em> worked correctly every time. This isn't specific to
+<code>Group-Object</code> -- the same thing happened with <code>Select-Object | ConvertTo-Csv</code>
+chained directly (see the "Flatten to CSV" section below), so every PowerShell example on this
+page now saves to a variable first as a general rule, not just this one.
+(<code>Group-Object</code>'s own row order here is first-seen order in the input, not
+alphabetical -- that's why it doesn't match the jq histogram's alphabetical order above.)</p>
 </div>
 
 
@@ -197,6 +240,7 @@ Always pass an explicit <code>-Depth</code> generous enough for the report you'r
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_modbus.pcap -T json | jq -r '.[] | [.src_ip, .dst_ip, .summary] | @csv'</span>
 <span class="ln-out">"192.168.1.50","192.168.1.10","Read Holding Registers: request: read 10 holding register(s) starting at address 0"</span>
 <span class="ln-out">"192.168.1.10","192.168.1.50","Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09"</span>
+<span class="ln-out">"192.168.1.10","192.168.1.50","Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address"</span>
 </code></pre></div>
 <p style="margin-top:0.6em">Or skip <code>-T json | jq</code> entirely -- <code>decode</code> has a
 real <code>-T csv</code> of its own (more columns, RFC4180-quoted) -- see
@@ -206,14 +250,24 @@ you want a <em>different</em> column set than the built-in CSV gives you.</p>
 </div>
 <div class="os-panel" data-os="windows">
 <div class="term-wrap">
-<div class="term-label"><span class="chip fmt">PowerShell</span>ConvertTo-Csv -- same idea, PowerShell's own object pipeline does the quoting</div>
+<div class="term-label"><span class="chip fmt">PowerShell</span>ConvertTo-Csv -- same idea, PowerShell's own object pipeline does the quoting -- save to a variable first</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_modbus.pcap -T json | ConvertFrom-Json |</span>
-<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object src_ip, dst_ip, summary | ConvertTo-Csv -NoTypeInformation</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_modbus.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Select-Object src_ip, dst_ip, summary | ConvertTo-Csv -NoTypeInformation</span>
 
 <span class="ln-out">"src_ip","dst_ip","summary"</span>
-<span class="ln-out">"192.168.1.50","192.168.1.10","Read Holding Registers: request: read 10 holding register(s)..."</span>
+<span class="ln-out">"192.168.1.50","192.168.1.10","Read Holding Registers: request: read 10 holding register(s) starting at address 0"</span>
+<span class="ln-out">"192.168.1.10","192.168.1.50","Read Holding Registers: response: 20 data byte(s) = 00 00 00 01 00 02 00 03 00 04 00 05 00 06 00 07 00 08 00 09"</span>
+<span class="ln-out">"192.168.1.10","192.168.1.50","Read Holding Registers: exception response to Read Holding Registers: Illegal Data Address"</span>
 </code></pre></div>
+<p style="margin-top:0.6em">Confirmed broken on real Windows PowerShell when chained directly
+(no intermediate variable): <code>.\conduitscope ... | ConvertFrom-Json | Select-Object
+src_ip, dst_ip, summary | ConvertTo-Csv ...</code> came back with the header row and zero data
+rows. Saving to <code>$report</code> first and piping <em>that</em> fixed it -- see the note in
+the "Count / group by a field" section above for the same pitfall with
+<code>Group-Object</code>. Given it reproduces with two different downstream cmdlets now, treat
+it as a general rule for this page, not a <code>Group-Object</code>-specific one: always save
+<code>ConvertFrom-Json</code>'s output to a variable before piping it into anything else.</p>
 </div>
 
 
@@ -231,6 +285,8 @@ you want a <em>different</em> column set than the built-in CSV gives you.</p>
 <span class="ln-out">{"technique_id":"T0843","description":"S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station"}</span>
 <span class="ln-out">{"technique_id":"T0816","description":"DNP3 Cold Restart request -- an outstation is being commanded to restart"}</span>
 <span class="ln-out">{"technique_id":"T0816","description":"IEC 104 Reset Process command (C_RP_NA_1) -- a controlling station commanded a process reset"}</span>
+<span class="ln-out">{"technique_id":"T0816","description":"BACnet ReinitializeDevice request -- a device is being commanded to restart or change its reinitialization state"}</span>
+<span class="ln-out">{"technique_id":"T0855","description":"BACnet DeviceCommunicationControl request -- a device's own communication can be silenced or re-enabled by this service"}</span>
 </code></pre></div><div class="term-wrap">
 <div class="term-label"><span class="chip fmt">bash + jq</span>Findings per category, counted</div>
 <pre class="term"><code>
@@ -246,7 +302,7 @@ you want a <em>different</em> column set than the built-in CSV gives you.</p>
 <div class="term-wrap">
 <div class="term-label"><span class="chip fmt">PowerShell</span>Only Critical findings</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = conduitscope detect -r tests\sample_detect.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope detect -r tests\sample_detect.pcap -T json | ConvertFrom-Json</span>
 <span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.findings | Where-Object { $_.severity -eq "Critical" } | Select-Object technique_id, description</span>
 </code></pre></div><div class="term-wrap">
 <div class="term-label"><span class="chip fmt">PowerShell</span>Findings per category, counted</div>
@@ -265,6 +321,313 @@ ConvertFrom-Json</code>) and querying it with several separate commands avoids r
 asking more than one.</p>
 
 </div>
+
+<h2>Sort by a field</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>sort_by -- jq sorts ascending, so negate the field for descending</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_bacnet.pcap -T json | jq -c '[.[] | {index, captured_len}] | sort_by(-.captured_len) | .[0:3]'</span>
+<span class="ln-out">[{"index":53,"captured_len":143},{"index":54,"captured_len":94},{"index":66,"captured_len":85}]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Sort-Object -Descending, then take the top 3 -- save to a variable first</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_bacnet.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Sort-Object captured_len -Descending | Select-Object -First 3 index, captured_len | ConvertTo-Json</span>
+
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  53,</span>
+<span class="ln-out">    "captured_len":  143</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  54,</span>
+<span class="ln-out">    "captured_len":  94</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  66,</span>
+<span class="ln-out">    "captured_len":  85</span>
+<span class="ln-out">  }</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+<p style="margin-top:0.6em">Piping the final result through <code>ConvertTo-Json</code> instead
+of letting it print as a default table isn't required -- it's done throughout this page's newer
+examples specifically because <code>ConvertTo-Json</code>'s output format is stable and
+well-documented, whereas a bare <code>Format-Table</code>'s exact column widths depend on
+console width and aren't worth guessing at without a real Windows shell to check against.</p>
+</div>
+
+
+<h2>Min, max, and average of a numeric field</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>min / max / add-over-length for the average, all in one object construction</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_bacnet.pcap -T json | jq '[.[].captured_len] | {min: min, max: max, avg: (add/length)}'</span>
+<span class="ln-out">{</span>
+<span class="ln-out">  "min": 44,</span>
+<span class="ln-out">  "max": 143,</span>
+<span class="ln-out">  "avg": 60.4264705882353</span>
+<span class="ln-out">}</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Measure-Object does min/max/average natively</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_bacnet.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$stats = $report.captured_len | Measure-Object -Minimum -Maximum -Average</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>[PSCustomObject]@{ min = $stats.Minimum; max = $stats.Maximum; avg = [math]::Round($stats.Average, 2) } | ConvertTo-Json</span>
+
+<span class="ln-out">{</span>
+<span class="ln-out">  "min":  44,</span>
+<span class="ln-out">  "max":  143,</span>
+<span class="ln-out">  "avg":  60.43</span>
+<span class="ln-out">}</span>
+</code></pre></div>
+<p style="margin-top:0.6em">The average is rounded to 2 decimal places with
+<code>[math]::Round(...)</code> here rather than shown at jq's full floating-point precision --
+.NET's and jq's default number-to-string formatting don't necessarily agree on every trailing
+digit of a repeating decimal, so rounding sidesteps a mismatch that's cosmetic, not a real
+difference in the underlying value (both are computing the same 4109 &divide; 68).</p>
+</div>
+
+
+<h2>Distinct / unique values</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>unique -- note this sorts the result, it doesn't just dedupe in place</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_bacnet.pcap -T json | jq -c '[.[].src_ip] | unique'</span>
+<span class="ln-out">["192.168.1.10","192.168.1.20","192.168.1.21"]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Select-Object -Unique -- preserves first-seen order instead of sorting</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_bacnet.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Select-Object -ExpandProperty src_ip -Unique | ConvertTo-Json</span>
+
+<span class="ln-out">[</span>
+<span class="ln-out">  "192.168.1.10",</span>
+<span class="ln-out">  "192.168.1.20",</span>
+<span class="ln-out">  "192.168.1.21"</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+<p style="margin-top:0.6em">Same three addresses here either way, but don't count on that in
+general: jq's <code>unique</code> always sorts, while PowerShell's <code>-Unique</code> keeps
+whatever order the values first appeared in the capture.</p>
+</div>
+
+
+<h2>Filter by a time range</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span><code>time</code> is a string ("12.012000"), not a number -- cast it first</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope decode -r tests/sample_dnp3.pcap -T json | jq -c '.[] | select((.time | tonumber) >= 10 and (.time | tonumber) <= 15) | {index, time}'</span>
+<span class="ln-out">{"index":11,"time":"10.010000"}</span>
+<span class="ln-out">{"index":12,"time":"11.011000"}</span>
+<span class="ln-out">{"index":13,"time":"12.012000"}</span>
+<span class="ln-out">{"index":14,"time":"13.013000"}</span>
+<span class="ln-out">{"index":15,"time":"14.014000"}</span>
+</code></pre></div>
+<p style="margin-top:0.6em">Every packet in <code>tests/sample_dnp3.pcap</code> is spaced exactly
+1.001 seconds apart, which is why asking for 10-15 seconds lands on exactly indices 11-15 --
+convenient for a worked example, but don't expect round numbers like that against a real
+capture.</p>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Where-Object with an explicit [double] cast, same reason as the jq <code>tonumber</code> above</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_dnp3.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Where-Object { [double]$_.time -ge 10 -and [double]$_.time -le 15 } |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object index, time | ConvertTo-Json</span>
+
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  11,</span>
+<span class="ln-out">    "time":  "10.010000"</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  12,</span>
+<span class="ln-out">    "time":  "11.011000"</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  13,</span>
+<span class="ln-out">    "time":  "12.012000"</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  14,</span>
+<span class="ln-out">    "time":  "13.013000"</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "index":  15,</span>
+<span class="ln-out">    "time":  "14.014000"</span>
+<span class="ln-out">  }</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+</div>
+
+
+<h2>Findings by severity, across all severities</h2>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>group_by(.severity) -- the same shape as the category histogram above, different field</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T json | jq '.findings | group_by(.severity) | map({severity: .[0].severity, count: length})'</span>
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "severity": "Critical",</span>
+<span class="ln-out">    "count": 5</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "severity": "Moderate",</span>
+<span class="ln-out">    "count": 4</span>
+<span class="ln-out">  }</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Group-Object severity -- reusing $report from the section above</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.findings | Group-Object severity | Select-Object Name, Count | ConvertTo-Json</span>
+
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "Name":  "Critical",</span>
+<span class="ln-out">    "Count":  5</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "Name":  "Moderate",</span>
+<span class="ln-out">    "Count":  4</span>
+<span class="ln-out">  }</span>
+<span class="ln-out">]</span>
+</code></pre></div>
+<p style="margin-top:0.6em">This <code>$report</code> is the one from the "detect findings"
+section above (<code>$report = conduitscope detect ... | ConvertFrom-Json</code>) -- no need to
+re-run <code>conduitscope</code> just to ask a different question about the same report.</p>
+</div>
+
+
+<h2>Inventory: nested arrays (assets, zones, conduits)</h2>
+<p><code>inventory</code>'s own JSON report isn't a flat array like <code>decode</code>'s --
+it's one object with <code>assets</code>, <code>zones</code>, and <code>conduits</code> arrays
+(among others), each with its own nested fields. The same filtering idioms apply, just one level
+deeper.</p>
+
+<div class="os-tabs">
+  <button type="button" class="os-tab-btn" data-os="linux">Linux</button>
+  <button type="button" class="os-tab-btn" data-os="windows">Windows</button>
+</div>
+<div class="os-panel" data-os="linux">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>Assets, busiest first</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap -T json | jq -c '.assets | sort_by(-.packet_count) | .[] | {ip, inferred_role, packet_count}'</span>
+<span class="ln-out">{"ip":"10.0.5.21","inferred_role":"HMI/Engineering Station","packet_count":6}</span>
+<span class="ln-out">{"ip":"10.0.5.22","inferred_role":"Unknown","packet_count":4}</span>
+<span class="ln-out">{"ip":"192.168.1.12","inferred_role":"PLC/RTU","packet_count":4}</span>
+<span class="ln-out">...</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>Which conduit carries dnp3</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap -T json | jq '.conduits[] | select(.protocol == "dnp3")'</span>
+<span class="ln-out">{</span>
+<span class="ln-out">  "name": "zone_10_0_5_0_24 -&gt; zone_192_168_1_0_24 (dnp3/20000)",</span>
+<span class="ln-out">  "from_zone": "zone_10_0_5_0_24",</span>
+<span class="ln-out">  "to_zone": "zone_192_168_1_0_24",</span>
+<span class="ln-out">  "protocol": "dnp3",</span>
+<span class="ln-out">  "port": 20000,</span>
+<span class="ln-out">  "edge_count": 1,</span>
+<span class="ln-out">  "packet_count": 2</span>
+<span class="ln-out">}</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">bash + jq</span>Which zone a given IP belongs to</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope inventory -r tests/sample_inventory.pcap -T json | jq -c '.zones[] | select(.member_ips | index("10.0.5.21")) | {name, network}'</span>
+<span class="ln-out">{"name":"zone_10_0_5_0_24","network":"10.0.5.0/24"}</span>
+</code></pre></div>
+</div>
+<div class="os-panel" data-os="windows">
+<div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Assets, busiest first -- save to a variable first</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope inventory -r tests\sample_inventory.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.assets | Sort-Object packet_count -Descending |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object ip, inferred_role, packet_count | ConvertTo-Json</span>
+
+<span class="ln-out">[</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "ip":  "10.0.5.21",</span>
+<span class="ln-out">    "inferred_role":  "HMI/Engineering Station",</span>
+<span class="ln-out">    "packet_count":  6</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  {</span>
+<span class="ln-out">    "ip":  "10.0.5.22",</span>
+<span class="ln-out">    "inferred_role":  "Unknown",</span>
+<span class="ln-out">    "packet_count":  4</span>
+<span class="ln-out">  },</span>
+<span class="ln-out">  ...</span>
+<span class="ln-out">]</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Which conduit carries dnp3 -- reusing $report from above</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.conduits | Where-Object { $_.protocol -eq "dnp3" } | ConvertTo-Json</span>
+
+<span class="ln-out">{</span>
+<span class="ln-out">  "name":  "zone_10_0_5_0_24 -&gt; zone_192_168_1_0_24 (dnp3/20000)",</span>
+<span class="ln-out">  "from_zone":  "zone_10_0_5_0_24",</span>
+<span class="ln-out">  "to_zone":  "zone_192_168_1_0_24",</span>
+<span class="ln-out">  "protocol":  "dnp3",</span>
+<span class="ln-out">  "port":  20000,</span>
+<span class="ln-out">  "edge_count":  1,</span>
+<span class="ln-out">  "packet_count":  2</span>
+<span class="ln-out">}</span>
+</code></pre></div><div class="term-wrap">
+<div class="term-label"><span class="chip fmt">PowerShell</span>Which zone a given IP belongs to -- -contains, not -eq, against the member_ips array</div>
+<pre class="term"><code>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report.zones | Where-Object { $_.member_ips -contains "10.0.5.21" } |</span>
+<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Select-Object name, network | ConvertTo-Json</span>
+
+<span class="ln-out">{</span>
+<span class="ln-out">  "name":  "zone_10_0_5_0_24",</span>
+<span class="ln-out">  "network":  "10.0.5.0/24"</span>
+<span class="ln-out">}</span>
+</code></pre></div>
+</div>
+
 
 
 <h2 id="escaping">Escape characters: when the data itself contains a quote</h2>
@@ -309,10 +672,10 @@ quote outside any quoting, then reopen with <code>'t'</code>) produces the liter
 </div>
 <div class="os-panel" data-os="windows">
 <div class="term-wrap">
-<div class="term-label"><span class="chip fmt">PowerShell</span>PowerShell: -like avoids the nested-quote problem entirely (recommended)</div>
+<div class="term-label"><span class="chip fmt">PowerShell</span>PowerShell: -like avoids the nested-quote problem entirely (recommended) -- save to a variable first</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r tests\sample_enip.pcap -T json | ConvertFrom-Json |</span>
-<span class="ln-cmd"><span class="prompt-mark">&gt;</span>      Where-Object { $_.summary -like '*name="Conduit*' } | Select-Object -ExpandProperty summary</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report = .\conduitscope decode -r tests\sample_enip.pcap -T json | ConvertFrom-Json</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$report | Where-Object { $_.summary -like '*name="Conduit*' } | Select-Object -ExpandProperty summary</span>
 
 <span class="ln-out">ListIdentity; identity: vendor=1 device_type=12 product_code=54 rev=2.1 serial=0x1337ab name="Conduit-ENIP-Sample"</span>
 

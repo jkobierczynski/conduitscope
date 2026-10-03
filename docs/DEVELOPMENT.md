@@ -17759,6 +17759,216 @@ it done as its own patch.
     (it already used the safe `bash` form), and the local repro above using the real built
     `build/conduitscope` binary.
 
+128. **`docs/manual/json-filtering.html`: a stale "Count / group by a field" PowerShell example, a
+    real `Group-Object` pipeline-chaining pitfall confirmed on actual Windows PowerShell, and
+    several other stale worked-example outputs on this page and across the manual's own sidebar
+    version string -- all found while Jurgen was manually QA-ing the manual's PowerShell examples
+    on a real Windows box.** **Done.**
+
+    **The finding, in the order it unfolded.** Jurgen reported running the manual's own
+    `Group-Object protocol` example against a real `conduitscope-0.3.2-windows-x86_64` release and
+    getting one group with a blank name and count 1, instead of the manual's claimed six-row
+    table. The JSON itself and `ConvertFrom-Json`'s parsing were both confirmed correct along the
+    way (`$arr.Count` came back 14, matching the real binary's output verified independently in
+    this sandbox), and grouping that already-materialized `$arr` worked perfectly -- six correct
+    groups. But re-running the *same* logical pipeline with `Group-Object` chained directly onto
+    `ConvertFrom-Json`'s live output (no intermediate variable) reproducibly gave the broken
+    one-group result again. This isolates a real, confirmed-on-real-Windows-PowerShell pitfall:
+    chaining a blocking, whole-input-accumulating cmdlet like `Group-Object` directly onto
+    `ConvertFrom-Json`'s output in a single pipeline statement sourced from a native executable is
+    unreliable; materializing to a variable first and grouping *that* is reliable. (This page
+    already recommended the variable-first pattern for a different reason -- avoiding re-running
+    `conduitscope` for every follow-up query -- in its `detect` findings section; this is now a
+    second, stronger reason given in the fixed section itself.)
+
+    **What was done to that one example.** Rewrote it to `$report = ... | ConvertFrom-Json`
+    followed by `$report | Group-Object protocol | Select-Object Name, Count`, matching the
+    already-reliable pattern used elsewhere on the same page, and added a note stating the
+    confirmed-on-real-Windows-PowerShell pitfall explicitly (not just asserting the fix works, but
+    explaining what was observed to fail and why the fix avoids it).
+
+    **What else turned up while fact-checking that one example against the real binary.** Every
+    jq/PowerShell example on this page was re-run against the actual current `build/conduitscope`
+    binary (this page's own disclaimer already admitted the PowerShell column had never been run
+    on a real Windows shell, but the Linux jq column claimed to have been verified and had itself
+    gone stale): the protocol histogram was missing a `cotp` entry entirely (the real inventory
+    fixture decodes to 6 distinct protocols, not 5 -- `cotp` support was evidently added to the
+    fixture or decoder after this page was last checked) and used a hand-compacted one-line JSON
+    object style that doesn't match jq's real multi-line pretty-print default; the `detect`
+    Critical-findings listing was missing two real Critical findings (both BACnet technique IDs --
+    the sibling "Findings per category, counted" example's own aggregate counts (4/4/1) were
+    already correct, so only the un-aggregated listing had gone stale); and the modbus-to-CSV
+    example (both the jq and the PowerShell `ConvertTo-Csv` panels) was missing a third row -- the
+    real `tests/sample_modbus.pcap` now decodes to 3 packets (request, response, and an exception
+    response), not 2. All four fixed against freshly re-run real output, not assumed. The
+    "Select rows by a field value" and "Escape characters" sections' examples were also re-run and
+    confirmed still accurate as-is -- no change needed there.
+
+    **Also found and fixed: a version-bump gap from item 125.** That item's v0.3.2 bump updated
+    `docs/USER_GUIDE.md` and `README.md` but missed `docs/manual/`'s own HTML pages entirely --
+    every one of the 12 manual pages' sidebar still read "extended manual &middot; v0.2.9", and
+    six pages' own worked-example output (CEF/LEEF/syslog `deviceVersion` fields, `conduitscope
+    version`/`--version` lines, `docs/manual/index.html`'s own lede sentence) still quoted a live
+    `0.2.9`. All bumped to `0.3.2` in this item, the same category of fix item 125 already applied
+    to the other docs (a live version claim, not a historical point-in-time record, so it tracks
+    current).
+
+    **Also updated** the page's own top callout, which previously claimed the PowerShell column
+    was "written to the same semantics" without ever being run on real Windows PowerShell -- now
+    states plainly that one example has since been confirmed on real Windows PowerShell (crediting
+    the actual pitfall found), that the underlying jq-side data was re-verified and two entries
+    were fixed, and that the remaining PowerShell examples are still each command's un-executed
+    idiomatic equivalent, not overstating verification that didn't happen.
+
+    **Verification.** This is a documentation-only change (plain HTML/text, no CMakeLists.txt or
+    C++ source touched) -- the standing build/CTest bar doesn't exercise it. Verified instead:
+    every corrected jq example was re-run against the real `build/conduitscope` binary in this
+    sandbox and the doc's text now matches that output byte-for-byte; the one PowerShell fix was
+    confirmed against Jurgen's own real Windows PowerShell session (`$PSVersionTable`/`$arr.Count`/
+    the broken direct-chain repro/the working variable-first fix were all run live on his machine,
+    not assumed); `python3 -m html.parser`-style well-formedness check on the edited page (balanced
+    `<div>`/`<pre>` tag counts, no parse errors); and a project-wide grep confirmed zero remaining
+    `0.2.9` references anywhere under `docs/manual/`.
+
+129. **Two more manual-page copy/paste problems Jurgen asked for across the board: bare
+    `conduitscope` in PowerShell examples (PowerShell won't run a cwd-relative bare command name
+    the way bash does -- it needs `.\conduitscope`), and the `PS&gt;`/`$`/`&gt;` prompt markers
+    getting dragged into a manually copy-pasted command.** **Done.**
+
+    **The `.\` finding.** PowerShell's execution policy doesn't resolve a bare command name
+    against the current directory the way bash/cmd.exe do -- `conduitscope decode ...` typed (or
+    pasted) straight into a real PowerShell session fails to find the command at all unless
+    `conduitscope` happens to be on `PATH`, which it isn't for someone who just extracted a
+    release zip into their own folder. Swept every PowerShell (`PS&gt;`) command line across all
+    12 `docs/manual/*.html` pages: nine lines in `decode.html` (3) and `json-filtering.html` (6)
+    invoked `conduitscope`/`$report = conduitscope ...` bare and now read `.\conduitscope`/`$report
+    = .\conduitscope ...`. Every other PowerShell line on every other page (`setup.html`,
+    `live-capture.html`) already used a path-qualified form (`build\Release\conduitscope.exe`, an
+    absolute `C:\conduitscope\conduitscope.exe` inside a `New-ScheduledTaskAction`) and needed no
+    change -- confirmed by reading every `PS&gt;`-prefixed line on the whole manual, not just the
+    two pages that turned out to need fixing.
+
+    **The copy/paste finding.** A reader selecting a multi-line command block by hand (drag-select
+    + copy, as opposed to using the page's own "Copy" button) picks up the visible `$`/`PS&gt;`/
+    `&gt;` prompt character as literal text, so the pasted command starts with a prompt marker
+    that has to be manually deleted before it'll run. The existing "Copy" button
+    (`docs/manual/assets/script.js`) already strips the `.prompt-mark` element before writing to
+    the clipboard -- that path was already clean -- so the actual gap was specifically the manual
+    drag-select path. Fixed with one CSS rule in the one stylesheet every manual page shares
+    (`docs/manual/assets/style.css`'s `.ln-cmd .prompt-mark`): `user-select: none` (plus the
+    `-webkit-` prefix for older Safari). This excludes just the prompt-mark span's text from a
+    drag-selection's copied content while leaving it fully visible and leaving the rest of the
+    line normally selectable -- no HTML content changed, no spans removed, every prompt marker
+    still renders exactly as before; only what ends up on the clipboard changes. Fixes every
+    command block on every manual page (bash `$`, PowerShell `PS&gt;`, and PowerShell continuation
+    `&gt;` prompts alike) in the one shared file, rather than needing a per-line HTML edit
+    repeated across all 12 pages.
+
+    **Also:** Jurgen asked for `tests/` to be included with this delivery so the fixture captures
+    the manual's examples reference are available locally without a separate extraction step --
+    bundled whole (343 files, ~4MB) alongside the touched files in this item's zip.
+
+    **Verification.** `user-select: none` is a long-standing, broadly-supported CSS property for
+    excluding an inline element from a text selection's copied content (Chrome, Firefox, Safari,
+    Edge all honor it for exactly this "don't let decorative prefix text get copied" use case);
+    confirmed the CSS parses (balanced brace count) and that the existing copy-button JS logic is
+    unaffected (it already removes the `.prompt-mark` node from its cloned copy before reading
+    `textContent`, independent of CSS selectability, so both copy paths -- button and manual
+    drag-select -- now produce a clean, directly runnable command). Both edited HTML files
+    (`decode.html`, `json-filtering.html`) re-checked with `python3`'s `html.parser` for
+    well-formedness after the nine `.\` edits. A project-wide grep confirmed no remaining bare
+    `PS&gt;conduitscope`/`= conduitscope` invocations anywhere under `docs/manual/`, and that every
+    other PowerShell line was already correctly path-qualified before this item (not just assumed
+    -- individually read and checked).
+
+130. **The direct-chain `ConvertFrom-Json | <cmdlet>` pitfall from item 128 is general, not
+    `Group-Object`-specific -- confirmed a second time on real Windows PowerShell, this time with
+    `Select-Object | ConvertTo-Csv`, and every remaining example on the page fixed proactively.**
+    Jurgen ran `json-filtering.html`'s "Flatten to CSV" PowerShell example exactly as published
+    (`.\conduitscope decode ... | ConvertFrom-Json | Select-Object src_ip, dst_ip, summary`) and
+    got back the header row with zero data rows underneath. **Done.**
+
+    **The finding.** Item 128 had already confirmed-and-fixed one instance of this (`ConvertFrom-
+    Json | Group-Object ...` coming back as one blank group) but its own writeup left open
+    whether the pitfall was specific to `Group-Object` or general to chaining anything directly
+    onto `ConvertFrom-Json`'s output in a single pipeline statement sourced from a native
+    executable. This is now confirmed general: `Select-Object | ConvertTo-Csv` chained the same
+    way reproduces the same class of failure (here, silently dropping every row instead of
+    collapsing to one). Given two independent, unrelated downstream cmdlets both break the same
+    way, the right fix is proactive, not wait-for-the-next-bug-report: every remaining PowerShell
+    example on the page that still chained directly onto `ConvertFrom-Json` was converted to the
+    variable-first pattern, whether or not a real failure had been reported for that specific one.
+
+    **What was changed.** Four remaining direct-chain examples on `docs/manual/json-filtering.html`
+    -- the baseline `ConvertTo-Json -Depth 10` pretty-printer, the `Where-Object`/`Select-Object`
+    modbus filter (inventory fixture), the `Select-Object`/`ConvertTo-Csv` flatten (the one
+    confirmed broken), and the `-like`/`-ExpandProperty` ENIP filter -- all now read `$report =
+    .\conduitscope ... | ConvertFrom-Json` on one line followed by `$report | <rest of the
+    pipeline>` on the next, matching the pattern items 128/129 already established for
+    `Group-Object` and already used from the start by the `detect` findings section. Every
+    PowerShell example on this page now follows the same rule with no exceptions. Updated the
+    page's own "Count / group by a field" note and top-of-page callout to say the pitfall is
+    general (confirmed twice, with two different cmdlets) rather than implying it was
+    `Group-Object`'s own quirk, and added a matching note on the "Flatten to CSV" section
+    documenting the real failure Jurgen hit and the fix.
+
+    **Verification.** No change to the underlying data shown (all output tables were already
+    re-verified against the real binary in item 128 and are unchanged here, only the commands
+    producing them). `python3`'s `html.parser` confirms the edited page is still well-formed
+    (balanced `<div>`/`<pre>` counts, no parse errors). A grep for `ConvertFrom-Json |` (direct
+    pipe continuation, no variable) across the page now matches only prose inside the two
+    explanatory notes describing the broken pattern, not any live `ln-cmd` line -- confirming no
+    direct-chain example remains anywhere on the page. The two now-fixed real-world failures
+    (`Group-Object`, item 128; `Select-Object | ConvertTo-Csv`, this item) were both confirmed on
+    Jurgen's actual Windows PowerShell session; the other two examples converted here
+    proactively (the `ConvertTo-Json`/`-Depth 10` pretty-printer and the ENIP `-like` filter)
+    have not themselves been independently re-run on a real Windows shell, but now follow the
+    same structurally-safe pattern as the two that were.
+
+131. **"Add way more JSON filtering examples based on the included sample pcaps," Jurgen's own
+    words.** **Done.** Six new jq/PowerShell recipe pairs added to
+    `docs/manual/json-filtering.html`, between the existing "detect findings" and "Escape
+    characters" sections: sorting by a field, min/max/average of a numeric field, distinct/unique
+    values, filtering by a time range, a findings-by-severity histogram across all severities (not
+    just Critical), and a three-part "inventory's nested arrays" section (assets sorted by
+    traffic volume, looking up a conduit by protocol, looking up which zone an IP belongs to).
+    Pulls in three sample pcaps the page hadn't used before (`sample_bacnet.pcap`,
+    `sample_dnp3.pcap`) alongside the existing `sample_inventory.pcap`/`sample_detect.pcap`, so the
+    page now demonstrates filtering against `decode`, `detect`, and `inventory` reports rather
+    than just `decode`/`detect`.
+
+    **Verification discipline carried forward from items 128-130.** Every new jq command and its
+    shown output was run against the real `build/conduitscope` binary and `jq 1.7` before being
+    written into the page, then re-run a second time after the page was final to confirm nothing
+    drifted during editing (all eight matched byte-for-byte both times). Every new PowerShell
+    example follows the variable-first pattern items 128-130 established as the only form
+    confirmed reliable on real Windows PowerShell. Beyond that, each new PowerShell example's
+    final pipeline stage was deliberately changed from what earlier sections did: rather than
+    ending in a bare `Format-Table`-style default display (whose exact column widths depend on
+    console width and can't be confidently predicted without a real Windows shell -- see items
+    128/130's own hard-won lesson about asserting unverified output), every new example ends with
+    `| ConvertTo-Json`, whose output format is stable, well-documented .NET behavior independent
+    of console width. The one place real floating-point precision could plausibly differ between
+    jq and .NET (the average of 68 packet sizes) is sidestepped by rounding to 2 decimal places in
+    the PowerShell command itself (`[math]::Round(...)`) rather than asserting a specific
+    full-precision trailing-digit string neither tool's formatting is verified to agree on.
+
+    **A real authoring bug caught before delivery, not after.** The "inventory" section's three
+    stacked examples per column (more than the two-per-column pattern already used by "detect
+    findings") were first drafted with an extra stray `</div>` at each term-wrap transition,
+    unbalancing the page's `<div>` nesting and, in one spot, closing the enclosing `os-panel`
+    early. Caught by a `<div>`/`</div>` count check before shipping (111 open vs. 115 close, not
+    0), traced to the exact two broken transitions with a line-by-line nesting-depth script
+    (rather than guessing), and fixed by matching the established "close the previous term-wrap
+    and open the next one on the same line" convention the file already uses for multi-example
+    columns. Final file re-confirmed balanced (111/111) and well-formed via `html.parser`.
+
+    **Verification.** All eight new jq commands and their outputs re-run against the real binary
+    as described above. `python3`'s `html.parser` parses the finished page with no errors;
+    `<div>`/`<pre>` open and close counts both balance exactly; a full nesting-depth trace across
+    the entire file never goes negative and ends at exactly 0. The existing `#escaping`/`#cmd-exe`
+    anchors (one of them linked to from `decode.html`) were confirmed still present and unmoved.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

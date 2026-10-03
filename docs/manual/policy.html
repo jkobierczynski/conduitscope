@@ -11,7 +11,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a class="brand" href="index.html">conduitscope</a>
-    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <span class="brand-sub">extended manual &middot; v0.3.2</span>
     <nav>
 <div class="nav-group-title">Start here</div><ul>
 <li><a  href="index.html">Overview</a></li>
@@ -161,7 +161,7 @@ CEF/LEEF/syslog conventions across every subcommand that supports them.</p>
 <div class="term-label">A violation as a CEF one-liner, ready for a SIEM forwarder</div>
 <pre class="term"><code>
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope policy validate -r tests/sample_modbus.pcap --policy tests/policies/wrong_port.yaml --format cef</span>
-<span class="ln-out">CEF:0|conduitscope|conduitscope-policy|0.2.9|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-policy|0.3.2|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3</span>
 </code></pre></div>
 
 <h2>Discover, then enforce</h2>

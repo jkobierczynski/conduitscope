@@ -11,7 +11,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a class="brand" href="index.html">conduitscope</a>
-    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <span class="brand-sub">extended manual &middot; v0.3.2</span>
     <nav>
 <div class="nav-group-title">Start here</div><ul>
 <li><a  href="index.html">Overview</a></li>
@@ -140,19 +140,19 @@ real CEF/LEEF severity independently.</p>
 <div class="term-label"><span class="chip fmt">-T cef</span>CEF -- severity (the number after the technique name) maps from Critical/Moderate/Informational</div>
 <pre class="term"><code>
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T cef</span>
-<span class="ln-out">CEF:0|conduitscope|conduitscope-detect|0.2.9|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000</span>
-<span class="ln-out">CEF:0|conduitscope|conduitscope-detect|0.2.9|T0855|Unauthorized Command Message|5|src=192.168.1.60 dst=192.168.1.62 dpt=20000 proto=dnp3 cat=Protocol Misuse msg=DNP3 Unsolicited Response from an outstation this capture never saw a master enable unsolicited responses on ... cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020004004 end=1700020004004</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-detect|0.3.2|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-detect|0.3.2|T0855|Unauthorized Command Message|5|src=192.168.1.60 dst=192.168.1.62 dpt=20000 proto=dnp3 cat=Protocol Misuse msg=DNP3 Unsolicited Response from an outstation this capture never saw a master enable unsolicited responses on ... cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020004004 end=1700020004004</span>
 </code></pre></div><div class="term-wrap">
 <div class="term-label"><span class="chip fmt">-T leef</span>LEEF -- tab-separated key=value pairs, IBM QRadar's own format</div>
 <pre class="term"><code>
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T leef</span>
-<span class="ln-out">LEEF:2.0|conduitscope|conduitscope-detect|0.2.9|T0843|src=192.168.1.60\tdst=192.168.1.10\tdpt=102\tproto=s7comm\tcat=Firmware/Logic Change\tmsg=S7comm block download (Request Download) ...\tcs1Label=Evidence\tcs1=Confirmed\tcs2Label=Novelty\tcs2=N/A\tcnt=1\tstart=1700020000000\tend=1700020000000\tsev=9</span>
+<span class="ln-out">LEEF:2.0|conduitscope|conduitscope-detect|0.3.2|T0843|src=192.168.1.60\tdst=192.168.1.10\tdpt=102\tproto=s7comm\tcat=Firmware/Logic Change\tmsg=S7comm block download (Request Download) ...\tcs1Label=Evidence\tcs1=Confirmed\tcs2Label=Novelty\tcs2=N/A\tcnt=1\tstart=1700020000000\tend=1700020000000\tsev=9</span>
 </code></pre></div><div class="term-wrap">
 <div class="term-label"><span class="chip fmt">-T syslog</span>syslog -- RFC 5424 envelope wrapping the same CEF payload, PRI mapped from severity</div>
 <pre class="term"><code>
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope detect -r tests/sample_detect.pcap -T syslog</span>
-<span class="ln-out">&lt;106&gt;1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.2.9|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download ...</span>
-<span class="ln-out">&lt;108&gt;1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.2.9|T0855|Unauthorized Command Message|5|src=192.168.1.60 dst=192.168.1.62 dpt=20000 proto=dnp3 ...</span>
+<span class="ln-out">&lt;106&gt;1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.3.2|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download ...</span>
+<span class="ln-out">&lt;108&gt;1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.3.2|T0855|Unauthorized Command Message|5|src=192.168.1.60 dst=192.168.1.62 dpt=20000 proto=dnp3 ...</span>
 </code></pre></div>
 <p>Forward any of these straight to a log pipeline:</p>
 <div class="term-wrap">

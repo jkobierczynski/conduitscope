@@ -11,7 +11,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a class="brand" href="index.html">conduitscope</a>
-    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <span class="brand-sub">extended manual &middot; v0.3.2</span>
     <nav>
 <div class="nav-group-title">Start here</div><ul>
 <li><a  href="index.html">Overview</a></li>
@@ -189,16 +189,16 @@ conduitscope ever sees the string.</p>
 <div class="term-wrap">
 <div class="term-label"><span class="chip fmt">PowerShell</span>PowerShell -- single-quote the whole expression too</div>
 <pre class="term"><code>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r cap.pcap -Y 'modbus.func_code == 16 &amp;&amp; ip.src == 10.1.2.3'</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>.\conduitscope decode -r cap.pcap -Y 'modbus.func_code == 16 &amp;&amp; ip.src == 10.1.2.3'</span>
 
 <span class="ln-comment"># PowerShell single-quoted strings are literal, same idea as bash -- double quotes inside</span>
 <span class="ln-comment"># pass through untouched:</span>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r cap.pcap -Y 'enip.service_name contains "Write"'</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>.\conduitscope decode -r cap.pcap -Y 'enip.service_name contains "Write"'</span>
 
 <span class="ln-comment"># if you must double-quote the OUTER string (e.g. because it's built from a PowerShell</span>
 <span class="ln-comment"># variable), escape the inner double quotes with a backtick:</span>
 <span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>$svc = "Write"</span>
-<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>conduitscope decode -r cap.pcap -Y "enip.service_name contains `"$svc`""</span>
+<span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>.\conduitscope decode -r cap.pcap -Y "enip.service_name contains `"$svc`""</span>
 </code></pre></div>
 </div>
 

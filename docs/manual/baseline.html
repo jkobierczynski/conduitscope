@@ -11,7 +11,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a class="brand" href="index.html">conduitscope</a>
-    <span class="brand-sub">extended manual &middot; v0.2.9</span>
+    <span class="brand-sub">extended manual &middot; v0.3.2</span>
     <nav>
 <div class="nav-group-title">Start here</div><ul>
 <li><a  href="index.html">Overview</a></li>
@@ -133,8 +133,8 @@ a failure.</p>
 <div class="term-label"><span class="chip fmt">-T cef</span>Anomalies as CEF one-liners</div>
 <pre class="term"><code>
 <span class="ln-cmd"><span class="prompt-mark">$</span>conduitscope baseline check --baseline-file baseline.json tests/sample_baseline_modbus_mutated.pcap -T cef</span>
-<span class="ln-out">CEF:0|conduitscope|conduitscope-baseline|0.2.9|new-target-range|New Target Range|3|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=new-target-range msg=new-target-range: operation "Read Holding Registers" (observed range 200-205 not fully covered by the baseline) cnt=2</span>
-<span class="ln-out">CEF:0|conduitscope|conduitscope-baseline|0.2.9|new-operation|New Operation|5|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=new-operation msg=new-operation: operation "Write Multiple Registers" cnt=1</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-baseline|0.3.2|new-target-range|New Target Range|3|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=new-target-range msg=new-target-range: operation "Read Holding Registers" (observed range 200-205 not fully covered by the baseline) cnt=2</span>
+<span class="ln-out">CEF:0|conduitscope|conduitscope-baseline|0.3.2|new-operation|New Operation|5|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=new-operation msg=new-operation: operation "Write Multiple Registers" cnt=1</span>
 </code></pre></div>
 <p><code>-T leef</code> and <code>-T syslog</code> work the same way, matching
 <a href="detect.html#security-event-export">detect's own SIEM export conventions</a>.</p>

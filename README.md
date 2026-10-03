@@ -288,8 +288,9 @@ planned next -- see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)'s ROADMAP.
   collision handling, and the development roadmap.
 - **[man/conduitscope.1](man/conduitscope.1)** -- the man page, built from
   the same material as USER_GUIDE.md.
-- **[docs/manual/index.html](docs/manual/index.html)** -- an extended,
-  example-driven manual: one page per feature, every command run for real
+-  **[docs/manual/index.html](docs/manual/index.html)**, 
+  **[offsite online version](https://jurgenkobierczynski.com/conduitscope-manual/)**
+  -- an extended, example-driven manual: one page per feature, every command run for real
   against the fixtures in `tests/`, Linux/Windows setup, and JSON-filtering
   recipes (`jq`/PowerShell) with shell-escaping worked through explicitly.
   A companion to the reference docs above, not a replacement for them.
