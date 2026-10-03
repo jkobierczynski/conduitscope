@@ -60,8 +60,26 @@ ceilings checked *during* each report's own JSON parse rather than after --
 directly addressing this finding's own "second-order amplification" point
 (a compact, under-the-byte-ceiling document containing a huge number of
 small objects can still expand far past its own source byte count once
-parsed). F2-F8 have not been scheduled or acted on yet -- Jurgen has not
-yet directed which, if any, to take up next.
+parsed).
+
+**Update: F2 is fixed.** Jurgen asked for this one next. See
+[DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item 134 for the full fix: the
+inventory JSON parser now validates every field this finding's own
+"Recommended fix" list names (`packet_count`/`skipped_packets`/
+`total_packets` non-negative, `server_port` in [0, 65535]) before the
+narrowing conversion, plus two of the "ideally validate" items (IP addresses
+syntactically valid, `first_seen` <= `last_seen`) -- each confirmed, by
+testing against the real pre-fix binary, to do exactly what this finding
+describes (a crafted "packet_count": -1 really did become
+18446744073709551615, a crafted "server_port": -1 really did become 65535)
+before being fixed. A crash this same hardening pass found incidentally
+(an out-of-range integer literal aborting the whole process) was fixed in
+the same change. "`packet_count` not absurd relative to input" and a
+protocol-string vocabulary check were deliberately left out -- see item 134
+for why.
+
+F3-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
+which, if any, to take up next.
 
 The commit hash and any test-count/line/file references below reflect the
 reviewer's own state at review time; see DEVELOPMENT.md for current figures

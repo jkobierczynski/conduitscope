@@ -12229,6 +12229,22 @@ add_test(NAME merge_inventory_aggregate_limits_enforced
 set_tests_properties(merge_inventory_aggregate_limits_enforced PROPERTIES
   TIMEOUT 20)
 
+# docs/reviews/2026-10-chatgpt-security-review-patch295.md finding F2 fix (item 134,
+# DEVELOPMENT.md): the JSON parser behind `merge inventory` now validates several fields
+# SEMANTICALLY (not just syntactically) before trusting them -- a negative packet_count/
+# total_packets/skipped_packets, an out-of-range server_port, a malformed IPv4 address string, and
+# first_seen after last_seen are all rejected now instead of silently becoming corrupted/
+# nonsensical data (or, for an out-of-range integer literal, crashing the process -- a bug found
+# incidentally while making this same fix). See tests/merge_inventory_semantic_validation_smoke.sh's
+# own file header for the full list of cases and why this one test file deliberately hand-authors
+# its JSON fixtures rather than generating them with the CLI (every case it proves is a value the
+# CLI itself can never produce).
+add_test(NAME merge_inventory_semantic_validation_rejects_crafted_values
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_inventory_semantic_validation_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(merge_inventory_semantic_validation_rejects_crafted_values PROPERTIES
+  TIMEOUT 20)
+
 add_test(NAME merge_needs_a_subcommand
   COMMAND conduitscope merge)
 set_tests_properties(merge_needs_a_subcommand PROPERTIES

@@ -121,7 +121,49 @@ public:
         size_t digits_start = pos_;
         while (pos_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) ++pos_;
         if (pos_ == digits_start) fail("expected a number");
-        return std::stoll(text_.substr(start, pos_ - start));
+        std::string literal = text_.substr(start, pos_ - start);
+        try {
+            return std::stoll(literal);
+        } catch (const std::exception&) {
+            // A JSON number with more digits than fit in a `long long` (e.g.
+            // "99999999999999999999999999999999") is syntactically a perfectly fine JSON number,
+            // but std::stoll throws std::out_of_range on it -- confirmed, before this fix, to
+            // crash the whole process (an uncaught C++ exception, SIGABRT) rather than fail
+            // cleanly, since only InventoryMergeError/ResolverError are caught around
+            // `merge inventory`'s own call stack (run_merge_inventory, cli_main.cpp). Found
+            // incidentally while hardening this same function for patch295 finding F2 (item 134,
+            // DEVELOPMENT.md) and fixed in the same pass rather than left as a separate crash.
+            fail("integer literal '" + literal + "' is out of range");
+        }
+    }
+
+    // F2 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 134, DEVELOPMENT.md):
+    // wraps parse_integer() above with the non-negativity check the finding's own "Recommended
+    // fix" list asks for (packet_count/skipped_packets/total_packets) -- confirmed, before this
+    // fix, that a crafted "packet_count": -1 silently became 18446744073709551615 (SIZE_MAX) via
+    // the unguarded `static_cast<size_t>` narrowing conversion the finding points at, rather than
+    // being rejected. `field_name` is folded into the thrown InventoryMergeError so the operator
+    // can tell which field/value tripped it.
+    size_t parse_non_negative_integer(const char* field_name) {
+        long long v = parse_integer();
+        if (v < 0) {
+            fail_semantic(std::string(field_name) + " must not be negative, got " + std::to_string(v));
+        }
+        return static_cast<size_t>(v);
+    }
+
+    // F2 fix: the same idea as parse_non_negative_integer above, specifically for `server_port` --
+    // semantically a 16-bit TCP/UDP port even though the JSON wire format carries it as a plain
+    // number. Confirmed, before this fix, that a crafted "server_port": -1 silently became 65535
+    // via the unguarded `static_cast<uint16_t>` narrowing conversion the finding's own example
+    // shows, exactly as described; rejects anything outside [0, 65535] instead of truncating it.
+    uint16_t parse_port(const char* field_name) {
+        long long v = parse_integer();
+        if (v < 0 || v > 65535) {
+            fail_semantic(std::string(field_name) + " must be a port number in [0, 65535], got " +
+                          std::to_string(v));
+        }
+        return static_cast<uint16_t>(v);
     }
 
     double parse_double() {
@@ -202,6 +244,15 @@ public:
                                    std::to_string(pos_) + ")");
     }
 
+    // F2 fix: distinct from fail() above on purpose -- this is for a value that IS well-formed
+    // JSON but semantically invalid for the field it's in (a negative count, an out-of-range port,
+    // a malformed IP address string, last_seen before first_seen), so the thrown message doesn't
+    // claim the JSON ITSELF is malformed, only that one field's value doesn't pass this merge's own
+    // semantic checks.
+    [[noreturn]] void fail_semantic(const std::string& what) {
+        throw InventoryMergeError("inventory report: " + what + " (at byte offset " + std::to_string(pos_) + ")");
+    }
+
 private:
     const std::string& text_;
     size_t pos_ = 0;
@@ -251,6 +302,15 @@ InventoryAsset parse_asset(JsonCursor& c) {
             c.expect(':');
             if (key == "ip") {
                 a.ip = c.parse_string();
+                // F2 fix ("ideally validate... IP addresses are syntactically valid"): reuses
+                // ipv4.hpp's own parse_ipv4_string, the single already-exported IPv4-syntax
+                // validator this codebase has, rather than hand-rolling a second one that could
+                // drift from it -- a real report's own `ip` is always a dotted-quad written by
+                // write_inventory_report_json (format_ipv4), so this only ever rejects a crafted/
+                // corrupted value, never a genuine one.
+                if (!parse_ipv4_string(a.ip)) {
+                    c.fail_semantic("asset 'ip' is not a syntactically valid IPv4 address: '" + a.ip + "'");
+                }
                 have_ip = true;
             } else if (key == "mac") {
                 if (c.peek() == 'n') {
@@ -263,7 +323,7 @@ InventoryAsset parse_asset(JsonCursor& c) {
             } else if (key == "protocols") {
                 a.protocols = parse_string_array(c);
             } else if (key == "packet_count") {
-                a.packet_count = static_cast<size_t>(c.parse_integer());
+                a.packet_count = c.parse_non_negative_integer("asset packet_count");
             } else if (key == "first_seen") {
                 a.first_seen = c.parse_double();
             } else if (key == "last_seen") {
@@ -293,6 +353,15 @@ InventoryAsset parse_asset(JsonCursor& c) {
         c.expect('}');
     }
     if (!have_ip) c.fail("asset object missing required field 'ip'");
+    // F2 fix ("ideally validate... first_seen <= last_seen"): checked here, once the whole object
+    // is parsed, rather than inline above, because JSON object field order isn't guaranteed --
+    // last_seen can legally appear before first_seen on the wire. A genuine report's own first/
+    // last-seen are always a real min/max pair by construction (asset_inventory.cpp), so this only
+    // ever rejects a crafted/corrupted value.
+    if (a.first_seen > a.last_seen) {
+        c.fail_semantic("asset '" + a.ip + "' has first_seen (" + std::to_string(a.first_seen) +
+                         ") after last_seen (" + std::to_string(a.last_seen) + ")");
+    }
     return a;
 }
 
@@ -306,20 +375,29 @@ InventoryEdge parse_edge(JsonCursor& c) {
             c.expect(':');
             if (key == "client_ip") {
                 e.client_ip = c.parse_string();
+                // F2 fix -- see parse_asset's own identical check (and comment) above for why.
+                if (!parse_ipv4_string(e.client_ip)) {
+                    c.fail_semantic("edge 'client_ip' is not a syntactically valid IPv4 address: '" +
+                                    e.client_ip + "'");
+                }
                 have_client = true;
             } else if (key == "server_ip") {
                 e.server_ip = c.parse_string();
+                if (!parse_ipv4_string(e.server_ip)) {
+                    c.fail_semantic("edge 'server_ip' is not a syntactically valid IPv4 address: '" +
+                                    e.server_ip + "'");
+                }
                 have_server = true;
             } else if (key == "protocol") {
                 e.protocol = c.parse_string();
                 have_protocol = true;
             } else if (key == "server_port") {
-                e.server_port = static_cast<uint16_t>(c.parse_integer());
+                e.server_port = c.parse_port("edge server_port");
                 have_port = true;
             } else if (key == "observed_functions") {
                 e.observed_functions = parse_string_array(c);
             } else if (key == "packet_count") {
-                e.packet_count = static_cast<size_t>(c.parse_integer());
+                e.packet_count = c.parse_non_negative_integer("edge packet_count");
             } else if (key == "direction_source") {
                 e.direction_source = parse_direction_source(c.parse_string());
             } else if (key == "first_seen") {
@@ -340,6 +418,13 @@ InventoryEdge parse_edge(JsonCursor& c) {
     }
     if (!have_client || !have_server || !have_protocol || !have_port) {
         c.fail("edge object missing a required field (client_ip/server_ip/protocol/server_port)");
+    }
+    // F2 fix -- see parse_asset's own identical check (and comment) above for why this runs here,
+    // once the whole object is parsed, rather than inline above.
+    if (e.first_seen > e.last_seen) {
+        c.fail_semantic("edge " + e.client_ip + " -> " + e.server_ip + ":" + std::to_string(e.server_port) +
+                         " (" + e.protocol + ") has first_seen (" + std::to_string(e.first_seen) +
+                         ") after last_seen (" + std::to_string(e.last_seen) + ")");
     }
     return e;
 }
@@ -387,9 +472,9 @@ AssetInventoryReport parse_inventory_report_json_impl(const std::string& text, M
             std::string key = c.parse_string();
             c.expect(':');
             if (key == "total_packets") {
-                report.total_packets = static_cast<size_t>(c.parse_integer());
+                report.total_packets = c.parse_non_negative_integer("total_packets");
             } else if (key == "skipped_packets") {
-                report.skipped_packets = static_cast<size_t>(c.parse_integer());
+                report.skipped_packets = c.parse_non_negative_integer("skipped_packets");
             } else if (key == "observation_truncated") {
                 report.observation_truncated = c.parse_bool();
             } else if (key == "observation_reasons") {

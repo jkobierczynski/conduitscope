@@ -18095,6 +18095,109 @@ it done as its own patch.
     extract-rebuild-test cycle, before delivery as a zip of touched/new files via the standing
     no-git-commit convention -- never git-commit.
 
+134. **Fix patch295 finding F2: inventory JSON parser needs semantic range validation, quoting the
+    review's own framing: "you're not merely parsing arbitrary data -- you are generating security
+    conclusions from it"** -- Jurgen's direct request, the second item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`, right after item 133 (F1). **Done.**
+
+    **The finding, confirmed by testing before it was fixed.** `inventory_merge.cpp`'s JSON parser
+    narrowed several fields straight from a signed `long long` to an unsigned/fixed-width type with
+    no range check: `static_cast<size_t>(c.parse_integer())` for `packet_count`/`total_packets`/
+    `skipped_packets`, `static_cast<uint16_t>(c.parse_integer())` for `server_port`. Built the
+    pre-fix binary and fed it a crafted report to confirm the review's own two headline examples
+    exactly: `"packet_count": -1` became `18446744073709551615` (`SIZE_MAX`) in the merged JSON
+    output, and `"server_port": -1` became `65535`. Neither is a memory-corruption bug (the
+    existing 256 MiB per-file ceiling, item 122/F5, still bounds the input), but both are a real
+    integrity problem for a tool whose entire purpose is generating OT security conclusions from
+    this data -- a crafted or corrupted report could silently masquerade as a legitimate finding
+    rather than being refused.
+
+    **A second, unrelated crash found incidentally, fixed in the same pass.** While hardening
+    `parse_integer()` itself, noticed it called `std::stoll` with no handling for
+    `std::out_of_range` -- a JSON number with more digits than fit in a `long long` (e.g.
+    `"total_packets": 99999999999999999999999999999999`, syntactically a perfectly ordinary JSON
+    number) threw an uncaught C++ exception, crashing the whole process (confirmed: `SIGABRT`,
+    "terminate called after throwing an instance of 'std::out_of_range'"). Fixed by catching it and
+    folding it into the existing `InventoryMergeError`/`fail()` path instead -- the same "found
+    while verifying something else, fixed in the same pass rather than left as a separate crash"
+    precedent item 123 (also found during a patch282 audit) already set.
+
+    **The fix.** Two new `JsonCursor` methods, next to the existing `parse_integer`/`parse_double`/
+    `parse_bool`: `parse_non_negative_integer(field_name)` (rejects a negative value before the
+    `size_t` cast -- used for `packet_count` on both assets and edges, and for `total_packets`/
+    `skipped_packets`) and `parse_port(field_name)` (rejects anything outside `[0, 65535]` before
+    the `uint16_t` cast -- used for `server_port`). Both throw through a new `fail_semantic()`
+    helper, deliberately separate from the existing `fail()`: `fail()`'s own message claims the
+    JSON itself is malformed, which isn't true here -- these values are syntactically fine JSON,
+    just semantically wrong for the field they're in -- so `fail_semantic()` doesn't make that
+    claim.
+
+    Also implemented two of the finding's own softer "ideally validate" suggestions, both cheap and
+    zero-risk against genuine data: `ip`/`client_ip`/`server_ip` are now checked against
+    `ipv4.hpp`'s own already-exported `parse_ipv4_string` (reused rather than a second,
+    drift-prone validator) and rejected if not a syntactically valid dotted-quad; an asset's or
+    edge's `first_seen` is now checked against its own `last_seen` once the whole object has been
+    parsed (field order isn't guaranteed on the wire, so this can't run inline per-field) and
+    rejected if `first_seen` is later. Neither check can ever reject a genuine report: a real
+    report's `ip` fields are always written by `format_ipv4` from a decoded `Ipv4Header`, and its
+    `first_seen`/`last_seen` are always a real min/max pair by construction
+    (`asset_inventory.cpp`) -- both checks only ever fire against crafted/corrupted input.
+
+    **Two of the finding's suggestions deliberately NOT implemented, and why.** "`packet_count` not
+    absurd relative to input" -- the finding names no concrete threshold, and inventing an arbitrary
+    one risks rejecting a genuine, just unusually busy, capture; left as a reasonable follow-up IF a
+    specific, justified ceiling is ever wanted, not attempted here. A protocol-string vocabulary
+    check (rejecting an edge/asset `protocol` value outside the twelve this codebase recognizes) --
+    there is no single, authoritative, already-exported list of those twelve names anywhere in this
+    codebase to validate against (the various mentions, e.g. `asset_inventory.cpp`'s own
+    `role_field_protocols()`, are each scoped to a different, narrower purpose, not an exhaustive
+    canonical list); hand-rolling a NEW, separately-maintained duplicate here would be a genuine
+    drift risk every future protocol addition would have to remember to update, for no
+    corresponding integrity gain -- `merge` itself never dispatches on or interprets this field's
+    value, only carries it through, consistent with this parser's own file-header-documented
+    "tolerant of fields/values it doesn't itself need to interpret" philosophy.
+
+    **New tests.** `tests/merge_inventory_semantic_validation_smoke.sh` (new
+    `merge_inventory_semantic_validation_rejects_crafted_values` CTest entry) -- a deliberate,
+    explicitly-documented exception to this project's own "generate every fixture with the real
+    CLI" rule (see the script's own header): every case this test proves rejected is, by
+    definition, a value the CLI itself can never produce, so there is no "run the CLI and capture
+    its output" path to a crafted-adversarial fixture here. Nine cases in one script, via a shared
+    `assert_rejected` helper: negative asset/edge `packet_count`, negative/out-of-range
+    `server_port`, negative `total_packets`/`skipped_packets`, a malformed asset `ip` and edge
+    `client_ip`, an asset and an edge with `first_seen` after `last_seen`, the out-of-range integer
+    literal (proving the crash is now a clean rejection, not a `SIGABRT`), and a regression guard
+    (a real, CLI-generated report still merges successfully under every one of the new checks).
+    Caught and fixed a `set -e` bug of its own while writing it (a bare `grep ... && fail ...`
+    statement trips `set -e` on grep's own expected "no match" exit code, aborting the whole script
+    right after the first case) -- documented inline in the script rather than silently worked
+    around, matching this project's own standing practice of explaining a found-and-fixed authoring
+    bug rather than just quietly correcting it.
+
+    **Docs.** `docs/USER_GUIDE.md`'s `merge inventory` section gains a new paragraph, right after
+    the existing "Deliberately not merged" one, naming exactly which fields are now validated and
+    how, cross-referencing this item. `docs/reviews/2026-10-chatgpt-security-review-patch295.md`'s
+    own intro paragraph updated to mark F2 fixed, cross-referencing this item (F3-F8 remain open,
+    not yet directed).
+
+    **Verification.** Manual testing against the real pre-fix binary FIRST, to confirm the finding's
+    own two examples exactly as described, and to confirm the `std::stoll` crash really did abort
+    the process -- before writing any fix. Then all seven adversarial cases (the two headline
+    examples, the out-of-range port, the malformed IP, the inverted first/last-seen, the oversized
+    integer literal) individually confirmed to now fail cleanly with a clear message instead of
+    corrupting data or crashing, and a real merge of two genuine reports confirmed still successful,
+    before any CTest entry was written. Then the new CTest entry, then the full `merge`-scoped CTest
+    group (12 tests, up from 11, all passing). Then all four standing build configs, each +1 over
+    item 133's own figures with zero regressions: default GCC `build` 2495/2495 (was 2494/2494);
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive` 2477/2477 (was 2476/2476); Clang
+    ASan/UBSan `build-fuzz` 2573/2573 (was 2572/2572, including all 78 pre-existing
+    `*_corpus_regression` tests, zero new crashes/UB on the hardened parse path -- notable given
+    this item's own fix is specifically about preventing a crash); MinGW cross-compile
+    `build-mingw`, build-only, configured test count 2477 (matching `build_nolive`'s count). Then a
+    clean-room extract-rebuild-test cycle (2495/2495, matching the incremental build exactly),
+    before delivery as a zip of touched/new files via the standing no-git-commit convention --
+    never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -2503,6 +2503,16 @@ heuristic isn't exposed outside the engine that originally computed it); `notabl
 (never merged). See `include/conduitscope/inventory_merge.hpp`'s own header comment and
 `docs/design/sensor-mode.md` for the full scope record.
 
+**Each input report's own numbers are validated, not just trusted.** `merge` is explicitly an
+analysis boundary where an operator may be asked to combine reports from other systems/tap
+points/teams, not only ones this build itself produced (see `--max-inventory-file-bytes` above),
+so a field that's well-formed JSON but semantically nonsensical for what it holds is rejected
+rather than silently folded into the merged result: `packet_count`/`total_packets`/
+`skipped_packets` must not be negative, `server_port` must be in `[0, 65535]`, `ip`/`client_ip`/
+`server_ip` must be syntactically valid IPv4 addresses, and an asset's or edge's `first_seen` must
+not be after its own `last_seen`. See `docs/DEVELOPMENT.md`'s ROADMAP item 134 (patch295 finding
+F2).
+
 ```
 $ conduitscope inventory --read site1.pcap --format json -o site1.json
 $ conduitscope inventory --read site2.pcap --format json -o site2.json
