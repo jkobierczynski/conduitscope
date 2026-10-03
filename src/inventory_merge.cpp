@@ -202,6 +202,22 @@ public:
         return false;  // unreachable
     }
 
+    // F3 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 135,
+    // DEVELOPMENT.md): skip_value() just below is the one place in this whole parser that
+    // recurses arbitrarily deep -- once per nesting level of whatever object/array structure it's
+    // asked to discard. The existing 256 MiB per-file byte ceiling (item 122/F5) bounds how much
+    // JSON TEXT there can be, but says nothing about how DEEPLY NESTED it is: a tiny, compact,
+    // nowhere-near-the-ceiling file shaped like {"x":{"x":{"x": ... }}} can still recurse
+    // arbitrarily deep. Confirmed, before this fix, that a 12 MB file with 2,000,000 nesting
+    // levels crashes the whole process outright (a real stack overflow, SIGSEGV) rather than
+    // failing cleanly -- the exact "256 MiB file-size limit != bounded parser recursion"
+    // distinction the finding names. Same shape, same constant name and value, as
+    // display_filter_parser.cpp's own kMaxNestingDepth (128, item 112/patch282 F2) -- the
+    // "earlier parser hardening" this finding itself points back to.
+    static constexpr size_t kMaxNestingDepth = 128;
+
+    size_t skip_value_depth_ = 0;
+
     // Recursively consumes and discards exactly one JSON value (string/number/object/array/bool/
     // null) of whatever shape is next -- used for every field this merge doesn't need to read back.
     void skip_value() {
@@ -209,6 +225,10 @@ public:
         if (c == '"') {
             parse_string();
         } else if (c == '{') {
+            if (++skip_value_depth_ > kMaxNestingDepth) {
+                fail("JSON nesting is deeper than the " + std::to_string(kMaxNestingDepth) +
+                     "-level limit this parser allows");
+            }
             expect('{');
             if (!consume_if('}')) {
                 while (true) {
@@ -220,7 +240,12 @@ public:
                 }
                 expect('}');
             }
+            --skip_value_depth_;
         } else if (c == '[') {
+            if (++skip_value_depth_ > kMaxNestingDepth) {
+                fail("JSON nesting is deeper than the " + std::to_string(kMaxNestingDepth) +
+                     "-level limit this parser allows");
+            }
             expect('[');
             if (!consume_if(']')) {
                 while (true) {
@@ -230,6 +255,7 @@ public:
                 }
                 expect(']');
             }
+            --skip_value_depth_;
         } else if (c == 't' || c == 'f') {
             parse_bool();
         } else if (c == 'n') {

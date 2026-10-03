@@ -18198,6 +18198,69 @@ it done as its own patch.
     before delivery as a zip of touched/new files via the standing no-git-commit convention --
     never git-commit.
 
+135. **Fix patch295 finding F3: deep recursive JSON structures remain a DoS vector, quoting the
+    review's own framing: "256 MiB file-size limit != bounded parser recursion"** -- Jurgen's
+    direct request, the third item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`, right after item 134 (F2).
+    **Done.**
+
+    **The finding, confirmed by testing before it was fixed.** `inventory_merge.cpp`'s tolerant
+    JSON parser has exactly one genuinely recursive function, `JsonCursor::skip_value()` -- called
+    once per unrecognized field this merge doesn't itself read back (every one of
+    `parse_asset`/`parse_edge`/the top-level report parser's own "else" branches), and recursively
+    on itself for every nested object member or array element it has to discard. It had no depth
+    tracking at all. Item 122/F5's own 256 MiB per-file byte ceiling bounds how much JSON TEXT a
+    report can contain, but says nothing about how deeply NESTED that text is: a tiny, compact file
+    shaped like `{"x":{"x":{"x": ... }}}` stays far under that ceiling no matter how many levels
+    deep it goes, because each extra level only costs a few bytes. Built a 12 MB file (well under
+    the 256 MiB ceiling) with 2,000,000 such nesting levels against the real pre-fix binary and
+    confirmed it crashed the whole process outright -- a genuine stack overflow, `SIGSEGV`, exit
+    139 -- not a clean rejection, exactly the gap the finding describes.
+
+    **The fix.** `JsonCursor` gains a `kMaxNestingDepth` constant and a `skip_value_depth_` counter,
+    incremented on entry to the `{`/`[` branches of `skip_value()` and decremented on exit, with the
+    same `if (++depth_ > kMaxNestingDepth) fail(...)` shape, the same constant NAME, and the same
+    VALUE (128) as `display_filter_parser.cpp`'s own `kMaxNestingDepth` (item 112, fixing patch282's
+    own finding F2) -- the exact "earlier parser hardening" this finding's own text points back to,
+    reused rather than reinvented. Breaching the limit throws the same `InventoryMergeError`/
+    `fail()` path every other malformed-JSON case in this parser already uses, naming the limit
+    explicitly. No other function in this parser needed the same treatment: `parse_asset`/
+    `parse_edge` are flat, single-level object scans over a fixed set of known keys (never
+    self-recursive), and the top-level report parser's own `assets`/`edges` ARRAY-length handling
+    is a different axis entirely, already covered by item 133/F1's new aggregate count ceilings --
+    `skip_value()` was the one and only place arbitrary nesting depth could actually accumulate.
+
+    **New tests.** `tests/merge_inventory_nesting_depth_smoke.sh` (new
+    `merge_inventory_nesting_depth_bounded` CTest entry) -- another deliberate, explicitly-
+    documented exception to this project's own "generate every fixture with the real CLI" rule
+    (same reasoning as item 134's own semantic-validation test): a deeply-nested fixture isn't
+    something the real CLI can ever produce, so a short Python snippet builds one instead, the same
+    way the crash was first confirmed. Four cases: the exact 2,000,000-level crash repro (must now
+    fail cleanly with the nesting-depth error, never crash); exactly AT the 128-level limit (must
+    still succeed -- proving the ceiling isn't off-by-one against legitimate input); one level past
+    it, 129 (must fail with the same clean error); and a regression guard (a real, CLI-generated
+    report, which never nests more than a few levels, still merges successfully).
+
+    **Docs.** `docs/USER_GUIDE.md`'s `merge inventory` section gains a short addition to the
+    paragraph item 134 added, naming the new 128-level nesting-depth ceiling and cross-referencing
+    this item. `docs/reviews/2026-10-chatgpt-security-review-patch295.md`'s own intro paragraph
+    updated to mark F3 fixed, cross-referencing this item (F4-F8 remain open, not yet directed).
+
+    **Verification.** Manual testing against the real pre-fix binary FIRST, to confirm the
+    2,000,000-level crash exactly as described (`SIGSEGV`, exit 139) -- before writing any fix.
+    Then, post-fix: the same crash repro now fails cleanly; the exact 128-level boundary succeeds
+    and 129 fails; a shallow, legitimate extra-nested field still parses fine -- all confirmed
+    manually before any CTest entry was written. Then the new CTest entry, then the full
+    `merge`-scoped CTest group (13 tests, up from 12, all passing). Then all four standing build
+    configs, each +1 over item 134's own figures with zero regressions: default GCC `build`
+    2496/2496 (was 2495/2495); `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive` 2478/2478
+    (was 2477/2477); Clang ASan/UBSan `build-fuzz` 2574/2574 (was 2573/2573, including all 78
+    pre-existing `*_corpus_regression` tests, zero new crashes/UB -- notable given this item's own
+    fix is specifically about preventing a crash); MinGW cross-compile `build-mingw`, build-only,
+    configured test count 2478 (matching `build_nolive`'s count). Then a clean-room
+    extract-rebuild-test cycle (2496/2496, matching the incremental build exactly), before delivery
+    as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

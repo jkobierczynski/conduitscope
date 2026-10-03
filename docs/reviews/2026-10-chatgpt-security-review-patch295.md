@@ -78,7 +78,18 @@ the same change. "`packet_count` not absurd relative to input" and a
 protocol-string vocabulary check were deliberately left out -- see item 134
 for why.
 
-F3-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
+**Update: F3 is fixed.** Jurgen asked for this one next. See
+[DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item 135 for the full fix: the
+parser's one recursive function, `skip_value()`, now tracks its own nesting
+depth and rejects anything past 128 levels -- the same constant and shape as
+`display_filter_parser.cpp`'s own `kMaxNestingDepth` (item 112/patch282 F2),
+the "earlier parser hardening" this finding itself references. Confirmed,
+before the fix, that a 12 MB file (far under the 256 MiB per-file ceiling)
+with 2,000,000 nesting levels crashed the whole process outright (a real
+stack overflow) -- exactly the "256 MiB file-size limit != bounded parser
+recursion" distinction this finding names.
+
+F4-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
 which, if any, to take up next.
 
 The commit hash and any test-count/line/file references below reflect the

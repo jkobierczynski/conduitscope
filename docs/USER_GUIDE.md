@@ -2511,7 +2511,10 @@ rather than silently folded into the merged result: `packet_count`/`total_packet
 `skipped_packets` must not be negative, `server_port` must be in `[0, 65535]`, `ip`/`client_ip`/
 `server_ip` must be syntactically valid IPv4 addresses, and an asset's or edge's `first_seen` must
 not be after its own `last_seen`. See `docs/DEVELOPMENT.md`'s ROADMAP item 134 (patch295 finding
-F2).
+F2). Separately, how deeply nested a value inside an input report can be is also bounded (128
+levels), independent of `--max-inventory-file-bytes` above -- a small file can still be nested
+arbitrarily deep, which the byte ceiling alone doesn't catch. See ROADMAP item 135 (patch295
+finding F3).
 
 ```
 $ conduitscope inventory --read site1.pcap --format json -o site1.json

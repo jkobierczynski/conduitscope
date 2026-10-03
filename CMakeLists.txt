@@ -12245,6 +12245,21 @@ add_test(NAME merge_inventory_semantic_validation_rejects_crafted_values
 set_tests_properties(merge_inventory_semantic_validation_rejects_crafted_values PROPERTIES
   TIMEOUT 20)
 
+# docs/reviews/2026-10-chatgpt-security-review-patch295.md finding F3 fix (item 135,
+# DEVELOPMENT.md): the per-file BYTE ceiling above bounds how much JSON text there can be, but
+# says nothing about how DEEPLY NESTED it is -- skip_value() (inventory_merge.cpp's one genuinely
+# recursive parser function) used to recurse once per nesting level with no depth tracking at all,
+# so a tiny, compact, well-under-the-ceiling file shaped like {"x":{"x":{"x": ... }}} could still
+# crash the whole process (a real stack overflow, confirmed by testing before this fix). See
+# tests/merge_inventory_nesting_depth_smoke.sh's own file header for the full crash repro and why
+# this is another deliberate exception to this project's own "generate every fixture with the real
+# CLI" rule.
+add_test(NAME merge_inventory_nesting_depth_bounded
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_inventory_nesting_depth_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(merge_inventory_nesting_depth_bounded PROPERTIES
+  TIMEOUT 30)
+
 add_test(NAME merge_needs_a_subcommand
   COMMAND conduitscope merge)
 set_tests_properties(merge_needs_a_subcommand PROPERTIES
