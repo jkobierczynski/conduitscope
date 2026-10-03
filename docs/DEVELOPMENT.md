@@ -17969,6 +17969,132 @@ it done as its own patch.
     the entire file never goes negative and ends at exactly 0. The existing `#escaping`/`#cmd-exe`
     anchors (one of them linked to from `decode.html`) were confirmed still present and unmoved.
 
+132. **Add an offsite online version of the manual to `docs/MANUAL.md`'s own index entry,
+    Jurgen's own request.** **Done.** `docs/MANUAL.md`'s bullet for `manual/index.html` now links
+    both the in-repo HTML manual and an offsite hosted copy of the same material
+    (`https://jurgenkobierczynski.com/conduitscope-manual/`), and its description was condensed to
+    "one page per feature, every command run for real against the fixtures in `tests/`,
+    Linux/Windows setup, and JSON-filtering recipes" -- the shorter form Jurgen's own request used,
+    replacing the longer enumerated-command-list wording this bullet had before.
+
+    **One deliberate deviation from the literal request text.** Jurgen's own request wrote the
+    in-repo link as `[docs/manual/index.html](docs/manual/index.html)` for both display text and
+    href. Kept the href as the existing, already-correct `manual/index.html` instead: `MANUAL.md`
+    itself lives inside `docs/`, so a relative href of `docs/manual/index.html` from a file that is
+    already inside `docs/` would resolve to `docs/docs/manual/index.html` -- one directory level
+    too deep, a broken link. The display TEXT and the new offsite link are exactly as given; only
+    the in-repo href was kept at its existing, sibling-consistent, correct relative form.
+
+    **Verification.** Re-read `docs/MANUAL.md` after the edit: the new bullet still flows correctly
+    into the following "See also the top-level README.md..." paragraph, both links are present and
+    correctly formed (`manual/index.html` relative, the offsite URL absolute), and no other bullet
+    in the file was touched. Deliberately skipped the four standing build configs and the
+    clean-room rebuild cycle for this change -- a one-bullet edit to a single Markdown index file
+    exercises no C++ source, no test, and no build configuration, so none of that bar applies (the
+    same documentation-only exception this project's own standing rule already carves out, applied
+    identically to items 126-131 immediately above).
+
+133. **Fix patch295 finding F1: residual aggregate resource exhaustion in `merge inventory`,
+    quoting the review's own section verbatim: "Validate... [the per-file ceiling] does not put a
+    meaningful ceiling on the total input set"** -- Jurgen's direct request, the first item taken
+    up from `docs/reviews/2026-10-chatgpt-security-review-patch295.md`. **Done.**
+
+    **The finding.** Item 122/patch282's own finding F5 fix gave `merge inventory` a per-file
+    `--max-inventory-file-bytes` ceiling (256 MiB default), checked before any one file is read.
+    patch295's F1 points out that this says nothing about the AGGREGATE: an operator can still name
+    arbitrarily many files, each individually under that ceiling, and the process still parses and
+    retains every one of them in memory before merging -- the review's own worked example is
+    "100 x 256 MiB." It also names a second, subtler risk: because each `InventoryAsset`/
+    `InventoryEdge` struct carries several of its own strings/vectors, a single, compact JSON
+    document well under the per-file byte ceiling but containing a huge NUMBER of small asset/edge
+    objects can still expand into a substantially larger in-memory footprint than its own source
+    byte count would suggest -- a risk the per-file byte ceiling, which only ever looks at a file's
+    size, structurally cannot catch.
+
+    **The fix: four new aggregate ceilings, one new library entry point.**
+    `inventory_merge.hpp`/`.cpp` gain `read_inventory_report_files_for_merge` -- the function
+    `run_merge_inventory` (`cli_main.cpp`) now calls instead of its own per-path loop around
+    `read_inventory_report_file_for_merge` -- which enforces, across the WHOLE set of files named
+    on one `merge inventory` command line, cheapest and least-revealing first:
+
+    - **`--max-inventory-input-files`** (default 256): `paths.size()` checked before a single file
+      is opened.
+    - **`--max-inventory-total-bytes`** (default 4 GiB, 16x the per-file 256 MiB default): each
+      file's own size is still checked against `--max-inventory-file-bytes` exactly as before, then
+      added to a running total checked against this new ceiling -- BEFORE that file's content is
+      read -- so the file that would cross the aggregate ceiling, and every file after it, is never
+      read.
+    - **`--max-inventory-total-assets`** / **`--max-inventory-total-edges`** (default 2,000,000
+      each, 10x `asset_inventory.hpp`'s own per-CAPTURE `kDefaultMaxInventoryAssets`/`Edges`
+      figures -- named `kDefaultMaxMergedInventoryAssets`/`Edges`, deliberately NOT reusing those
+      exact names, to avoid both a C++ redefinition and an operator confusing a per-capture cap
+      with this aggregate one): a shared counter, threaded across EVERY file in the call, decremented
+      as each asset/edge object is parsed out of each file's own JSON array. This is the one piece
+      that actually answers F1's second-order concern: the check runs DURING array parsing (a
+      pre-check right before each `parse_asset`/`parse_edge` call, inside the same loop the existing
+      per-file parser already used), so an oversized array is caught mid-array, the moment the
+      aggregate ceiling is crossed, rather than only after the whole array -- or the whole file --
+      has already been fully materialized into memory.
+
+    All four new constants (`kDefaultMaxInventoryInputFiles`, `kDefaultMaxInventoryTotalBytes`,
+    `kDefaultMaxMergedInventoryAssets`, `kDefaultMaxMergedInventoryEdges`) live in
+    `inventory_merge.hpp` next to `kDefaultMaxInventoryFileBytes`, each commented with the same
+    "deliberately generous multiple of an already-justified single-unit figure, not an arbitrary
+    round number" reasoning that constant itself already uses. Every ceiling breach throws
+    `InventoryMergeError` naming the exact count/limit/override flag, the same convention every
+    other ceiling in this codebase follows, and the whole call fails closed on any breach -- no
+    partial/truncated merge is ever returned, matching `merge inventory`'s own existing
+    "reject before success" posture (item 122/F5) rather than a soft, OBSERVATION-INCOMPLETE-style
+    degrade (the posture `inventory`'s OWN, differently-scoped, per-capture `--max-inventory-assets`/
+    `--max-inventory-edges` flags use -- deliberately NOT reused here: those cap ONE capture's own
+    live engine state and mark the result incomplete rather than failing, a fundamentally different
+    contract from merge's own "an oversized/corrupted/substituted input is rejected outright" one,
+    see item 122).
+
+    **No signature change to any existing public function.** `read_inventory_report_file_for_merge`
+    and `parse_inventory_report_json_for_merge` keep their exact existing signatures and behavior --
+    every existing caller (and `tests/merge_inventory_oversize_smoke.sh`, which greps their exact
+    existing error text) is unaffected. Internally, the real parsing logic was factored into a
+    private `parse_inventory_report_json_impl` taking an optional, nullable budget (a small
+    `MergeCountBudget` struct); the two existing public functions call it with an "unlimited"
+    (null-pointer) budget, and only the new `read_inventory_report_files_for_merge` ever threads a
+    real one through.
+
+    **New tests.** `tests/merge_inventory_aggregate_limits_smoke.sh` (new
+    `merge_inventory_aggregate_limits_enforced` CTest entry), following this project's own standing
+    rule of generating real `inventory --format json` reports with the CLI itself rather than a
+    hand-authored fixture: two real reports (`sample_modbus.pcap`, 2 assets/1 edge;
+    `sample_inventory.pcap`, 9 assets/5 edges -- confirmed by direct inspection before the test was
+    written) are merged five ways -- once under every default (must still succeed, proving the new
+    checks reject nothing a legitimate run would have accepted before), then once each with
+    `--max-inventory-input-files 1`, `--max-inventory-total-bytes` set to exactly the first report's
+    own size, `--max-inventory-total-assets 5`, and `--max-inventory-total-edges 2` (each strictly
+    below the real combined figure it guards), asserting the exact error text naming the right
+    count/limit/override flag and that no `merged:` report output is ever produced once a ceiling
+    rejects the input. The assets/edges cases in particular prove the "trips mid-array, not only
+    after" behavior directly: 2+9=11 assets with a limit of 5, and 1+5=6 edges with a limit of 2,
+    both cross their ceiling partway through the SECOND file's own array, not merely at a whole-file
+    boundary.
+
+    **Docs.** `docs/USER_GUIDE.md`'s `merge inventory` options table gains four new rows for the
+    four new flags, each cross-referencing this item. `docs/reviews/2026-10-chatgpt-security-
+    review-patch295.md`'s own intro paragraph updated to mark F1 fixed, cross-referencing this item
+    (F2-F8 remain open, not yet directed).
+
+    **Verification.** Manual smoke-testing first (all four ceilings individually confirmed to
+    reject a real over-budget merge with the exact expected message, and the same inputs confirmed
+    to still succeed under every default, before any CTest entry was written). Then the new
+    `merge_inventory_aggregate_limits_enforced` test, then the full `merge`-scoped CTest group (11
+    tests, up from 10, all passing, including every pre-existing merge test unchanged), then all
+    four standing build configs, each +1 over item 125's own figures with zero regressions: default
+    GCC `build` 2494/2494 (was 2493/2493); `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`
+    2476/2476 (was 2475/2475); Clang ASan/UBSan `build-fuzz` 2572/2572 (was 2571/2571, including all
+    78 pre-existing `*_corpus_regression` tests, zero new crashes/UB on the refactored parse path);
+    MinGW cross-compile `build-mingw`, build-only, configured test count 2476 (matching
+    `build_nolive`'s count, both configurations having live capture disabled). Then a clean-room
+    extract-rebuild-test cycle, before delivery as a zip of touched/new files via the standing
+    no-git-commit convention -- never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

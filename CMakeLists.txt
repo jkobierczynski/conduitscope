@@ -12215,6 +12215,20 @@ add_test(NAME merge_inventory_oversize_rejected_before_read
 set_tests_properties(merge_inventory_oversize_rejected_before_read PROPERTIES
   TIMEOUT 20)
 
+# docs/reviews/2026-10-chatgpt-security-review-patch295.md finding F1 fix (item 133,
+# DEVELOPMENT.md): the per-file ceiling above says nothing about the AGGREGATE across however
+# many input files one merge names -- these four new ceilings (input-file count, combined byte
+# total, combined asset count, combined edge count) close that gap. See
+# tests/merge_inventory_aggregate_limits_smoke.sh's own file header for exactly what each of the
+# four proves and why (in particular: the asset/edge ceilings are proven to trip DURING a file's
+# own array parsing, not only after it finishes, which is what actually matters against F1's own
+# "second-order amplification" concern).
+add_test(NAME merge_inventory_aggregate_limits_enforced
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_inventory_aggregate_limits_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(merge_inventory_aggregate_limits_enforced PROPERTIES
+  TIMEOUT 20)
+
 add_test(NAME merge_needs_a_subcommand
   COMMAND conduitscope merge)
 set_tests_properties(merge_needs_a_subcommand PROPERTIES

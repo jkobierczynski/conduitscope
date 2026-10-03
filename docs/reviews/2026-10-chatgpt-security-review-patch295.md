@@ -50,8 +50,18 @@ corroborating the review's own "no obvious command injection" check. Unlike
 finding corrected on that same kind of pass), nothing here needed
 correction.
 
-None of F1-F8 have been scheduled or acted on yet -- Jurgen has not yet
-directed which, if any, to take up.
+**Update: F1 is fixed.** Jurgen asked for this one first. See
+[DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item 133 for the full fix: four
+new aggregate ceilings across a whole `merge inventory` input set
+(`--max-inventory-input-files`, `--max-inventory-total-bytes`,
+`--max-inventory-total-assets`, `--max-inventory-total-edges`), on top of the
+existing per-file `--max-inventory-file-bytes` ceiling, with the two count
+ceilings checked *during* each report's own JSON parse rather than after --
+directly addressing this finding's own "second-order amplification" point
+(a compact, under-the-byte-ceiling document containing a huge number of
+small objects can still expand far past its own source byte count once
+parsed). F2-F8 have not been scheduled or acted on yet -- Jurgen has not
+yet directed which, if any, to take up next.
 
 The commit hash and any test-count/line/file references below reflect the
 reviewer's own state at review time; see DEVELOPMENT.md for current figures

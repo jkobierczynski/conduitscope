@@ -2981,6 +2981,8 @@ int run_merge_inventory(const std::vector<std::string>& inputs, const std::strin
                          const std::string& format, uint8_t zone_prefix_len, bool quiet, bool oui_enabled,
                          bool resolve_hostnames, const std::string& hosts_path, bool service_names_enabled,
                          const std::string& services_path, size_t max_inventory_file_bytes,
+                         size_t max_inventory_total_bytes, size_t max_inventory_input_files,
+                         size_t max_inventory_total_assets, size_t max_inventory_total_edges,
                          std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
@@ -3001,11 +3003,14 @@ int run_merge_inventory(const std::vector<std::string>& inputs, const std::strin
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
 
-        std::vector<AssetInventoryReport> reports;
-        reports.reserve(inputs.size());
-        for (const auto& path : inputs) {
-            reports.push_back(read_inventory_report_file_for_merge(path, max_inventory_file_bytes));
-        }
+        // patch295 finding F1 fix (item 133, docs/DEVELOPMENT.md): a single library call now
+        // enforces the existing per-file byte ceiling AND the four new aggregate ceilings
+        // (input-file count, combined byte total, combined asset/edge counts) across the whole
+        // input set -- see read_inventory_report_files_for_merge's own comment
+        // (inventory_merge.hpp) for exactly how and why each is checked.
+        std::vector<AssetInventoryReport> reports = read_inventory_report_files_for_merge(
+            inputs, max_inventory_file_bytes, max_inventory_total_bytes, max_inventory_input_files,
+            max_inventory_total_assets, max_inventory_total_edges);
 
         AssetInventoryReport merged = merge_inventory_reports(reports, zone_prefix_len);
 
@@ -4414,6 +4419,14 @@ int main(int argc, char** argv) {
     bool merge_inventory_mac_vendor = false, merge_inventory_resolve = false, merge_inventory_service_names = true;
     std::string merge_inventory_hosts_file, merge_inventory_services_file;
     size_t merge_inventory_max_file_bytes = kDefaultMaxInventoryFileBytes;
+    // patch295 finding F1 fix (item 133, docs/DEVELOPMENT.md) -- four new AGGREGATE ceilings
+    // across the whole input set, on top of --max-inventory-file-bytes above (which only ever
+    // caps one file at a time); see inventory_merge.hpp's own comment on each constant below for
+    // the full reasoning.
+    size_t merge_inventory_max_total_bytes = kDefaultMaxInventoryTotalBytes;
+    size_t merge_inventory_max_input_files = kDefaultMaxInventoryInputFiles;
+    size_t merge_inventory_max_total_assets = kDefaultMaxMergedInventoryAssets;
+    size_t merge_inventory_max_total_edges = kDefaultMaxMergedInventoryEdges;
     merge_inventory_cmd
         ->add_option("reports", merge_inventory_inputs,
                       "One or more 'inventory --format json' report files, one per tap point "
@@ -4426,6 +4439,31 @@ int main(int argc, char** argv) {
                       "Cap how large any one input report file may be before it's read into memory "
                       "(default 256 MiB) -- same shape as --max-baseline-file-bytes; see "
                       "inventory_merge.hpp's kDefaultMaxInventoryFileBytes comment")->group("Input/output")
+        ->capture_default_str();
+    merge_inventory_cmd
+        ->add_option("--max-inventory-total-bytes", merge_inventory_max_total_bytes,
+                      "Cap the COMBINED size of every input report file in this merge, on top of "
+                      "--max-inventory-file-bytes' own per-file ceiling (default 4 GiB). Checked "
+                      "before each file past the point the ceiling would be crossed is read -- "
+                      "docs/reviews/2026-10-chatgpt-security-review-patch295.md finding F1")->group("Input/output")
+        ->capture_default_str();
+    merge_inventory_cmd
+        ->add_option("--max-inventory-input-files", merge_inventory_max_input_files,
+                      "Cap how many input report files one merge may name (default 256), checked "
+                      "before any of them is opened -- patch295 finding F1")->group("Input/output")
+        ->capture_default_str();
+    merge_inventory_cmd
+        ->add_option("--max-inventory-total-assets", merge_inventory_max_total_assets,
+                      "Cap the COMBINED number of asset objects across every input report in this "
+                      "merge (default 2,000,000), checked while each report is parsed rather than "
+                      "after, so an oversized input is caught mid-array instead of being fully "
+                      "materialized first -- patch295 finding F1")->group("Input/output")
+        ->capture_default_str();
+    merge_inventory_cmd
+        ->add_option("--max-inventory-total-edges", merge_inventory_max_total_edges,
+                      "Cap the COMBINED number of edge objects across every input report in this "
+                      "merge (default 2,000,000), checked the same way as --max-inventory-total-assets "
+                      "above -- patch295 finding F1")->group("Input/output")
         ->capture_default_str();
     merge_inventory_cmd->add_option(
         "-o,--output", merge_inventory_output,
@@ -4848,7 +4886,9 @@ int main(int argc, char** argv) {
                                     static_cast<uint8_t>(merge_inventory_zone_prefix), quiet,
                                     merge_inventory_mac_vendor, merge_inventory_resolve, merge_inventory_hosts_file,
                                     merge_inventory_service_names, merge_inventory_services_file,
-                                    merge_inventory_max_file_bytes, *diag);
+                                    merge_inventory_max_file_bytes, merge_inventory_max_total_bytes,
+                                    merge_inventory_max_input_files, merge_inventory_max_total_assets,
+                                    merge_inventory_max_total_edges, *diag);
     }
     if (merge_cmd->parsed()) {
         std::cerr << "error: 'merge' needs a subcommand (currently only 'inventory' exists)\n";

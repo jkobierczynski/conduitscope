@@ -362,9 +362,23 @@ std::string zone_name_for(const CidrBlock& block) {
     return "zone_" + addr + "_" + std::to_string(block.prefix_len);
 }
 
-}  // namespace
+// Shared, cross-file asset/edge budget for read_inventory_report_files_for_merge's F1 aggregate
+// checks below -- a single instance is threaded through every file in one merge call, so the
+// moment the COMBINED count across every file parsed so far would exceed either ceiling, parsing
+// throws immediately, mid-array, rather than finishing that array or that file first (see this
+// file's own kDefaultMaxMergedInventoryAssets/Edges comment, inventory_merge.hpp, for why checking
+// DURING parsing rather than after is what actually matters here). `nullptr` fields in a
+// MergeCountBudget (used for the public, single-file, unlimited-by-definition
+// parse_inventory_report_json_for_merge below) mean "no ceiling" -- never decremented, never
+// checked.
+struct MergeCountBudget {
+    size_t* remaining_assets = nullptr;
+    size_t max_assets_for_message = 0;
+    size_t* remaining_edges = nullptr;
+    size_t max_edges_for_message = 0;
+};
 
-AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& text) {
+AssetInventoryReport parse_inventory_report_json_impl(const std::string& text, MergeCountBudget& budget) {
     JsonCursor c(text);
     AssetInventoryReport report;
     c.expect('{');
@@ -412,6 +426,18 @@ AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& te
                 c.expect('[');
                 if (!c.consume_if(']')) {
                     while (true) {
+                        // F1 fix: checked BEFORE parsing the next element, not after, so an
+                        // oversized array is caught mid-array rather than fully materialized
+                        // first -- see MergeCountBudget's own comment just above.
+                        if (budget.remaining_assets) {
+                            if (*budget.remaining_assets == 0) {
+                                throw InventoryMergeError(
+                                    "merge inventory: combined asset count across all input reports "
+                                    "exceeds the " + std::to_string(budget.max_assets_for_message) +
+                                    " asset limit (--max-inventory-total-assets to override)");
+                            }
+                            --(*budget.remaining_assets);
+                        }
                         report.assets.push_back(parse_asset(c));
                         if (c.consume_if(',')) continue;
                         c.expect(']');
@@ -422,6 +448,15 @@ AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& te
                 c.expect('[');
                 if (!c.consume_if(']')) {
                     while (true) {
+                        if (budget.remaining_edges) {
+                            if (*budget.remaining_edges == 0) {
+                                throw InventoryMergeError(
+                                    "merge inventory: combined edge count across all input reports "
+                                    "exceeds the " + std::to_string(budget.max_edges_for_message) +
+                                    " edge limit (--max-inventory-total-edges to override)");
+                            }
+                            --(*budget.remaining_edges);
+                        }
                         report.edges.push_back(parse_edge(c));
                         if (c.consume_if(',')) continue;
                         c.expect(']');
@@ -441,7 +476,11 @@ AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& te
     return report;
 }
 
-AssetInventoryReport read_inventory_report_file_for_merge(const std::string& path, size_t max_file_bytes) {
+// Opens `path`, checks its size against `max_file_bytes` BEFORE reading it into memory, and
+// returns its raw content -- the shared first half of both read_inventory_report_file_for_merge
+// and read_inventory_report_files_for_merge below, factored out so the F1 fix's new aggregate
+// path reuses the exact same per-file check/error text rather than a second, drifting copy of it.
+std::string read_and_size_check_inventory_report_file(const std::string& path, size_t max_file_bytes) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         throw InventoryMergeError("report file '" + path + "': cannot open for reading");
@@ -468,7 +507,60 @@ AssetInventoryReport read_inventory_report_file_for_merge(const std::string& pat
     if (!in.good() && !in.eof()) {
         throw InventoryMergeError("report file '" + path + "': read error");
     }
-    return parse_inventory_report_json_for_merge(buf.str());
+    return buf.str();
+}
+
+}  // namespace
+
+AssetInventoryReport parse_inventory_report_json_for_merge(const std::string& text) {
+    MergeCountBudget unlimited;  // both pointers null -- no ceiling, see MergeCountBudget's comment
+    return parse_inventory_report_json_impl(text, unlimited);
+}
+
+AssetInventoryReport read_inventory_report_file_for_merge(const std::string& path, size_t max_file_bytes) {
+    std::string text = read_and_size_check_inventory_report_file(path, max_file_bytes);
+    return parse_inventory_report_json_for_merge(text);
+}
+
+std::vector<AssetInventoryReport> read_inventory_report_files_for_merge(const std::vector<std::string>& paths,
+                                                                         size_t max_file_bytes,
+                                                                         size_t max_total_bytes,
+                                                                         size_t max_input_files, size_t max_assets,
+                                                                         size_t max_edges) {
+    // Cheapest, least-revealing check first: the input-file COUNT, before a single file is opened.
+    if (paths.size() > max_input_files) {
+        throw InventoryMergeError("merge inventory: " + std::to_string(paths.size()) +
+                                   " input file(s) exceeds the " + std::to_string(max_input_files) +
+                                   " file limit (--max-inventory-input-files to override)");
+    }
+
+    std::vector<AssetInventoryReport> reports;
+    reports.reserve(paths.size());
+    size_t total_bytes_so_far = 0;
+    size_t remaining_assets = max_assets;
+    size_t remaining_edges = max_edges;
+    MergeCountBudget budget;
+    budget.remaining_assets = &remaining_assets;
+    budget.max_assets_for_message = max_assets;
+    budget.remaining_edges = &remaining_edges;
+    budget.max_edges_for_message = max_edges;
+
+    for (const auto& path : paths) {
+        // Per-file size check (unchanged, see read_and_size_check_inventory_report_file), THEN the
+        // aggregate byte check, before this file's content is parsed -- so the file that would
+        // cross the aggregate ceiling, and every file after it, is never read.
+        std::string text = read_and_size_check_inventory_report_file(path, max_file_bytes);
+        total_bytes_so_far += text.size();
+        if (total_bytes_so_far > max_total_bytes) {
+            throw InventoryMergeError("report file '" + path + "': reading it brings the combined input "
+                                       "size across all " + std::to_string(paths.size()) + " merge input(s) to " +
+                                       std::to_string(total_bytes_so_far) + " byte(s), exceeding the " +
+                                       std::to_string(max_total_bytes) +
+                                       " byte aggregate limit (--max-inventory-total-bytes to override)");
+        }
+        reports.push_back(parse_inventory_report_json_impl(text, budget));
+    }
+    return reports;
 }
 
 AssetInventoryReport merge_inventory_reports(const std::vector<AssetInventoryReport>& reports,
