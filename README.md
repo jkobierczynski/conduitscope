@@ -221,9 +221,9 @@ tunneling) shows up on a segment that shouldn't carry it:
 
 ## Status
 
-Groundwork / v0.3.1. Every protocol named above is implemented, decoding real
+Groundwork / v0.3.2. Every protocol named above is implemented, decoding real
 wire-format fields (not just naming the protocol), and covered by the
-automated test suite -- 2223 tests as of this writing, run via `ctest` after
+automated test suite -- 2493 tests as of this writing, run via `ctest` after
 building (see Building below). Where a real capture was available (public
 ICS-lab collections, vendor-attributed samples, or a live device on real
 hardware), the decoder is validated against it, not just a synthetic
@@ -288,15 +288,19 @@ planned next -- see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)'s ROADMAP.
   collision handling, and the development roadmap.
 - **[man/conduitscope.1](man/conduitscope.1)** -- the man page, built from
   the same material as USER_GUIDE.md.
-- **[docs/manual/index.html](docs/manual/index.html)**, 
-  **[offsite online version](https://jurgenkobierczynski.com/conduitscope-manual/)**
-  -- an extended, example-driven manual: one page per feature, every command run for real
+- **[docs/manual/index.html](docs/manual/index.html)** -- an extended,
+  example-driven manual: one page per feature, every command run for real
   against the fixtures in `tests/`, Linux/Windows setup, and JSON-filtering
   recipes (`jq`/PowerShell) with shell-escaping worked through explicitly.
   A companion to the reference docs above, not a replacement for them.
 - **[docs/MANUAL.md](docs/MANUAL.md)** -- a short index page pointing at the
   docs above (kept in place because compiled-in `--help` text and error
   messages in the binary itself reference it by path).
+- **[docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md)** -- the
+  dependency/license manifest: what conduitscope's build and shipped
+  binaries actually touch (CLI11, libpcap/Npcap, CI infrastructure), what's
+  redistributed (nothing beyond the vendored CLI11 source) and what isn't,
+  and where each release's build-provenance manifest comes from.
 
 ## Building
 

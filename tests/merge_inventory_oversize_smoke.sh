@@ -14,6 +14,19 @@
 # output -- never a hand-authored/checked-in fixture that could silently drift from the real
 # report schema), then measures that report's own real byte size so the "too small a limit"
 # case below is set relative to a real, just-produced file rather than a guessed constant.
+#
+# NOTE on the error-message assertion below: it deliberately does NOT include the report
+# file's own path in the matched pattern, even though the real error message does name it.
+# On Windows CI, this script runs under Git Bash/MSYS2, which silently translates the
+# POSIX-style $SCRATCH path into its Windows-native form (e.g. "/tmp/xyz/report.json" ->
+# "C:/Users/RUNNER~1/AppData/Local/Temp/xyz/report.json") when passing it as an argument to
+# the native conduitscope.exe -- so the exe's own error message legitimately echoes back the
+# translated, Windows-native path, while this script's own $SCRATCH variable still holds the
+# original, untranslated form. A grep pattern that embeds $SCRATCH therefore mismatches on
+# Windows even though the production error message is completely correct. Matching only the
+# platform-independent suffix (byte count / limit / override flag -- the actual substance this
+# test cares about, per the comment below) avoids that false positive while still proving the
+# error names the right numbers and the right flag.
 set -eu
 
 CONDUITSCOPE="$1"
@@ -44,7 +57,9 @@ if OUTPUT="$("$CONDUITSCOPE" merge inventory "$SCRATCH/report.json" --max-invent
     fail "expected merge inventory to fail when --max-inventory-file-bytes ($TOO_SMALL) is below the report's own size ($REPORT_BYTES)"
 fi
 echo "$OUTPUT"
-echo "$OUTPUT" | grep -q "report file '$SCRATCH/report.json': $REPORT_BYTES byte(s) exceeds the $TOO_SMALL byte limit (--max-inventory-file-bytes to override)" \
+# Deliberately not matching the report file's own path here -- see the NOTE in this script's
+# header comment: Git Bash on Windows CI translates it before conduitscope.exe ever sees it.
+echo "$OUTPUT" | grep -q ": $REPORT_BYTES byte(s) exceeds the $TOO_SMALL byte limit (--max-inventory-file-bytes to override)" \
     || fail "expected a clear error naming the exact byte count/limit/override flag, got: $OUTPUT"
 echo "$OUTPUT" | grep -q "^merged:" && fail "expected no merged-report output once the size ceiling rejected the input"
 

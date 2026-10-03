@@ -17267,9 +17267,9 @@ it done as its own patch.
     observing the real binary's actual output, never assumed.
 
     **Remaining from patch282:** F6 (an `observation_status`/`reasons` property, not a defect --
-    fixed next, item 123), F7 (build/dependency-version pinning and SBOM, future hardening), and
-    F8 (an even louder "NOT VALIDATED" banner on generated firewall ACLs) are still open and
-    unscheduled -- Jurgen has not yet directed which, if any, to take up next.
+    fixed next, item 123), F7 (build/dependency-version pinning and SBOM, fixed after that, item
+    124), and F8 (an even louder "NOT VALIDATED" banner on generated firewall ACLs) are still
+    open and unscheduled -- Jurgen has not yet directed which, if any, to take up next.
 
 123. **A closed-enum `observation_status`/`observation_reasons` property across every report
     engine, plus a `merge inventory` crash found while building it.**
@@ -17410,9 +17410,354 @@ it done as its own patch.
     sequence (cmsys' regex engine doesn't interpret the latter as one), by cross-checking three
     other already-passing LEEF tests' own regex literals before guessing.
 
-    **Remaining from patch282:** F7 (build/dependency-version pinning and SBOM, future hardening)
-    and F8 (an even louder "NOT VALIDATED" banner on generated firewall ACLs) are still open and
-    unscheduled -- Jurgen has not yet directed which, if any, to take up next.
+    **Remaining from patch282:** F7 (build/dependency-version pinning and SBOM, fixed next, item
+    124) and F8 (an even louder "NOT VALIDATED" banner on generated firewall ACLs, fixed after
+    that, item 125) are still open and unscheduled -- Jurgen has not yet directed which, if any,
+    to take up next.
+
+124. **patch282 security review finding 7 (F7, "Low/Medium" -- release build/reproducibility
+    hardening lags the CI workflow's own SHA-pinning), docs/reviews/2026-09-chatgpt-security-
+    review-patch282.md.** Jurgen asked for this one next, right after item 123 (F6). **Done, with
+    two of the review's own six suggested items deliberately scoped out and documented as such,
+    not silently skipped.**
+
+    **The finding.** CI itself (`.github/workflows/ci.yml`) is already well-hardened -- every
+    GitHub Action pinned to an immutable commit SHA, the Npcap SDK download checksum-verified
+    before use (both item 15, an earlier review's own finding). What F7 points out is that the
+    *release artifacts that CI produces* don't get the same treatment: `apt-get install libpcap-
+    dev` floats on whatever the Ubuntu archive mirror currently serves, nothing records exactly
+    what a given release binary was built with beyond its own `conduitscope version` string, and
+    nobody had actually checked whether the Release build is reproducible across different build
+    environments or was just assumed to be. The review's own suggested direction: "pinned build
+    container; pinned compiler; pinned libpcap version; SBOM; dependency/license manifest;
+    reproducible build verification" -- six distinct, loosely related items, explicitly framed by
+    the review itself as "future hardening, not a current vulnerability."
+
+    **What was done, and what was deliberately left out.** Rather than attempt all six
+    superficially, three were implemented for real and verified end-to-end in this environment,
+    and two were scoped out with a specific, documented engineering reason rather than silently
+    dropped (the sixth, a pinned compiler, is subsumed by the build-provenance manifest below,
+    which records the exact compiler used per build rather than trying to force every build host
+    onto one fixed compiler install):
+
+    - **Reproducible build verification -- done, and the result was a genuine (positive)
+      finding, not a fix.** New `tools/verify_reproducible_build.sh`: copies only the files an
+      out-of-tree build needs (`CMakeLists.txt`, `src/`, `include/`, `third_party/`, `tools/` --
+      never a checkout's own `build*/` directories) into two scratch directories at deliberately
+      mismatched absolute paths (one short, one long and nested many levels deeper under an
+      unrelated subtree), builds `-DCMAKE_BUILD_TYPE=Release` in both, strips both binaries, and
+      fails loudly if their SHA-256 hashes differ. Run for real multiple times while writing this
+      item (including an adversarial variant with out-of-tree build directories at completely
+      unrelated paths, not just differently-named subdirectories of the two source copies): the
+      Release binary is **already** byte-for-byte identical regardless of build/source path,
+      today, with no new compiler flag needed -- because this codebase never uses `__DATE__`/
+      `__TIME__`/`__FILE__`/`__LINE__` in a way that reaches compiled Release code (grep finds
+      `assert()` in exactly three files, and CMake's own default `CMAKE_CXX_FLAGS_RELEASE`
+      already defines `NDEBUG`, which makes `assert()` expand to nothing), and Release carries no
+      `-g` debug info (so no `DW_AT_comp_dir`/`DW_AT_name` absolute-path records to leak either).
+      This script exists so that property is continuously re-verified going forward -- wired into
+      a new CI job, `reproducible-build-check` (`.github/workflows/ci.yml`), gated the same as
+      `build-and-test` -- rather than remaining a one-time claim: a future change that adds `-g`
+      to a shipped config, or introduces a `__FILE__`/`__DATE__` use that reaches compiled code,
+      will now fail this job loudly instead of silently shipping a build that's no longer actually
+      reproducible.
+    - **Build-provenance manifest ("SBOM" + "dependency/license manifest" together) -- done, as
+      a small hand-rolled record, deliberately not a full SPDX/CycloneDX SBOM.** New
+      `tools/generate_build_manifest.sh`: given a built `conduitscope` binary, writes a JSON
+      document recording that build's `conduitscope version` output (version, compiler id +
+      version, OS, build type -- parsed back from the binary's own reported string rather than
+      duplicating CMake's `CMAKE_CXX_COMPILER_ID`/`VERSION` logic separately), the exact `libpcap-
+      dev` package version actually installed on the build host (`dpkg-query`, with an honest
+      fallback string when unavailable -- e.g. a `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` build),
+      the vendored CLI11 version (read back from `third_party/CLI11/README.md`'s own "Version
+      vendored" line -- a single source of truth, never a second hardcoded copy that could drift
+      from it), the build host's kernel/architecture, the commit built from (CI's own `GITHUB_SHA`
+      when set, "unknown" otherwise -- this repository's own sandbox checkout has no VCS metadata
+      to fall back on), and a UTC timestamp. Wired into the `release` CI job: run against the
+      already-staged, already-stripped binary right after the existing Package step, and attached
+      as a new release asset (`conduitscope-X.Y.Z-linux-x86_64.manifest.json`) alongside the
+      existing archive and `.sha256` checksum in the same `gh release create` call. New
+      `docs/THIRD_PARTY_NOTICES.md` is the consolidated, discoverable landing page this finding
+      was really asking for: conduitscope's own Apache-2.0 license, CLI11's existing detailed
+      provenance note (pointed at, not duplicated), libpcap as a dynamically-linked, never-
+      redistributed system dependency (BSD-3-Clause), the Npcap SDK as build-time-only on Windows
+      (never bundled into the shipped `.exe`, which delay-loads the end user's own separately-
+      installed Npcap runtime), and CI's own already-SHA-pinned GitHub Actions -- linked from
+      README.md's own Documentation section.
+    - **Pinned build container -- deliberately scoped out.** Verifying a trustworthy container
+      image digest needs a route to a container registry; this environment's own egress policy
+      refuses one (confirmed: a direct check against Docker Hub's registry endpoint was blocked
+      by the sandbox's proxy, the same class of restriction item 15 hit reaching npcap.com before
+      that fix's own hash value could be filled in by hand). Unlike that earlier case, this isn't
+      a single value to backfill later: migrating the release build into a container changes the
+      whole job's execution shape (the `CAP_NET_RAW` `setcap` grant path the live-capture tests
+      rely on, Windows SDK caching, the exact toolchain available), and GitHub's own hosted
+      runner images already receive their own security patches on a cadence a hand-pinned
+      container would then become responsible for re-pinning to keep receiving -- landing that
+      unverified risks shipping a CI change that has never actually run green for real, for a
+      genuine tradeoff rather than a pure improvement. Documented in `docs/THIRD_PARTY_NOTICES.md`
+      with this reasoning, not silently dropped.
+    - **Hard `libpcap-dev` version pin -- deliberately scoped out.** `apt-get install libpcap-
+      dev=<exact version>` only keeps working for as long as that exact version stays the
+      *current* candidate in the live Ubuntu archive mirror CI's `apt-get update` reaches --
+      `archive.ubuntu.com` doesn't retain superseded package versions the way a dedicated
+      snapshot service would, so a naive hard pin is a time bomb: it works right up until the
+      next ordinary `libpcap` security update lands upstream, at which point every CI run starts
+      failing with "Version '<pinned>' for 'libpcap-dev' was not found" for a reason that has
+      nothing to do with this project's own code (confirmed real and current in this sandbox:
+      `apt-cache policy libpcap-dev` shows exactly one candidate version available, `1.10.4-
+      4.1ubuntu3`, not a history of versions to pin against). Genuinely pinning libpcap the way
+      the Npcap SDK is pinned would mean vendoring a specific upstream source tarball with a
+      verified checksum and building it from source in every job -- a real option, but a
+      materially bigger lift than this pass's scope, not attempted half-way. What this pass does
+      instead: the build-provenance manifest above records the *exact* version actually used for
+      each specific release, after the fact -- the traceability the finding was really asking
+      for, without pretending to control an upstream archive this project doesn't own. Documented
+      in `docs/THIRD_PARTY_NOTICES.md`'s own "What's deliberately not pinned" section.
+
+    **New/changed files.** `tools/verify_reproducible_build.sh` (new), `tools/
+    generate_build_manifest.sh` (new), `docs/THIRD_PARTY_NOTICES.md` (new, linked from README.md's
+    Documentation section), `.github/workflows/ci.yml` (new `reproducible-build-check` job; new
+    "Generate build-provenance manifest" step plus the manifest added to the `release` job's `gh
+    release create` asset list), `CMakeLists.txt` (one new CTest case, below).
+
+    **New test.** `generate_build_manifest_produces_expected_fields`: runs `tools/
+    generate_build_manifest.sh` against the real built `$<TARGET_FILE:conduitscope>` and matches
+    the exact JSON shape it writes to stdout. Deliberately does NOT test `tools/
+    verify_reproducible_build.sh` the same way -- that script runs two full nested `cmake`/`cmake
+    --build` invocations of its own (confirmed: roughly as long as one ordinary full build, each
+    run), real build time that belongs in its own dedicated CI job (`reproducible-build-check`),
+    not inside the default CTest suite this project's own verification convention runs
+    repeatedly end-to-end across four separate build configs every time; it was instead run
+    directly, by hand, multiple times (including an adversarial out-of-tree-build-directory
+    variant) while writing this item, as described above.
+
+    **Verification.** `tools/verify_reproducible_build.sh` run directly against this checkout:
+    PASS, identical SHA-256 across two builds at deliberately mismatched absolute paths, both
+    with the default in-tree build-directory shape and with fully out-of-tree build directories
+    at unrelated paths/depths. `tools/generate_build_manifest.sh` run directly against the
+    default build's binary and against the `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` build's
+    binary, output checked by hand and validated as well-formed JSON (`python3 -m json.tool`).
+    Default build: full CTest suite, 2492/2492 passing (2491 before this item, +1 for the new
+    manifest-shape test). Clang ASan/UBSan (`build-fuzz`): 2570/2570 -- the new test's regex
+    needed one fix mid-verification (it hardcoded `"build_type": "Release build"`, which this
+    config's own `-DCMAKE_BUILD_TYPE=Debug` naturally fails; generalized to `[^"]+` since the
+    test's actual job is checking the manifest's *shape*, not re-asserting which build type a
+    given CTest run happens to use). `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` (`build_nolive`):
+    2474/2474. MinGW cross-compile (`build-mingw`): rebuilt clean, build-only as usual (this
+    item's new shell-script tooling is Linux-only by design -- see `tools/
+    generate_build_manifest.sh`'s own header comment for why Windows wasn't folded into the same
+    script). A full clean-room extract-rebuild-test cycle (fresh copy excluding build
+    directories, configure, build, full CTest): 2492/2492, zero failures.
+
+    **Remaining from patch282:** F8 (an even louder "NOT VALIDATED" banner on generated firewall
+    ACLs, fixed next, item 125) is the only item left open.
+
+125. **patch282 security review finding 8 (F8, "Low" -- generated firewall configurations
+    remain operationally dangerous despite warnings), docs/reviews/2026-09-chatgpt-security-
+    review-patch282.md.** Jurgen asked for this one next, right after item 124 (F7), in the same
+    message that also set the project's version to v0.3.2 (see below). **Done.** The last of the
+    eight patch282 findings -- F1-F8 are now all either fixed or, for F7's two items, deliberately
+    scoped out with documented reasoning (item 124).
+
+    **The finding.** The review's own words: `inventory --acl-out` already marks its output
+    `FIRST-DRAFT firewall ACL derived from observed traffic` and says to review before deploying
+    -- "that's good" -- but the review judged a single calm sentence too easy to skim past in a
+    wall of `object-group`/`config firewall`/`set` commands, especially given the review's own
+    standing observation about this feature: `observed != intended` and `absence from capture !=
+    forbidden` (a capture seeing zone A talk to zone B over Modbus doesn't mean that's the only
+    traffic that should ever be permitted, or even traffic anyone intended to allow). The review's
+    own suggested fix was an explicit, louder banner:
+    ```
+    CONDUITSCOPE GENERATED DRAFT
+    NOT VALIDATED
+    NOT SAFE FOR DIRECT DEPLOYMENT
+    ```
+    and "possibly require an explicit `--i-understand-this-is-a-draft` type flag **if you ever
+    introduce direct deployment tooling**." The review itself classified this as "an accepted
+    design risk, not a code defect" -- it isn't asking for the feature to change behavior, only
+    to make the existing warning harder to miss.
+
+    **What was done.** `write_acl_draft_header` (`src/asset_inventory.cpp`), the one function
+    shared by all three ACL dialect renderers (`write_inventory_acl_cisco`/`_fortinet`/
+    `_paloalto`), now opens with two loud, all-caps lines directly echoing the review's own
+    wording, ahead of the pre-existing fuller explanation (kept verbatim, unchanged):
+    ```
+    ! *** CONDUITSCOPE GENERATED DRAFT -- NOT VALIDATED ***
+    ! *** NOT SAFE FOR DIRECT DEPLOYMENT -- REVIEW BEFORE USE ***
+    !
+    ! Auto-generated by `conduitscope inventory` -- a FIRST-DRAFT firewall ACL derived from
+    ! observed traffic (inferred zones/conduits), NOT a reviewed, ready-to-deploy ruleset.
+    ! Review before deploying -- ...
+    ```
+    (`!` for Cisco, `#` for FortiGate/Palo Alto -- each dialect's own existing comment
+    character, unchanged). Uses this codebase's own pre-existing "loud banner" convention
+    (`***`-wrapping, the same one `*** OBSERVATION INCOMPLETE ***`/`*** CAPTURE INCOMPLETE ***`
+    already use in `asset_inventory.cpp`/`baseline.cpp`/`detect_engine.cpp`/`cli_main.cpp`)
+    rather than inventing a new ASCII-box style for just this one warning -- deliberately NOT a
+    verbatim copy of the review's own three-line example, which would have been a style
+    inconsistency with every other loud warning this tool already prints.
+
+    **The `--i-understand-this-is-a-draft`-type flag was deliberately not added.** The review's
+    own wording conditions it on "if you ever introduce direct deployment tooling" -- conduitscope
+    has none: `--acl-out` only ever writes a draft file to disk, there is no `deploy`/`push`
+    subcommand, no SSH/API client to a real firewall, nothing that would need gating. Adding a
+    confirmation flag in front of a file-write that already requires the operator to explicitly
+    pass `--acl-out PATH` in the first place would be solving a problem this tool doesn't have
+    yet, not closing a real gap -- the honest thing is to not add speculative complexity for
+    tooling that doesn't exist, and to revisit this if direct-deployment tooling is ever actually
+    built (at which point the review's own suggestion is exactly right).
+
+    **Scope: ACL output only, not `--policy-out`.** The review's own finding is specifically about
+    "generated firewall configurations" (the FortiGate/Palo Alto/Cisco ACL dialects) -- the
+    separate `--policy-out` YAML file (meant to be loaded back into `conduitscope policy validate`,
+    a read path inside this same tool, never pushed to a live device) carries a different,
+    materially lower risk and keeps its own existing, unchanged "FIRST-DRAFT zone/conduit policy"
+    header (`write_inventory_policy_yaml`).
+
+    **Version bump to v0.3.2.** Jurgen's own explicit instruction, given in the same message as
+    this item. `CMakeLists.txt`'s `project(conduitscope VERSION ...)` now reads `0.3.2` (was
+    `0.2.9`); every place that quotes a live `conduitscope version`/`--version` output or a
+    SIEM-export example containing that version string was updated to match --
+    `docs/USER_GUIDE.md`'s two `evidence` worked-example "tool version:" lines and its CEF
+    `policy`/`detect` example lines, and README.md's own "Status" line (which also had its own
+    separately-stale test count fixed in the same edit: 2223 -> 2493, the actual current total).
+    `docs/DEVELOPMENT.md`'s own historical entries that quote a past `conduitscope 0.2.9` output
+    as a point-in-time record of what that earlier item's own verification actually ran against
+    (items 92's `--version`/`version` discrepancy writeup, 123's own verification note) were
+    deliberately left as `0.2.9` -- they're historical fact about what version was running
+    at the time, not a live claim that needs to track the current one.
+
+    **New test.** `inventory_acl_out_has_loud_not_validated_banner`: runs `inventory --acl-out`
+    in all three dialects against `tests/sample_inventory.pcap` and positively asserts the new
+    banner's exact text appears in each one's own comment-character flavor. Deliberately a new,
+    dedicated test rather than relying only on `inventory_diagram_and_policy_out_smoke`'s own
+    giant combined regex -- that test's existing `.*` between each `=== acl-out (...) ===` marker
+    and the pre-existing "Auto-generated by" sentence *tolerates* this banner's presence but would
+    not have caught its removal, so it was extended (three `.*` insertions, one per dialect) to
+    keep passing rather than to prove the banner exists; this new test is the one that actually
+    proves it.
+
+    **Verification.** Manually run against the real built binary in all three dialects before
+    writing the new test's regex, matching this project's own standing rule. Default build: full
+    CTest suite, 2493/2493 passing (2492 before this item, +1 for the new banner test). Clang
+    ASan/UBSan (`build-fuzz`): 2571/2571. `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    (`build_nolive`): 2475/2475. MinGW cross-compile (`build-mingw`): rebuilt clean, build-only as
+    usual, `conduitscope.exe version` not directly runnable here but the version string is
+    compiled in via the same `version.hpp.in`/`CONDUITSCOPE_REPORTED_VERSION` path every other
+    config uses. A full clean-room extract-rebuild-test cycle (fresh copy excluding build
+    directories, configure, build, full CTest): 2493/2493, zero failures, `conduitscope version`
+    confirmed reporting `0.3.2`.
+
+    **All eight patch282 findings are now accounted for:** F1-F4 confirmed-and-fixed (items
+    110-113), F5/F6 fixed (items 122-123), F7 fixed with two sub-items deliberately scoped out and
+    documented (item 124), F8 fixed (this item). Jurgen has not yet directed what to take up next.
+
+126. **Windows CI false-positive: `merge_inventory_oversize_rejected_before_read`'s own test
+    script compared against an untranslated path, not a production defect.** Jurgen pasted a real
+    GitHub Actions Windows CI failure with no further instruction:
+    ```
+    error: report file 'C:/Users/RUNNER~1/AppData/Local/Temp/tmp.d0QKr1nw94/report.json':
+    2193 byte(s) exceeds the 2192 byte limit (--max-inventory-file-bytes to override)
+    FAIL: expected a clear error naming the exact byte count/limit/override flag, got: ...
+    ```
+    **Done.**
+
+    **The finding.** `conduitscope.exe`'s own error message is completely correct -- it names the
+    right path, the right byte count (2193), the right limit (2192), and the right override flag.
+    The failure is entirely in `tests/merge_inventory_oversize_smoke.sh`'s own assertion
+    (item 122/F5's test, see that script's header). On Linux this script's `grep -q` check
+    compares the real error text against a pattern built from its own `$SCRATCH` shell variable
+    (a `mktemp -d` path) and matches. On the Windows CI runner, this script runs under Git Bash/
+    MSYS2, which automatically translates a POSIX-style path into its Windows-native form
+    (`/tmp/xyz/report.json` -> `C:/Users/RUNNER~1/...`) when that path is passed as an argument to
+    a native `.exe` -- so `conduitscope.exe` legitimately receives and echoes back the translated,
+    Windows-native path, while the bash script's own `$SCRATCH` variable still holds the original,
+    untranslated form. The `grep` pattern, built from `$SCRATCH`, therefore no longer textually
+    matches the real (correct) error message, and the test fails on a code path that is actually
+    working as intended.
+
+    **What was done.** Relaxed the `grep -q` pattern in `tests/merge_inventory_oversize_smoke.sh`
+    to drop the literal `'$SCRATCH/report.json'` path prefix and match only the platform-
+    independent substantive suffix the test's own comment says it's actually proving: `": $REPORT_
+    BYTES byte(s) exceeds the $TOO_SMALL byte limit (--max-inventory-file-bytes to override)"` --
+    still positively proves the exact byte count, the exact limit, and the exact override-flag
+    name are all present in the error, without being tied to any particular path representation.
+    Added a NOTE directly in the script's header comment explaining the Git-Bash path-translation
+    root cause, matching this project's established practice of documenting a root-caused CI-only
+    bug directly in the fixed test script (see `tests/merge_inventory_truncated_input_smoke.sh`'s
+    own such note from an earlier item). No production code changed -- `src/inventory_merge.cpp`'s
+    error-reporting path is correct as-is and was not touched.
+
+    **Proactively checked for the same anti-pattern elsewhere.** Searched every `tests/*.sh` script
+    for a `grep` expected-output pattern that embeds a literal path variable (`$SCRATCH` or
+    similar) the way this one did. Confirmed this was the only occurrence in the entire test
+    suite -- every other script's assertions either don't name a path at all or (like
+    `tests/merge_inventory_truncated_input_smoke.sh`, item 123's own test) already match only the
+    platform-independent substance of the error message.
+
+    **Verification.** No source file or `CMakeLists.txt` changed -- only the one test script, so a
+    rebuild was not strictly required, but the default build was rebuilt anyway to confirm nothing
+    else was disturbed. `ctest -R merge_inventory_oversize_rejected_before_read`: passes. Full
+    default-build CTest suite: 2493/2493 (unchanged count -- this item fixes an existing test's
+    assertion, it doesn't add or remove one). Clang ASan/UBSan (`build-fuzz`): 2571/2571. `-DCON
+    DUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` (`build_nolive`): 2475/2475. MinGW cross-compile
+    (`build-mingw`): not rebuilt -- build-only, no tests run there, and nothing it builds from
+    changed. A full clean-room extract-rebuild-test cycle (fresh copy excluding build directories,
+    configure, build, full CTest): 2493/2493, zero failures. The original failure was only ever
+    reproducible on a real Windows/Git-Bash runner (this sandbox is Linux), so the fix's soundness
+    rests on the root-cause analysis above (the production error message's own path-echoing
+    behavior was confirmed correct, and the new pattern was checked to still require every
+    substantive field the test cares about) rather than a direct Windows repro.
+
+127. **CI "Generate build-provenance manifest" step: `Permission denied` (exit 126) running
+    `tools/generate_build_manifest.sh` directly.** Jurgen pasted a real GitHub Actions release-job
+    failure with no further instruction:
+    ```
+    tools/generate_build_manifest.sh "/tmp/${name}/conduitscope" "${manifest}"
+    .../fd5c7332....sh: line 4: tools/generate_build_manifest.sh: Permission denied
+    Error: Process completed with exit code 126.
+    ```
+    **Done.**
+
+    **The finding.** `tools/generate_build_manifest.sh` itself (item 124) is fine -- its shebang
+    (`#!/usr/bin/env bash`) is correct and it carries the executable bit in this sandbox's own
+    checkout. The release job's "Generate build-provenance manifest" step
+    (`.github/workflows/ci.yml`) invoked it directly, `tools/generate_build_manifest.sh ...` with
+    no interpreter named, which only works if the executable bit survives however the file reached
+    the runner's checkout -- and on Jurgen's real repository it evidently didn't (this project
+    keeps no git history on this side of the delivery; files are integrated into Jurgen's own repo
+    by hand from each delivered zip, and an executable bit is exactly the kind of per-file
+    metadata that doesn't reliably survive a zip-extract-then-add round trip done in a GUI tool or
+    on a filesystem that doesn't track it). This project's own two sibling call sites for this
+    exact pair of scripts already avoid that dependency entirely: `CMakeLists.txt`'s
+    `generate_build_manifest_produces_expected_fields` test invokes it as
+    `COMMAND bash ".../generate_build_manifest.sh" ...`, and the CI release job's own "Reproducible
+    build verification" step invokes `verify_reproducible_build.sh` the same safe way (`run: bash
+    tools/verify_reproducible_build.sh .`). The one broken call site was the only one of the three
+    that didn't follow that convention.
+
+    **What was done.** One-line fix in `.github/workflows/ci.yml`'s "Generate build-provenance
+    manifest" step: `tools/generate_build_manifest.sh "/tmp/${name}/conduitscope" "${manifest}"` ->
+    `bash tools/generate_build_manifest.sh "/tmp/${name}/conduitscope" "${manifest}"` -- matching
+    the convention already used at the other two call sites. This removes the dependency on the
+    executable bit entirely rather than just telling Jurgen to `chmod +x` the file in his own repo
+    (which would leave the same trap for the next file added the same way).
+
+    **Reproduced locally before and after the fix**, since this sandbox's own checkout already has
+    the executable bit set and so can't show the failure by just running the script normally:
+    temporarily `chmod -x tools/generate_build_manifest.sh`, then confirmed direct invocation
+    (`tools/generate_build_manifest.sh ...`) fails with the exact same `Permission denied`/exit 126
+    as the pasted CI log, and `bash tools/generate_build_manifest.sh ...` succeeds and produces a
+    correct manifest regardless of the executable bit -- then restored the bit.
+
+    **Verification.** This is a CI-workflow-only change (no C++ source, `CMakeLists.txt`, or test
+    script touched), so the standing four-build-config/clean-room bar doesn't exercise it --
+    nothing in that bar runs GitHub Actions workflows. Verified instead: `.github/workflows/ci.yml`
+    still parses as valid YAML (`python3 -c "import yaml; yaml.safe_load(open(...))"`), the
+    existing `generate_build_manifest_produces_expected_fields` CTest case still passes unchanged
+    (it already used the safe `bash` form), and the local repro above using the real built
+    `build/conduitscope` binary.
 
 ### Protocols not covered at all
 

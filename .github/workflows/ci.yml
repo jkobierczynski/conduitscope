@@ -6,7 +6,10 @@ name: CI
 # per-harness fuzzing campaigns on a nightly schedule. See docs/DEVELOPMENT.md's "External code
 # review and engineering priorities" section (ROADMAP items 2 and 6) for the reasoning and the
 # adopted order (CI first, sanitizers/fuzzing next -- this workflow -- the decoder
-# registration-model refactor after that).
+# registration-model refactor after that). The `reproducible-build-check` job and the `release`
+# job's build-provenance manifest step are docs/DEVELOPMENT.md ROADMAP item 124 (patch282
+# security review finding 7) -- see that item and docs/THIRD_PARTY_NOTICES.md for what they cover
+# and, just as importantly, what was deliberately left out of that pass and why.
 #
 # Every `uses:` line below is pinned to an immutable commit SHA, not a mutable tag like `@v4`
 # (docs/DEVELOPMENT.md ROADMAP item 15, docs/reviews/2026-09-chatgpt-security-review-patch160.md
@@ -470,6 +473,22 @@ jobs:
           echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
+      # docs/DEVELOPMENT.md ROADMAP item 124 (patch282 security review finding 7 -- "SBOM,
+      # dependency/license manifest"). See tools/generate_build_manifest.sh's own header comment
+      # and docs/THIRD_PARTY_NOTICES.md for exactly what this records and why it's deliberately a
+      # small hand-rolled document rather than a full SPDX/CycloneDX SBOM. Run against the
+      # already-staged, already-stripped binary from the Package step above (not build/
+      # conduitscope directly) so the manifest's own reported compiler/version fields describe
+      # the exact bytes actually being shipped in this release's archive.
+      - name: Generate build-provenance manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          name="conduitscope-${{ steps.version.outputs.version }}-linux-x86_64"
+          manifest="${name}.manifest.json"
+          bash tools/generate_build_manifest.sh "/tmp/${name}/conduitscope" "${manifest}"
+          echo "manifest=${manifest}" >> "$GITHUB_OUTPUT"
+
       - name: Download Windows binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -497,6 +516,7 @@ jobs:
           gh release create "${tag}" \
             "${{ steps.package.outputs.archive }}" \
             "${{ steps.package.outputs.checksum }}" \
+            "${{ steps.manifest.outputs.manifest }}" \
             windows-release-binary/* \
             --title "conduitscope ${{ steps.version.outputs.version }}" \
             --generate-notes
@@ -528,6 +548,28 @@ jobs:
       - name: Test
         working-directory: build
         run: ctest -j"$(nproc)" --output-on-failure
+
+  reproducible-build-check:
+    # docs/DEVELOPMENT.md ROADMAP item 124 (patch282 security review finding 7 -- "release
+    # reproducibility is still not deterministic" -- the review's own suggested "reproducible
+    # build verification" item). Runs tools/verify_reproducible_build.sh, which builds the
+    # Release configuration TWICE from two independently-copied checkouts at two deliberately
+    # different, differently-shaped absolute paths and diffs the two stripped binaries -- see
+    # that script's own header comment for why this project's current Release configuration
+    # already passes this today (NDEBUG strips every assert(), and Release carries no -g debug
+    # info, so nothing currently embeds an absolute path into the compiled output) and why this
+    # check exists anyway: to catch a FUTURE change that reintroduces that dependency (e.g. -g
+    # added to a shipped config, or a new __FILE__/__DATE__ use that reaches compiled code)
+    # before it ships, rather than relying on this comment's claim staying true forever.
+    name: Reproducible build verification
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Verify Release build is path-independent
+        run: bash tools/verify_reproducible_build.sh .
 
   scheduled-fuzz:
     # The other half of docs/DEVELOPMENT.md's ROADMAP item 6: materially longer, dedicated
