@@ -395,6 +395,25 @@ input the way decoded network traffic is. Ordinary expressions, however
 long or deeply parenthesized a person would realistically write by hand,
 are nowhere near any of these ceilings.
 
+A `matches` pattern shaped like a quantified group whose own content is
+itself quantified (e.g. `(a+)+`) prints a `note:` warning at the same
+compile-time check, but is NOT rejected -- this shape is a classic
+catastrophic-backtracking ("ReDoS") risk for `std::regex`'s backtracking
+engine, and this filter evaluates against every packet, so a pathological
+pattern matched against an adversarial field value can take seconds or
+more per packet. The check is a syntactic heuristic, not a proof: it
+reliably catches this one specific shape and nothing else (an overlapping
+alternation like `(a|a)*` is a different ReDoS shape it does not catch),
+so the absence of a warning is not a guarantee the pattern is safe, and
+the warning's presence is not a guarantee it actually is slow against real
+data -- it's a nudge to simplify the pattern before running it against
+live or high-volume traffic. `--quiet` suppresses it like every other
+compile-time note. See docs/DEVELOPMENT.md ROADMAP item 136 and
+`docs/reviews/2026-10-chatgpt-security-review-patch295.md` finding F4 for
+the full reasoning, including why a stricter fix (rejecting the pattern,
+capping matched-value length, or a wall-clock execution deadline) was
+considered and not built.
+
 `ip.src`/`ip.dst` compare as exact text only in this pass -- no CIDR or
 range matching (`ip.src == 10.1.2.0/24` is not supported); only `==`/`!=`
 and `in {...}`. Using an ordering operator (`<`/`<=`/`>`/`>=`) against an

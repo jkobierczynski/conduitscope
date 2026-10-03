@@ -4763,10 +4763,20 @@ int main(int argc, char** argv) {
                 }
             }
             std::string display_filter_error;
-            decode_display_filter_compiled = compile_display_filter(decode_display_filter, &display_filter_error);
+            // F4 (item 136, docs/DEVELOPMENT.md): compile_display_filter can now also return
+            // non-fatal warnings (today, just the catastrophic-backtracking regex heuristic) --
+            // printed the same way resolver_notes are above, unconditionally to `diag` unless
+            // --quiet, since like those notes this describes the run's configuration (a filter
+            // expression accepted at compile time) rather than any one packet.
+            std::vector<std::string> display_filter_warnings;
+            decode_display_filter_compiled =
+                compile_display_filter(decode_display_filter, &display_filter_error, &display_filter_warnings);
             if (!decode_display_filter_compiled) {
                 std::cerr << display_filter_error;
                 return 1;
+            }
+            if (!quiet) {
+                for (const auto& warning : display_filter_warnings) *diag << "note: " << warning << "\n";
             }
         }
 

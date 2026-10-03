@@ -89,7 +89,24 @@ with 2,000,000 nesting levels crashed the whole process outright (a real
 stack overflow) -- exactly the "256 MiB file-size limit != bounded parser
 recursion" distinction this finding names.
 
-F4-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
+**Update: F4 is addressed**, deliberately scoped down from the "long-term"
+fix this finding itself floats (replacing `std::regex`, or restricting the
+`matches` grammar) -- matching this finding's own explicit framing that
+it's "not a remote vulnerability" and not worth engineering time right now.
+Jurgen asked for this one next. See [DEVELOPMENT.md](../DEVELOPMENT.md)'s
+ROADMAP item 136 for the full writeup: `-Y`'s `matches` operator now flags
+(via a `note:`, not a rejection) patterns shaped like a quantified group
+whose own content is itself quantified (e.g. `(a+)+`), the classic
+catastrophic-backtracking shape, with measured timing confirming the
+exponential blowup is real (59.7ms at 20 characters against a non-matching
+string, 3973.3ms at 26). Two stricter mitigations (a length cap on the
+matched-against value; a wall-clock execution deadline around the match)
+were considered and explicitly rejected -- see item 136 for why. The
+heuristic itself is documented as exactly that: it reliably catches this
+one pattern shape and nothing else (an overlapping alternation like
+`(a|a)*` is a different ReDoS shape it won't catch).
+
+F5-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
 which, if any, to take up next.
 
 The commit hash and any test-count/line/file references below reflect the

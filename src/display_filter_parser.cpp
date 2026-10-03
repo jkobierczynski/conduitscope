@@ -303,6 +303,81 @@ constexpr int kMaxNestingDepth = 128;                // combined '(' / '!'/'not'
 constexpr size_t kMaxSetMembers = 512;              // literals in one `in {...}` clause
 constexpr size_t kMaxRegexLength = 4096;             // characters in one `matches "..."` pattern
 
+// F4 mitigation (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 136,
+// DEVELOPMENT.md): `-Y matches` compiles an operator-supplied pattern into a `std::regex`
+// (ECMAScript syntax, a backtracking NFA engine) -- F2/item 112 already fixed compiling it once
+// per filter rather than once per packet, and kMaxRegexLength above bounds the pattern's own
+// length, but neither stops the single most common catastrophic-backtracking ("ReDoS") SHAPE: a
+// quantified group whose own inner content is ITSELF quantified, e.g. `(a+)+`, `(a*)+`, `(a+)*`,
+// `(a*)*`. Measured directly against std::regex before writing this: `(a+)+$` evaluated (via
+// std::regex_search, exactly how evaluate()'s own Matches case calls it below) against a
+// NON-matching string of just 26 'a' characters already took ~4 seconds on this machine -- time
+// roughly doubles with EVERY added character, so the blowup is intractable well before any
+// realistic field value's length, let alone this file's own 4096-character PATTERN ceiling (which
+// bounds the pattern text, not the VALUE it's matched against -- a decoded packet field's string
+// length has no such ceiling here).
+//
+// The review's own "Long-term recommendation" (a linear-time regex engine, or a deliberately
+// restricted grammar) is NOT attempted here -- explicitly out of scope, see item 136's own
+// writeup for why a length cap on the matched-against value was considered and rejected too (the
+// same measured exponential blowup means no single length ceiling is both small enough to be
+// genuinely safe against an arbitrary pathological pattern and large enough to stay useful for
+// real OT field matching). What IS implemented: a lightweight, purely SYNTACTIC scan of the
+// pattern text for that one specific nested-quantifier shape, run once at compile time (the same
+// place node.compiled_regex itself is constructed), surfaced as a `note:` WARNING -- never a hard
+// rejection, because this is a heuristic, not a proof: it catches the exact shape this finding's
+// own worked example uses (confirmed against 19 cases, including realistic field-matching
+// patterns with character classes/alternation/bounded quantifiers that must NOT be flagged,
+// before this was wired in), but a different ReDoS shape (e.g. overlapping alternation like
+// `(a|a)*`) would slip past it undetected -- rejecting outright on an unproven heuristic would
+// risk blocking a legitimate pattern an operator actually wants, which is a worse day-2 outcome
+// than a missed warning for what the review itself already scores Low/Medium and "not a remote
+// vulnerability" (the regex is operator-authored, never packet-derived -- an attacker can shape a
+// FIELD VALUE a filter happens to evaluate against, but never the pattern itself).
+bool looks_like_nested_quantifier_redos(const std::string& pattern) {
+    struct Group {
+        bool saw_quantifier = false;  // did this group's own (direct) content include a bare +/*/{ ?
+    };
+    std::vector<Group> stack;
+    bool in_character_class = false;  // inside an UNescaped [...] -- +/*/{ are literal there, not quantifiers
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        char c = pattern[i];
+        if (c == '\\') {
+            ++i;  // skip the escaped character entirely -- an escaped ( ) [ ] + * { is never a metacharacter
+            continue;
+        }
+        if (in_character_class) {
+            if (c == ']') in_character_class = false;
+            continue;
+        }
+        if (c == '[') {
+            in_character_class = true;
+            continue;
+        }
+        if (c == '(') {
+            stack.push_back(Group{});
+            continue;
+        }
+        if (c == ')') {
+            if (stack.empty()) continue;  // unbalanced -- std::regex's own constructor will reject this
+            bool inner_had_quantifier = stack.back().saw_quantifier;
+            stack.pop_back();
+            bool followed_by_quantifier =
+                (i + 1 < pattern.size()) && (pattern[i + 1] == '+' || pattern[i + 1] == '*' || pattern[i + 1] == '{');
+            if (inner_had_quantifier && followed_by_quantifier) return true;
+            // Propagate up so a three-or-more-level nest like ((a+)+)+ is still caught even though
+            // the innermost (a+) alone, and the middle (a+)+ alone, are each individually checked
+            // as their own ) is reached first.
+            if (!stack.empty() && inner_had_quantifier) stack.back().saw_quantifier = true;
+            continue;
+        }
+        if ((c == '+' || c == '*' || c == '{') && !stack.empty()) {
+            stack.back().saw_quantifier = true;
+        }
+    }
+    return false;
+}
+
 class Parser {
 public:
     explicit Parser(const std::string& source) : lexer_(source) {
@@ -563,15 +638,20 @@ const char* kind_text(FilterValueKind k) {
 // into it -- every caller (this function's own recursive calls, and compile_display_filter()'s
 // initial call against the still-mutable `root` before it is wrapped in `shared_ptr<const
 // FilterNode>`) already holds a non-const FilterNode at this point, so this costs nothing.
-void type_check(FilterNode& node, const FieldRegistry& registry, const std::string& expr) {
+// `warnings`, when non-null, collects operator-facing advisory notes that don't warrant rejecting
+// an otherwise-valid filter -- today, only the F4 nested-quantifier-ReDoS heuristic (just above)
+// ever pushes one. Threaded through every recursive call so a warning from anywhere in the AST
+// reaches the caller.
+void type_check(FilterNode& node, const FieldRegistry& registry, const std::string& expr,
+                 std::vector<std::string>* warnings) {
     switch (node.kind) {
         case FilterNodeKind::And:
         case FilterNodeKind::Or:
-            type_check(*node.lhs, registry, expr);
-            type_check(*node.rhs, registry, expr);
+            type_check(*node.lhs, registry, expr, warnings);
+            type_check(*node.rhs, registry, expr, warnings);
             return;
         case FilterNodeKind::Not:
-            type_check(*node.lhs, registry, expr);
+            type_check(*node.lhs, registry, expr, warnings);
             return;
         case FilterNodeKind::Exists: {
             bool has_dot = node.field_name.find('.') != std::string::npos;
@@ -625,6 +705,19 @@ void type_check(FilterNode& node, const FieldRegistry& registry, const std::stri
                 throw std::runtime_error("'" + node.field_name + "' matches \"" +
                     node.literal.string_value + "\" is not a valid regular expression (" +
                     e.what() + ")");
+            }
+            // F4 mitigation: a syntactically valid regex can still risk catastrophic backtracking
+            // -- see looks_like_nested_quantifier_redos's own comment above for exactly what this
+            // catches and why it warns rather than rejects.
+            if (warnings && looks_like_nested_quantifier_redos(node.literal.string_value)) {
+                warnings->push_back(
+                    "'" + node.field_name + "' matches \"" + node.literal.string_value + "\" contains a "
+                    "quantified group whose own content is itself quantified (e.g. (a+)+) -- this shape "
+                    "is a classic catastrophic-backtracking risk: evaluated against certain packet field "
+                    "values, a single match attempt can take seconds or more, and this filter runs on "
+                    "every packet. Not rejected (this is a heuristic, not a proof the pattern is unsafe), "
+                    "but consider rewriting it without a repeated group around already-repeated content "
+                    "if this will run against live/high-volume traffic.");
             }
             return;
         }
@@ -813,7 +906,8 @@ bool CompiledDisplayFilter::matches(const DecodedPacket& dp) const {
     return evaluate(*root_, dp, FieldRegistry::instance());
 }
 
-std::optional<CompiledDisplayFilter> compile_display_filter(const std::string& expr, std::string* error) {
+std::optional<CompiledDisplayFilter> compile_display_filter(const std::string& expr, std::string* error,
+                                                              std::vector<std::string>* warnings) {
     // F3: the one complexity ceiling checked here rather than inside Parser -- see kMaxExpressionLength's
     // own comment above (this file's complexity-limits block). It has to be checked before anything else
     // touches `expr`, for two reasons: (1) it bounds the cost of every later step (lexing, parsing,
@@ -837,7 +931,7 @@ std::optional<CompiledDisplayFilter> compile_display_filter(const std::string& e
         const FieldRegistry& registry = FieldRegistry::instance();
         Parser parser(expr);
         std::shared_ptr<FilterNode> root = parser.parse_expression();
-        type_check(*root, registry, expr);
+        type_check(*root, registry, expr, warnings);
         return CompiledDisplayFilter(root, expr);
     } catch (const std::exception& e) {
         if (error) {

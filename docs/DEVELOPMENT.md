@@ -18261,6 +18261,109 @@ it done as its own patch.
     extract-rebuild-test cycle (2496/2496, matching the incremental build exactly), before delivery
     as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
 
+136. **Address patch295 finding F4: `std::regex` remains a potential CPU-amplification
+    mechanism** -- Jurgen's direct request, the fourth item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`, right after item 135 (F3).
+    **Done**, deliberately scoped down from the review's own "long-term" suggestion -- see below.
+
+    **The finding, and why it's handled differently from F1-F3.** `-Y`/`--filter`'s `matches`
+    operator (`display_filter_parser.cpp`) compiles an operator-supplied pattern straight into
+    `std::regex` (ECMAScript grammar) and evaluates it, via `std::regex_search`, against a packet
+    field's value on every single packet the run processes. `std::regex`'s ECMAScript engine is a
+    backtracking NFA: certain pattern shapes -- the classic one being a quantified group whose own
+    content is itself quantified, e.g. `(a+)+` -- have exponential worst-case time against an
+    adversarial input, the well-known "ReDoS" (Regular Expression Denial of Service) class. Unlike
+    F1-F3, the review's own text is explicit that this is NOT a remote vulnerability ("I would
+    **not** call this a remote vulnerability... I would **not spend engineering time on this
+    now**"), because the pattern is operator-authored CLI input, the same trust boundary -f/BPF and
+    --policy YAML already sit inside, confirmed by grep that `compile_display_filter`'s only call
+    site is `cli_main.cpp`'s `decode` subcommand handling -- never derived from packet/file content.
+    So this item's own bar for "proportionate" is deliberately lower than F1-F3's: no rejection, no
+    behavior change to what any existing, non-pathological `-Y` expression does, and the full
+    "long-term" fix the review itself floats (replacing `std::regex`, or restricting the matches
+    grammar) is explicitly NOT attempted here, matching the review's own stated priority.
+
+    **Measured first, before deciding what (if anything) to build.** Confirmed the exponential
+    blowup is real, not theoretical, with a standalone timing harness running
+    `std::regex_search` against `(a+)+$` on a non-matching string of increasing length: 59.7ms at
+    20 characters, 211.6ms at 22, 868.7ms at 24, 3973.3ms at 26 -- roughly doubling or worse per
+    1-2 extra characters. Two more aggressive mitigations were considered and explicitly rejected
+    before settling on the one below:
+    - **A length cap on the matched-against field value.** Rejected: because the blowup is
+      exponential, any ceiling small enough to be "safe" by this data (roughly 20-24 bytes) is far
+      too small to remain useful for real OT field matching (hostnames, service names, descriptive
+      strings routinely exceed that), while any ceiling large enough to stay useful (e.g. reusing
+      the existing 4096-character `kMaxRegexLength` pattern-length ceiling, applied to the VALUE
+      instead) would do essentially nothing against a genuinely pathological pattern -- the time at
+      that length is astronomical regardless.
+    - **A wall-clock execution deadline around `std::regex_search`** (e.g. run the match on a
+      worker thread, abandon it past a timeout). Rejected: `std::regex_search` cannot be safely
+      cancelled mid-match -- there's no cooperative cancellation point inside it -- so "abandon
+      past a timeout" really means leaking or detaching a thread that keeps burning CPU
+      indefinitely in the background, trading a hang for a slow leak. Disproportionate complexity
+      and a new category of resource problem, for a Low/Medium, operator-precondition-gated
+      finding the review itself says not to spend engineering time on.
+
+    **The fix: a syntactic warning, not a rejection.** Added
+    `looks_like_nested_quantifier_redos(pattern)` (`display_filter_parser.cpp`, anonymous
+    namespace): a single forward pass over the pattern string with a stack of per-group
+    "saw-a-quantifier" flags, honoring `\`-escapes and skipping `[...]` character-class content
+    (quantifier characters are literal there). On each `)`, it checks whether the group just
+    closed contained a bare `+`/`*`/`{` of its own AND is immediately followed by `+`/`*`/`{` --
+    catching `(a+)+`/`(a*)+`/`(a+)*`/`(a*)*`, non-capturing groups (`(?:...)`), and multi-level
+    nesting (e.g. the innermost offending level of `((a+)+)+`). Validated against 19 cases (9
+    known-bad ReDoS shapes, 10 known-good/realistic patterns including
+    `^(10\.0\.5\.[0-9]+)$`, `(abc|def)+`, bounded `a{2,5}`, escaped literal parens `\(a+\)+`, and
+    `[+*{]+`) in a standalone test program, all passing, before it ever touched the real codebase.
+    This is documented in its own comment, deliberately, as a heuristic, not a proof: it catches
+    this one specific shape and nothing else (e.g. it does not catch overlapping-alternation
+    ReDoS shapes like `(a|a)*`). `type_check()` (the Matches case, after the existing regex-compile
+    try/catch) now calls it and, if it fires, appends a human-readable explanation to a new
+    `std::vector<std::string>* warnings` output parameter threaded through `type_check()`'s
+    signature and both its recursive call sites (And/Or, Not). The pattern still compiles and the
+    filter still runs exactly as before -- this is advisory only.
+
+    `compile_display_filter()` gained a matching `std::vector<std::string>* warnings = nullptr`
+    parameter (default-null, so every pre-existing caller/signature elsewhere is unaffected) in
+    both `display_filter_parser.cpp` and its `display_filter.hpp` declaration. The one real call
+    site, `cli_main.cpp`'s `decode` subcommand (~line 4766), now passes a
+    `display_filter_warnings` vector and, on successful compilation, prints each warning to `diag`
+    with a `note: ` prefix -- the exact convention `run_merge_inventory`'s `resolver_notes` already
+    uses -- respecting `--quiet` the same way.
+
+    **New tests.** Three new CTest entries, inserted into `CMakeLists.txt`'s existing F3/patch282
+    complexity-limits block (right after the `kMaxRegexLength` pair), following that block's own
+    conventions exactly (single-literal `PASS_REGULAR_EXPRESSION`, no skip-groups):
+    `decode_display_filter_f4_redos_heuristic_warns` (`(a+)+$` against `sample_modbus.pcap` still
+    compiles and runs, AND prints the expected `note:` text -- not an error),
+    `decode_display_filter_f4_redos_heuristic_silent_for_benign_pattern` (`^Read.*`, an ordinary
+    pattern with its own unrelated quantifier, produces no warning -- no false-positive noise on
+    everyday `-Y` expressions), and
+    `decode_display_filter_f4_redos_heuristic_respects_quiet` (the same pathological pattern with
+    global `--quiet` ahead of the subcommand, matching
+    `resolver_resolve_with_no_hosts_file_noop_note_respects_quiet`'s own command shape, produces no
+    `note:` output).
+
+    **Docs.** `docs/USER_GUIDE.md`'s display-filter section gains a short paragraph naming the new
+    advisory-only `matches` warning, what it does and doesn't catch, and that `--quiet` suppresses
+    it. `docs/reviews/2026-10-chatgpt-security-review-patch295.md`'s own intro paragraph updated to
+    mark F4 addressed, cross-referencing this item and naming the deliberate scope-down from the
+    review's own "long-term" suggestion (F5-F8 remain open, not yet directed).
+
+    **Verification.** Manual end-to-end verification against the real built binary first: the
+    pathological pattern compiles successfully and prints the expected `note:` to stderr; the
+    benign pattern prints nothing; `--quiet` suppresses the note -- all three confirmed before any
+    CTest entry was written. Then the three new CTest entries specifically, then the full
+    49-test display-filter CTest group (all passing), then the full default-build suite and all
+    three other standing build configs, each +3 over item 135's own figures with zero regressions:
+    default GCC `build` 2499/2499 (was 2496/2496);
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive` 2481/2481 (was 2478/2478); Clang
+    ASan/UBSan `build-fuzz` 2577/2577 (was 2574/2574, including all 78 pre-existing
+    `*_corpus_regression` tests, zero new crashes/UB); MinGW cross-compile `build-mingw`,
+    build-only, configured test count 2481 (matching `build_nolive`'s count). Then a clean-room
+    extract-rebuild-test cycle (2499/2499, matching the incremental build exactly), before delivery
+    as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

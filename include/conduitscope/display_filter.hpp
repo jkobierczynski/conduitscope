@@ -119,6 +119,13 @@ private:
 // numeric field to a string literal, ordering-comparing a String/Bool/Ip field, an unknown field
 // name) is rejected here, before a single packet is read -- the same "fail fast, once, before the
 // loop" posture as -d/--decode-as's own parse_decode_as_rules.
-std::optional<CompiledDisplayFilter> compile_display_filter(const std::string& expr, std::string* error);
+//
+// `warnings`, when non-null, collects non-fatal advisories discovered during type-checking --
+// currently just the F4/item 136 catastrophic-backtracking heuristic on `matches` patterns (see
+// looks_like_nested_quantifier_redos's own comment in display_filter_parser.cpp). A warning never
+// causes compilation to fail: the expression still compiles and `warnings` is populated alongside
+// a non-nullopt return. Callers that pass nullptr simply get the pre-item-136 behavior back.
+std::optional<CompiledDisplayFilter> compile_display_filter(const std::string& expr, std::string* error,
+                                                              std::vector<std::string>* warnings = nullptr);
 
 }  // namespace conduitscope

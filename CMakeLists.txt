@@ -18024,6 +18024,42 @@ set_tests_properties(decode_display_filter_regex_length_under_limit_still_works 
   PASS_REGULAR_EXPRESSION "Read Holding Registers"
   FAIL_REGULAR_EXPRESSION "^error:")
 
+# patch295 security review finding F4 ("std::regex remains a potential CPU-amplification
+# mechanism", item 136, docs/DEVELOPMENT.md): a `matches` pattern containing a quantified group
+# whose own content is itself quantified (e.g. (a+)+) is a classic catastrophic-backtracking
+# shape -- std::regex_search against it can take seconds or more on an adversarial input, and
+# this filter runs on every packet. Unlike every other display-filter validation above, this one
+# is a WARNING, not a rejection (looks_like_nested_quantifier_redos's own comment in
+# display_filter_parser.cpp explains why: it's a syntactic heuristic, not a proof the pattern is
+# actually unsafe, and the review itself says this is a Low/Medium finding not worth a correctness
+# trade-off over). The filter still compiles and still runs; a "note:" is printed the same way
+# resolver_notes already are, respecting --quiet the same way.
+add_test(NAME decode_display_filter_f4_redos_heuristic_warns
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_name matches \"(a+)+$\"")
+set_tests_properties(decode_display_filter_f4_redos_heuristic_warns PROPERTIES
+  PASS_REGULAR_EXPRESSION "note: 'modbus\\.func_name' matches \"\\(a\\+\\)\\+\\$\" contains a quantified group whose own content is itself quantified"
+  FAIL_REGULAR_EXPRESSION "^error:")
+
+# An ordinary, non-pathological pattern -- including one with an unrelated quantifier -- never
+# trips the heuristic: no false-positive warning noise on everyday -Y expressions.
+add_test(NAME decode_display_filter_f4_redos_heuristic_silent_for_benign_pattern
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_name matches \"^Read.*\"")
+set_tests_properties(decode_display_filter_f4_redos_heuristic_silent_for_benign_pattern PROPERTIES
+  PASS_REGULAR_EXPRESSION "Read Holding Registers"
+  FAIL_REGULAR_EXPRESSION "note:|^error:")
+
+# --quiet suppresses the note exactly like every other resolver/compile-time note in this
+# codebase -- the global flag has to precede the subcommand (see rewrite_subcommand_alias's own
+# leading-global-flags scan in cli_main.cpp), matching
+# resolver_resolve_with_no_hosts_file_noop_note_respects_quiet's own command shape above.
+add_test(NAME decode_display_filter_f4_redos_heuristic_respects_quiet
+  COMMAND conduitscope --quiet decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap"
+    -Y "modbus.func_name matches \"(a+)+$\"")
+set_tests_properties(decode_display_filter_f4_redos_heuristic_respects_quiet PROPERTIES
+  FAIL_REGULAR_EXPRESSION "note:|^error:")
+
 # Numeric-field-mirroring regression tests (display_filter.hpp's Phase-4 fix: S7CommResult/
 # Dnp3Result/Iec104Result/MmsFrame each previously exposed only a rendered name string, no raw
 # numeric code) -- confirms both the new -T json field and the corresponding -Y filter field work.
