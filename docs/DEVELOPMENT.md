@@ -18591,6 +18591,168 @@ it done as its own patch.
     extract-rebuild-test cycle (2500/2500, matching the incremental build exactly), before delivery
     as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
 
+140. **Fix patch295 finding F8: `sha256()` has a minor zero-length-input API sharp edge** --
+    Jurgen's direct request, the eighth and final item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`. **Done**, with a second,
+    structurally identical instance found and fixed in the same pass.
+
+    **The finding, confirmed by testing before it was fixed.** `sha256.cpp`'s final-block handling
+    formed `data + full_blocks * 64` and handed it to `memcpy` as the source argument
+    unconditionally, even when `len == 0` (in which case `full_blocks` and the copy length are both
+    0). When `data` is a genuine null pointer -- which this codebase deliberately passes for an
+    empty digest (`evidence_report.cpp`'s own `sha256_hex`, hashing an empty capture/policy file) --
+    this forms `nullptr + 0` and passes a null pointer to `memcpy` with a length of 0: both
+    technically undefined behavior per the C++/C standard (pointer arithmetic on a null pointer, and
+    a null-pointer argument to a function like `memcpy` whose parameters are declared never-null,
+    are each UB regardless of the offset or length being zero), even though every real libc
+    implementation treats a zero-length `memcpy` as a complete no-op and this was never observed to
+    misbehave at runtime. Confirmed with a standalone repro compiled under Clang's
+    `-fsanitize=address,undefined`, calling `sha256(nullptr, 0, ...)` directly: UBSan reported
+    "null pointer passed as argument 2, which is declared to never be null," exactly as the finding
+    predicts, before any fix was written. The review's own framing: "not remotely exploitable in
+    the current application... this is cleanup rather than a security incident."
+
+    **A second, structurally identical instance found incidentally.** While reproducing the finding,
+    the same repro also exercised `hmac_sha256(nullptr, 0, nullptr, 0, ...)` -- the shape
+    `evidence_report.cpp`'s own `hmac_sha256_hex` deliberately calls for an empty `--sign-key`
+    (guarding an empty `std::vector`'s own `data()` with a ternary, precisely because
+    `std::vector::data()`, unlike `std::string::data()`, is NOT guaranteed non-null when empty) --
+    and UBSan flagged the identical root cause at `hkdf.cpp`'s own
+    `std::memcpy(key_block, key, key_len)` in `hmac_sha256`'s short-key branch. The review's own F8
+    names only `sha256()`, but this is the same bug shape reachable through a second, already-live
+    production call path, so it was fixed in the same pass rather than left as a known-but-unfixed
+    twin.
+
+    **The fix.** Both call sites now guard the `memcpy` with the length actually being nonzero --
+    `sha256.cpp`'s final-block copy under `if (remainder > 0)`, `hkdf.cpp`'s short-key copy under
+    `else if (key_len > 0)` (added as a third arm alongside the existing `key_len > 64` branch,
+    `key_block` already being zero-initialized so skipping the copy when there is nothing to copy
+    changes no observable behavior for any input length). This matches the review's own first
+    suggested approach ("handle without touching data" when the length is zero) over its second
+    ("require a non-null pointer regardless of length") -- the latter would have broken this
+    codebase's own existing, deliberate `nullptr`-for-empty calling convention at both call sites
+    rather than fixing the function to tolerate it correctly.
+
+    **New tests.** Two new checks in `tools/crypto_selftest.cpp`, both calling the primitive with a
+    GENUINE null pointer rather than `std::string::data()` on an empty string (which the existing
+    `sha256(empty)` check already used, and which is guaranteed non-null since C++11 -- so it never
+    actually exercised this finding's own case): `sha256(nullptr, 0, ...) matches sha256(empty)`,
+    and `hmac_sha256(nullptr, 0, nullptr, 0, ...) (empty key, empty data)` against a reference digest
+    cross-checked against Python's own `hmac`/`hashlib` before being hardcoded. No new CTest entry
+    was needed -- both checks live inside the existing `crypto_primitives_self_test` case. Also
+    re-ran the standalone `-fsanitize=address,undefined` repro against the fixed code to confirm the
+    UBSan report is gone, and ran the real `crypto_selftest` binary built under the project's own
+    `build-fuzz` ASan/UBSan configuration directly (not just the standalone repro) to confirm the fix
+    holds in the actual build, not only in isolation.
+
+    **Docs.** No `docs/USER_GUIDE.md` change -- this is an internal correctness fix with no
+    user-visible behavior, flag, or output change of any kind (every affected call site already
+    produces the exact same digest before and after the fix). `docs/reviews/2026-10-chatgpt-
+    security-review-patch295.md`'s own intro paragraph updated to mark F8 fixed -- the last of the
+    eight findings -- cross-referencing this item and the incidentally-found `hmac_sha256` twin.
+
+    **Verification.** Standalone ASan/UBSan repro confirming the UB exists, before any fix; the same
+    repro confirming it's gone, after. Then the two new `crypto_selftest` checks (16 checks total,
+    up from 14, all passing), run both in the default `build` and directly under `build-fuzz`'s own
+    ASan/UBSan instrumentation (zero sanitizer reports, not just a passing exit code). Then the full
+    default-build suite and all three other standing build configs, matching item 139's own figures
+    exactly (no new CTest entry, only two new checks inside an existing self-test binary) with zero
+    regressions: default GCC `build` 2500/2500; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive` 2482/2482; Clang ASan/UBSan `build-fuzz` 2578/2578 (including all 78 pre-existing
+    `*_corpus_regression` tests); MinGW cross-compile `build-mingw`, build-only (`conduitscope` and
+    `crypto_selftest` both). Then a clean-room extract-rebuild-test cycle (2500/2500, matching the
+    incremental build exactly), before delivery as a zip of touched/new files via the standing
+    no-git-commit convention -- never git-commit.
+
+    This closes out every finding (F1-F8) from `docs/reviews/2026-10-chatgpt-security-review-
+    patch295.md` -- see that file's own updated intro paragraph for the full fixed/addressed
+    summary and cross-references to items 133-140.
+
+141. **Windows CI false positive: `merge_inventory_nesting_depth_bounded`'s own fixture-generating
+    Python snippet never wrote its file, not a production defect.** Jurgen pasted a real GitHub
+    Actions Windows CI failure with no further instruction:
+    ```
+    Start 1691: merge_inventory_json_strictness_enforced
+    1688/2489 Test #1690: merge_inventory_nesting_depth_bounded ...***Failed 0.68 sec
+    Traceback (most recent call last):
+      File "<string>", line 4, in <module>
+    FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.Wy2H8CuWzi/deep.json'
+    ```
+    **Done.** Same root-cause FAMILY as item 126's own Windows CI false positive (a POSIX/
+    Windows path mismatch under Git Bash/MSYS2), but a different failure shape -- this one never
+    reaches `conduitscope.exe` at all; the test's own Python fixture-generator fails before the
+    binary under test is even invoked.
+
+    **The finding.** `tests/merge_inventory_nesting_depth_smoke.sh`'s `make_nested_report()` helper
+    (item 135's own test, generating the deeply-nested-JSON fixtures F3's fix is tested against)
+    built its fixture path into the `python3 -c "..."` script's own TEXT via plain bash string
+    interpolation (`with open('$path', 'w') as f:`), rather than passing it as a separate
+    command-line argument. Item 126 already documented, from a real Windows CI failure, exactly how
+    Git Bash/MSYS2 handles POSIX-style paths on that runner: it automatically translates one into
+    its Windows-native form ONLY when that path is passed as an actual ARGUMENT to a native,
+    non-MSYS executable -- which is exactly how `conduitscope.exe` correctly receives a translated
+    path today. A path merely APPEARING as a literal substring somewhere inside a different
+    argument's text (here, buried inside the larger multi-line `-c` script-source argument) gets no
+    such treatment. `python3` on the Windows CI runner is itself a native, non-MSYS executable (the
+    standard `actions/setup-python` install), so it should have received the SAME argument
+    translation `conduitscope.exe` does -- but because `$path` was embedded in the script text
+    rather than passed as its own argv entry, there was no bare, path-shaped argument there for
+    MSYS to translate at all. `python3` therefore received the literal, untranslated `/tmp/tmp.
+    ...` text, tried to `open()` a file inside a directory that -- from a native, non-MSYS
+    process's point of view -- does not exist, and failed with `FileNotFoundError` before writing
+    a single byte of the fixture, which is exactly the traceback Jurgen pasted. Not reproducible in
+    this sandbox (Linux-only), so this diagnosis rests on item 126's own already-confirmed
+    understanding of this runner's path-translation behavior, applied to a new call shape (python,
+    not the project's own binary) rather than a fresh, independently-reproduced root cause.
+
+    **The fix.** `make_nested_report()` now passes `$path` to `python3` as a genuine argv argument
+    (appended after the `-c` script, read back inside the script as `sys.argv[1]`) instead of
+    interpolating it into the script's own source text. This gives MSYS the bare, path-shaped
+    argument its own translation heuristic needs -- the exact mechanism that already works
+    correctly for `conduitscope.exe`'s own arguments, now applied to `python3`'s too. `$depth`
+    stays interpolated directly into the script text (it's a plain integer, not a path -- no
+    translation concern applies to it). A NOTE documenting this exact root cause was added directly
+    in the helper's own comment, cross-referencing item 126, matching this project's established
+    practice of recording a root-caused CI-only bug right in the fixed script (see e.g.
+    `tests/merge_inventory_truncated_input_smoke.sh`'s and item 126's own such notes). No
+    production code changed -- `inventory_merge.cpp`'s nesting-depth enforcement itself (item 135)
+    is correct as-is and was not touched.
+
+    **Proactively checked for the same anti-pattern elsewhere**, matching item 126's own diligence:
+    grepped every `tests/*.sh` script for any `python3`/`python` invocation at all, and separately
+    for `python3 -c`/`python -c` across `tests/`, `tools/*.sh`, and `CMakeLists.txt`. This test
+    script is the ONLY one in the entire suite that invokes Python at all with an embedded
+    filesystem path; `CMakeLists.txt`'s own one `python3 -c` use (the `evidence --cip-monitoring-
+    window --format json | python3 -c 'import json,sys; json.load(sys.stdin); ...'` JSON-validity
+    check) reads from `stdin` via a pipe and names no path whatsoever, so it was never exposed to
+    this failure mode.
+
+    **New tests.** None -- this is a test-infrastructure fix, not new coverage; the existing
+    `merge_inventory_nesting_depth_bounded` CTest entry is what this fix repairs. Manually re-ran
+    `tests/merge_inventory_nesting_depth_smoke.sh` directly against the real built binary to confirm
+    all four of its own cases (the 2,000,000-level crash repro, the exact 128-level boundary, 129
+    one past it, and the real-report regression guard) still pass identically after switching to
+    the `sys.argv[1]` form -- a behavior-preserving mechanism change on Linux, where the bug was
+    never reproducible in the first place.
+
+    **Docs.** No `docs/USER_GUIDE.md` change -- nothing user-visible changed; this is a test-only
+    fix. No change to `docs/reviews/2026-10-chatgpt-security-review-patch295.md` either -- this
+    bug is unrelated to any of that review's eight findings (it's a CI-infrastructure issue
+    surfaced in item 135's own test, not a product-security finding).
+
+    **Verification.** `ctest -R merge_inventory_nesting_depth_bounded`: passes. Full `merge`-scoped
+    CTest group (14 tests, unchanged count -- this item repairs an existing test, it doesn't add or
+    remove one). Full default-build suite and the two other build configs that actually run tests:
+    default GCC `build` 2500/2500 (unchanged); `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive` 2482/2482 (unchanged); Clang ASan/UBSan `build-fuzz` 2578/2578 (unchanged,
+    including all 78 pre-existing `*_corpus_regression` tests). MinGW cross-compile `build-mingw`
+    not rebuilt -- build-only, no tests run there, and no C++ source changed. A clean-room
+    extract-rebuild-test cycle (2500/2500, matching exactly). The original failure was only ever
+    reproducible on a real Windows/Git-Bash CI runner (this sandbox is Linux), so, exactly as item
+    126 notes for its own analogous fix, this fix's soundness rests on the root-cause analysis
+    above (item 126's own already-confirmed understanding of this runner's argument-path
+    translation, applied to a new call shape) rather than a locally-reproduced failure.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

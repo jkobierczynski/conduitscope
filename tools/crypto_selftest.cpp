@@ -86,6 +86,18 @@ int main() {
         run("sha256(empty)", kSha256EmptyInput, kSha256EmptyInputDigest);
         run("sha256(\"abc\")", kSha256Abc, kSha256AbcDigest);
         run("sha256(two-block message)", kSha256TwoBlock, kSha256TwoBlockDigest);
+
+        // F8 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 140,
+        // DEVELOPMENT.md): "sha256(empty)" above passes std::string::data() on an empty string,
+        // which is guaranteed non-null since C++11 -- it never actually exercises the case this
+        // finding is about. This codebase deliberately calls sha256 with a genuine null pointer for
+        // an empty digest (evidence_report.cpp's own sha256_hex, hashing an empty capture/policy
+        // file), so that exact call shape is exercised directly here, confirmed (before the fix)
+        // to trip UBSan ("null pointer passed as argument 2, which is declared to never be null")
+        // even though it always produced the right digest at runtime.
+        uint8_t digest[32];
+        sha256(nullptr, 0, digest);
+        check("sha256(nullptr, 0, ...) matches sha256(empty)", to_hex(digest, 32), kSha256EmptyInputDigest);
     }
 
     // --- HMAC-SHA256 ------------------------------------------------------------------------
@@ -102,6 +114,20 @@ int main() {
         uint8_t mac[32];
         hmac_sha256(key.data(), key.size(), reinterpret_cast<const uint8_t*>(data.data()), data.size(), mac);
         check("hmac_sha256 (key longer than block size)", to_hex(mac, 32), kHmacLongDigest);
+    }
+    {
+        // F8 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 140,
+        // DEVELOPMENT.md): the same nullptr-into-memcpy edge case applies to hmac_sha256's own key
+        // handling (hkdf.cpp), and this codebase deliberately calls it with a genuine null,
+        // zero-length key -- evidence_report.cpp's own hmac_sha256_hex guards an empty --sign-key
+        // vector's own data() with a ternary, specifically because std::vector::data() (unlike
+        // std::string::data()) is NOT guaranteed non-null when empty. Expected digest is
+        // HMAC-SHA256 with an empty key and empty message, cross-checked against Python's own
+        // hmac/hashlib before being hardcoded here.
+        uint8_t mac[32];
+        hmac_sha256(nullptr, 0, nullptr, 0, mac);
+        check("hmac_sha256(nullptr, 0, nullptr, 0, ...) (empty key, empty data)", to_hex(mac, 32),
+              "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad");
     }
 
     // --- HKDF-Extract / HKDF-Expand ----------------------------------------------------------

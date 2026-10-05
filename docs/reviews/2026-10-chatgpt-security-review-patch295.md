@@ -162,8 +162,28 @@ other three headers each pointing back to it -- turning this finding's own
 recommendation into an enforced project convention instead of a line in
 this review document.
 
-F8 has not been scheduled or acted on yet -- Jurgen has not yet directed
-whether to take it up next.
+**Update: F8 is fixed** -- the last of the eight findings. Jurgen asked
+for this one next. See [DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item
+140 for the full fix: `sha256.cpp`'s final-block `memcpy` now skips the
+copy entirely when there is nothing to copy, instead of unconditionally
+forming `data + full_blocks * 64` (which is `nullptr + 0` when `data` is
+null and `len` is 0 -- a shape this codebase deliberately produces for an
+empty digest) and handing it to `memcpy`. Confirmed, with a standalone
+`-fsanitize=address,undefined` repro, that the old code really did trip
+UBSan ("null pointer passed as argument 2, which is declared to never be
+null") exactly as this finding predicts, before the fix; confirmed clean
+after. A second, structurally identical instance was found incidentally
+while reproducing this one -- `hkdf.cpp`'s `hmac_sha256`, in the exact
+empty-key shape `evidence_report.cpp`'s own `--sign-key` handling already
+produces -- and fixed in the same pass, since this finding's own root
+cause reaches a second, already-live call path it doesn't itself name.
+
+This closes out every finding from this review. Summary: F1 (item 133),
+F2 (item 134), F3 (item 135), F4 (item 136), F5 (item 137), F6 (item 138),
+and F8 (item 140) were each fixed outright; F7 (item 139) named no code
+change and was instead addressed with an audit plus a durable, written
+scope boundary. See each item's own DEVELOPMENT.md writeup for the full
+reasoning and verification record.
 
 The commit hash and any test-count/line/file references below reflect the
 reviewer's own state at review time; see DEVELOPMENT.md for current figures

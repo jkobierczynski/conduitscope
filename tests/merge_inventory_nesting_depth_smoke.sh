@@ -36,16 +36,32 @@ fail() {
 # one unrecognized top-level field ("evil") is nested DEPTH levels deep -- exactly the shape
 # skip_value() has to recurse through, and the only field this merge doesn't itself interpret
 # (so it's guaranteed to reach skip_value() rather than any of the dedicated field parsers).
+#
+# NOTE (Windows CI): `path` is passed to python3 as a genuine argv ARGUMENT (sys.argv[1]), never
+# interpolated into the `-c` script text itself. On the Windows CI runner, this script runs under
+# Git Bash/MSYS2, which automatically translates a POSIX-style path into its Windows-native form
+# only when that path is passed as an argument to a native .exe (see item 126, DEVELOPMENT.md, for
+# this project's own earlier, confirmed-by-a-real-CI-failure diagnosis of exactly this behavior,
+# there for conduitscope.exe's own path arguments). `python3` on that runner is likewise a native,
+# non-MSYS executable, so it gets the same argument translation `conduitscope.exe` does -- but ONLY
+# for an actual argv entry, not for a POSIX path buried inside a larger quoted string that happens
+# to be part of a DIFFERENT argument (the `-c` script source). The original version embedded
+# `$path` directly into the script text via bash string interpolation, so MSYS had no bare,
+# path-shaped argv token to translate at all: python3 received the script's literal, untranslated
+# `/tmp/...` text, tried to open a directory that, from a native (non-MSYS) process's point of
+# view, does not exist, and failed with FileNotFoundError before ever writing the fixture --
+# confirmed via a real Windows CI run, not reproduced locally (this sandbox is Linux).
 make_nested_report() {
     local depth="$1" path="$2"
     python3 -c "
+import sys
 depth = $depth
 s = '{\"x\":' * depth + '0' + '}' * depth
-with open('$path', 'w') as f:
+with open(sys.argv[1], 'w') as f:
     f.write('{\"total_packets\":0,\"skipped_packets\":0,\"assets\":[],\"edges\":[],\"evil\":')
     f.write(s)
     f.write('}')
-"
+" "$path"
 }
 
 # 1. The exact crash repro (2,000,000 levels, ~12 MB, far under the 256 MiB per-file ceiling) must

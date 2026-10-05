@@ -18,7 +18,16 @@ void hmac_sha256(const uint8_t* key, size_t key_len, const uint8_t* data, size_t
         uint8_t hashed[32];
         sha256(key, key_len, hashed);
         std::memcpy(key_block, hashed, 32);
-    } else {
+    } else if (key_len > 0) {
+        // F8 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 140,
+        // DEVELOPMENT.md): the same null-pointer-into-memcpy edge case the review names for
+        // sha256.cpp applies here too -- this codebase deliberately calls `hmac_sha256(nullptr, 0,
+        // ...)` for an empty key (see evidence_report.cpp's own hmac_sha256_hex, guarding an empty
+        // --sign-key vector's own data() with a ternary precisely because std::vector::data(),
+        // unlike std::string::data(), is not guaranteed non-null when empty). Confirmed,
+        // empirically, that the old unconditional `std::memcpy(key_block, key, key_len)` tripped
+        // UBSan the same way sha256.cpp's did. `key_block` is already zero-initialized above, so
+        // skipping the copy when there's nothing to copy changes no observable behavior.
         std::memcpy(key_block, key, key_len);
     }
 

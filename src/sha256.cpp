@@ -83,7 +83,21 @@ void sha256(const uint8_t* data, size_t len, uint8_t out[32]) {
     size_t remainder = len - full_blocks * 64;
     uint8_t tail[128];
     std::memset(tail, 0, sizeof(tail));
-    std::memcpy(tail, data + full_blocks * 64, remainder);
+    // F8 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 140,
+    // DEVELOPMENT.md): skip the copy entirely rather than forming `data + full_blocks * 64` and
+    // handing it to memcpy unconditionally. This codebase deliberately calls `sha256(nullptr, 0,
+    // ...)` for an empty digest (see evidence_report.cpp's own sha256_hex), and when `len == 0`,
+    // full_blocks and remainder are both 0 -- so the old code formed `nullptr + 0` and passed it
+    // as memcpy's source argument with a length of 0. Confirmed, empirically, that this trips
+    // UBSan ("null pointer passed as argument 2, which is declared to never be null") even though
+    // every real libc implementation treats a zero-length memcpy as a harmless no-op and this was
+    // never observed to misbehave at runtime. Guarding the call when there is nothing to copy
+    // removes the UB-triggering expression entirely rather than relying on it happening to be
+    // harmless in practice -- copying zero bytes was always a no-op anyway, so this changes no
+    // observable behavior for any length.
+    if (remainder > 0) {
+        std::memcpy(tail, data + full_blocks * 64, remainder);
+    }
     tail[remainder] = 0x80;
     size_t tail_blocks = (remainder < 56) ? 1 : 2;
     uint64_t bit_len = static_cast<uint64_t>(len) * 8;
