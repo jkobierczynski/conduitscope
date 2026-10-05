@@ -120,7 +120,25 @@ has the identical truncation but was deliberately left untouched -- it only
 ever reads back its own previously-written file, a closed round-trip
 outside this finding's own "externally-supplied report" scope.
 
-F6-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
+**Update: F6 is fixed**, despite this finding's own explicit "not a
+vulnerability I'd block on" framing (the AES-GCM tag it protects is QUIC
+Initial traffic's own RFC 9001 publicly-derivable key, not a secret, so
+there is no realistic remote timing attack surface against this codebase's
+one actual use of it) -- a straightforward, byte-identical-behavior fix
+with no trade-off to weigh, so there was no reason to leave the weaker form
+in place once asked to look at it. Jurgen asked for this one next. See
+[DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item 138 for the full fix:
+`aes128_gcm.cpp`'s tag comparison is now a branchless XOR-accumulate loop
+through `volatile`-qualified pointers (the same idiom OpenSSL's
+`CRYPTO_memcmp`/libsodium's `sodium_memcmp` use) instead of a per-byte `if`/
+`bool match`, so a compiler can no longer transform the comparison in a way
+that reintroduces a data-dependent timing signal. Note this is adopting the
+industry-standard idiom for the problem, not a measured timing guarantee --
+a statistical timing test to actually prove constant-time behavior was
+deliberately not attempted, being unreliable under CI noise and
+disproportionate for a finding this low-severity.
+
+F7-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
 which, if any, to take up next.
 
 The commit hash and any test-count/line/file references below reflect the

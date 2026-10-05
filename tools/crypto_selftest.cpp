@@ -149,6 +149,22 @@ int main() {
         bool rejected = !aes128_gcm_decrypt(key.data(), iv.data(), aad.data(), aad.size(), ct.data(), ct.size(),
                                              bad_tag.data(), discard);
         check_bool("aes128_gcm_decrypt rejects a corrupted tag", rejected);
+
+        // F6 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 138,
+        // DEVELOPMENT.md): the tag comparison was rewritten from a per-byte `if`/`bool match` into
+        // a branchless XOR-accumulate loop (see aes128_gcm.cpp's own comment at the fix). The
+        // case above only ever flips byte 0 -- not enough to prove the rewritten loop still
+        // examines every one of the 16 bytes rather than stopping early somewhere in the middle,
+        // which is exactly the class of bug a loop rewrite like this one could introduce. Flipping
+        // only the LAST byte instead is the strongest version of that check: any accumulator loop
+        // that silently short-circuits (or has an off-by-one truncating it) before reaching index
+        // 15 would wrongly accept this tag.
+        auto bad_tag_last_byte = tag;
+        bad_tag_last_byte[15] ^= 0x01;
+        std::vector<uint8_t> discard_last_byte;
+        bool rejected_last_byte = !aes128_gcm_decrypt(key.data(), iv.data(), aad.data(), aad.size(), ct.data(),
+                                                        ct.size(), bad_tag_last_byte.data(), discard_last_byte);
+        check_bool("aes128_gcm_decrypt rejects a tag corrupted only in its last byte", rejected_last_byte);
     }
 
     // --- AES-128-GCM decrypt, empty AAD and plaintext (pure-tag edge case) ------------------

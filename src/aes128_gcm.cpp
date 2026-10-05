@@ -144,11 +144,25 @@ bool aes128_gcm_decrypt(const uint8_t key[16], const uint8_t iv[12], const uint8
     uint8_t computed_tag[16];
     xor_block(computed_tag, s, tag_mask);
 
-    bool match = true;
+    // F6 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 138, DEVELOPMENT.md):
+    // a formally constant-time comparison, not just a branch-free-looking one. The old code
+    // already never early-returned (good -- that much was already timing-safe against the most
+    // obvious leak), but assigning into a `bool match` inside a per-byte `if` is still a per-byte
+    // CONDITIONAL BRANCH in the source, and the review's own point is exactly that a compiler is
+    // free to transform that branch (vectorize it, reorder it, short-circuit it once a mismatch is
+    // known) in ways that reintroduce a data-dependent timing signal -- nothing in the C++
+    // standard stops it. This instead XORs every byte pair into a single accumulator with no
+    // branch anywhere in the loop -- the same idiom OpenSSL's `CRYPTO_memcmp` and libsodium's
+    // `sodium_memcmp` use -- through `volatile`-qualified pointers, so the compiler can't prove
+    // it's safe to skip comparing a later byte once an earlier difference is already known (the
+    // one optimization that would reopen exactly the timing side-channel this guards against).
+    volatile const uint8_t* vc = computed_tag;
+    volatile const uint8_t* vt = tag;
+    uint8_t diff = 0;
     for (int i = 0; i < 16; ++i) {
-        if (computed_tag[i] != tag[i]) match = false;
+        diff = static_cast<uint8_t>(diff | (vc[i] ^ vt[i]));
     }
-    return match;
+    return diff == 0;
 }
 
 }  // namespace conduitscope

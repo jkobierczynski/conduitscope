@@ -18441,6 +18441,76 @@ it done as its own patch.
     extract-rebuild-test cycle (2500/2500, matching the incremental build exactly), before delivery
     as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
 
+138. **Fix patch295 finding F6: cryptographic tag comparison is not constant-time** -- Jurgen's
+    direct request, the sixth item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`, right after item 137 (F5).
+    **Done.**
+
+    **The finding, and this item's own risk-proportionate scope.** `aes128_gcm.cpp`'s
+    `aes128_gcm_decrypt` verified its computed authentication tag against the one on the wire with
+    a per-byte `if (computed_tag[i] != tag[i]) match = false;` loop. It never early-returned on a
+    mismatch, which the review itself credits as already avoiding the most obvious timing leak,
+    but a per-byte conditional branch in the source is still something a compiler is free to
+    transform (vectorize, reorder, optimize around a known-different byte) in ways that could
+    reintroduce a data-dependent timing signal -- nothing in the C++ standard forbids it, which is
+    exactly the review's own point ("compiler transformations mean this isn't something I'd call a
+    formally constant-time comparison"). The review rates this Low severity and is explicit that,
+    for this codebase's one actual use of it -- verifying a QUIC Initial packet's AEAD tag during
+    passive decode, where the keys themselves are RFC 9001's own publicly-derivable Initial
+    secrets, not a secret anyone is protecting -- "this is not a realistic remote timing attack
+    surface" and "not a vulnerability I'd block on." Fixed anyway: unlike F4's own regex heuristic
+    (a real behavior trade-off the review explicitly discouraged spending time on), this is a
+    drop-in replacement with byte-identical functional behavior and no new trade-off to weigh, so
+    there was no reason to leave the weaker form in place once asked to look at it.
+
+    **The fix.** The per-byte `if`/`bool match` loop in `aes128_gcm_decrypt`
+    (`aes128_gcm.cpp`) is replaced with a branchless XOR-accumulate comparison -- the same idiom
+    OpenSSL's `CRYPTO_memcmp` and libsodium's `sodium_memcmp` use: every byte pair is XORed into a
+    single `uint8_t diff` accumulator with no conditional anywhere in the loop, through
+    `volatile`-qualified pointers so the compiler can't prove it's safe to skip comparing a later
+    byte once an earlier difference is already known (the one optimization that would reopen the
+    exact timing side-channel this guards against). The function still returns `true` iff all 16
+    bytes match, `false` otherwise -- functionally identical to the old code in every case.
+
+    **New tests.** `tools/crypto_selftest.cpp` already had `aes128_gcm_decrypt rejects a corrupted
+    tag`, but that case only ever flips byte 0 -- not strong enough to prove a rewritten comparison
+    loop still examines every one of the 16 bytes rather than stopping early partway through,
+    exactly the class of bug a loop rewrite like this one could introduce. Added a second case,
+    `aes128_gcm_decrypt rejects a tag corrupted only in its last byte`, flipping only byte 15: any
+    accumulator loop that silently short-circuited or had an off-by-one truncating it before index
+    15 would wrongly accept this tag. No new CTest entry was needed or added -- `crypto_selftest`
+    is already wired in as the existing `crypto_primitives_self_test` CTest case, and this is a
+    pure algorithmic swap behind an unchanged function signature, so the full pre-existing
+    functional coverage (the self-test's own NIST GCM test vector, plus `quic_client_initial_
+    decrypted_sni`'s tag-verifies path and `quic_initial_aead_mismatch_falls_back_gracefully`'s
+    tag-mismatch path through the real CLI) already proves this correct end to end; note that none
+    of this -- old or new -- is a timing measurement. A statistical timing test would be the only
+    way to actually measure "constant-time" as a property, and was deliberately not attempted
+    here: it is unreliable and flaky under CI virtualization/scheduling noise, and disproportionate
+    engineering effort for a Low-severity finding the review itself says isn't worth blocking on.
+    This fix is best understood as adopting the industry-standard idiom for this exact problem,
+    not as a measured-and-verified timing guarantee.
+
+    **Docs.** No `docs/USER_GUIDE.md` change -- this is an internal comparison-loop implementation
+    detail with no user-visible behavior, flag, or output change of any kind.
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`'s own intro paragraph updated to
+    mark F6 fixed, cross-referencing this item (F7-F8 remain open, not yet directed).
+
+    **Verification.** Manual run of `crypto_selftest` first, confirming both the pre-existing NIST
+    GCM test vector (`aes128_gcm_decrypt tag verifies`) and the corrupted-tag rejection still pass
+    under the new comparison, before the new last-byte-only case was added and confirmed passing
+    too. Then the full `quic`-scoped CTest group (16 tests, all passing, unchanged count -- this
+    fix added no new CTest entry). Then the full default-build suite and all three other standing
+    build configs, matching item 137's own figures exactly (no new tests were added at the CTest
+    level, only inside the existing self-test binary) with zero regressions: default GCC `build`
+    2500/2500; `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive` 2482/2482; Clang ASan/UBSan
+    `build-fuzz` 2578/2578 (including all 78 pre-existing `*_corpus_regression` tests, zero new
+    crashes/UB); MinGW cross-compile `build-mingw`, build-only (both the `conduitscope` and
+    `crypto_selftest` targets confirmed to still cross-compile cleanly, since this fix touches a
+    `volatile`-pointer idiom worth confirming isn't MinGW/GCC-cross-specific). Then a clean-room
+    extract-rebuild-test cycle (2500/2500, matching the incremental build exactly), before delivery
+    as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
