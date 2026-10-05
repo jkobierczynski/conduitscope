@@ -8,6 +8,9 @@
 // (evidence_report.cpp's own hmac_sha256_hex) -- HKDF-Extract/-Expand/-Expand-Label stay QUIC-only.
 // See hkdf.cpp's own file header for how this is self-tested against RFC 4231/RFC 5869's own
 // published test vectors.
+//
+// See aes128_gcm.hpp's own file header for this codebase's crypto-subsystem-wide SCOPE BOUNDARY
+// (patch295 finding F7; item 139, DEVELOPMENT.md) -- this file is one of the four it covers.
 #pragma once
 
 #include <cstddef>

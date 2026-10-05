@@ -18511,6 +18511,86 @@ it done as its own patch.
     extract-rebuild-test cycle (2500/2500, matching the incremental build exactly), before delivery
     as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
 
+139. **Address patch295 finding F7: the custom crypto deserves a hard boundary** -- Jurgen's direct
+    request, the seventh item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`, right after item 138 (F6). **Done**
+    -- an audit plus a durable, written-down scope boundary, not a code-behavior change; this
+    finding names no bug and asks for none.
+
+    **The finding.** Severity "Low / architectural." The review's own assessment: this codebase's
+    hand-written AES-128/GCM/SHA-256/HKDF are "deliberately textbook/reference-style," "the GCM
+    code is appropriately narrow in scope," and for a passive network-analysis tool implementing a
+    small, fixed subset of QUIC/TLS 1.3 key derivation, "that's defensible." Its recommendation is
+    entirely forward-looking: "I'd keep it isolated exactly as it is now. If the crypto surface
+    expands, I'd move toward a well-reviewed system/library crypto implementation rather than
+    extending the home-grown crypto subsystem." There is no code change the finding itself asks
+    for -- "doing" this item means auditing whether that isolation still holds, and then making the
+    boundary an explicit, durable project convention rather than a line in a review document
+    nobody is likely to re-read before the next crypto-adjacent change.
+
+    **The audit.** Grepped every call site of every function these four files export
+    (`aes128_encrypt_block`, `aes128_gcm_decrypt`, `sha256`, `hmac_sha256`, `hkdf_extract`,
+    `hkdf_expand`, `hkdf_expand_label`) across `src/`, `include/`, `tools/`, and `fuzz/`. Result:
+    `aes128_encrypt_block`/`aes128_gcm_decrypt`/`hkdf_extract`/`hkdf_expand`/`hkdf_expand_label` are
+    exactly as narrow as the review describes -- `quic.cpp` is their only caller, for RFC 9001's own
+    QUIC Initial-packet key derivation and decryption, nothing else. `sha256`/`hmac_sha256` turned
+    out to have a SECOND caller already: `evidence_report.cpp`'s own `sha256_hex`/`hmac_sha256_hex`,
+    hashing a capture/policy file's bytes and (optionally, via `evidence --sign-key`) HMAC-signing
+    the evidence pack's own integrity section. This isn't a gap this item discovered -- it was a
+    deliberate decision already made and already documented, at item 117 (the `evidence` subcommand
+    itself), in both `sha256.hpp`'s and `hkdf.hpp`'s own file headers ("a second, deliberate
+    caller was added..."; "hmac_sha256 alone has a second, deliberate caller..."). Confirmed, by
+    reading both those existing comments, that this project was already being honest about the
+    crypto surface's shape before this item existed. What item 117's own documentation did NOT do
+    is say whether a second caller of an EXISTING primitive (plain content-integrity hashing, no
+    new cryptographic capability) is the kind of "expansion" this finding's own closing
+    recommendation is warning about, or something categorically different (it's the latter: no new
+    primitive, cipher, or capability was added, only a second, narrow, already-scoped use of a hash
+    function already proven against its own FIPS 180-4 test vectors) -- that judgment call is what
+    this item makes explicit.
+
+    **The fix: a written-down, forward-looking scope boundary**, not a code-behavior change.
+    `aes128_gcm.hpp` -- the file the review itself singled out as "appropriately narrow in scope" --
+    gains a new "SCOPE BOUNDARY" paragraph stating the rule in both directions: a new CALLER of a
+    primitive already implemented here (another integrity-hashing use, say) is fine and already
+    precedented (item 117); a new PRIMITIVE, cipher, mode, or capability -- anything this AES-128/
+    GCM-decrypt-only/SHA-256/HKDF quartet doesn't already implement -- is explicitly NOT to be added
+    here, and should instead reach for a well-reviewed system/library crypto implementation
+    (OpenSSL, mbedTLS, libsodium, ...). `aes128.hpp`, `sha256.hpp`, and `hkdf.hpp` each gain a short
+    one-line pointer back to that paragraph, so a future contributor (or future-me) touching any of
+    these four files directly sees the constraint without first having to go find this ROADMAP
+    item. This is the review's own recommendation, turned from a one-off comment into an actual
+    enforced project convention.
+
+    **New tests.** None -- no behavior changed (every edit in this item is a comment). The audit
+    itself, and its result (the full current call-site list, and the item-117 precedent it rests
+    on), is recorded here in prose rather than as a CTest assertion, the same way this project has
+    always recorded an audit finding nothing actionable to fix (see e.g. item 100's detection
+    false-positive validation, and the BACnet/DNP3 reassembly audit's own "no production-code gap
+    found" halves) -- a grep-based "only these files may call `sha256`" CI guard was considered and
+    rejected as disproportionate: this project has no existing precedent for that style of
+    structural lint test, and a plain-language, clearly-written boundary comment at the point a
+    future change would actually be made (the crypto headers themselves) is both more durable
+    against a sufficiently mechanical grep's own brittleness (a new file added anywhere, including
+    a legitimate future test/tool, could trivially trip a glob-based guard) and more informative
+    than a pass/fail CI signal with no explanation attached.
+
+    **Docs.** No `docs/USER_GUIDE.md` change -- nothing user-visible changed. `docs/reviews/
+    2026-10-chatgpt-security-review-patch295.md`'s own intro paragraph updated to mark F7
+    addressed, cross-referencing this item and naming the second-SHA-256-caller finding from the
+    audit explicitly (F8 remains open, not yet directed).
+
+    **Verification.** Since every change here is a comment, "verification" is mostly the audit
+    itself (every grep result re-checked against the actual call site, not just counted) plus
+    confirming the comment-only edits introduce no compile regression: full default-build suite and
+    all three other standing build configs, matching item 138's own figures exactly (no test counts
+    moved, since nothing behavioral changed): default GCC `build` 2500/2500;
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive` 2482/2482; Clang ASan/UBSan `build-fuzz`
+    2578/2578 (including all 78 pre-existing `*_corpus_regression` tests); MinGW cross-compile
+    `build-mingw`, build-only (`conduitscope` and `crypto_selftest` both). Then a clean-room
+    extract-rebuild-test cycle (2500/2500, matching the incremental build exactly), before delivery
+    as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

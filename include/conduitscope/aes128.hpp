@@ -9,6 +9,9 @@
 // protection mask (section 5.4) is likewise always a single AES-ECB *encrypt* of a 16-byte sample.
 // So this codebase never needs AES decrypt (InvSubBytes/InvShiftRows/InvMixColumns) at all -- see
 // aes128_gcm.hpp for the GCM layer built on top of this, and quic.hpp for the one caller.
+//
+// See aes128_gcm.hpp's own file header for this codebase's crypto-subsystem-wide SCOPE BOUNDARY
+// (patch295 finding F7; item 139, DEVELOPMENT.md) -- this file is one of the four it covers.
 #pragma once
 
 #include <cstdint>

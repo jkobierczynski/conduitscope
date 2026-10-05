@@ -14,6 +14,11 @@
 // silently produces a wrong key, which silently produces a failed (not just wrong) decryption, not
 // a loud error. See sha256.cpp's own file header for how this is self-tested against FIPS 180-4's
 // own published test vectors before it is ever trusted with real QUIC key derivation.
+//
+// See aes128_gcm.hpp's own file header for this codebase's crypto-subsystem-wide SCOPE BOUNDARY
+// (patch295 finding F7; item 139, DEVELOPMENT.md) -- this file is one of the four it covers, and
+// the "second, deliberate caller" paragraph above is exactly the kind of same-primitive-new-caller
+// growth that boundary welcomes; a genuinely new primitive is the kind it closes the door on.
 #pragma once
 
 #include <cstddef>

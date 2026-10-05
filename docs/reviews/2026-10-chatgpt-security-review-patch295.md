@@ -138,8 +138,32 @@ a statistical timing test to actually prove constant-time behavior was
 deliberately not attempted, being unreliable under CI noise and
 disproportionate for a finding this low-severity.
 
-F7-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
-which, if any, to take up next.
+**Update: F7 is addressed.** This finding asks for no code change -- its
+own recommendation is purely forward-looking ("I'd keep it isolated
+exactly as it is now. If the crypto surface expands, I'd move toward a
+well-reviewed system/library crypto implementation..."), so "addressing"
+it meant auditing whether that isolation still holds and writing the
+boundary down durably. Jurgen asked for this one next. See
+[DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item 139 for the full
+writeup: a grep-verified audit of every call site of every function
+`aes128.hpp`/`aes128_gcm.hpp`/`sha256.hpp`/`hkdf.hpp` export confirms
+`aes128_encrypt_block`/`aes128_gcm_decrypt`/`hkdf_extract`/`hkdf_expand`/
+`hkdf_expand_label` are exactly as narrow as this finding describes
+(`quic.cpp` is their only caller) -- but `sha256`/`hmac_sha256` already
+have a second caller, `evidence_report.cpp`'s own integrity-hashing/
+`--sign-key` use. That was a deliberate decision already made and already
+documented at item 117, not a new gap this audit found, and this item's
+own judgment call is that a second caller of an EXISTING primitive for
+plain content-integrity hashing is a materially different (and
+acceptable) kind of growth than the new-cipher/new-capability expansion
+this finding warns against. `aes128_gcm.hpp` now carries an explicit,
+durable "SCOPE BOUNDARY" paragraph saying so in both directions, with the
+other three headers each pointing back to it -- turning this finding's own
+recommendation into an enforced project convention instead of a line in
+this review document.
+
+F8 has not been scheduled or acted on yet -- Jurgen has not yet directed
+whether to take it up next.
 
 The commit hash and any test-count/line/file references below reflect the
 reviewer's own state at review time; see DEVELOPMENT.md for current figures
