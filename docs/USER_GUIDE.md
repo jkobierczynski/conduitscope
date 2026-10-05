@@ -2533,7 +2533,13 @@ not be after its own `last_seen`. See `docs/DEVELOPMENT.md`'s ROADMAP item 134 (
 F2). Separately, how deeply nested a value inside an input report can be is also bounded (128
 levels), independent of `--max-inventory-file-bytes` above -- a small file can still be nested
 arbitrarily deep, which the byte ceiling alone doesn't catch. See ROADMAP item 135 (patch295
-finding F3).
+finding F3). The JSON string reader is also stricter than a casual hand-rolled parser needs to be:
+an unescaped control character inside a string is rejected rather than copied in verbatim, and a
+`\uXXXX` escape is properly UTF-16-decoded (including surrogate pairs, for a codepoint above the
+Basic Multilingual Plane) and UTF-8-encoded rather than truncated to a single raw byte -- both
+matter because these strings become asset-identity fields (vendor/product/serial/security
+posture/plant identification) a human or downstream tool will trust. See ROADMAP item 137
+(patch295 finding F5).
 
 ```
 $ conduitscope inventory --read site1.pcap --format json -o site1.json

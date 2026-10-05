@@ -12260,6 +12260,21 @@ add_test(NAME merge_inventory_nesting_depth_bounded
 set_tests_properties(merge_inventory_nesting_depth_bounded PROPERTIES
   TIMEOUT 30)
 
+# docs/reviews/2026-10-chatgpt-security-review-patch295.md finding F5 fix (item 137,
+# DEVELOPMENT.md): the JSON parser behind `merge inventory` (JsonCursor::parse_string,
+# inventory_merge.cpp) is now strict about two things RFC 8259 itself requires instead of silently
+# accepting the malformed shape or corrupting the value -- an unescaped control character inside a
+# string is now rejected rather than copied in verbatim, and a \uXXXX escape is now properly
+# UTF-16-decoded (including surrogate pairs) and UTF-8-encoded rather than truncated to its own low
+# byte. See tests/merge_inventory_json_strictness_smoke.sh's own file header for the full case list
+# (including why it hand-builds its fixtures rather than generating them with the CLI) and item
+# 137's own DEVELOPMENT.md writeup for the data-integrity reasoning.
+add_test(NAME merge_inventory_json_strictness_enforced
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/merge_inventory_json_strictness_smoke.sh" "$<TARGET_FILE:conduitscope>"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+set_tests_properties(merge_inventory_json_strictness_enforced PROPERTIES
+  TIMEOUT 20)
+
 add_test(NAME merge_needs_a_subcommand
   COMMAND conduitscope merge)
 set_tests_properties(merge_needs_a_subcommand PROPERTIES

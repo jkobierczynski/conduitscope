@@ -72,6 +72,30 @@ public:
         return false;
     }
 
+    // F5 fix (docs/reviews/2026-10-chatgpt-security-review-patch295.md; item 137, DEVELOPMENT.md):
+    // encodes one Unicode code point -- already resolved from a single \uXXXX escape, or from a
+    // combined UTF-16 surrogate pair (see parse_string()'s own 'u' case below) -- as UTF-8 bytes
+    // appended to `out`. Standard 1/2/3/4-byte UTF-8 encoding; by the time this is called,
+    // parse_string() has already rejected any unpaired surrogate, so `code` is always a valid
+    // Unicode scalar value here and no further validation happens in this function.
+    static void append_utf8(unsigned code, std::string& out) {
+        if (code <= 0x7F) {
+            out += static_cast<char>(code);
+        } else if (code <= 0x7FF) {
+            out += static_cast<char>(0xC0 | (code >> 6));
+            out += static_cast<char>(0x80 | (code & 0x3F));
+        } else if (code <= 0xFFFF) {
+            out += static_cast<char>(0xE0 | (code >> 12));
+            out += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (code & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (code >> 18));
+            out += static_cast<char>(0x80 | ((code >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (code & 0x3F));
+        }
+    }
+
     std::string parse_string() {
         skip_ws();
         if (pos_ >= text_.size() || text_[pos_] != '"') fail("expected a string");
@@ -102,12 +126,60 @@ public:
                             else if (h >= 'A' && h <= 'F') code |= static_cast<unsigned>(h - 'A' + 10);
                             else fail("invalid \\u escape digit");
                         }
-                        out += static_cast<char>(code & 0xFF);
+                        // F5 fix: real UTF-16 surrogate-pair handling and UTF-8 encoding, replacing
+                        // the old `static_cast<char>(code & 0xFF)` truncation -- confirmed, before
+                        // this fix, that e.g. "é" ('e'-acute) became the single raw byte 0xE9
+                        // (not valid UTF-8 on its own) instead of 'e'-acute's actual 2-byte UTF-8
+                        // encoding (0xC3 0xA9). A lone/unpaired surrogate is rejected outright
+                        // rather than silently producing a nonsense byte for it: RFC 8259 itself
+                        // doesn't define \u surrogate-pair semantics, but every real-world JSON
+                        // producer -- including this project's own baseline.cpp json_escape --
+                        // emits any codepoint above the Basic Multilingual Plane as two consecutive
+                        // \uXXXX escapes (a high surrogate 0xD800-0xDBFF immediately followed by a
+                        // low surrogate 0xDC00-0xDFFF), so anything else is malformed input.
+                        if (code >= 0xD800 && code <= 0xDBFF) {
+                            if (pos_ + 6 > text_.size() || text_[pos_] != '\\' || text_[pos_ + 1] != 'u') {
+                                fail("unpaired UTF-16 high surrogate in \\u escape (not followed by "
+                                     "a low surrogate)");
+                            }
+                            pos_ += 2;  // consume the second escape's leading "\u"
+                            unsigned low = 0;
+                            for (int i = 0; i < 4; ++i) {
+                                char h = text_[pos_++];
+                                low <<= 4;
+                                if (h >= '0' && h <= '9') low |= static_cast<unsigned>(h - '0');
+                                else if (h >= 'a' && h <= 'f') low |= static_cast<unsigned>(h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') low |= static_cast<unsigned>(h - 'A' + 10);
+                                else fail("invalid \\u escape digit");
+                            }
+                            if (low < 0xDC00 || low > 0xDFFF) {
+                                fail("UTF-16 high surrogate in \\u escape not followed by a valid "
+                                     "low surrogate");
+                            }
+                            unsigned codepoint = 0x10000u + ((code - 0xD800u) << 10) + (low - 0xDC00u);
+                            append_utf8(codepoint, out);
+                        } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                            fail("unpaired UTF-16 low surrogate in \\u escape");
+                        } else {
+                            append_utf8(code, out);
+                        }
                         break;
                     }
                     default: fail("unrecognized string escape");
                 }
             } else {
+                // F5 fix: RFC 8259 section 7 forbids an unescaped control character (U+0000-U+001F)
+                // appearing literally inside a JSON string -- it must be escaped (\n, \t, \u0000,
+                // ...) instead. Confirmed, before this fix, that this parser silently accepted one
+                // verbatim into the resulting string, exactly as the finding describes.
+                if (static_cast<unsigned char>(c) <= 0x1F) {
+                    static const char kHexDigits[] = "0123456789ABCDEF";
+                    unsigned char uc = static_cast<unsigned char>(c);
+                    std::string hex;
+                    hex += kHexDigits[(uc >> 4) & 0xF];
+                    hex += kHexDigits[uc & 0xF];
+                    fail("unescaped control character 0x" + hex + " in string literal");
+                }
                 out += c;
             }
         }

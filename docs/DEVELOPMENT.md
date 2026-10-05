@@ -18364,6 +18364,83 @@ it done as its own patch.
     extract-rebuild-test cycle (2499/2499, matching the incremental build exactly), before delivery
     as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
 
+137. **Fix patch295 finding F5: custom JSON parser accepts some malformed JSON more generously
+    than intended** -- Jurgen's direct request, the fifth item taken up from
+    `docs/reviews/2026-10-chatgpt-security-review-patch295.md`, right after item 136 (F4).
+    **Done.**
+
+    **The finding, confirmed by inspection before it was fixed.** `inventory_merge.cpp`'s
+    `JsonCursor::parse_string()` had two real gaps against RFC 8259, both exactly as the finding
+    describes: (1) it never checked for an unescaped control character (U+0000-U+001F) appearing
+    literally inside a string -- the spec requires these be escaped (`\n`, `\t`, `\u0000`, ...),
+    but a raw control byte was silently copied into the resulting string verbatim; (2) its `\u`
+    escape handling reduced every code point to `static_cast<char>(code & 0xFF)` -- a single
+    truncated byte, not real UTF-8 encoding, and with no UTF-16 surrogate-pair handling at all, so
+    any codepoint above the Basic Multilingual Plane (anything needing a surrogate pair, e.g. an
+    emoji) could never be represented correctly. The review's own framing: not a memory-safety bug,
+    but a data-integrity/canonicalization concern -- these are the exact fields
+    (`vendor`/`product`/`serial_number`/`security_posture`/`plant_identification`/...) that become
+    asset-identity data a human or downstream tool trusts, so a value that's technically malformed
+    JSON silently becoming an accepted internal string is the real risk. Unlike F1-F4, this finding
+    is about `merge inventory`'s JSON parser specifically -- `baseline.cpp`'s own, structurally
+    similar `JsonCursor` has the identical `code & 0xFF` truncation, but that parser only ever
+    reads back its OWN previously-written baseline store file (a closed round-trip, and its own
+    `json_escape` only ever emits `\u` for the control-character range it itself writes), a
+    different trust boundary than `merge inventory`'s externally-supplied, potentially
+    multi-source, untrusted report files -- left untouched, deliberately, and already documented
+    that way in its own comment.
+
+    **The fix.** `parse_string()`'s plain-character branch now rejects any byte in the
+    `0x00`-`0x1F` range with a clear `unescaped control character 0x<HH> in string literal` error
+    (the same `fail()`/`InventoryMergeError` path every other malformed-JSON case in this parser
+    already uses) instead of copying it in. The `'u'` escape case now does real UTF-16 decoding: a
+    new `append_utf8(code, out)` helper UTF-8-encodes a code point (1-4 bytes, standard encoding);
+    a high surrogate (`0xD800`-`0xDBFF`) is required to be immediately followed by a second `\u`
+    escape holding a valid low surrogate (`0xDC00`-`0xDFFF`), the pair combined into its real
+    codepoint and UTF-8-encoded; a lone high surrogate (not followed by a low one) or a lone low
+    surrogate (with no preceding high one) is rejected outright rather than silently producing a
+    nonsense byte for it, matching every real-world JSON producer's own surrogate-pair convention
+    (including this project's own `baseline.cpp` `json_escape`). An ordinary `\u` escape outside
+    the surrogate range (the common case -- any BMP character) is UTF-8-encoded directly, no
+    pairing needed. Manually confirmed end-to-end against the real binary before writing any test:
+    `"é"` ('e'-acute) now correctly produces the 2-byte UTF-8 sequence `0xC3 0xA9` (not the old
+    single truncated byte `0xE9`); `"😀"` (a surrogate pair for U+1F600, "grinning face")
+    now correctly produces its real 4-byte UTF-8 encoding `0xF0 0x9F 0x98 0x80` -- something the old
+    code could never have produced correctly at all, since it only ever looked at one `\u` escape
+    in isolation.
+
+    **New tests.** `tests/merge_inventory_json_strictness_smoke.sh` (new
+    `merge_inventory_json_strictness_enforced` CTest entry) -- another deliberate, explicitly-
+    documented exception to this project's own "generate every fixture with the real CLI" rule
+    (same reasoning as items 134/135's own hand-authored fixtures): none of the malformed cases
+    here are something `inventory --format json` can ever itself produce. Seven cases: an
+    unescaped `0x01` control byte rejected; a different control byte (`0x1F`, the top of the
+    forbidden range) also rejected, confirming the check is a range rather than one hardcoded
+    value; `"é"` accepted and correctly UTF-8-encoded; the `"😀"` surrogate pair
+    accepted and correctly combined/UTF-8-encoded; a lone high surrogate rejected; a lone low
+    surrogate rejected; and a regression guard confirming a real, CLI-generated inventory report
+    (no exotic escapes or control bytes in it) still merges successfully, proving neither new check
+    is too strict against ordinary, legitimate input.
+
+    **Docs.** `docs/USER_GUIDE.md`'s `merge inventory` section gains a short paragraph on the two
+    new strictness checks, cross-referencing this item. `docs/reviews/2026-10-chatgpt-security-
+    review-patch295.md`'s own intro paragraph updated to mark F5 fixed, cross-referencing this item
+    (F6-F8 remain open, not yet directed).
+
+    **Verification.** Manual end-to-end verification against the real built binary first, for all
+    five distinct behaviors (control-byte rejection, the `é` and surrogate-pair cases
+    correctly encoding, both unpaired-surrogate rejections) -- all confirmed before any CTest entry
+    was written. Then the new CTest entry specifically, then the full `merge`-scoped CTest group
+    (14 tests, up from 13, all passing). Then the full default-build suite and all three other
+    standing build configs, each +1 over item 136's own figures with zero regressions: default GCC
+    `build` 2500/2500 (was 2499/2499); `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`
+    2482/2482 (was 2481/2481); Clang ASan/UBSan `build-fuzz` 2578/2578 (was 2577/2577, including all
+    78 pre-existing `*_corpus_regression` tests, zero new crashes/UB -- notable given this item's
+    own fix touches string-decoding logic directly); MinGW cross-compile `build-mingw`, build-only,
+    configured test count 2482 (matching `build_nolive`'s count). Then a clean-room
+    extract-rebuild-test cycle (2500/2500, matching the incremental build exactly), before delivery
+    as a zip of touched/new files via the standing no-git-commit convention -- never git-commit.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

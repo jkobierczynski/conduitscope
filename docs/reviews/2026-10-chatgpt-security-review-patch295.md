@@ -106,7 +106,21 @@ heuristic itself is documented as exactly that: it reliably catches this
 one pattern shape and nothing else (an overlapping alternation like
 `(a|a)*` is a different ReDoS shape it won't catch).
 
-F5-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
+**Update: F5 is fixed.** Jurgen asked for this one next. See
+[DEVELOPMENT.md](../DEVELOPMENT.md)'s ROADMAP item 137 for the full fix:
+`merge inventory`'s JSON string reader (`inventory_merge.cpp`'s own
+`JsonCursor::parse_string()`) now rejects an unescaped control character
+inside a string instead of copying it in verbatim, and now properly
+UTF-16-decodes (including surrogate pairs) and UTF-8-encodes a `\uXXXX`
+escape instead of truncating it to `static_cast<char>(code & 0xFF)` --
+confirmed, before the fix, that `"é"` became the single raw byte
+`0xE9` rather than 'e'-acute's real 2-byte UTF-8 encoding, exactly as this
+finding describes. `baseline.cpp`'s own, structurally similar `JsonCursor`
+has the identical truncation but was deliberately left untouched -- it only
+ever reads back its own previously-written file, a closed round-trip
+outside this finding's own "externally-supplied report" scope.
+
+F6-F8 have not been scheduled or acted on yet -- Jurgen has not yet directed
 which, if any, to take up next.
 
 The commit hash and any test-count/line/file references below reflect the
