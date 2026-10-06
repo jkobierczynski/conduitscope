@@ -748,13 +748,29 @@ COTP's own End-of-TSDU bit -- i.e. a captured COTP Data frame can be a
 complete, EOT=1 COTP PDU while still carrying only an incomplete S7comm-Plus
 telegram. This decoder's usual COTP-level reassembly (shared with classic
 S7comm/MMS, keyed on COTP's own EOT bit) is therefore NOT sufficient by
-itself for S7comm-Plus, and this decoder does not additionally implement
-S7comm-Plus's own above-COTP, trailer-based reassembly (a genuinely
-separate, TCP-session-keyed state machine in the reference plugin) -- a
-telegram missing its trailer is reported as such (`"summary": "Data
-(fragment, awaiting further data)"`, plus a note) with whatever of the Data
-part fits in that one frame decoded, rather than guessed at across frames it
-hasn't seen. See docs/USER_GUIDE.md's LIMITATIONS.
+itself for S7comm-Plus -- but, as of docs/DEVELOPMENT.md's ROADMAP item 147,
+this above-COTP, trailer-based reassembly IS now implemented, as its own
+genuinely separate state machine (`S7CommPlusReassemblyState`,
+s7commplus.hpp/s7commplus.cpp), mirroring the reference plugin's own design:
+every physical fragment re-parses its own full 4-byte header, and the
+reassembly state is tracked per WHOLE TCP SESSION, not per direction (the
+reference plugin's own `find_conversation(..., NO_PORT_B)` lookup is
+direction-independent, unlike this codebase's own usual per-direction
+default for DNP3/COTP/OPC UA chunk reassembly). For DataFW1_5 (firmware >=
+V1.5), EVERY physical fragment -- not just the final one -- carries its own
+leading Integrity block, which is stripped before fragments are
+concatenated (see the DataFW1_5 paragraph under Tier 1 below). A fragment
+still in flight is reported as such (`"summary": "Data (fragment, awaiting
+further data)"`, plus a "buffering..." note); once a later frame's trailer
+completes it, the function body is decoded from the full reassembled Data
+part and a "telegram reassembled from N fragment(s)..." note is added. A
+PDU-type/firmware-shape mismatch between an in-progress reassembly and a new
+arrival abandons the earlier, incomplete one (with a note) rather than
+silently concatenating bytes from two unrelated telegrams -- a deliberate
+deviation from the reference plugin's own FSM, which does not guard against
+this case at all. The existing `--max-reassembly-bytes`/
+`--max-reassembly-segments` flags bound how much any one session can
+buffer. See docs/USER_GUIDE.md's LIMITATIONS.
 
 #### Two-tier function coverage
 
@@ -860,10 +876,21 @@ real HMI traffic: GetMultiVariables (both the symbolic-addressing and
 subscribed-link request shapes), SetMultiVariables (including a genuinely
 nested Struct-of-Struct value with a `WString` member and a 360-byte
 `Blob`), and DeleteObject all exercise Tier-1 decoding correctly, with
-Connect and GetVarSubStreamed correctly recognized as Tier-2. It also
-repeatedly exercises this decoder's above-COTP, trailer-based reassembly
-DETECTION on real traffic (every SetMultiVariables request here arrives
-split across 2 TPKT/COTP frames). `opc_request_all_types` lives up to its
+Connect and GetVarSubStreamed correctly recognized as Tier-2. A pre-existing
+claim here -- that this capture "repeatedly exercises this decoder's
+above-COTP, trailer-based reassembly DETECTION on real traffic" because
+every SetMultiVariables request arrives split across 2 TPKT/COTP frames --
+was checked byte-for-byte during ROADMAP item 147's own work (tshark plus a
+custom Python payload extractor) and found to be describing something else:
+the first of those two frames contributes 0 bytes of COTP user data with
+COTP's own EOT bit at 0, the second contributes the frame's actual content
+with EOT=1, and the COMBINED, COTP-already-reassembled TSDU has
+`has_trailer=true` from the start -- this is pure COTP-level (EOT-bit)
+fragmentation, not S7comm-Plus's own above-COTP gap. Neither real capture
+this project has actually exercises the missing-trailer code path item 147
+closes; that feature rests on grammar-plus-synthetic-fixture validation
+only (see docs/DEVELOPMENT.md's own item 147 for the fixtures).
+`opc_request_all_types` lives up to its
 name: a single 40-item GetMultiVariables request/response pair walks nearly
 every datatype this decoder knows in one call. **Zero per-item decode
 errors, zero `ParseError`-triggered fallbacks, in either file.**

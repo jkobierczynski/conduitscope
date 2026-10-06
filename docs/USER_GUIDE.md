@@ -7679,11 +7679,18 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   for plain Data.
 - **S7comm-Plus's own above-COTP fragmentation (a telegram split across
   multiple TPKT/COTP frames, signalled by the ABSENCE of the trailer, not
-  COTP's own EOT bit) is detected and reported but not reassembled.** A
-  telegram missing its trailer decodes only as far as the bytes present in
-  that one frame; the continuation frame(s) are not stitched back in. This
-  is a genuinely separate, TCP-session-keyed state machine in the reference
-  plugin that this decoder does not replicate.
+  COTP's own EOT bit) is reassembled (docs/DEVELOPMENT.md's ROADMAP item
+  147), as its own TCP-session-keyed state machine mirroring the reference
+  plugin's own design.** A fragment still in flight is reported as such
+  (buffering, awaiting the completing frame); once a trailer-bearing frame
+  arrives, the function body decodes from the full reassembled Data part. A
+  PDU-type/firmware-shape mismatch mid-reassembly abandons the earlier,
+  incomplete telegram with a note rather than concatenating unrelated bytes
+  -- a deliberate deviation from the reference plugin's own FSM, which
+  doesn't guard against that case. Neither real S7comm-Plus capture this
+  project has actually exercises the missing-trailer path, so this rests on
+  grammar-plus-synthetic-fixture validation, not a real-capture
+  confirmation (see docs/PROTOCOL_COVERAGE.md's S7comm-Plus section).
 - **S7comm-Plus's native symbolic item addressing (CRC + LID chain) decodes
   the numbers faithfully but cannot resolve what they mean.** A LID's or
   CRC's symbolic meaning (which tag name it refers to) depends on TIA

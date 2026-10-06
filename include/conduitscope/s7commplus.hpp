@@ -57,13 +57,34 @@
 //     this trailer, NOT by COTP's own End-of-TSDU bit -- i.e. a captured COTP Data frame can be a
 //     complete, EOT=1 COTP PDU while still carrying only an incomplete S7comm-Plus telegram (no
 //     trailer yet). This decoder's usual COTP-level reassembly (CotpDecoder::decode, cotp.hpp/
-//     cotp.cpp -- shared with classic S7comm/MMS, keyed on COTP's own EOT bit) is
-//     therefore NOT sufficient by itself for S7comm-Plus, and this file does not additionally
-//     implement S7comm-Plus's own above-COTP, trailer-based reassembly (a genuinely separate,
-//     TCP-session-keyed state machine in the reference plugin) -- a telegram missing its trailer
-//     is reported as such (see S7CommPlusFrame::has_trailer) with whatever of the Data part fits
-//     in this frame decoded, rather than guessed at across frames it hasn't seen. See LIMITATIONS
-//     in docs/MANUAL.md.
+//     cotp.cpp -- shared with classic S7comm/MMS, keyed on COTP's own EOT bit) is therefore NOT
+//     sufficient by itself for S7comm-Plus. As of ROADMAP item 147 (docs/DEVELOPMENT.md), this
+//     file ALSO implements S7comm-Plus's own above-COTP, trailer-based reassembly: every physical
+//     fragment (first, inner, and last alike) carries its own repeated 4-byte header -- see the
+//     reference plugin's own dissect_s7commp, which re-checks the 0x72 protocol id on every
+//     fragment, not just the first -- so S7CommPlusDecoder::decode buffers each fragment's own
+//     "pure" Data-part contribution (see S7CommPlusReassemblyState below) per TCP SESSION
+//     (deliberately not per direction -- see that class's own comment for why) until a fragment
+//     with a trailer completes it, then decodes the full reassembled Data part exactly as a
+//     single, unfragmented telegram's own Data part is decoded. DataFW1_5's own per-fragment
+//     leading Integrity block (see below) is stripped from EVERY fragment before concatenation,
+//     not just the first or last -- the reference plugin's own source comments make clear this
+//     changed starting with firmware >= V1.5 (every fragment gets its own Integrity block, where
+//     older firmware's plain Data PDU type only ever had one, on the final fragment). A fragment
+//     whose PDU type doesn't match an already-in-progress reassembly on the same session abandons
+//     the earlier, incomplete one (with a note) rather than silently concatenating unrelated
+//     bytes -- the reference plugin's own FSM doesn't guard against this (it trusts has_trailer
+//     transitions unconditionally), but this codebase's own convention elsewhere for above-the-
+//     transport reassembly (DNP3/COTP/OPC UA) is to detect and abandon on mismatch, applied here
+//     too. See S7CommPlusFrame::has_trailer/body_region and S7CommPlusReassemblyState below.
+//     Validation posture, stated honestly: neither real S7comm-Plus capture this project has ever
+//     exercises the actual missing-trailer path (both of this decoder's own real-world "split
+//     across 2 TPKT/COTP frames" SetMultiVariables requests turn out, on inspection, to already
+//     be fully resolved at the COTP layer -- the apparent split is COTP-level fragmentation with
+//     a zero-byte first fragment, not an above-COTP S7comm-Plus trailer gap at all), so this
+//     feature rests on hand-built synthetic fixtures only, the same honestly-stated posture this
+//     codebase already uses for OPC UA's own SecureConversation chunk reassembly (ROADMAP item
+//     146) and MMS's own Session-extended-length form (ROADMAP item 145).
 //
 // Function-specific bodies this file fully decodes (Tier 1, matching this codebase's usual
 // "the dominant real-world operations get full item/value decode" standard -- see e.g. MMS's own
@@ -286,8 +307,39 @@ struct S7CommPlusFrame {
 
     bool has_trailer = false;
 
+    // Above-COTP, trailer-based reassembly (ROADMAP item 147, docs/DEVELOPMENT.md): the raw bytes
+    // of THIS physical fragment's own Data part, right after the 4-byte header and before any
+    // Integrity/opcode processing -- exactly `data_length` bytes (clamped to what's actually
+    // available), regardless of has_trailer. Populated for every non-KeepAlive PDU type, including
+    // Connect. Aliases the caller's own `data` span passed to try_parse_s7comm_plus -- valid only
+    // for the lifetime of that span, the same convention OPC UA's own chunk_service_region
+    // documents (opcua.hpp). S7CommPlusDecoder::decode is the only consumer that needs this past
+    // the single-fragment parse itself.
+    ByteSpan body_region;
+
     std::string summary;
     std::vector<std::string> notes;
+};
+
+// Above-COTP, trailer-based reassembly state (see s7commplus.hpp's own "Chunking" section in the
+// file header, and ROADMAP item 147 in docs/DEVELOPMENT.md) -- keyed by the WHOLE TCP session
+// (FlowStateKeying::Session), deliberately NOT per direction, mirroring the reference plugin's own
+// conv_state_t exactly: packet-s7comm_plus.c's dissect_s7commp tracks this fragmentation state
+// against one Wireshark "conversation" (addresses + one port, direction-agnostic), not against
+// each direction separately -- unlike DNP3/COTP/OPC UA's own chunk-reassembly state, which IS
+// per-direction (see Dnp3ReassemblyState/CotpReassemblyState/OpcUaReassemblyState), because this
+// protocol's own reference implementation was built and field-tested that way, not because this
+// codebase's own usual per-direction default was judged wrong here.
+class S7CommPlusReassemblyState : public DecoderFlowState {
+public:
+    bool in_progress = false;
+    uint8_t pdu_type = 0;   // must match for every fragment of one logical telegram
+    bool is_fw1_5 = false;  // ditto
+    std::vector<uint8_t> buffered_data;  // concatenated "pure" Data-part content so far (each
+                                           // fragment's own leading DataFW1_5 integrity, if any,
+                                           // already stripped -- see strip_fw1_5_fragment_integrity
+                                           // in s7commplus.cpp)
+    size_t fragment_count = 0;
 };
 
 std::string s7commplus_pdu_type_name(uint8_t pdu_type);
@@ -308,11 +360,17 @@ std::string s7commplus_datatype_name(uint8_t datatype);
 std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan cotp_user_data);
 
 // registration-model migration batch 2 (see protocol_decoder.hpp/protocol_registry.hpp). Thin
-// ProtocolDecoder wrapper: detection+decode still goes through try_parse_s7comm_plus above,
-// unchanged -- S7comm-Plus is stateless, so decode() needs no flow state at all. gate_kind() is
-// CotpPayload: this decoder is never gated against raw TCP bytes itself, only ever invoked by
-// decoder.cpp's COTP/S7comm-family call site with the bytes a CotpDecoder (cotp.hpp) has already
-// framed and cross-packet-reassembled.
+// ProtocolDecoder wrapper: detection still goes through try_parse_s7comm_plus above, unchanged --
+// every single physical fragment's own 4-byte header/body_region is still parsed exactly the same
+// way regardless of reassembly. As of ROADMAP item 147 (docs/DEVELOPMENT.md), decode() is no
+// longer stateless: it also drives the above-COTP, trailer-based reassembly state machine
+// described in the file header's "Chunking" section, via
+// ctx.flow_state<S7CommPlusReassemblyState>(FlowStateKeying::Session) -- a direct call to
+// try_parse_s7comm_plus alone (as the fuzz harness and any other ctx-free caller still does) sees
+// only one physical fragment at a time and never reassembles, exactly as before this item.
+// gate_kind() is CotpPayload: this decoder is never gated against raw TCP bytes itself, only ever
+// invoked by decoder.cpp's COTP/S7comm-family call site with the bytes a CotpDecoder (cotp.hpp)
+// has already framed and cross-packet-reassembled at the COTP level.
 class S7CommPlusDecoder : public ProtocolDecoder {
 public:
     std::string_view id() const override { return "s7comm-plus"; }

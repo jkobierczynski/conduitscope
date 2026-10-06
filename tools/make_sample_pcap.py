@@ -6209,10 +6209,22 @@ def build_s7commplus_sample():
     and a value using the one datatype code (S7String, 0x19) this decoder's value switch does not
     implement, both exercising the per-Data-part try/catch's graceful "decoding stopped" note
     rather than losing the whole packet. Separate flows (own port pairs): a telegram missing its
-    trailer (S7comm-Plus's own above-COTP fragmentation signal, NOT reassembled by this decoder --
-    reported as such); a completely truncated (<4 byte) telegram (the outer catch(ParseError)
-    "could not parse packet" path); and a session on a non-102 TCP port (the "not a configured/
-    standard COTP/S7comm port" note)."""
+    trailer (S7comm-Plus's own above-COTP fragmentation signal -- this one is left unanswered by a
+    completing fragment on purpose, so it stays in the "buffering" state forever, the same lone-
+    fragment shape ROADMAP item 147's own one pre-existing test already covered); a completely
+    truncated (<4 byte) telegram (the outer catch(ParseError) "could not parse packet" path); and
+    a session on a non-102 TCP port (the "not a configured/standard COTP/S7comm port" note). Then
+    three more separate flows (ROADMAP item 147, docs/DEVELOPMENT.md) actually exercising above-
+    COTP, trailer-based reassembly rather than just its detection: a GetMultiVariables response
+    split across two physical TPKT/COTP frames at an arbitrary byte offset (not aligned to any
+    field boundary, to prove reassembly is pure byte concatenation) that reassembles cleanly into
+    the same decode a single, unfragmented frame would have produced; the same shape but
+    DataFW1_5-framed, exercising the firmware>=V1.5-only wrinkle where EVERY physical fragment --
+    not just the final one -- carries its own leading Integrity block that must be stripped before
+    concatenating; and a complete telegram of a different PDU type arriving mid-reassembly on the
+    same TCP session, which abandons the in-progress reassembly (a deliberate deviation from the
+    reference plugin's own FSM, which doesn't guard against this at all) while leaving that new
+    telegram's own standalone decode unaffected."""
     ENG_IP, PLC_PORT = HMI_IP, 102
     packets = []
     ident = [0x8000]
@@ -6420,6 +6432,78 @@ def build_s7commplus_sample():
     tcp_ka = tcp_header(other_port_a, other_port_b, 100, 200, TCP_PSH | TCP_ACK, len(ka)) + ka
     ip_ka = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_ka), 0x8300) + tcp_ka
     packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_ka)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow (ROADMAP item 147, docs/DEVELOPMENT.md): above-COTP, trailer-based reassembly
+    # actually COMPLETING across two physical TPKT/COTP frames -- the gap this round closes (the
+    # frag_port flow above only exercises DETECTING a missing trailer, never completing it). A
+    # GetMultiVariables response's own envelope bytes are split at an arbitrary byte offset
+    # (deliberately NOT aligned to any field boundary, to prove reassembly is pure byte
+    # concatenation, indifferent to the Data part's own internal structure): the first physical
+    # frame declares its own (correct, smaller) Data Length for what it actually carries and has
+    # no trailer; the second is an ordinary, complete (trailer-having) frame carrying the
+    # remainder. Own port pair so it can't interact with any other flow's own reassembly state.
+    # ---------------------------------------------------------------------------------------------
+    reasm_port = 50305
+    resp_reasm = s7p_getmultivar_response(0, [(1, s7p_scalar(0x07, el_int(4242)))])
+    full_reasm = s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_GETMULTIVAR, 20, resp_reasm)
+    split_at = len(full_reasm) // 2
+    reasm_part1, reasm_part2 = full_reasm[:split_at], full_reasm[split_at:]
+    reasm_frag1 = dt(s7p_frame_no_trailer(S7P_PDUTYPE_DATA, reasm_part1, declared_full_length=len(reasm_part1)))
+    reasm_frag2 = dt(s7p_frame(S7P_PDUTYPE_DATA, reasm_part2))
+    reasm_seq = [500]
+    for frag_bytes in (reasm_frag1, reasm_frag2):
+        tcp_r = tcp_header(PLC_PORT, reasm_port, reasm_seq[0], 600, TCP_PSH | TCP_ACK, len(frag_bytes)) + frag_bytes
+        ip_r = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_r), 0x8400 + (reasm_seq[0] & 0xff)) + tcp_r
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_r)
+        reasm_seq[0] += len(frag_bytes)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow (ROADMAP item 147): the same above-COTP reassembly, but DataFW1_5-framed --
+    # exercising the firmware>=V1.5-only wrinkle where EVERY physical fragment (not just the final
+    # one) carries its own leading Integrity block that must be stripped before concatenating
+    # fragments (see decode_integrity_fw1_5/strip_fw1_5_fragment_integrity in src/s7commplus.cpp).
+    # Own port pair.
+    # ---------------------------------------------------------------------------------------------
+    reasm_fw15_port = 50306
+    resp_reasm_fw15 = s7p_getmultivar_response(0, [(1, s7p_scalar(0x04, el_udint(777)))])
+    full_reasm_fw15 = s7p_envelope(S7P_OPCODE_RESPONSE, S7P_FC_GETMULTIVAR, 21, resp_reasm_fw15)
+    split_at2 = len(full_reasm_fw15) // 2
+    fw15_part1, fw15_part2 = full_reasm_fw15[:split_at2], full_reasm_fw15[split_at2:]
+    fw15_frag1_data = s7p_integrity_fw1_5(integrity_id=1) + fw15_part1
+    fw15_frag2_data = s7p_integrity_fw1_5(integrity_id=1) + fw15_part2
+    fw15_frag1 = dt(s7p_frame_no_trailer(S7P_PDUTYPE_DATAFW1_5, fw15_frag1_data,
+                                          declared_full_length=len(fw15_frag1_data)))
+    fw15_frag2 = dt(s7p_frame(S7P_PDUTYPE_DATAFW1_5, fw15_frag2_data))
+    reasm_fw15_seq = [700]
+    for frag_bytes in (fw15_frag1, fw15_frag2):
+        tcp_r = tcp_header(PLC_PORT, reasm_fw15_port, reasm_fw15_seq[0], 800, TCP_PSH | TCP_ACK,
+                            len(frag_bytes)) + frag_bytes
+        ip_r = ipv4_header(PLC_IP, ENG_IP, 6, len(tcp_r), 0x8500 + (reasm_fw15_seq[0] & 0xff)) + tcp_r
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip_r)
+        reasm_fw15_seq[0] += len(frag_bytes)
+
+    # ---------------------------------------------------------------------------------------------
+    # Separate flow (ROADMAP item 147): a complete telegram of a DIFFERENT PDU type arrives while
+    # a previous above-COTP reassembly is still in progress on the same TCP session -- the
+    # in-progress reassembly is abandoned (with a note), and the new telegram's own standalone
+    # decode is unaffected. A deliberate deviation from the reference plugin's own FSM, which does
+    # not guard against this at all (see s7commplus.hpp's own "Chunking" section).
+    # ---------------------------------------------------------------------------------------------
+    mismatch_port = 50307
+    stray_body = s7p_envelope(S7P_OPCODE_REQUEST, S7P_FC_GETMULTIVAR, 30,
+                               s7p_getmultivar_request([s7p_item_symbolic(0x1, 0x52)]),
+                               session_id=0x1001, integrity=False)
+    stray_part1 = stray_body[: len(stray_body) // 2]
+    mismatch_frag1 = dt(s7p_frame_no_trailer(S7P_PDUTYPE_DATA, stray_part1, declared_full_length=len(stray_part1)))
+    mismatch_frag2 = dt(s7p_frame(S7P_PDUTYPE_CONNECT, bytes(range(16))))
+    mismatch_seq = [900]
+    for frag_bytes in (mismatch_frag1, mismatch_frag2):
+        tcp_r = tcp_header(mismatch_port, PLC_PORT, mismatch_seq[0], 950, TCP_PSH | TCP_ACK,
+                            len(frag_bytes)) + frag_bytes
+        ip_r = ipv4_header(ENG_IP, PLC_IP, 6, len(tcp_r), 0x8600 + (mismatch_seq[0] & 0xff)) + tcp_r
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_r)
+        mismatch_seq[0] += len(frag_bytes)
 
     data = pcap_global_header()
     for i, pkt in enumerate(packets):

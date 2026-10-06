@@ -755,6 +755,173 @@ void decode_integrity_fw1_5(Cursor& c, S7CommPlusFrame& frame) {
     }
 }
 
+// --- Above-COTP, trailer-based reassembly (ROADMAP item 147, docs/DEVELOPMENT.md) -------------
+//
+// Strips THIS ONE physical fragment's own leading Integrity block (DataFW1_5 only -- see
+// decode_integrity_fw1_5 above) so that every fragment's contribution to a logical telegram's
+// Data part is "pure" content, with no per-fragment integrity blocks interleaved into the
+// concatenated buffer. Per the reference plugin's own source comments, firmware >= V1.5 places
+// one of these at the FRONT of EVERY physical fragment (first, inner, and last alike), not just
+// the single telegram as a whole -- a distinct wrinkle from the plain Data PDU type, where only
+// the final fragment ever carries an Integrity part (at the END, handled separately by
+// decode_integrity, called from decode_s7comm_plus_body below). A no-op for every other PDU type
+// (is_fw1_5 is only ever true for DataFW1_5). Degrades gracefully (leaves whatever's left, possibly
+// empty) rather than throwing if a fragment is too short even for the varuint32 id -- the eventual
+// opcode-level decode's own try/catch is what surfaces that as a clear note.
+ByteSpan strip_fw1_5_fragment_integrity(ByteSpan data_part, bool is_fw1_5, S7CommPlusFrame& frame) {
+    if (!is_fw1_5) return data_part;
+    Cursor dc(data_part);
+    try {
+        decode_integrity_fw1_5(dc, frame);
+    } catch (const ParseError&) {
+        // Too little data even for the leading varuint32 id -- fall through with whatever's left.
+    }
+    return dc.rest();
+}
+
+// Builds S7CommPlusFrame::summary from whatever fields are already populated -- shared by
+// try_parse_s7comm_plus's own tail (the common, single-fragment case) and
+// finalize_s7comm_plus_fragment's reassembly-completion path (s7commplus.cpp's own
+// S7CommPlusDecoder::decode wrapper), so a reassembled telegram's summary is built exactly the
+// same way as an unfragmented one's. A summary already set by decode_s7comm_plus_body itself
+// (Connect's bare "Connect", or a fragment-placeholder set directly in try_parse_s7comm_plus) is
+// left alone, matching this function's own pre-extraction behavior exactly.
+std::string build_s7comm_plus_summary(const S7CommPlusFrame& frame) {
+    if (!frame.summary.empty()) return frame.summary;
+    std::ostringstream s;
+    s << frame.pdu_type_name;
+    if (frame.has_function) {
+        s << ": " << frame.opcode_name << " " << frame.function_name;
+    } else if (frame.is_notification) {
+        s << ": Notification";
+    }
+    if (frame.has_sequence_number) s << " (seq=" << frame.sequence_number << ")";
+    if (frame.has_return_value && (frame.return_code != 0)) {
+        s << " [" << frame.return_code_name << "]";
+    }
+    if (!frame.item_addresses.empty()) {
+        s << " (" << frame.item_addresses.size() << " item(s))";
+    }
+    if (!frame.id_values.empty()) {
+        s << " (" << frame.id_values.size() << " value(s))";
+    }
+    return s.str();
+}
+
+// Decodes a logical Data part's worth of bytes -- either one self-contained, unfragmented
+// telegram's own data_part (the overwhelmingly common case, called directly from
+// try_parse_s7comm_plus below), or a fully-reassembled multi-fragment buffer (called from
+// finalize_s7comm_plus_fragment once a trailer completes an above-COTP reassembly in progress).
+// `pure_data` must already have any DataFW1_5 leading Integrity block stripped (by
+// strip_fw1_5_fragment_integrity above) -- this function never does that itself, so it behaves
+// identically whichever caller reaches it. Exactly today's pre-item-147 logic, just extracted
+// and relieved of the DataFW1_5-leading-integrity step it used to do inline (now hoisted to every
+// caller, uniformly, whether there's one fragment or many).
+void decode_s7comm_plus_body(ByteSpan pure_data, uint8_t pdu_type, S7CommPlusFrame& frame) {
+    if (pdu_type == S7COMMP_PDUTYPE_CONNECT) {
+        frame.notes.push_back("Connect PDU (session establishment handshake) is recognized but "
+                               "not decoded in this release -- see LIMITATIONS in docs/MANUAL.md");
+        frame.summary = "Connect";
+        return;
+    }
+
+    // Any ParseError anywhere below (a truncated capture, or hitting an unrecognized value
+    // datatype -- see decode_value_element) is caught here and degrades to a clear note rather
+    // than losing the whole packet.
+    try {
+        Cursor dc(pure_data);
+        frame.has_data_part = true;
+
+        frame.opcode = dc.u8();
+        frame.opcode_name = s7commplus_opcode_name(frame.opcode);
+
+        if (frame.opcode == S7COMMP_OPCODE_NOTIFICATION) {
+            frame.is_notification = true;
+            frame.notes.push_back("Notification body (subscribed/cyclic variable updates) is "
+                                   "recognized but not decoded in this release -- see "
+                                   "LIMITATIONS in docs/MANUAL.md");
+        } else {
+            dc.u16be();  // reserved1
+            frame.function_code = dc.u16be();
+            frame.function_name = s7commplus_function_name(frame.function_code);
+            frame.has_function = true;
+            dc.u16be();  // reserved2
+            frame.sequence_number = dc.u16be();
+            frame.has_sequence_number = true;
+
+            if (frame.opcode == S7COMMP_OPCODE_REQUEST) {
+                frame.session_id = dc.u32be();
+                frame.has_session_id = true;
+                dc.u8();  // unknown1
+
+                switch (frame.function_code) {
+                    case S7COMMP_FUNCTIONCODE_GETMULTIVAR:
+                        decode_request_getmultivar(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    case S7COMMP_FUNCTIONCODE_SETMULTIVAR:
+                        decode_request_setmultivar(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    case S7COMMP_FUNCTIONCODE_SETVARIABLE:
+                        decode_request_setvariable(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    case S7COMMP_FUNCTIONCODE_DELETEOBJECT:
+                        decode_request_deleteobject(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    default:
+                        frame.notes.push_back(frame.function_name +
+                                               " request body is recognized but not decoded in "
+                                               "this release -- see LIMITATIONS in "
+                                               "docs/MANUAL.md");
+                        break;
+                }
+            } else if (frame.opcode == S7COMMP_OPCODE_RESPONSE ||
+                       frame.opcode == S7COMMP_OPCODE_RESPONSE2) {
+                dc.u8();  // unknown1
+
+                switch (frame.function_code) {
+                    case S7COMMP_FUNCTIONCODE_GETMULTIVAR:
+                        decode_response_getmultivar(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    case S7COMMP_FUNCTIONCODE_SETMULTIVAR:
+                        decode_response_setmultivar(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    case S7COMMP_FUNCTIONCODE_SETVARIABLE:
+                        decode_response_setvariable(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    case S7COMMP_FUNCTIONCODE_DELETEOBJECT:
+                        decode_response_deleteobject(dc, frame);
+                        frame.body_decoded = true;
+                        break;
+                    default:
+                        frame.notes.push_back(frame.function_name +
+                                               " response body is recognized but not decoded in "
+                                               "this release -- see LIMITATIONS in "
+                                               "docs/MANUAL.md");
+                        break;
+                }
+            }
+        }
+
+        // Integrity part: only attempted for the shapes this file understands (Tier-1 function
+        // bodies just decoded above); left alone otherwise since a Tier-2 body's own undecoded
+        // length means the integrity part's true position isn't known. (DataFW1_5's own integrity
+        // is never found here -- it's always consumed per-fragment, before this function ever
+        // runs -- see strip_fw1_5_fragment_integrity above.)
+        if (!frame.is_fw1_5 && frame.body_decoded && dc.remaining() >= 32) {
+            decode_integrity(dc, frame);
+        }
+    } catch (const ParseError& e) {
+        frame.notes.push_back(std::string("S7comm-Plus Data part decoding stopped: ") + e.what());
+    }
+}
+
 }  // namespace
 
 std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
@@ -786,159 +953,179 @@ std::optional<S7CommPlusFrame> try_parse_s7comm_plus(ByteSpan data) {
     bool has_trailer = data.size() > kHeaderLen + static_cast<size_t>(data_length);
     frame.has_trailer = has_trailer;
 
+    // This fragment's own Data-part bytes, exactly `data_length` bytes clamped to what's actually
+    // available -- populated unconditionally (every non-KeepAlive PDU type, trailer present or
+    // not) so that finalize_s7comm_plus_fragment (S7CommPlusDecoder::decode's reassembly-driving
+    // wrapper, below) can buffer it when there's no trailer, without re-deriving it itself.
+    size_t available_after_header = data.size() - kHeaderLen;  // safe: data.size() >= 4, checked above
+    size_t data_take = std::min<size_t>(data_length, available_after_header);
+    ByteSpan data_part = data.subspan(kHeaderLen, data_take);
+    frame.body_region = data_part;
+
     if (!has_trailer) {
+        // Above-COTP, trailer-based reassembly (ROADMAP item 147, docs/DEVELOPMENT.md): this
+        // fragment alone isn't a complete telegram. try_parse_s7comm_plus itself stays ctx-free
+        // and single-fragment-only (its own documented contract, relied on directly by
+        // fuzz/fuzz_s7comm_plus.cpp) -- actually buffering and reassembling fragments across
+        // frames is S7CommPlusDecoder::decode's job, via finalize_s7comm_plus_fragment below.
         frame.notes.push_back(
             "S7comm-Plus telegram has no trailer in this frame -- it continues in a further "
-            "TPKT/COTP frame (this protocol's own above-COTP fragmentation is not reassembled "
-            "in this release, see LIMITATIONS in docs/MANUAL.md)");
+            "TPKT/COTP frame; reassembled once a later frame's trailer completes it (see "
+            "S7CommPlusReassemblyState in s7commplus.hpp)");
         frame.summary = frame.pdu_type_name + " (fragment, awaiting further data)";
         return frame;
     }
 
-    size_t available_after_header = data.size() - kHeaderLen;  // safe: data.size() >= 4, checked above
-    size_t data_take = std::min<size_t>(data_length, available_after_header);
-    ByteSpan data_part = data.subspan(kHeaderLen, data_take);
-
-    if (frame.pdu_type == S7COMMP_PDUTYPE_CONNECT) {
-        frame.notes.push_back("Connect PDU (session establishment handshake) is recognized but "
-                               "not decoded in this release -- see LIMITATIONS in docs/MANUAL.md");
-        frame.summary = "Connect";
-    } else {
-        // PDU type Data (0x02) -- the Tier-1 target. Any ParseError anywhere below (a truncated
-        // capture, or hitting an unrecognized value datatype -- see decode_value_element) is
-        // caught here and degrades to a clear note rather than losing the whole packet.
-        try {
-            Cursor dc(data_part);
-            frame.has_data_part = true;
-
-            if (frame.is_fw1_5) {
-                // DataFW1_5 moves its Integrity value to the front of the Data part -- see
-                // decode_integrity_fw1_5 above for what confirms this and its exact shape. The
-                // ordinary Data(0x02) opcode-led body layout resumes immediately after it.
-                decode_integrity_fw1_5(dc, frame);
-            }
-            frame.opcode = dc.u8();
-            frame.opcode_name = s7commplus_opcode_name(frame.opcode);
-
-            if (frame.opcode == S7COMMP_OPCODE_NOTIFICATION) {
-                frame.is_notification = true;
-                frame.notes.push_back("Notification body (subscribed/cyclic variable updates) is "
-                                       "recognized but not decoded in this release -- see "
-                                       "LIMITATIONS in docs/MANUAL.md");
-            } else {
-                dc.u16be();  // reserved1
-                frame.function_code = dc.u16be();
-                frame.function_name = s7commplus_function_name(frame.function_code);
-                frame.has_function = true;
-                dc.u16be();  // reserved2
-                frame.sequence_number = dc.u16be();
-                frame.has_sequence_number = true;
-
-                if (frame.opcode == S7COMMP_OPCODE_REQUEST) {
-                    frame.session_id = dc.u32be();
-                    frame.has_session_id = true;
-                    dc.u8();  // unknown1
-
-                    switch (frame.function_code) {
-                        case S7COMMP_FUNCTIONCODE_GETMULTIVAR:
-                            decode_request_getmultivar(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        case S7COMMP_FUNCTIONCODE_SETMULTIVAR:
-                            decode_request_setmultivar(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        case S7COMMP_FUNCTIONCODE_SETVARIABLE:
-                            decode_request_setvariable(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        case S7COMMP_FUNCTIONCODE_DELETEOBJECT:
-                            decode_request_deleteobject(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        default:
-                            frame.notes.push_back(frame.function_name +
-                                                   " request body is recognized but not decoded in "
-                                                   "this release -- see LIMITATIONS in "
-                                                   "docs/MANUAL.md");
-                            break;
-                    }
-                } else if (frame.opcode == S7COMMP_OPCODE_RESPONSE ||
-                           frame.opcode == S7COMMP_OPCODE_RESPONSE2) {
-                    dc.u8();  // unknown1
-
-                    switch (frame.function_code) {
-                        case S7COMMP_FUNCTIONCODE_GETMULTIVAR:
-                            decode_response_getmultivar(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        case S7COMMP_FUNCTIONCODE_SETMULTIVAR:
-                            decode_response_setmultivar(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        case S7COMMP_FUNCTIONCODE_SETVARIABLE:
-                            decode_response_setvariable(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        case S7COMMP_FUNCTIONCODE_DELETEOBJECT:
-                            decode_response_deleteobject(dc, frame);
-                            frame.body_decoded = true;
-                            break;
-                        default:
-                            frame.notes.push_back(frame.function_name +
-                                                   " response body is recognized but not decoded in "
-                                                   "this release -- see LIMITATIONS in "
-                                                   "docs/MANUAL.md");
-                            break;
-                    }
-                }
-            }
-
-            // Integrity part: only attempted for the shapes this file understands (Tier-1
-            // function bodies just decoded above); left alone otherwise since a Tier-2 body's
-            // own undecoded length means the integrity part's true position isn't known.
-            // (DataFW1_5's integrity was already consumed at the front, above.)
-            if (!frame.is_fw1_5 && frame.body_decoded && dc.remaining() >= 32) {
-                decode_integrity(dc, frame);
-            }
-        } catch (const ParseError& e) {
-            frame.notes.push_back(std::string("S7comm-Plus Data part decoding stopped: ") + e.what());
-        }
-    }
+    ByteSpan pure_data = strip_fw1_5_fragment_integrity(data_part, frame.is_fw1_5, frame);
+    decode_s7comm_plus_body(pure_data, frame.pdu_type, frame);
 
     // frame.has_trailer is already true here (the !has_trailer branch above returned early) --
     // its position is known directly from the header's own Data Length field, independent of
     // whether the Data part itself decoded successfully.
 
-    std::ostringstream s;
-    if (!frame.summary.empty()) {
-        s << frame.summary;
-    } else {
-        s << frame.pdu_type_name;
-        if (frame.has_function) {
-            s << ": " << frame.opcode_name << " " << frame.function_name;
-        } else if (frame.is_notification) {
-            s << ": Notification";
-        }
-        if (frame.has_sequence_number) s << " (seq=" << frame.sequence_number << ")";
-        if (frame.has_return_value && (frame.return_code != 0)) {
-            s << " [" << frame.return_code_name << "]";
-        }
-        if (!frame.item_addresses.empty()) {
-            s << " (" << frame.item_addresses.size() << " item(s))";
-        }
-        if (!frame.id_values.empty()) {
-            s << " (" << frame.id_values.size() << " value(s))";
-        }
-    }
-    frame.summary = s.str();
+    frame.summary = build_s7comm_plus_summary(frame);
 
     return frame;
 }
 
-std::optional<ProtocolResult> S7CommPlusDecoder::decode(ByteSpan payload, DecodeContext& /*ctx*/) const {
+// Resets every field decode_s7comm_plus_body (and the strip_fw1_5_fragment_integrity /
+// decode_integrity it calls) can populate, back to S7CommPlusFrame's own defaults. Used only by
+// finalize_s7comm_plus_fragment below, immediately before re-decoding a just-completed
+// reassembled buffer from scratch -- mirrors OPC UA chunk reassembly's own reset-then-redecode
+// pattern (see OpcUaReassemblyState's own finalize_chunk in opcua.cpp) so a reassembled telegram's
+// frame ends up indistinguishable from one that had arrived whole in a single fragment.
+static void reset_s7comm_plus_body_fields(S7CommPlusFrame& frame) {
+    frame.has_data_part = false;
+    frame.is_notification = false;
+    frame.opcode = 0;
+    frame.opcode_name.clear();
+    frame.has_function = false;
+    frame.function_code = 0;
+    frame.function_name.clear();
+    frame.has_sequence_number = false;
+    frame.sequence_number = 0;
+    frame.has_session_id = false;
+    frame.session_id = 0;
+    frame.body_decoded = false;
+    frame.has_return_value = false;
+    frame.return_code = 0;
+    frame.return_code_name.clear();
+    frame.item_addresses.clear();
+    frame.id_values.clear();
+    frame.item_errors.clear();
+    frame.has_integrity = false;
+    frame.integrity_digest_present = false;
+    frame.integrity_digest_length = 0;
+    frame.summary.clear();
+}
+
+// Drives the above-COTP, trailer-based reassembly FSM (ROADMAP item 147, docs/DEVELOPMENT.md;
+// S7CommPlusReassemblyState in s7commplus.hpp) for one already-parsed, single-fragment frame.
+// Called only from S7CommPlusDecoder::decode, immediately after try_parse_s7comm_plus -- never
+// from try_parse_s7comm_plus itself (which stays ctx-free, per fuzz/fuzz_s7comm_plus.cpp's own
+// direct-call contract) and never from fuzz harnesses. Mutates `frame` in place: a fragment that
+// completes a reassembly gets its body-decode fields replaced with the reassembled result; every
+// other case leaves try_parse_s7comm_plus's own already-correct standalone decode untouched,
+// aside from an added note.
+static void finalize_s7comm_plus_fragment(S7CommPlusFrame& frame, DecodeContext& ctx) {
+    if (frame.is_keepalive) return;  // KeepAlive never has a Data part at all -- nothing to do.
+
+    auto& state = ctx.flow_state<S7CommPlusReassemblyState>(FlowStateKeying::Session);
+
+    if (!state.in_progress) {
+        if (frame.has_trailer) return;  // common case -- already fully decoded, nothing to do
+        // Begin a new reassembly. No safety-cap check on this first fragment -- same posture
+        // OPC UA chunk reassembly's own finalize_chunk (opcua.cpp) takes on its own first ('C')
+        // chunk: the cap exists to bound CONTINUED accumulation, not to reject a lone first
+        // fragment outright.
+        state = S7CommPlusReassemblyState{};
+        state.in_progress = true;
+        state.pdu_type = frame.pdu_type;
+        state.is_fw1_5 = frame.is_fw1_5;
+        ByteSpan pure = strip_fw1_5_fragment_integrity(frame.body_region, frame.is_fw1_5, frame);
+        state.buffered_data.assign(pure.data(), pure.data() + pure.size());
+        state.fragment_count = 1;
+        frame.notes.push_back(
+            "buffering an S7comm-Plus telegram split across TPKT/COTP frames -- " +
+            std::to_string(state.buffered_data.size()) + " byte(s) buffered across " +
+            std::to_string(state.fragment_count) + " fragment(s) so far on this TCP session");
+        return;
+    }
+
+    // A reassembly is already in progress -- this fragment must match the PDU type and firmware
+    // shape (Data vs. DataFW1_5) the first fragment set, to be accepted as its continuation.
+    bool matches = state.pdu_type == frame.pdu_type && state.is_fw1_5 == frame.is_fw1_5;
+    if (!matches) {
+        frame.notes.push_back(
+            (frame.has_trailer ? "a complete S7comm-Plus telegram (PDU type "
+                                : "a new S7comm-Plus fragment (PDU type ") +
+            frame.pdu_type_name +
+            ") arrived while a previous above-COTP reassembly was in progress (" +
+            std::to_string(state.buffered_data.size()) + " byte(s) buffered across " +
+            std::to_string(state.fragment_count) + " fragment(s)) -- abandoned" +
+            (frame.has_trailer ? "; this telegram's own standalone decode above is unaffected" : ""));
+        state = S7CommPlusReassemblyState{};
+        finalize_s7comm_plus_fragment(frame, ctx);  // re-run this same fragment with nothing in progress
+        return;
+    }
+
+    ByteSpan pure = strip_fw1_5_fragment_integrity(frame.body_region, frame.is_fw1_5, frame);
+    state.buffered_data.insert(state.buffered_data.end(), pure.data(), pure.data() + pure.size());
+    ++state.fragment_count;
+
+    // Safety caps against a pathological/malformed capture stalling a reassembly open forever --
+    // same caps DNP3's and OPC UA's own reassembly already use (CLI-configurable via
+    // --max-reassembly-bytes/--max-reassembly-segments; 0/unset keeps these literal defaults).
+    const size_t kMaxBufferedBytes = resource_limits().max_reassembly_bytes.value_or(65536);
+    const size_t kMaxFragmentsPerTelegram = resource_limits().max_reassembly_segments.value_or(500);
+    if (state.buffered_data.size() > kMaxBufferedBytes || state.fragment_count > kMaxFragmentsPerTelegram) {
+        frame.notes.push_back(
+            "above-COTP S7comm-Plus reassembly exceeded this release's safety limits (" +
+            std::to_string(state.buffered_data.size()) + " byte(s) across " +
+            std::to_string(state.fragment_count) + " fragment(s)) -- abandoned");
+        state = S7CommPlusReassemblyState{};
+        return;
+    }
+
+    if (!frame.has_trailer) {
+        frame.notes.push_back(
+            "buffering an S7comm-Plus telegram split across TPKT/COTP frames -- " +
+            std::to_string(state.buffered_data.size()) + " byte(s) buffered across " +
+            std::to_string(state.fragment_count) + " fragment(s) so far on this TCP session");
+        return;
+    }
+
+    // frame.has_trailer == true: reassembly complete. try_parse_s7comm_plus already decoded this
+    // last fragment's own bytes as a (incomplete/misleading) standalone telegram -- replace that
+    // with a fresh decode of the full reassembled buffer instead.
+    size_t total_fragments = state.fragment_count;
+    std::vector<uint8_t> reassembled = std::move(state.buffered_data);
+    state = S7CommPlusReassemblyState{};
+
+    reset_s7comm_plus_body_fields(frame);
+    if (frame.is_fw1_5) {
+        // decode_s7comm_plus_body never attempts a tail Integrity decode for DataFW1_5 (its own
+        // Integrity is always front-loaded, per fragment, already consumed into `pure` above).
+        // Re-run the strip once more, now against the just-reset frame, purely so its own
+        // has_integrity/integrity_digest_present end up reflecting this last fragment's leading
+        // Integrity block -- exactly as a single, unfragmented DataFW1_5 telegram's own
+        // try_parse_s7comm_plus path already shows it. (Idempotent: decode_integrity_fw1_5 reads
+        // the same bytes deterministically either time; nothing is double-consumed since this
+        // works off frame.body_region, not the cursor already spent above.)
+        strip_fw1_5_fragment_integrity(frame.body_region, true, frame);
+    }
+    decode_s7comm_plus_body(ByteSpan(reassembled.data(), reassembled.size()), frame.pdu_type, frame);
+    frame.notes.push_back(
+        "S7comm-Plus telegram reassembled from " + std::to_string(total_fragments) +
+        " fragment(s) across this TCP session, " + std::to_string(reassembled.size()) +
+        " byte(s) of Data part total");
+    frame.summary = build_s7comm_plus_summary(frame);
+}
+
+std::optional<ProtocolResult> S7CommPlusDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
     auto parsed = try_parse_s7comm_plus(payload);
     if (!parsed) return std::nullopt;
+    finalize_s7comm_plus_fragment(*parsed, ctx);
     return ProtocolResult::make<S7CommPlusFrame>("s7comm-plus", std::move(*parsed));
 }
 

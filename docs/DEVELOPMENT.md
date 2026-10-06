@@ -19360,6 +19360,137 @@ it done as its own patch.
     real-world hit. Delivered as a zip of touched/new files via `SendUserFile`, per this project's
     own no-git-commit convention.
 
+147. **S7comm-Plus: above-COTP, trailer-based reassembly actually reassembles now, instead of
+    only being detected and reported.** Jurgen asked: "Can you do S7comm-Plus: above-COTP
+    trailer-based reassembly is detected and reported but not reassembled?" -- a gap distinct from
+    the COTP-level EOT-bit reassembly `CotpDecoder` already does (shared with classic S7comm/MMS):
+    a complete S7comm-Plus *telegram* can still be split across multiple complete TPKT/COTP
+    *frames*, signaled not by COTP's own EOT bit but by the ABSENCE of this protocol's own 4-byte
+    trailer (protocol id + PDU type + Data Length, repeated from the header once a telegram is
+    complete). Before this round, `try_parse_s7comm_plus` detected and noted this ("fragment,
+    awaiting further data") but never buffered or reassembled across it. No official Siemens spec
+    exists for this protocol (s7commplus.hpp's own file header), so the sole sourcing authority, as
+    for every other S7comm-Plus finding in this codebase, is the reference Wireshark plugin
+    (`packet-s7comm_plus.c`, by Thomas Wiens, never merged into mainline Wireshark) -- cloned via
+    the `moki-ics/s7commwireshark` GitHub mirror after direct `osdn.net` access was blocked by this
+    environment's own egress policy (the original host, confirmed via the agent proxy's own error
+    message, not worked around). Reading `dissect_s7commp`'s own reassembly FSM line-by-line
+    settled three design questions that could not be answered from the byte-level real-capture
+    example alone (which turned out to be a red herring -- see Validation posture below): every
+    physical fragment -- first, inner, and last alike -- re-parses its own full 4-byte header, not
+    just the first; `has_trailer` is computed per-fragment from THAT fragment's own declared Data
+    Length against its own actual carried-byte count, not from any notion of a cumulative/total
+    length; and the reassembly state is tracked against the WHOLE TCP session, direction-
+    independent (mirroring the reference plugin's own `find_conversation(..., NO_PORT_B)` lookup),
+    unlike this codebase's own usual per-direction default for DNP3/COTP/OPC UA chunk reassembly --
+    a deliberate, sourced deviation from that default, not an oversight. A fourth wrinkle, specific
+    to the DataFW1_5 PDU type (firmware >= V1.5), is sourced from the reference plugin's own
+    (translated) German source comment: unlike the plain `Data` (0x02) PDU type, where only the
+    LAST fragment ever carries a trailing Integrity block, DataFW1_5 places a leading Integrity
+    block (varuint32 id + 32-byte digest, no length-prefix byte) at the FRONT of EVERY physical
+    fragment, which must be stripped before concatenating fragments into one logical buffer.
+
+    **Design.** Follows the OPC UA chunk-reassembly precedent (item 146) closely: a new
+    `S7CommPlusReassemblyState : public DecoderFlowState`, reached via
+    `ctx.flow_state<S7CommPlusReassemblyState>(FlowStateKeying::Session)` (Session, not
+    DirectionalFlow -- see above), buffers each fragment's own Data-part bytes
+    (`S7CommPlusFrame::body_region`, a new field aliasing the caller's own `data` span, populated
+    for every non-KeepAlive PDU type regardless of `has_trailer`) until a trailer-bearing fragment
+    completes it, then decodes the function body from the full reassembled buffer instead of just
+    that last fragment's own tail. The pre-existing single-fragment opcode/function-body decode
+    logic was extracted into two new free functions, `decode_s7comm_plus_body` and
+    `build_s7comm_plus_summary`, plus a new `strip_fw1_5_fragment_integrity` helper (applied to
+    EVERY fragment's own `body_region`, not just the last), so the single-fragment case (still the
+    overwhelming common case) and the new reassembled-buffer case share one code path. Like OPC
+    UA's own `finalize_chunk`, the FSM appends-then-checks the safety cap uniformly for every
+    fragment after the first (no cap check on a lone first/begin fragment, matching that same
+    precedent exactly), reusing the existing `--max-reassembly-bytes`/`--max-reassembly-segments`
+    flags -- no new CLI flag needed. A PDU-type/firmware-shape mismatch between an in-progress
+    reassembly and a newly-arrived fragment (complete or not) abandons the earlier one with a note
+    and re-runs the new arrival fresh, exactly as OPC UA's own mismatch handling does -- a
+    deliberate deviation from the reference plugin's own FSM, which does not guard against this
+    case at all. One subtlety this round's own first implementation attempt got wrong and had to
+    fix before any test was written: resetting a completing fragment's decoded fields BEFORE
+    re-running `strip_fw1_5_fragment_integrity` on it (rather than after) silently discarded that
+    last fragment's own `has_integrity`/`integrity_digest_present` evidence for a reassembled
+    DataFW1_5 telegram, which a single, unfragmented DataFW1_5 telegram's own decode path already
+    shows -- caught by comparing JSON output for the reassembled case against the pre-existing
+    single-fragment DataFW1_5 test's own output, not by inspection alone.
+
+    **What was done.**
+    - `include/conduitscope/s7commplus.hpp`: new `S7CommPlusFrame::body_region` field and
+      `S7CommPlusReassemblyState` class; file header's "Trailer" wire-structure paragraph and the
+      `S7CommPlusDecoder`/`try_parse_s7comm_plus` doc comments rewritten to describe the new
+      reassembly behavior (`try_parse_s7comm_plus` itself stays ctx-free and single-fragment-only,
+      exactly as before, since `fuzz/fuzz_s7comm_plus.cpp` calls it directly with no `DecodeContext`
+      at all).
+    - `src/s7commplus.cpp`: `strip_fw1_5_fragment_integrity`/`build_s7comm_plus_summary`/
+      `decode_s7comm_plus_body` extracted from `try_parse_s7comm_plus`'s own old inline logic;
+      new `reset_s7comm_plus_body_fields` and `finalize_s7comm_plus_fragment` (the begin/continue/
+      complete/abandon-on-mismatch state machine, mirroring `opcua.cpp`'s own `finalize_chunk`
+      structure); `S7CommPlusDecoder::decode` now calls `finalize_s7comm_plus_fragment` before
+      returning, instead of ignoring its own `DecodeContext` parameter.
+    - `tools/make_sample_pcap.py`: three new flows appended to `build_s7commplus_sample()` (own
+      port pairs, 6 new packets total) -- a plain-`Data`-PDU-type telegram split across two
+      physical frames at an arbitrary, field-boundary-ignorant byte offset that reassembles
+      cleanly; the same shape DataFW1_5-framed, exercising per-fragment Integrity stripping; and a
+      complete telegram of a different PDU type arriving mid-reassembly, abandoning it. All three
+      reuse the pre-existing `s7p_frame`/`s7p_frame_no_trailer`/`s7p_integrity_fw1_5` helpers
+      unchanged -- no new byte-builder helpers were needed. `tests/sample_s7commplus.pcap`
+      regenerated: 26 -> 32 packets.
+    - `CMakeLists.txt`: one pre-existing test renamed and its expectation widened
+      (`s7commplus_missing_trailer_fragment_noted` -> `s7commplus_lone_missing_trailer_fragment_
+      buffers_noted`, now also asserting the new "buffering..." note, mirroring item 146's own
+      `opcua_lone_intermediate_chunk_buffers_noted` rename); 7 new CTest entries (reassembly
+      completing for both PDU-type shapes, each confirmed via a `--format text` summary/note check
+      AND a separate `--format json` value/integrity check; the mismatch-abandonment case; both
+      `--max-reassembly-bytes`/`--max-reassembly-segments` cap-enforcement cases, reusing the
+      completing-reassembly fixture at a deliberately tiny cap, the same pattern
+      `max_reassembly_bytes/segments_abandons_dnp3_fragment_reassembly` already established), each
+      confirmed against real decoded output before its regex was written; `s7commplus_protocol_
+      filter`'s packet/PDU-type/function counts updated for the new fixtures.
+
+    **Left open, documented honestly rather than silently dropped.** Nothing new was deliberately
+    left undecoded by this round -- the gap it closes was reassembly itself, not a function body or
+    value shape. The existing Tier-2 (not-body-decoded) function codes, Notification, and Connect
+    remain exactly as item-146-era `docs/PROTOCOL_COVERAGE.md` already described them.
+
+    **Docs.** `docs/PROTOCOL_COVERAGE.md`'s S7comm-Plus section: the "Trailer"/reassembly
+    subsection rewritten to describe real reassembly instead of "detected, not reassembled," and a
+    pre-existing, now-corrected inaccuracy called out directly -- it previously claimed one of this
+    project's two real S7comm-Plus captures (`s7comm_plus_1511_db3_var1_hmi.pcap`, frames 14-15)
+    "exercises this decoder's above-COTP, trailer-based reassembly DETECTION on real traffic."
+    Byte-level inspection (tshark plus a custom Python payload extractor) during this round found
+    that claim describes pure COTP-level (EOT-bit) fragmentation instead -- frame 14 contributes 0
+    bytes of COTP user data with EOT=0, frame 15 contributes 419 bytes with EOT=1, and the COMBINED,
+    COTP-already-reassembled TSDU has `has_trailer=true` from the start -- so neither real capture
+    this project has actually exercises the missing-trailer code path this round closes.
+    `docs/USER_GUIDE.md`: the S7comm-Plus LIMITATIONS bullet describing above-COTP fragmentation as
+    "not reassembled" updated to describe the new behavior. `docs/MANUAL.md` was NOT touched, per
+    Jurgen's standing instruction.
+
+    **Verification.** Every new fixture was hand-checked against real decoded JSON/text output
+    before its CTest regex was written, including both completing-reassembly cases' own decoded
+    values (Int=4242 plain-Data, UDInt=777 DataFW1_5) and integrity fields, and both safety-cap
+    cases (confirmed, by adding and then removing a temporary debug trace, that each cap case's
+    "exceeded" note fires exactly once per fixture -- an initial read of duplicate-looking output
+    across two DIFFERENT fixtures sharing one global `--max-reassembly-bytes` value in the same
+    run turned out to be two genuine, independent hits, not a double-counting bug, confirmed before
+    concluding either way). Full default-build CTest suite: 2544/2544 passing, zero regressions (up
+    from item 146's 2537 -- +7 net new, matching the 7 new CTest entries above). Clang ASan/UBSan
+    `build-fuzz`, including `fuzz_s7comm_plus_corpus_regression` and `fuzz_cotp_s7comm_corpus_
+    regression`: 2622/2622 passing (up from 2615; the full non-fuzz-labeled subset was run directly
+    given the fuzz-labeled corpus targets' own long runtime, with the two S7comm-Plus-relevant
+    corpus regressions run and passing separately).
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2526/2526 passing (up from 2519).
+    MinGW cross-compile `build-mingw`: builds clean (build-only, no live-capture-dependent tests run
+    there). Validation posture, stated honestly: as the Docs section above details, NEITHER real
+    S7comm-Plus capture this project has exercises the missing-trailer code path at all, so this
+    feature rests entirely on grammar-plus-synthetic-fixture validation, the same posture several
+    other first-pass gaps this codebase has closed before (OPC UA chunking, item 146; MMS's own
+    Session-extended-length form, item 145) also had to accept. Delivered as a zip of touched/new
+    files via `SendUserFile`, per this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

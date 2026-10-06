@@ -5978,11 +5978,83 @@ set_tests_properties(s7commplus_unrecognized_datatype_s7string_rejected PROPERTI
   PASS_REGULAR_EXPRESSION "S7comm-Plus Data part decoding stopped: unrecognized S7comm-Plus value datatype 0x19")
 
 # A telegram missing its trailer -- S7comm-Plus's own above-COTP fragmentation signal (NOT COTP's
-# own EOT bit), which this decoder does not reassemble across, only reports.
-add_test(NAME s7commplus_missing_trailer_fragment_noted
+# own EOT bit). ROADMAP item 147 (docs/DEVELOPMENT.md): this now actually buffers it (via
+# S7CommPlusReassemblyState, FlowStateKeying::Session), rather than merely reporting the gap --
+# renamed from s7commplus_missing_trailer_fragment_noted to reflect that, mirroring OPC UA item
+# 146's own opcua_intermediate_chunk_not_reassembled_noted -> opcua_lone_intermediate_chunk_buffers_noted
+# rename. This particular fragment is never followed by a completing one (its flow ends here), so
+# it stays in the "buffering" state forever -- the completing case is covered by
+# s7commplus_reassembly_completes_across_fragments below.
+add_test(NAME s7commplus_lone_missing_trailer_fragment_buffers_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --verbose)
-set_tests_properties(s7commplus_missing_trailer_fragment_noted PROPERTIES
-  PASS_REGULAR_EXPRESSION "Data \\(fragment, awaiting further data\\)[^\n]*\n *note: S7comm-Plus telegram has no trailer in this frame -- it continues in a further TPKT/COTP frame")
+set_tests_properties(s7commplus_lone_missing_trailer_fragment_buffers_noted PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data \\(fragment, awaiting further data\\)[^\n]*\n *note: S7comm-Plus telegram has no trailer in this frame -- it continues in a further TPKT/COTP frame; reassembled once a later frame's trailer completes it.*\n *note: buffering an S7comm-Plus telegram split across TPKT/COTP frames -- 12 byte\\(s\\) buffered across 1 fragment\\(s\\) so far on this TCP session")
+
+# ROADMAP item 147 (docs/DEVELOPMENT.md): above-COTP, trailer-based reassembly actually
+# COMPLETING across two physical TPKT/COTP frames (plain Data PDU type) -- the gap this item
+# closes. The reassembled GetMultiVariables response decodes its one value (Int=4242) and its
+# own tail Integrity block exactly as a single, unfragmented frame would have.
+add_test(NAME s7commplus_reassembly_completes_across_fragments
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --verbose)
+set_tests_properties(s7commplus_reassembly_completes_across_fragments PROPERTIES
+  PASS_REGULAR_EXPRESSION "Data: Response GetMultiVariables \\(seq=20\\) \\(1 value\\(s\\)\\)[^\n]*\n *note: S7comm-Plus telegram reassembled from 2 fragment\\(s\\) across this TCP session, 52 byte\\(s\\) of Data part total")
+
+# Same fixture, --format json: confirms the reassembled value actually decoded correctly (not
+# just that a plausible-looking summary/note pair appeared) and that the tail Integrity block
+# (present once per the FULL reassembled Data part, same as a single unfragmented frame) decoded
+# too.
+add_test(NAME s7commplus_reassembly_completes_value_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_reassembly_completes_value_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Data: Response GetMultiVariables \\(seq=20\\) \\(1 value\\(s\\)\\)\",.*\"s7plus_values\": \\[\"item=1: \\(Int\\) = 4242\"\\],.*\"s7plus_integrity_digest_present\": true")
+
+# Same completing-reassembly shape, but DataFW1_5-framed: exercises the firmware>=V1.5-only
+# wrinkle where EVERY physical fragment (not just the final one) carries its own leading
+# Integrity block that must be stripped before concatenating fragments. The reassembled telegram
+# shows integrity consumed, exactly as a single, unfragmented DataFW1_5 frame already does (see
+# s7commplus_datafw1_5_getmultivar_decoded above).
+add_test(NAME s7commplus_datafw1_5_reassembly_strips_per_fragment_integrity
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --verbose)
+set_tests_properties(s7commplus_datafw1_5_reassembly_strips_per_fragment_integrity PROPERTIES
+  PASS_REGULAR_EXPRESSION "DataFW1_5: Response GetMultiVariables \\(seq=21\\) \\(1 value\\(s\\)\\)[^\n]*\n *note: S7comm-Plus telegram reassembled from 2 fragment\\(s\\) across this TCP session, 52 byte\\(s\\) of Data part total")
+
+# Same fixture, --format json: confirms the reassembled value decoded correctly AND that
+# has_integrity/integrity_digest_present reflect the LAST fragment's own leading Integrity block
+# (consumed during reassembly, not merely a stale carry-over from decode_s7comm_plus_body's own
+# reset) -- exactly as a single, unfragmented DataFW1_5 telegram's own decode already shows (see
+# s7commplus_datafw1_5_getmultivar_decoded above).
+add_test(NAME s7commplus_datafw1_5_reassembly_value_and_integrity_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7commplus_datafw1_5_reassembly_value_and_integrity_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"DataFW1_5: Response GetMultiVariables \\(seq=21\\) \\(1 value\\(s\\)\\)\",.*\"s7plus_values\": \\[\"item=1: \\(UDInt\\) = 777\"\\],.*\"s7plus_integrity_digest_present\": true")
+
+# ROADMAP item 147: a complete telegram of a DIFFERENT PDU type (Connect) arrives while a
+# previous above-COTP reassembly (Data) is still in progress on the same TCP session -- the
+# in-progress reassembly is abandoned (with a note naming the byte/fragment counts lost), and the
+# Connect telegram's own standalone decode is unaffected. A deliberate deviation from the
+# reference plugin's own FSM, which doesn't guard against this at all (see s7commplus.hpp's own
+# "Chunking" section).
+add_test(NAME s7commplus_reassembly_abandoned_on_pdu_type_mismatch
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --verbose)
+set_tests_properties(s7commplus_reassembly_abandoned_on_pdu_type_mismatch PROPERTIES
+  PASS_REGULAR_EXPRESSION "Connect[^\n]*\n *note: Connect PDU \\(session establishment handshake\\) is recognized but not decoded.*\n *note: a complete S7comm-Plus telegram \\(PDU type Connect\\) arrived while a previous above-COTP reassembly was in progress \\(12 byte\\(s\\) buffered across 1 fragment\\(s\\)\\) -- abandoned; this telegram's own standalone decode above is unaffected")
+
+# Security-audit-style follow-up (same posture as max_reassembly_bytes/segments_abandons_dnp3_
+# fragment_reassembly above): the same two --max-reassembly-* flags, exercised against
+# S7comm-Plus's OWN local above-COTP reassembly cap (S7CommPlusReassemblyState, s7commplus.cpp)
+# instead of the generic TCP-segment cap. sample_s7commplus.pcap's reasm_port flow (port 50305)
+# normally reassembles a 2-fragment, 52-byte telegram cleanly (see
+# s7commplus_reassembly_completes_across_fragments above); set low enough, s7commplus.cpp's own
+# cap abandons it instead.
+add_test(NAME max_reassembly_bytes_abandons_s7commplus_fragment_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --max-reassembly-bytes 5 --verbose)
+set_tests_properties(max_reassembly_bytes_abandons_s7commplus_fragment_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "above-COTP S7comm-Plus reassembly exceeded this release's safety limits \\(52 byte\\(s\\) across 2 fragment\\(s\\)\\) -- abandoned")
+
+add_test(NAME max_reassembly_segments_abandons_s7commplus_fragment_reassembly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --max-reassembly-segments 1 --verbose)
+set_tests_properties(max_reassembly_segments_abandons_s7commplus_fragment_reassembly PROPERTIES
+  PASS_REGULAR_EXPRESSION "above-COTP S7comm-Plus reassembly exceeded this release's safety limits")
 
 # A telegram too short even for the fixed 4-byte header -- surfaced via the decoder's outer
 # catch(ParseError) as protocol=parse-error, not a partial/guessed S7comm-Plus decode.
@@ -6019,7 +6091,7 @@ set_tests_properties(s7commplus_stats_counted PROPERTIES
 add_test(NAME s7commplus_protocol_filter
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap")
 set_tests_properties(s7commplus_protocol_filter PROPERTIES
-  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +23.*\ns7comm-plus pdu types:\n *Connect +2\n *Data +18\n *DataFW1_5 +1\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +7\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 13")
+  PASS_REGULAR_EXPRESSION "protocols:\n *cotp +2\n *parse-error +1\n *s7comm-plus +29.*\ns7comm-plus pdu types:\n *Connect +3\n *Data +21\n *DataFW1_5 +3\n *Keep Alive +2\ns7comm-plus functions:\n *DeleteObject +2\n *Explore +2\n *GetMultiVariables +9\n *SetMultiVariables +4\n *SetVariable +2\ns7comm-plus function bodies fully decoded \\(Tier 1\\): 15")
 
 # Regression guard for a real false positive: non-Modbus traffic (here, bytes that also happen
 # to satisfy DNP3's 0x05 0x64 start) whose first four bytes look like transaction_id + a valid
