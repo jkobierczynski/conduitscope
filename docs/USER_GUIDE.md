@@ -7683,29 +7683,30 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   the full 64-bit value are surfaced as a raw note, not asserted
   bit-for-bit -- the reference plugin's own source only comments on their
   meaning informally.
-- **Most of MMS's 78 confirmedServices are Tier 2 (name + invokeID only,
-  body shown as raw hex).** Only 18 are fully field-decoded (Tier 1):
-  `status`, `getNameList`, `identify`, `read`, `write`,
-  `getVariableAccessAttributes`, `defineNamedVariableList`,
-  `getNamedVariableListAttributes`, `deleteNamedVariableList`,
-  `getDomainAttributes`, `getCapabilityList`, and the seven file-transfer
-  services `obtainFile`, `fileOpen`, `fileRead`, `fileClose`,
-  `fileRename`, `fileDelete`, `fileDirectory` -- see docs/PROTOCOL_COVERAGE.md's
-  MMS section for why exactly these 18 and not others. Within the
-  file-transfer group, `ObtainFile-Request`'s own `sourceFileServer`
-  (`ApplicationReference`) is likewise structurally recognized but not
-  deep-decoded.
-- **MMS's Session layer only supports the "normal" (one-byte-length-per-
-  parameter) SPDU length form ISO 8327-1 defines** -- the extended 2-byte
-  length form (LI `0xFF`) is recognized as a distinct, legal encoding but
-  not implemented, since it has never been observed in real IEC 61850 MMS
-  traffic during this decoder's own research.
-- **MMS's `TypeSpecification` and non-symbolic `Address` variable
-  addressing are not decoded** -- both are structurally recognized as
-  present (shown as e.g. `"address=<Address, not decoded>"` /
-  `"typeSpecification=<TypeSpecification, not decoded>"` inside
-  `mms_values`) but not decoded field-by-field, since real IEC 61850
-  traffic overwhelmingly addresses variables by symbolic `name` instead.
+- **All 78 of MMS's confirmedServices are now fully field-decoded** -- the
+  former Tier 1/Tier 2 split (only 18 fully decoded, the other 60 shown as
+  name + invokeID + raw hex) is gone; see docs/DEVELOPMENT.md's ROADMAP
+  item 145 for the round that closed it and docs/PROTOCOL_COVERAGE.md's
+  MMS section for the per-group validation posture (most of the 60 rest
+  on the ASN.1 grammar plus this project's own synthetic BER fixtures
+  only, since neither a real capture nor `libiec61850` implements them --
+  `takeControl`/`relinquishControl` are the one pair with real-capture-
+  adjacent confirmation too). Within the file-transfer group,
+  `ObtainFile-Request`'s own `sourceFileServer` (`ApplicationReference`),
+  and every other `ApplicationReference`-typed field elsewhere, remain
+  structurally recognized but not deep-decoded (see below).
+- **MMS's Session layer now supports both the "normal" (one-byte) and the
+  extended (2-byte, LI `0xFF`) SPDU parameter length forms ISO 8327-1
+  defines** -- the extended form is still never observed in real IEC
+  61850 MMS traffic, but is exercised by a hand-built synthetic fixture.
+- **MMS's `AlternateAccess` (a `ScatteredAccessDescription` entry's own
+  optional, recursive field) and `ServiceError`'s own
+  `serviceSpecificInformation[3]` (a per-service `*-Error` detail) remain
+  undecoded** -- both are structurally recognized (`AlternateAccess` shown
+  as a bare `+alternateAccess` presence marker; `serviceSpecificInformation`
+  not parsed at all today), narrower gaps than the former
+  `TypeSpecification`/non-symbolic-`Address` limitation this replaces,
+  which is now fully decoded.
 - **MMS's "1=ACSE, 3=MMS" presentation-context convention is an honest
   assumption, not a guarantee.** This decoder is stateless per message, so
   it cannot remember a context-definition-list negotiated on an earlier

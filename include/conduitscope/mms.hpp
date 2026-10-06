@@ -186,23 +186,28 @@
 // its own request across packets) and a ConfirmedServiceRequest/Response CHOICE selecting one
 // of 78 defined confirmed services (status, getNameList, identify, rename, read, write,
 // getVariableAccessAttributes, defineNamedVariable, ... down to fileDirectory) -- this decoder's
-// own dispatch table names every one of the 78 (so an unrecognized numeric tag never happens
-// for a spec-conformant confirmed service) and splits them into two tiers exactly as this
-// codebase already does for OPC UA's own service dispatch:
-//
-// Tier 1 (full field decode): status, getNameList, identify, read, write,
-// getVariableAccessAttributes, defineNamedVariableList, getNamedVariableListAttributes,
-// deleteNamedVariableList, getCapabilityList, getDomainAttributes, and the seven file-transfer
-// services obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/fileDirectory -- the
+// own dispatch table names and fully field-decodes every one of the 78 (so an unrecognized
+// numeric tag never happens for a spec-conformant confirmed service, and no confirmed service is
+// shown as raw hex). This used to be a Tier 1 (18 services)/Tier 2 (the other 60, name +
+// invokeID + raw hex only) split, the same shape OPC UA's own service dispatch still has in this
+// codebase -- the ROADMAP item that closed Tier 2 out (see docs/DEVELOPMENT.md's ROADMAP item
+// 145) also documents, per service group, which ones rest on a real or independent-stack
+// (libiec61850) capture and which rest on the ASN.1 grammar plus this project's own synthetic
+// BER fixtures only (most of the formerly-Tier-2 60; takeControl/relinquishControl are the one
+// pair among them with real-capture-adjacent confirmation too). The original Tier 1 set --
+// status, getNameList, identify, read, write, getVariableAccessAttributes,
+// defineNamedVariableList, getNamedVariableListAttributes, deleteNamedVariableList,
+// getCapabilityList, getDomainAttributes, and the seven file-transfer services
+// obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/fileDirectory -- remains the
 // services this decoder's own research found are (a) universally present in real IEC 61850 MMS
 // traffic (model browsing via getNameList, the actual reads/writes of process data via
 // read/write, session capability negotiation) or (b) the most OT-security-relevant of MMS's
 // remaining services (the file-transfer group IEC 61850's own COMTRADE/disturbance-file-
 // retrieval and firmware/configuration-file transfer workflows ride on -- see ROADMAP item 12 in
-// docs/MANUAL.md), and each is (c) simple enough to decode with full confidence. Tier 1 also
-// covers unconfirmed-PDU's own informationReport (the MMS analog of this codebase's own GOOSE
-// decoder -- see "InformationReport" below) and every one of rejectPDU/cancel-*/conclude-*
-// (each small and fully specified).
+// docs/DEVELOPMENT.md), each independently validated against real and/or independent-stack
+// traffic. This also covers unconfirmed-PDU's own informationReport (the MMS analog of this
+// codebase's own GOOSE decoder -- see "InformationReport" below) and every one of
+// rejectPDU/cancel-*/conclude-* (each small and fully specified).
 //
 // File-transfer services (obtainFile/fileOpen/fileRead/fileClose/fileRename/fileDelete/
 // fileDirectory): FileName (a SEQUENCE OF GraphicString) is rendered joined by "/", the same
@@ -215,18 +220,8 @@
 // (an ApplicationReference -- AP-title/AE-qualifier/invocation-ids, every field itself OPTIONAL)
 // is structurally recognized but not deep-decoded, the same posture this file's own ACSE AARQ/
 // AARE decode already takes for AP-title/AE-qualifier elsewhere (see "Deliberately NOT
-// implemented" below). Address and TypeSpecification decoding, and wider real-capture
-// validation of this group specifically, remain open -- see ROADMAP item 12 in docs/MANUAL.md.
-//
-// Tier 2 (service name + invokeID only, body shown as raw hex): every other confirmed service
-// (rename, defineNamedVariable, defineScatteredAccess, getScatteredAccessAttributes,
-// deleteVariableAccess, defineNamedType, getNamedTypeAttributes, deleteNamedType, input, output,
-// takeControl, relinquishControl, every semaphore/event-condition/event-action/
-// event-enrollment/journal/program-invocation/domain-download service) -- these are, in
-// this decoder's own research, genuinely rare in ordinary IEC 61850 process-data traffic
-// (belonging more to MMS's original general-purpose industrial-messaging scope than to IEC
-// 61850's own narrower profile of it) and each has its own, sometimes large, request/response
-// grammar this first-pass release does not implement field-by-field.
+// implemented" below). Address and TypeSpecification are now fully decoded (ROADMAP item 145);
+// wider real-capture validation of this group specifically remains open.
 //
 // The Data value type: UNLIKE this codebase's own OPC UA decoder (which deliberately leaves
 // Variant/DataValue -- OPC UA's own self-describing value encoding -- undecoded, see
@@ -314,11 +309,19 @@
 // research; AARQ/AARE's own authentication-value field (ACSE's optional password/certificate
 // authentication mechanism) is structurally skipped, not decoded -- never observed in this
 // decoder's own research, and, per ACSE's own EXPLICIT tagging (see above), safely skippable
-// without losing byte alignment for whatever follows; and, within the file-transfer services now
-// Tier 1 (see above), ObtainFile-Request's own sourceFileServer (ApplicationReference) is
-// structurally recognized but not deep-decoded, and GetVariableAccessAttributes-Response's own
-// Address/TypeSpecification fields remain undecoded -- both left for future work (see ROADMAP in
-// docs/MANUAL.md).
+// without losing byte alignment for whatever follows; ObtainFile-Request's own sourceFileServer,
+// and every other ApplicationReference-typed field across the confirmed services (e.g.
+// takeControl's applicationToPreempt, defineEventEnrollment's/
+// GetEventEnrollmentAttributes-Request's clientApplication, JournalEntry's
+// originatingApplication), are structurally recognized but not deep-decoded; AlternateAccess (an
+// optional, recursive field on each ScatteredAccessDescription entry -- component/index/
+// indexRange/allElements, itself able to nest further AlternateAccess) is likewise structurally
+// recognized (shown as a bare "+alternateAccess" presence marker) but not decoded field-by-field;
+// and ServiceError's own serviceSpecificInformation[3] (a per-service *-Error detail CHOICE
+// covering obtainFile/start/stop/resume/reset/deleteVariableAccess/deleteNamedVariableList/
+// deleteNamedType/defineEventEnrollment/fileRename/additionalService/
+// changeAccessControl-Error) is not parsed at all today -- all three left for future work (see
+// docs/DEVELOPMENT.md's ROADMAP item 145).
 //
 // Validation: see this file's own real-capture search record in tests/real_captures/mms/
 // ATTRIBUTION.md for the current state of that search, including both genuine real-world
@@ -396,14 +399,15 @@ struct MmsFrame {
                                        // selector or error_name's -- a deliberately smaller scope,
                                        // see docs/USER_GUIDE.md's Display filters subsection
     std::string service_name;         // e.g. "read", "getNameList" -- empty when !service_recognized
-    bool service_body_decoded = false;  // true for Tier 1 (full decode); false for Tier 2/unrecognized
+    bool service_body_decoded = false;  // true for every recognized confirmed service (all 78 are
+                                         // fully field-decoded); false only when unrecognized
 
     bool is_response = false;  // best-effort: true for a *ResponsePDU shape, false for *RequestPDU
 
     bool has_error = false;  // confirmed-ErrorPDU/initiate-ErrorPDU/cancel-ErrorPDU/conclude-ErrorPDU
     std::string error_name;  // "access(2)" style category(code), plus additionalCode/Description in notes
 
-    // Tier 1 service-specific decoded fields (and Initiate's own capability negotiation, and
+    // Confirmed-service-specific decoded fields (and Initiate's own capability negotiation, and
     // InformationReport's own variable+value list, and ServiceError/RejectPDU detail), "key=value"
     // each -- mirrors OpcUaMessage::values' (opcua.hpp)/HartIpPassThrough::values' (hartip.hpp) scheme.
     std::vector<std::string> values;

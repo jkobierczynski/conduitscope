@@ -19054,6 +19054,172 @@ it done as its own patch.
     reaching 0 failures. Other build configs, the clean-room cycle, and delivery are covered by
     this item's own packaging step below.
 
+145. **MMS: the Tier 1/Tier 2 confirmed-service split retired -- all 78 confirmed services now
+    fully field-decoded, plus Address/TypeSpecification and the Session-layer extended length
+    form.** Jurgen asked to work the MMS entry on the Protocol-depth backlog: "60 of 78 confirmed
+    services are still name-plus-invokeID only; Address and TypeSpecification decoding, and the
+    Session-layer extended length form, are open" -- three distinct, already-documented gaps
+    (mms.hpp's own "Deliberately NOT implemented" section, docs/USER_GUIDE.md's MMS LIMITATIONS
+    bullets, docs/PROTOCOL_COVERAGE.md's Tier 1/Tier 2 split). Primary sourcing matched this
+    decoder's own established standard (see mms.hpp's file header): a sparse `git clone` of
+    `github.com/wireshark/wireshark` pulled the actual, current
+    `epan/dissectors/asn1/mms/mms.asn` -- 2319 lines, the complete ISO 9506-2 module, the exact
+    file this decoder's own header comment already names as its primary MMS source -- and a
+    second clone, `mz-automation/libiec61850` (the same independent stack already used for this
+    decoder's own validation traffic), confirmed its `asn1c`-generated `Address.h`/
+    `TypeSpecification.h`/`VariableSpecification.h` agree byte-for-byte on tag numbers with the
+    Wireshark module, an independent cross-check on the two structures most central to the
+    Address/TypeSpecification half of this round. Both clones were read-only, purely for grammar
+    sourcing; nothing from either is vendored into this codebase. Jurgen confirmed scope via
+    `AskUserQuestion` before work began: full clearance of all 60 remaining services in one round
+    (not a curated subset, now that complete grammar was in hand for all of them), and an honestly
+    weaker validation bar for the 58 of those 60 with neither a real capture nor an independent-
+    stack implementation available -- grammar-plus-synthetic-fixture validation, documented
+    per service group rather than blurred with the stronger bar the original 18 (plus
+    `takeControl`/`relinquishControl`, which do have real-capture-adjacent coverage) already had.
+
+    **Design.** `Address`/`TypeSpecification`/`VariableSpecification`/`ScatteredAccessDescription`:
+    `decode_variable_specification` widened from a `name`-only CHOICE dispatch to the real four-
+    alternative CHOICE (`name`, `address`, `variableDescription`, `scatteredAccessDescription`,
+    `invalidated`), backed by two new recursive helpers, `decode_address` (numeric/symbolic/
+    unconstrained) and `decode_type_specification` (array/structure recurse, depth-capped the same
+    way `decode_data_value` already is), plus `decode_scattered_access_description` (each entry's
+    own `alternateAccess` shown only as a presence marker, not decoded -- see "left open" below).
+    Session-layer extended length: the existing generic PGI/PI parameter-list walker gained one new
+    branch -- a raw length byte of `0xFF` is now read as "2 more bytes, big-endian, are the real
+    length" rather than the (reserved, impossible) literal value 255, with parsing otherwise
+    unchanged. The 60 confirmed services were cleared in eight grouped passes mirroring the
+    standard's own section breaks (Variable/type definition: `rename`/`defineNamedVariable`/
+    `defineScatteredAccess`/`getScatteredAccessAttributes`/`deleteVariableAccess`/
+    `defineNamedType`/`getNamedTypeAttributes`/`deleteNamedType`; Operator communication: `input`/
+    `output`; Semaphore: `takeControl`/`relinquishControl`/`defineSemaphore`/`deleteSemaphore`/
+    `reportSemaphoreStatus`/`reportPoolSemaphoreStatus`/`reportSemaphoreEntryStatus`; Domain/
+    firmware download-upload: `initiateDownloadSequence`/`downloadSegment`/
+    `terminateDownloadSequence`/`initiateUploadSequence`/`uploadSegment`/
+    `terminateUploadSequence`/`requestDomainDownload`/`requestDomainUpload`/`loadDomainContent`/
+    `storeDomainContent`/`deleteDomain`; Program invocation control: `createProgramInvocation`/
+    `deleteProgramInvocation`/`start`/`stop`/`resume`/`reset`/`kill`/
+    `getProgramInvocationAttributes`; Events: `defineEventCondition`/`deleteEventCondition`/
+    `getEventConditionAttributes`/`reportEventConditionStatus`/`alterEventConditionMonitoring`/
+    `triggerEvent`/`defineEventAction`/`deleteEventAction`/`getEventActionAttributes`/
+    `reportEventActionStatus`/`defineEventEnrollment`/`deleteEventEnrollment`/
+    `alterEventEnrollment`/`reportEventEnrollmentStatus`/`getEventEnrollmentAttributes`; Alarm:
+    `acknowledgeEventNotification`/`getAlarmSummary`/`getAlarmEnrollmentSummary`; Journal:
+    `readJournal`/`writeJournal`/`initializeJournal`/`reportJournalStatus`/`createJournal`/
+    `deleteJournal`), each built, fixture-regenerated, and CTest-verified before the next group
+    started. `ApplicationReference`-typed fields throughout (e.g. `takeControl`'s own
+    `applicationToPreempt`, `JournalEntry`'s own `originatingApplication`) get the same
+    "structurally present, not deep-decoded" posture this file's own ACSE AP-title decode and
+    `ObtainFile-Request`'s own `sourceFileServer` already established, rather than inventing a new
+    one. `EXTERNAL`-typed CHOICE alternatives (`DownloadSegment-Response`'s own `loadData.coded`,
+    `Start-Request`'s own `executionArgument.encodedString`) get the matching "present, not
+    decoded" treatment, never observed on real wire traffic. One genuine, non-obvious grammar
+    subtlety recurred across three different services and was resolved the same way each time:
+    some `ConfirmedServiceRequest` CHOICE alternatives whose underlying type is itself a CHOICE
+    (`TakeControl-Response`'s own result, and `DeleteEventCondition-Request`/
+    `DeleteEventAction-Request`/`DeleteEventEnrollment-Request`'s own bodies) are EXPLICIT-tagged
+    even though their siblings aren't, an asymmetry settled by cross-checking Wireshark's actual
+    generated C dissector (`packet-mms.c`, mechanically produced by `asn2wrs` from the same
+    `mms.asn`) for the presence/absence of `BER_FLAGS_IMPLTAG` on the relevant `ber_choice_t` table
+    entry -- stronger evidence than the `.asn` text alone, and the same technique that first
+    surfaced on `TakeControl-Response` was then reused to find the Events group's own entire
+    cluster of EXPLICIT-request-only quirks (tags 6/48/49/50/54/55/56/58/60) before writing a
+    single line of code against them, rather than discovering each the hard way.
+
+    **What was done.**
+    - `src/mms.cpp`: `decode_address`/`decode_type_specification`/`decode_scattered_access_
+      description` added; `decode_variable_specification` widened to the full CHOICE; the Session
+      parameter-list walker's `LI == 0xFF` branch added; ~120 new small `decode_*_request`/
+      `decode_*_response` functions (one pair per service, plus small shared helpers --
+      `decode_modifier`, `decode_event_time`/`format_time_of_day`, `decode_event_enrollment`,
+      `decode_alarm_summary`/`decode_alarm_enrollment_summary`, `decode_entry_content`/
+      `decode_journal_entry`, and roughly a dozen small named-INTEGER/BIT-STRING lookup tables --
+      `ec_class_name`, `ec_state_name`, `ee_state_name`, `ee_class_name`, `ee_duration_name`,
+      `alarm_ack_rule_name`, `alarm_ack_filter_name`, `alarm_unacked_state_name`,
+      `event_enrollment_scope_name`, `program_invocation_state_name`, `kTransitionsNames`),
+      following the exact style of the pre-existing `decode_getdomainattributes_request`/
+      `decode_fileopen_response` etc.; both halves of `dispatch_confirmed_service`'s switch
+      widened from `default: decoded = false` to a real `case N:` for all 60 tags (47-70 plus the
+      earlier groups' own tags).
+    - `include/conduitscope/mms.hpp`: file header's Tier 1/Tier 2 section rewritten -- "all 78
+      confirmed services are fully field-decoded" replaces the 18/60 split, with the per-group
+      validation posture (real/independent-stack-backed vs. grammar-plus-synthetic-fixture-only)
+      called out explicitly; "Deliberately NOT implemented" section's `Address`/`TypeSpecification`
+      bullet removed (now decoded) and replaced with the two narrower items actually left open
+      (see below); `MmsFrame::service_body_decoded`'s own comment updated to match.
+    - `tools/make_sample_pcap.py`: one new builder-function pair per service (mirroring the
+      pre-existing `status_request`/`status_response` style exactly via the existing `svc`/
+      `ctx_p`/`ctx_c`/`uni_p`/`uni_c`/`ber_int` helpers), plus `address_numeric`/`address_symbolic`/
+      `address_unconstrained`, `type_spec_integer`/`type_spec_array`/`type_spec_structure`/...,
+      `var_spec_name`/`var_spec_address`/`var_spec_variable_description`/`var_spec_scattered`,
+      `scattered_access_entry`, a `session_param` extended-length-aware helper, and
+      `event_time_of_day`/`event_time_sequence`/`time_of_day_raw` for the Events/Alarm/Journal
+      groups' own time fields; `build_mms_sample()` extended with a representative request/
+      response frame pair per service (139 -> 187 total packets, 131 -> 179 recognized as `mms`),
+      renumbering the pre-existing trailing ServiceError/RejectPDU/Cancel-*/Malformed sections to
+      follow each time a group's own frames were inserted ahead of them.
+    - `CMakeLists.txt`: `mms_stats_counted`'s `PASS_REGULAR_EXPRESSION` and
+      `decode_display_filter_mms_service_tag_match`'s own frame-number assertion updated to match
+      the final frame count/positions (both drifted repeatedly as each group's frames were added,
+      fixed incrementally against this build's own actual output rather than guessed at); 15 new
+      representative CTest entries added, one or a few per logical sub-group (`mms_rename_and_
+      definenamedvariable_values`, `mms_scatteredaccess_request_and_response_values`,
+      `mms_deletevariableaccess_and_namedtype_values`, `mms_input_and_output_values`,
+      `mms_takecontrol_namedtoken_response`, `mms_semaphore_status_values`,
+      `mms_firmware_download_sequence_values`, `mms_firmware_upload_sequence_values`,
+      `mms_domain_filebased_transfer_values`, `mms_programinvocation_lifecycle_values`,
+      `mms_getprograminvocationattributes_values`, `mms_eventcondition_values`,
+      `mms_eventaction_values`, `mms_eventenrollment_values`, `mms_alarm_values`,
+      `mms_journal_values`), each confirmed passing before moving to the next group.
+
+    **Left open, documented honestly rather than silently dropped.** `AlternateAccess`'s own
+    recursive `AlternateAccessSelection` (component/index/indexRange/allElements, with further
+    nested `AlternateAccess` chaining) -- genuinely separate from what Jurgen asked for this round
+    (Address/TypeSpecification only); shown as a bare `+alternateAccess` presence marker wherever
+    the field is present, the same posture `sourceFileServer`/AP-title already have. `ServiceError`'s
+    own `serviceSpecificInformation[3]` (a per-service `*-Error` detail CHOICE covering
+    `obtainFile`/`start`/`stop`/`resume`/`reset`/`deleteVariableAccess`/`deleteNamedVariableList`/
+    `deleteNamedType`/`defineEventEnrollment`/`fileRename`/`additionalService`/
+    `changeAccessControl-Error`) -- not parsed at all today; Wireshark's own module itself marks
+    one of this CHOICE's own branches `-- XXX ... fix me later`, i.e. even the primary source isn't
+    fully settled on it. Neither is part of the 78 confirmed services' own field decode, so neither
+    blocks calling the Tier 1/Tier 2 split closed.
+
+    **Docs.** `docs/PROTOCOL_COVERAGE.md`'s MMS section: the Tier 1/Tier 2 bullet list replaced
+    with one list of all 78 services grouped by validation posture (real/independent-stack-backed;
+    `takeControl`/`relinquishControl`'s own real-capture-adjacent pair; the other 58 grammar-
+    plus-synthetic-fixture-only); the "Deliberately not implemented" paragraph's `Address`/
+    `TypeSpecification` bullet replaced with `AlternateAccess`/`serviceSpecificInformation`; the
+    S7comm-Plus section's own by-analogy mention of MMS's tiers corrected to say MMS no longer has
+    that split. `docs/USER_GUIDE.md`: the "Most of MMS's 78 confirmedServices are Tier 2" and
+    "`TypeSpecification`/non-symbolic `Address` not decoded" LIMITATIONS bullets replaced with one
+    "all 78 now fully field-decoded" bullet (naming the validation-posture split) plus a narrower
+    `AlternateAccess`/`serviceSpecificInformation` bullet; the Session-extended-length bullet
+    narrowed from "not implemented" to "now supports both forms." `man/conduitscope.1`: no changes
+    needed (it doesn't enumerate MMS services). `docs/MANUAL.md` was NOT touched, per Jurgen's
+    standing instruction.
+
+    **Verification.** Each of the eight service groups was built, its Python fixture builders
+    written, `tests/sample_mms.pcap` regenerated, decoded output hand-checked against the exact
+    `mms_values` expected for every new service (via `conduitscope decode --format json`), and its
+    own new CTest entries confirmed passing before the next group started -- the same disciplined
+    incremental-group workflow repeated eight times, never batching unverified work. `takeControl`/
+    `relinquishControl` were additionally checked against the real `mms-takeControl.pcap` already
+    in `tests/real_captures/mms/`; a byte-level TPKT-length-corruption artifact specific to that
+    capture's own response frames (confirmed pre-existing and unrelated to this round, via
+    `tshark -x`/`-q -z follow,tcp,hex,0`) made it unusable for settling `TakeControl-Response`'s
+    own EXPLICIT/IMPLICIT question empirically, so the Wireshark-generated-dissector cross-check
+    above was used instead. Full default-build CTest suite: 2528/2528 passing, zero regressions
+    (up from item 144's 2512 -- +16 net new CTest entries: the 15 new representative tests above
+    plus one renamed pre-existing one). Clang ASan/UBSan `build-fuzz`, including
+    `fuzz_mms_corpus_regression`: 2606/2606 passing. `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`: 2510/2510 passing. MinGW cross-compile `build-mingw`: builds clean
+    (build-only, no live-capture-dependent tests run there). A clean-room cycle -- fresh `tar`
+    of the full source tree (excluding build directories), extracted into an empty directory,
+    configured and built from scratch, full CTest suite run -- reproduced 2528/2528 passing with
+    zero further fixes needed. Delivered as a zip of touched/new files via `SendUserFile`, per
+    this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

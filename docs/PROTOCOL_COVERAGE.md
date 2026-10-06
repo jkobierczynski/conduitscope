@@ -758,8 +758,10 @@ hasn't seen. See docs/USER_GUIDE.md's LIMITATIONS.
 
 #### Two-tier function coverage
 
-Same two-tier split this codebase already applies to MMS (18 of 78 services)
-and OPC UA (Tier 1/Tier 2):
+Same two-tier split this codebase already applies to OPC UA (Tier 1/Tier
+2) -- MMS used to follow this same split (18 of 78 services) but no
+longer does, now that all 78 confirmed services are fully field-decoded
+(see docs/DEVELOPMENT.md's ROADMAP item 145):
 
 **Tier 1 -- fully decoded, both directions:**
 
@@ -1046,7 +1048,7 @@ in this decoder's own research); the authentication-value field is
 structurally skipped, not decoded (never observed either, and safely
 skippable per ACSE's own EXPLICIT tagging without losing byte alignment).
 
-#### MMS layer: MMSpdu, Tier 1 vs. Tier 2 services, and the Data value type
+#### MMS layer: MMSpdu, confirmed services, and the Data value type
 
 `MMSpdu` is a CHOICE of 14 alternatives, each its own CONTEXT-class
 constructed tag 0-13 (`0xA0`-`0xAD`): confirmed-RequestPDU(0),
@@ -1069,36 +1071,58 @@ confirmed service, ~85 bits), with every SET bit surfaced by name.
 application-chosen correlation number, never itself correlated back to the
 request it answers across packets -- see "Deliberately not implemented"
 below) and a ConfirmedServiceRequest/Response CHOICE selecting one of 78
-defined confirmed services. This decoder's own dispatch table names every
-one of the 78 and splits them into two tiers:
+defined confirmed services. This decoder's own dispatch table names and
+fully field-decodes every one of the 78 (see docs/DEVELOPMENT.md's ROADMAP
+item 145 for the round that closed the remaining 60 out of a prior partial
+pass) -- no confirmed service is shown as raw hex any more. By group:
 
-- **Tier 1** (full field decode -- 18 services): `status`, `getNameList`,
-  `identify`, `read`, `write`, `getVariableAccessAttributes`,
-  `defineNamedVariableList`, `getNamedVariableListAttributes`,
-  `deleteNamedVariableList`, `getDomainAttributes`, `getCapabilityList`,
-  plus the seven file-transfer services `obtainFile`, `fileOpen`,
-  `fileRead`, `fileClose`, `fileRename`, `fileDelete`, `fileDirectory` --
-  the services this decoder's own research found are (a) universally
-  present in real IEC 61850 MMS traffic or (b) the most OT-security-
-  relevant of MMS's remaining services (the file-transfer group IEC
-  61850's own COMTRADE/disturbance-file-retrieval and firmware/
-  configuration-file-transfer workflows ride on -- see docs/DEVELOPMENT.md's ROADMAP item 12),
-  and each is (c) simple enough to decode with full confidence. Tier 1
-  also covers unconfirmed-PDU's own informationReport (see below) and
-  every one of rejectPDU/cancel-*/conclude-* (each small and fully
-  specified).
-- **Tier 2** (service name + invokeID only, body shown as raw hex): every
-  other confirmed service -- `rename`, `defineNamedVariable`,
-  `defineScatteredAccess`, `getScatteredAccessAttributes`,
-  `deleteVariableAccess`, `defineNamedType`, `getNamedTypeAttributes`,
-  `deleteNamedType`, `input`, `output`, `takeControl`,
-  `relinquishControl`, every semaphore/event-condition/event-action/
-  event-enrollment/journal/program-invocation/domain-download service
-  -- genuinely rare in ordinary IEC 61850 process-data traffic (belonging
-  more to MMS's original general-purpose industrial-messaging scope than to
-  IEC 61850's own narrower profile of it), each with its own, sometimes
-  large, request/response grammar this first-pass release does not
-  implement field-by-field.
+- `status`, `getNameList`, `identify`, `read`, `write`,
+  `getVariableAccessAttributes`, `defineNamedVariableList`,
+  `getNamedVariableListAttributes`, `deleteNamedVariableList`,
+  `getDomainAttributes`, `getCapabilityList`, the seven file-transfer
+  services (`obtainFile`/`fileOpen`/`fileRead`/`fileClose`/`fileRename`/
+  `fileDelete`/`fileDirectory`), unconfirmed-PDU's own `informationReport`,
+  and every one of rejectPDU/cancel-*/conclude-* -- the original,
+  universally-present-in-real-traffic set, each independently validated
+  against real and/or independent-stack-generated captures (see
+  Validation below).
+- `takeControl`/`relinquishControl` (Semaphore group) -- validated against
+  both the ASN.1 grammar/a synthetic fixture AND `mms-takeControl.pcap`, a
+  genuine real-world capture (see Validation below); the one pair in the
+  remaining 60 with real-capture-adjacent confirmation.
+- The other 58 -- variable/type definition (`rename`,
+  `defineNamedVariable`, `defineScatteredAccess`,
+  `getScatteredAccessAttributes`, `deleteVariableAccess`,
+  `defineNamedType`, `getNamedTypeAttributes`, `deleteNamedType`), operator
+  communication (`input`, `output`), the rest of Semaphore
+  (`defineSemaphore`, `deleteSemaphore`, `reportSemaphoreStatus`,
+  `reportPoolSemaphoreStatus`, `reportSemaphoreEntryStatus`), Domain/
+  firmware download-upload (`initiateDownloadSequence`, `downloadSegment`,
+  `terminateDownloadSequence`, `initiateUploadSequence`, `uploadSegment`,
+  `terminateUploadSequence`, `requestDomainDownload`,
+  `requestDomainUpload`, `loadDomainContent`, `storeDomainContent`,
+  `deleteDomain`), Program invocation control (`createProgramInvocation`,
+  `deleteProgramInvocation`, `start`, `stop`, `resume`, `reset`, `kill`,
+  `getProgramInvocationAttributes`), Events (`defineEventCondition`,
+  `deleteEventCondition`, `getEventConditionAttributes`,
+  `reportEventConditionStatus`, `alterEventConditionMonitoring`,
+  `triggerEvent`, `defineEventAction`, `deleteEventAction`,
+  `getEventActionAttributes`, `reportEventActionStatus`,
+  `defineEventEnrollment`, `deleteEventEnrollment`, `alterEventEnrollment`,
+  `reportEventEnrollmentStatus`, `getEventEnrollmentAttributes`), Alarm
+  (`acknowledgeEventNotification`, `getAlarmSummary`,
+  `getAlarmEnrollmentSummary`), and Journal (`readJournal`,
+  `writeJournal`, `initializeJournal`, `reportJournalStatus`,
+  `createJournal`, `deleteJournal`) -- genuinely rare in ordinary IEC 61850
+  process-data traffic (belonging more to MMS's original general-purpose
+  industrial-messaging scope than to IEC 61850's own narrower profile of
+  it). None of these 58 has an available real capture or independent-
+  stack (`libiec61850`) implementation to validate against, so each is
+  decoded against the authoritative ASN.1 grammar (`mms.asn`) and this
+  project's own hand-built synthetic BER fixtures only -- a documented,
+  deliberately weaker validation bar than the services above, honestly
+  stated rather than blurred with them (see docs/DEVELOPMENT.md's ROADMAP
+  item 145).
 
 **The file-transfer services** (`obtainFile`/`fileOpen`/`fileRead`/
 `fileClose`/`fileRename`/`fileDelete`/`fileDirectory`): `FileName` (a
@@ -1203,18 +1227,25 @@ reassembly, already implemented for S7comm and shared as-is by MMS -- MMS
 needs no reassembly mechanism of its own); Presentation-layer context
 renegotiation mid-association (ISO 8823's own "presentation-context-
 addition-list" extension) -- never observed in real traffic; AARQ/AARE's
-own authentication-value field, structurally skipped; and, within the
-file-transfer services (now Tier 1 -- see above), `ObtainFile-Request`'s
-own `sourceFileServer` (`ApplicationReference`) is structurally recognized
-but not deep-decoded. `Address` (non-symbolic variable addressing, one of
-VariableSpecification's own two alternatives alongside `name`) is likewise
-structurally recognized but shown only as `"address=<Address, not
-decoded>"`, not decoded field-by-field, since real IEC 61850 traffic
-overwhelmingly addresses variables by symbolic `name` instead.
-`TypeSpecification` (part of defineNamedVariableList/
-getVariableAccessAttributes-response) is likewise recognized as present but
-shown only as `"typeSpecification=<TypeSpecification, not decoded>"`. Both
-`Address` and `TypeSpecification` remain open items -- see docs/DEVELOPMENT.md's ROADMAP item 12.
+own authentication-value field, structurally skipped; and `ObtainFile-
+Request`'s own `sourceFileServer` (`ApplicationReference`), and every
+other `ApplicationReference`-typed field across the confirmed services
+(e.g. `takeControl`'s `applicationToPreempt`, `defineEventEnrollment`'s/
+`getEventEnrollmentAttributes-Request`'s `clientApplication`,
+`JournalEntry`'s `originatingApplication`), are structurally recognized
+but not deep-decoded. `AlternateAccess` (an optional, recursive field on
+each `ScatteredAccessDescription` entry -- component/index/indexRange/
+allElements, itself able to nest further `AlternateAccess`) is likewise
+structurally recognized (`+alternateAccess`) but not decoded
+field-by-field. `ServiceError`'s own `serviceSpecificInformation[3]` (a
+per-service `*-Error` detail CHOICE covering `obtainFile`/`start`/`stop`/
+`resume`/`reset`/`deleteVariableAccess`/`deleteNamedVariableList`/
+`deleteNamedType`/`defineEventEnrollment`/`fileRename`/`additionalService`/
+`changeAccessControl-Error`) is not parsed at all today. `Address` and
+`TypeSpecification` (part of VariableSpecification/
+defineNamedVariableList/getVariableAccessAttributes-response) are now
+fully decoded -- see docs/DEVELOPMENT.md's ROADMAP item 145, which closed
+that gap.
 
 #### Validation
 
@@ -1269,7 +1300,7 @@ project), and one this project generated itself:
   (20 frames) are both "bare MMS" -- the real-world shape that motivated
   this decoder's own "Bare MMS" fallback path. `mms-takeControl.pcap`
   contains a bare `initiate-RequestPDU` followed by
-  `takeControl`/`relinquishControl` confirmed-RequestPDUs (both Tier 2).
+  `takeControl`/`relinquishControl` confirmed-RequestPDUs.
   `mms-cancelRequest.pcap` contains a bare `initiate-RequestPDU`, then a
   genuine `cancel-RequestPDU` (invokeID=1) and `conclude-RequestPDU` --
   both primitive MMSpdu alternatives, which is what caught the first bug

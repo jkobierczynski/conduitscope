@@ -4451,9 +4451,77 @@ def object_name_aa(name: str) -> bytes:
     return ctx_p(2, name.encode("ascii"))
 
 
+# ---- Address (mms.cpp's decode_address) ------------------------------------------------------
+def address_numeric(value: int) -> bytes: return ctx_p(0, ber_int(value))
+def address_symbolic(s: str) -> bytes: return ctx_p(1, s.encode("ascii"))
+def address_unconstrained(raw: bytes) -> bytes: return ctx_p(2, raw)
+
+
+# ---- TypeSpecification (mms.cpp's decode_type_specification) -- note these share most tag numbers
+# with the Data value builders above (data_bool/data_int/...) but NOT their content semantics
+# (e.g. integer[5]'s content here is the declared bit-WIDTH, not a value), so this is a deliberately
+# separate builder family, matching the C++ decoder's own distinct TypeSpecification function.
+def type_spec_name(object_name_alt: bytes) -> bytes:
+    return ctx_c(0, object_name_alt)  # typeName[0], EXPLICIT wrap around the ObjectName alternative
+
+
+def type_spec_array(count: int, element_type_spec: bytes, packed: bool = False) -> bytes:
+    content = (ctx_p(0, b"\x01") if packed else b"") + ctx_p(1, ber_int(count)) + ctx_c(2, element_type_spec)
+    return ctx_c(1, content)  # array[1], IMPLICIT SEQUENCE{packed?, numberOfElements, elementType EXPLICIT}
+
+
+def type_spec_structure(components, packed: bool = False) -> bytes:
+    """`components`: list of (component_name_or_None, type_spec_alt_bytes)."""
+    comp_entries = b""
+    for name, ts in components:
+        comp = (ctx_p(0, name.encode("ascii")) if name else b"") + ctx_c(1, ts)
+        comp_entries += uni_c(16, comp)  # SEQUENCE{componentName?, componentType EXPLICIT}
+    content = (ctx_p(0, b"\x01") if packed else b"") + ctx_c(1, comp_entries)
+    return ctx_c(2, content)  # structure[2]
+
+
+def type_spec_boolean() -> bytes: return ctx_p(3, b"")
+def type_spec_bitstring(num_bits: int) -> bytes: return ctx_p(4, ber_int(num_bits))
+def type_spec_integer(width_bits: int) -> bytes: return ctx_p(5, ber_int(width_bits))
+def type_spec_unsigned(width_bits: int) -> bytes: return ctx_p(6, ber_int(width_bits))
+def type_spec_octetstring(num_bytes: int) -> bytes: return ctx_p(9, ber_int(num_bytes))
+def type_spec_visiblestring(num_chars: int) -> bytes: return ctx_p(10, ber_int(num_chars))
+def type_spec_generalizedtime() -> bytes: return ctx_p(11, b"")
+def type_spec_binarytime(with_date: bool) -> bytes: return ctx_p(12, b"\x01" if with_date else b"\x00")
+def type_spec_bcd(num_digits: int) -> bytes: return ctx_p(13, ber_int(num_digits))
+def type_spec_objid() -> bytes: return ctx_p(15, b"")
+
+
 # ---- VariableSpecification / VariableAccessSpecification (mms.cpp) --------------------------------
 def var_spec_name(object_name_alt: bytes) -> bytes:
     return ctx_c(0, object_name_alt)  # name[0], EXPLICIT wrap around the ObjectName alternative
+
+
+def var_spec_address(address_alt: bytes) -> bytes:
+    return ctx_c(1, address_alt)  # address[1], EXPLICIT wrap around the Address alternative
+
+
+def var_spec_variable_description(address_alt: bytes, type_spec_alt: bytes) -> bytes:
+    # variableDescription[2], IMPLICIT SEQUENCE{address, typeSpecification} -- both fields are bare
+    # (untagged) CHOICEs, encoded back-to-back with no extra per-field wrap (see mms.cpp's own
+    # positional-decode comment on decode_variable_specification's tag-2 branch).
+    return ctx_c(2, address_alt + type_spec_alt)
+
+
+def var_spec_scattered(entries: bytes) -> bytes:
+    return ctx_c(3, entries)  # scatteredAccessDescription[3], IMPLICIT ScatteredAccessDescription
+
+
+def var_spec_invalidated() -> bytes:
+    return ctx_p(4, b"")
+
+
+def scattered_access_entry(component_name, var_spec_alt: bytes, has_alternate_access: bool = False) -> bytes:
+    content = (ctx_p(0, component_name.encode("ascii")) if component_name else b"")
+    content += ctx_c(1, var_spec_alt)  # variableSpecification[1], EXPLICIT wrap
+    if has_alternate_access:
+        content += ctx_c(2, b"")  # alternateAccess[2] -- presence-only placeholder, not decoded (see mms.cpp)
+    return uni_c(16, content)  # SEQUENCE{componentName?, variableSpecification, alternateAccess?}
 
 
 def list_of_variable(var_specs) -> bytes:
@@ -4556,8 +4624,12 @@ def getvariableaccessattributes_request(object_name_alt: bytes) -> bytes:
     return svc(6, True, ctx_c(0, object_name_alt))  # name[0], EXPLICIT wrap
 
 
-def getvariableaccessattributes_response(deletable: bool, type_specification_placeholder: bytes = b"\x00") -> bytes:
-    content = ctx_p(0, b"\x01" if deletable else b"\x00") + ctx_c(2, type_specification_placeholder)
+def getvariableaccessattributes_response(deletable: bool, type_specification: bytes = None) -> bytes:
+    # type_specification: one complete TypeSpecification alternative TLV (e.g. type_spec_boolean()) --
+    # defaults to boolean, matching this fixture's own ST$Ind1$stVal (a boolean status indication).
+    if type_specification is None:
+        type_specification = type_spec_boolean()
+    content = ctx_p(0, b"\x01" if deletable else b"\x00") + ctx_c(2, type_specification)
     return svc(6, True, content)
 
 
@@ -4707,6 +4779,900 @@ def filedirectory_response(entries, more_follows: bool = False) -> bytes:
     if more_follows:  # DEFAULT FALSE -- only encode when overriding the default to true
         content += ctx_p(1, b"\x01")
     return svc(77, True, content)
+
+
+# ---- Variable/type definition and management (mms.cpp's own Group 1 section, ROADMAP: MMS
+# confirmed-service clearance, closed) -- rename, defineNamedVariable, defineScatteredAccess,
+# getScatteredAccessAttributes, deleteVariableAccess, defineNamedType, getNamedTypeAttributes,
+# deleteNamedType.
+def rename_request(object_class_idx: int, current_name_alt: bytes, new_identifier: str) -> bytes:
+    extended_object_class = ctx_c(0, ctx_p(0, ber_int(object_class_idx)))  # extendedObjectClass[0],
+                                                                            # EXPLICIT wrap around objectClass[0]
+    content = extended_object_class + ctx_c(1, current_name_alt) + ctx_p(2, new_identifier.encode("ascii"))
+    return svc(3, True, content)
+
+
+def definenamedvariable_request(variable_name_alt: bytes, address_alt: bytes, type_spec_alt: bytes = None) -> bytes:
+    content = ctx_c(0, variable_name_alt) + ctx_c(1, address_alt)
+    if type_spec_alt is not None:
+        content += ctx_c(2, type_spec_alt)
+    return svc(7, True, content)
+
+
+def definescatteredaccess_request(scattered_name_alt: bytes, entries) -> bytes:
+    content = ctx_c(0, scattered_name_alt) + ctx_c(1, b"".join(entries))
+    return svc(8, True, content)
+
+
+def getscatteredaccessattributes_request(object_name_alt: bytes) -> bytes:
+    return svc(9, True, object_name_alt)  # bare ObjectName body, same shape as getnamedvariablelistattributes_request
+
+
+def getscatteredaccessattributes_response(deletable: bool, entries) -> bytes:
+    content = ctx_p(0, b"\x01" if deletable else b"\x00") + ctx_c(1, b"".join(entries))
+    return svc(9, True, content)
+
+
+def deletevariableaccess_request(scope: int = None, names=None, domain_name: str = None) -> bytes:
+    content = b""
+    if scope is not None:
+        content += ctx_p(0, ber_int(scope))
+    if names:
+        content += ctx_c(1, b"".join(names))
+    if domain_name is not None:
+        content += ctx_p(2, domain_name.encode("ascii"))
+    return svc(10, True, content)
+
+
+def deletevariableaccess_response(matched: int, deleted: int) -> bytes:
+    content = ctx_p(0, ber_int(matched)) + ctx_p(1, ber_int(deleted))
+    return svc(10, True, content)
+
+
+def definenamedtype_request(type_name_alt: bytes, type_spec_alt: bytes) -> bytes:
+    # DefineNamedType-Request ::= SEQUENCE{typeName ObjectName, typeSpecification TypeSpecification} --
+    # both fields untagged; the decoder reads them positionally, so simple concatenation is correct
+    # regardless of either alternative's own natural tag number.
+    return svc(14, True, type_name_alt + type_spec_alt)
+
+
+def definenamedtype_response() -> bytes:
+    return svc(14, False, b"")  # DefineNamedType-Response ::= NULL
+
+
+def getnamedtypeattributes_request(type_name_alt: bytes) -> bytes:
+    return svc(15, True, type_name_alt)  # bare ObjectName body
+
+
+def getnamedtypeattributes_response(deletable: bool, type_spec_alt: bytes) -> bytes:
+    content = ctx_p(0, b"\x01" if deletable else b"\x00") + type_spec_alt  # typeSpecification is untagged
+    return svc(15, True, content)
+
+
+def deletenamedtype_request(scope: int = None, names=None, domain_name: str = None) -> bytes:
+    content = b""
+    if scope is not None:
+        content += ctx_p(0, ber_int(scope))
+    if names:
+        content += ctx_c(1, b"".join(names))
+    if domain_name is not None:
+        content += ctx_p(2, domain_name.encode("ascii"))
+    return svc(16, True, content)
+
+
+def deletenamedtype_response(matched: int, deleted: int) -> bytes:
+    content = ctx_p(0, ber_int(matched)) + ctx_p(1, ber_int(deleted))
+    return svc(16, True, content)
+
+
+# ---- Operator communication (mms.cpp's own "Operator communication" section) -- input, output.
+def input_request(operator_station_name: str, echo: bool = None, prompt_data=None,
+                   input_timeout: int = None) -> bytes:
+    content = ctx_p(0, operator_station_name.encode("ascii"))
+    if echo is not None:  # DEFAULT TRUE -- only encode when overriding the default
+        content += ctx_p(1, b"\x01" if echo else b"\x00")
+    if prompt_data:
+        content += ctx_c(2, b"".join(uni_p(26, p.encode("ascii")) for p in prompt_data))
+    if input_timeout is not None:
+        content += ctx_p(3, ber_int(input_timeout))
+    return svc(17, True, content)
+
+
+def input_response(input_string: str) -> bytes:
+    return svc(17, False, input_string.encode("ascii"))  # Input-Response ::= VisibleString, bare
+
+
+def output_request(operator_station_name: str, output_data) -> bytes:
+    content = ctx_p(0, operator_station_name.encode("ascii"))
+    content += ctx_c(1, b"".join(uni_p(26, o.encode("ascii")) for o in output_data))
+    return svc(18, True, content)
+    # Output-Response ::= NULL -- no builder needed
+
+
+# ---- Semaphore (mms.cpp's own "Semaphore" section) -- takeControl, relinquishControl,
+# defineSemaphore, deleteSemaphore, reportSemaphoreStatus, reportPoolSemaphoreStatus,
+# reportSemaphoreEntryStatus. semaphoreName[0] fields below use the strict EXPLICIT wrap the
+# grammar names (ctx_c); the real tests/real_captures/mms/mms-takeControl.pcap/sample_mms.pcap
+# fixtures separately exercise the looser bare-primitive form that decode_object_name_flexible
+# also accepts (see mms.cpp) -- together these two synthetic+real sources cover both encodings.
+def takecontrol_request(semaphore_name_alt: bytes, named_token: str = None, priority: int = None,
+                         acceptable_delay: int = None, control_timeout: int = None,
+                         abort_on_timeout: bool = None, relinquish_if_connection_lost: bool = None,
+                         application_to_preempt: bool = False) -> bytes:
+    content = ctx_c(0, semaphore_name_alt)
+    if named_token is not None:
+        content += ctx_p(1, named_token.encode("ascii"))
+    if priority is not None:  # DEFAULT 64
+        content += ctx_p(2, ber_int(priority))
+    if acceptable_delay is not None:
+        content += ctx_p(3, ber_int(acceptable_delay))
+    if control_timeout is not None:
+        content += ctx_p(4, ber_int(control_timeout))
+    if abort_on_timeout is not None:
+        content += ctx_p(5, b"\x01" if abort_on_timeout else b"\x00")
+    if relinquish_if_connection_lost is not None:  # DEFAULT TRUE
+        content += ctx_p(6, b"\x01" if relinquish_if_connection_lost else b"\x00")
+    if application_to_preempt:
+        content += ctx_c(7, b"")  # ApplicationReference, empty -- structurally present only, not decoded
+    return svc(19, True, content)
+
+
+def takecontrol_response_no_result() -> bytes:
+    # TakeControl-Response is genuinely EXPLICIT-wrapped as a whole (see mms.cpp's
+    # decode_takecontrol_response header comment) -- svc(19, True, ...) wraps the CHOICE's own
+    # noResult[0] IMPLICIT NULL alternative one level deeper than every other response.
+    return svc(19, True, ctx_p(0, b""))
+
+
+def takecontrol_response_named_token(token: str) -> bytes:
+    return svc(19, True, ctx_p(1, token.encode("ascii")))
+
+
+def relinquishcontrol_request(semaphore_name_alt: bytes, named_token: str = None) -> bytes:
+    content = ctx_c(0, semaphore_name_alt)
+    if named_token is not None:
+        content += ctx_p(1, named_token.encode("ascii"))
+    return svc(20, True, content)
+    # RelinquishControl-Response ::= NULL -- no builder needed
+
+
+def definesemaphore_request(semaphore_name_alt: bytes, number_of_tokens: int) -> bytes:
+    content = ctx_c(0, semaphore_name_alt) + ctx_p(1, ber_int(number_of_tokens))
+    return svc(21, True, content)
+    # DefineSemaphore-Response ::= NULL -- no builder needed
+
+
+def deletesemaphore_request(semaphore_name_alt: bytes) -> bytes:
+    return svc(22, True, semaphore_name_alt)  # DeleteSemaphore-Request ::= ObjectName, bare
+    # DeleteSemaphore-Response ::= NULL -- no builder needed
+
+
+def reportsemaphorestatus_request(semaphore_name_alt: bytes) -> bytes:
+    return svc(23, True, semaphore_name_alt)  # ReportSemaphoreStatus-Request ::= ObjectName, bare
+
+
+def reportsemaphorestatus_response(deletable: bool, cls: int, number_of_tokens: int,
+                                    number_of_owned_tokens: int, number_of_hung_tokens: int) -> bytes:
+    content = (ctx_p(0, b"\x01" if deletable else b"\x00") + ctx_p(1, ber_int(cls)) +
+               ctx_p(2, ber_int(number_of_tokens)) + ctx_p(3, ber_int(number_of_owned_tokens)) +
+               ctx_p(4, ber_int(number_of_hung_tokens)))
+    return svc(23, True, content)
+
+
+def reportpoolsemaphorestatus_request(semaphore_name_alt: bytes, name_to_start_after: str = None) -> bytes:
+    content = ctx_c(0, semaphore_name_alt)
+    if name_to_start_after is not None:
+        content += ctx_p(1, name_to_start_after.encode("ascii"))
+    return svc(24, True, content)
+
+
+def reportpoolsemaphorestatus_response(tokens, more_follows: bool = None) -> bytes:
+    """`tokens`: list of (kind, name) with kind in {"free", "owned", "hung"}."""
+    kind_tag = {"free": 0, "owned": 1, "hung": 2}
+    entries = b"".join(ctx_p(kind_tag[k], n.encode("ascii")) for k, n in tokens)
+    content = ctx_c(0, entries)
+    if more_follows is not None:  # DEFAULT TRUE
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(24, True, content)
+
+
+def reportsemaphoreentrystatus_request(semaphore_name_alt: bytes, state: int,
+                                        entry_id_to_start_after: bytes = None) -> bytes:
+    content = ctx_c(0, semaphore_name_alt) + ctx_p(1, ber_int(state))
+    if entry_id_to_start_after is not None:
+        content += ctx_p(2, entry_id_to_start_after)
+    return svc(25, True, content)
+
+
+def semaphore_entry(entry_id: bytes, entry_class: int, named_token: str = None, priority: int = None,
+                     remaining_timeout: int = None, abort_on_timeout: bool = None,
+                     relinquish_if_connection_lost: bool = None) -> bytes:
+    content = ctx_p(0, entry_id) + ctx_p(1, ber_int(entry_class)) + ctx_c(2, b"")  # applicationReference,
+                                                                                    # empty -- not decoded
+    if named_token is not None:
+        content += ctx_p(3, named_token.encode("ascii"))
+    if priority is not None:
+        content += ctx_p(4, ber_int(priority))
+    if remaining_timeout is not None:
+        content += ctx_p(5, ber_int(remaining_timeout))
+    if abort_on_timeout is not None:
+        content += ctx_p(6, b"\x01" if abort_on_timeout else b"\x00")
+    if relinquish_if_connection_lost is not None:
+        content += ctx_p(7, b"\x01" if relinquish_if_connection_lost else b"\x00")
+    return uni_c(16, content)  # SemaphoreEntry ::= SEQUENCE
+
+
+def reportsemaphoreentrystatus_response(entries, more_follows: bool = None) -> bytes:
+    content = ctx_c(0, b"".join(entries))
+    if more_follows is not None:  # DEFAULT TRUE
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(25, True, content)
+
+
+# ---- Domain / firmware download-upload (mms.cpp's own "Domain / firmware download-upload"
+# section, ROADMAP: MMS confirmed-service clearance, closed) -- initiateDownloadSequence,
+# downloadSegment, terminateDownloadSequence, initiateUploadSequence, uploadSegment,
+# terminateUploadSequence, requestDomainDownload, requestDomainUpload, loadDomainContent,
+# storeDomainContent, deleteDomain.
+def initiatedownloadsequence_request(domain_name: str, capabilities, sharable: bool) -> bytes:
+    content = (ctx_p(0, domain_name.encode("ascii")) +
+               ctx_c(1, b"".join(uni_p(26, c.encode("ascii")) for c in capabilities)) +
+               ctx_p(2, b"\x01" if sharable else b"\x00"))
+    return svc(26, True, content)
+
+
+def downloadsegment_request(data_name: str) -> bytes:
+    return svc(27, False, data_name.encode("ascii"))  # DownloadSegment-Request ::= Identifier, bare
+
+
+def load_data_response(service_tag: int, non_coded: bytes = None, more_follows: bool = None) -> bytes:
+    """Shared by DownloadSegment-Response(27)/UploadSegment-Response(30) -- identical grammar."""
+    content = ctx_p(0, non_coded) if non_coded is not None else b""
+    if more_follows is not None:  # DEFAULT TRUE
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(service_tag, True, content)
+
+
+def terminatedownloadsequence_request(domain_name: str, discard: bytes = None) -> bytes:
+    content = ctx_p(0, domain_name.encode("ascii"))
+    if discard is not None:  # discard[1] IMPLICIT ServiceError OPTIONAL -- reuses service_error_fields
+        content += ctx_c(1, discard)
+    return svc(28, True, content)
+
+
+def initiateuploadsequence_request(domain_name: str) -> bytes:
+    return svc(29, False, domain_name.encode("ascii"))  # Identifier, bare
+
+
+def initiateuploadsequence_response(ulsm_id: int, capabilities) -> bytes:
+    content = (ctx_p(0, ber_int(ulsm_id)) +
+               ctx_c(1, b"".join(uni_p(26, c.encode("ascii")) for c in capabilities)))
+    return svc(29, True, content)
+
+
+def uploadsegment_request(ulsm_id: int) -> bytes:
+    return svc(30, False, ber_int(ulsm_id))  # Integer32, bare
+
+
+def terminateuploadsequence_request(ulsm_id: int) -> bytes:
+    return svc(31, False, ber_int(ulsm_id))  # Integer32, bare
+
+
+def requestdomaindownload_request(domain_name: str, file_name_parts, sharable: bool,
+                                   capabilities=None) -> bytes:
+    content = ctx_p(0, domain_name.encode("ascii"))
+    if capabilities:
+        content += ctx_c(1, b"".join(uni_p(26, c.encode("ascii")) for c in capabilities))
+    content += ctx_p(2, b"\x01" if sharable else b"\x00")
+    content += ctx_p(4, file_name(*file_name_parts))  # tag 3 genuinely absent, see mms.cpp
+    return svc(32, True, content)
+
+
+def requestdomainupload_request(domain_name: str, file_name_parts) -> bytes:
+    content = ctx_p(0, domain_name.encode("ascii")) + ctx_p(1, file_name(*file_name_parts))
+    return svc(33, True, content)
+
+
+def loaddomaincontent_request(domain_name: str, file_name_parts, sharable: bool,
+                               capabilities=None, include_third_party: bool = False) -> bytes:
+    content = ctx_p(0, domain_name.encode("ascii"))
+    if capabilities:
+        content += ctx_c(1, b"".join(uni_p(26, c.encode("ascii")) for c in capabilities))
+    content += ctx_p(2, b"\x01" if sharable else b"\x00")
+    content += ctx_p(4, file_name(*file_name_parts))
+    if include_third_party:
+        content += ctx_c(5, b"")  # ApplicationReference, empty -- structurally present only
+    return svc(34, True, content)
+
+
+def storedomaincontent_request(domain_name: str, file_name_parts, include_third_party: bool = False) -> bytes:
+    content = ctx_p(0, domain_name.encode("ascii")) + ctx_p(1, file_name(*file_name_parts))
+    if include_third_party:
+        content += ctx_c(2, b"")  # ApplicationReference, empty -- structurally present only
+    return svc(35, True, content)
+
+
+def deletedomain_request(domain_name: str) -> bytes:
+    return svc(36, False, domain_name.encode("ascii"))  # Identifier, bare
+
+
+# ---- Program invocation control (mms.cpp's own "Program invocation control" section, ROADMAP:
+# MMS confirmed-service clearance, closed) -- createProgramInvocation, deleteProgramInvocation,
+# start, stop, resume, reset, kill, getProgramInvocationAttributes.
+def execution_argument_simple(s: str) -> bytes:
+    return ctx_p(1, s.encode("ascii"))  # simpleString -- a bare context-tag-1 VisibleString
+
+
+def createprograminvocation_request(name: str, domain_names, reusable: bool = None,
+                                     monitor_type: bool = None) -> bytes:
+    content = ctx_p(0, name.encode("ascii")) + ctx_c(1, b"".join(uni_p(26, d.encode("ascii")) for d in domain_names))
+    if reusable is not None:  # DEFAULT TRUE
+        content += ctx_p(2, b"\x01" if reusable else b"\x00")
+    if monitor_type is not None:
+        content += ctx_p(3, b"\x01" if monitor_type else b"\x00")
+    return svc(38, True, content)
+
+
+def deleteprograminvocation_request(name: str) -> bytes:
+    return svc(39, False, name.encode("ascii"))  # Identifier, bare
+
+
+def start_request(name: str, execution_argument: bytes = None) -> bytes:
+    content = ctx_p(0, name.encode("ascii"))
+    if execution_argument is not None:
+        content += execution_argument
+    return svc(40, True, content)
+
+
+def stop_request(name: str) -> bytes:
+    return svc(41, True, ctx_p(0, name.encode("ascii")))
+
+
+def resume_request(name: str, execution_argument: bytes = None) -> bytes:
+    content = ctx_p(0, name.encode("ascii"))
+    if execution_argument is not None:
+        content += execution_argument
+    return svc(42, True, content)
+
+
+def reset_request(name: str) -> bytes:
+    return svc(43, True, ctx_p(0, name.encode("ascii")))
+
+
+def kill_request(name: str) -> bytes:
+    return svc(44, True, ctx_p(0, name.encode("ascii")))
+
+
+def getprograminvocationattributes_request(name: str) -> bytes:
+    return svc(45, False, name.encode("ascii"))  # Identifier, bare
+
+
+def getprograminvocationattributes_response(state: int, domain_names, deletable: bool, reusable: bool,
+                                             monitor: bool, start_argument: str,
+                                             execution_argument: bytes = None) -> bytes:
+    content = (ctx_p(0, ber_int(state)) +
+               ctx_c(1, b"".join(uni_p(26, d.encode("ascii")) for d in domain_names)) +
+               ctx_p(2, b"\x01" if deletable else b"\x00") +
+               ctx_p(3, b"\x01" if reusable else b"\x00") +
+               ctx_p(4, b"\x01" if monitor else b"\x00") +
+               ctx_p(5, start_argument.encode("ascii")))
+    if execution_argument is not None:
+        content += execution_argument
+    return svc(45, True, content)
+
+
+# ---- Events -- condition/action/enrollment (mms.cpp's own "Events" section, ROADMAP: MMS
+# confirmed-service clearance, closed) -- defineEventCondition, deleteEventCondition,
+# getEventConditionAttributes, reportEventConditionStatus, alterEventConditionMonitoring,
+# triggerEvent, defineEventAction, deleteEventAction, getEventActionAttributes,
+# reportEventActionStatus, defineEventEnrollment, deleteEventEnrollment, alterEventEnrollment,
+# reportEventEnrollmentStatus, getEventEnrollmentAttributes. Fields declared ObjectName/
+# VariableSpecification/EventTime with no IMPLICIT keyword get the strict EXPLICIT wrap (ctx_c)
+# throughout, matching mms.cpp's own decode comments for each service.
+
+def event_time_of_day(days: int, ms: int) -> bytes:
+    return ctx_p(0, struct.pack("!H", days) + struct.pack("!I", ms))
+
+
+def event_time_sequence(identifier: int) -> bytes:
+    return ctx_p(1, ber_int(identifier))
+
+
+def defineeventcondition_request(event_condition_name_alt: bytes, ec_class: int, priority: int = None,
+                                  severity: int = None, alarm_summary_reports: bool = None,
+                                  monitored_var_spec_alt: bytes = None, evaluation_interval: int = None) -> bytes:
+    content = ctx_c(0, event_condition_name_alt)  # eventConditionName[0], EXPLICIT wrap
+    content += ctx_p(1, ber_int(ec_class))  # class[1]
+    if priority is not None:
+        content += ctx_p(2, ber_int(priority))
+    if severity is not None:
+        content += ctx_p(3, ber_int(severity))
+    if alarm_summary_reports is not None:
+        content += ctx_p(4, b"\x01" if alarm_summary_reports else b"\x00")
+    if monitored_var_spec_alt is not None:
+        content += ctx_c(6, monitored_var_spec_alt)  # monitoredVariable[6], EXPLICIT wrap (tag 5 absent)
+    if evaluation_interval is not None:
+        content += ctx_p(7, ber_int(evaluation_interval))
+    return svc(47, True, content)
+    # DefineEventCondition-Response ::= NULL -- no builder needed
+
+
+def deleteeventcondition_request_specific(object_name_alts) -> bytes:
+    return svc(48, True, ctx_c(0, b"".join(object_name_alts)))
+
+
+def deleteeventcondition_request_aa_specific() -> bytes:
+    return svc(48, True, ctx_p(1, b""))
+
+
+def deleteeventcondition_request_domain(domain_name: str) -> bytes:
+    return svc(48, True, ctx_p(2, domain_name.encode("ascii")))
+
+
+def deleteeventcondition_request_vmd() -> bytes:
+    return svc(48, True, ctx_p(3, b""))
+
+
+def deleteeventcondition_response(candidates_not_deleted: int) -> bytes:
+    return svc(48, False, ber_int(candidates_not_deleted))
+
+
+def geteventconditionattributes_request(event_condition_name_alt: bytes) -> bytes:
+    return svc(49, True, event_condition_name_alt)  # bare ObjectName body
+
+
+def geteventconditionattributes_response(mms_deletable: bool, ec_class: int, priority: int = None,
+                                          severity: int = None, alarm_summary_reports: bool = None,
+                                          monitored_var_spec_alt: bytes = None,
+                                          monitored_undefined: bool = False,
+                                          evaluation_interval: int = None) -> bytes:
+    content = ctx_p(0, b"\x01" if mms_deletable else b"\x00")
+    content += ctx_p(1, ber_int(ec_class))
+    if priority is not None:
+        content += ctx_p(2, ber_int(priority))
+    if severity is not None:
+        content += ctx_p(3, ber_int(severity))
+    if alarm_summary_reports is not None:
+        content += ctx_p(4, b"\x01" if alarm_summary_reports else b"\x00")
+    if monitored_var_spec_alt is not None:
+        content += ctx_c(6, ctx_c(0, monitored_var_spec_alt))  # monitoredVariable[6]{variableReference[0]}, double EXPLICIT
+    elif monitored_undefined:
+        content += ctx_c(6, ctx_p(1, b""))  # monitoredVariable[6]{undefined[1]}
+    if evaluation_interval is not None:
+        content += ctx_p(7, ber_int(evaluation_interval))
+    return svc(49, True, content)
+
+
+def reporteventconditionstatus_request(event_condition_name_alt: bytes) -> bytes:
+    return svc(50, True, event_condition_name_alt)  # bare ObjectName body
+
+
+def reporteventconditionstatus_response(current_state: int, number_of_event_enrollments: int,
+                                         enabled: bool = None, time_of_last_transition_to_active: bytes = None,
+                                         time_of_last_transition_to_idle: bytes = None) -> bytes:
+    content = ctx_p(0, ber_int(current_state)) + ctx_p(1, ber_int(number_of_event_enrollments))
+    if enabled is not None:
+        content += ctx_p(2, b"\x01" if enabled else b"\x00")
+    if time_of_last_transition_to_active is not None:
+        content += ctx_c(3, time_of_last_transition_to_active)  # EventTime, EXPLICIT wrap
+    if time_of_last_transition_to_idle is not None:
+        content += ctx_c(4, time_of_last_transition_to_idle)
+    return svc(50, True, content)
+
+
+def altereventconditionmonitoring_request(event_condition_name_alt: bytes, enabled: bool = None,
+                                           priority: int = None, alarm_summary_reports: bool = None,
+                                           evaluation_interval: int = None) -> bytes:
+    content = ctx_c(0, event_condition_name_alt)
+    if enabled is not None:
+        content += ctx_p(1, b"\x01" if enabled else b"\x00")
+    if priority is not None:
+        content += ctx_p(2, ber_int(priority))
+    if alarm_summary_reports is not None:
+        content += ctx_p(3, b"\x01" if alarm_summary_reports else b"\x00")
+    if evaluation_interval is not None:
+        content += ctx_p(4, ber_int(evaluation_interval))
+    return svc(51, True, content)
+    # AlterEventConditionMonitoring-Response ::= NULL -- no builder needed
+
+
+def triggerevent_request(event_condition_name_alt: bytes, priority: int = None) -> bytes:
+    content = ctx_c(0, event_condition_name_alt)
+    if priority is not None:
+        content += ctx_p(1, ber_int(priority))
+    return svc(52, True, content)
+    # TriggerEvent-Response ::= NULL -- no builder needed
+
+
+def modifier_attach_to_event_condition(event_enrollment_name_alt: bytes, event_condition_name_alt: bytes) -> bytes:
+    content = ctx_c(0, event_enrollment_name_alt) + ctx_c(1, event_condition_name_alt)
+    return ctx_c(0, content)  # attach-To-Event-Condition[0] IMPLICIT AttachToEventCondition
+
+
+def modifier_attach_to_semaphore(semaphore_name_alt: bytes) -> bytes:
+    content = ctx_c(0, semaphore_name_alt)  # semaphoreName[0], EXPLICIT wrap
+    return ctx_c(1, content)  # attach-To-Semaphore[1] IMPLICIT AttachToSemaphore
+
+
+def defineeventaction_request(event_action_name_alt: bytes, modifiers=None) -> bytes:
+    content = ctx_c(0, event_action_name_alt)
+    if modifiers:
+        content += ctx_c(1, b"".join(modifiers))
+    return svc(53, True, content)
+    # DefineEventAction-Response ::= NULL -- no builder needed
+
+
+def deleteeventaction_request_specific(object_name_alts) -> bytes:
+    return svc(54, True, ctx_c(0, b"".join(object_name_alts)))
+
+
+def deleteeventaction_request_aa_specific() -> bytes:
+    return svc(54, True, ctx_p(1, b""))
+
+
+def deleteeventaction_request_domain(domain_name: str) -> bytes:
+    return svc(54, True, ctx_p(3, domain_name.encode("ascii")))
+
+
+def deleteeventaction_request_vmd() -> bytes:
+    return svc(54, True, ctx_p(4, b""))
+
+
+def deleteeventaction_response(candidates_not_deleted: int) -> bytes:
+    return svc(54, False, ber_int(candidates_not_deleted))
+
+
+def geteventactionattributes_request(event_action_name_alt: bytes) -> bytes:
+    return svc(55, True, event_action_name_alt)
+
+
+def geteventactionattributes_response(mms_deletable: bool, modifiers) -> bytes:
+    content = ctx_p(0, b"\x01" if mms_deletable else b"\x00")
+    content += ctx_c(1, b"".join(modifiers))
+    return svc(55, True, content)
+
+
+def reporteventactionstatus_request(event_action_name_alt: bytes) -> bytes:
+    return svc(56, True, event_action_name_alt)
+
+
+def reporteventactionstatus_response(number_of_event_enrollments: int) -> bytes:
+    return svc(56, False, ber_int(number_of_event_enrollments))
+
+
+def defineeventenrollment_request(event_enrollment_name_alt: bytes, event_condition_name_alt: bytes,
+                                   event_condition_transition_bits, alarm_ack_rule: int,
+                                   event_action_name_alt: bytes = None, has_client_application: bool = False) -> bytes:
+    content = ctx_c(0, event_enrollment_name_alt) + ctx_c(1, event_condition_name_alt)
+    content += ctx_p(2, bitstring_content(event_condition_transition_bits, 7))
+    content += ctx_p(3, ber_int(alarm_ack_rule))
+    if event_action_name_alt is not None:
+        content += ctx_c(4, event_action_name_alt)
+    if has_client_application:
+        content += ctx_c(5, b"")  # clientApplication[5] -- presence-only placeholder, not decoded
+    return svc(57, True, content)
+    # DefineEventEnrollment-Response ::= NULL -- no builder needed
+
+
+def deleteeventenrollment_request_specific(object_name_alts) -> bytes:
+    return svc(58, True, ctx_c(0, b"".join(object_name_alts)))
+
+
+def deleteeventenrollment_request_ec(event_condition_name_alt: bytes) -> bytes:
+    return svc(58, True, ctx_c(1, event_condition_name_alt))  # ec[1], EXPLICIT wrap (no IMPLICIT)
+
+
+def deleteeventenrollment_request_ea(event_action_name_alt: bytes) -> bytes:
+    return svc(58, True, ctx_c(2, event_action_name_alt))  # ea[2], EXPLICIT wrap
+
+
+def deleteeventenrollment_response(candidates_not_deleted: int) -> bytes:
+    return svc(58, False, ber_int(candidates_not_deleted))
+
+
+def altereventenrollment_request(event_enrollment_name_alt: bytes, event_condition_transition_bits=None,
+                                  alarm_ack_rule: int = None) -> bytes:
+    content = ctx_c(0, event_enrollment_name_alt)
+    if event_condition_transition_bits is not None:
+        content += ctx_p(1, bitstring_content(event_condition_transition_bits, 7))
+    if alarm_ack_rule is not None:
+        content += ctx_p(2, ber_int(alarm_ack_rule))
+    return svc(59, True, content)
+
+
+def altereventenrollment_response(current_state: int = None, current_state_undefined: bool = False,
+                                   transition_time_alt: bytes = None) -> bytes:
+    content = b""
+    if current_state is not None:
+        content += ctx_c(0, ctx_p(0, ber_int(current_state)))
+    elif current_state_undefined:
+        content += ctx_c(0, ctx_p(1, b""))
+    if transition_time_alt is not None:
+        content += ctx_c(1, transition_time_alt)
+    return svc(59, True, content)
+
+
+def reporteventenrollmentstatus_request(event_enrollment_name_alt: bytes) -> bytes:
+    return svc(60, True, event_enrollment_name_alt)
+
+
+def reporteventenrollmentstatus_response(event_condition_transition_bits, duration: int, current_state: int,
+                                          notification_lost: bool = None, alarm_ack_rule: int = None) -> bytes:
+    content = ctx_p(0, bitstring_content(event_condition_transition_bits, 7))
+    if notification_lost is not None:
+        content += ctx_p(1, b"\x01" if notification_lost else b"\x00")
+    content += ctx_p(2, ber_int(duration))
+    if alarm_ack_rule is not None:
+        content += ctx_p(3, ber_int(alarm_ack_rule))
+    content += ctx_p(4, ber_int(current_state))
+    return svc(60, True, content)
+
+
+def geteventenrollmentattributes_request(scope_of_request: int = None, event_enrollment_names=None,
+                                          has_client_application: bool = False,
+                                          event_condition_name_alt: bytes = None,
+                                          event_action_name_alt: bytes = None,
+                                          continue_after_alt: bytes = None) -> bytes:
+    content = b""
+    if scope_of_request is not None:
+        content += ctx_p(0, ber_int(scope_of_request))
+    if event_enrollment_names:
+        content += ctx_c(1, b"".join(event_enrollment_names))
+    if has_client_application:
+        content += ctx_c(2, b"")
+    if event_condition_name_alt is not None:
+        content += ctx_c(3, event_condition_name_alt)
+    if event_action_name_alt is not None:
+        content += ctx_c(4, event_action_name_alt)
+    if continue_after_alt is not None:
+        content += ctx_c(5, continue_after_alt)
+    return svc(61, True, content)
+
+
+def event_enrollment_entry(event_enrollment_name_alt: bytes, event_condition_name_alt: bytes = None,
+                            event_condition_undefined: bool = False, has_event_action: bool = False,
+                            event_action_name_alt: bytes = None, event_action_undefined: bool = False,
+                            mms_deletable: bool = False, enrollment_class: int = 0, duration: int = 0,
+                            invoke_id: int = None, remaining_acceptable_delay: int = None) -> bytes:
+    content = ctx_c(0, event_enrollment_name_alt)
+    if event_condition_name_alt is not None:
+        content += ctx_c(1, ctx_c(0, event_condition_name_alt))  # eventConditionName[1]{X[0] ObjectName}
+    elif event_condition_undefined:
+        content += ctx_c(1, ctx_p(1, b""))  # eventConditionName[1]{undefined[1]}
+    if has_event_action:
+        if event_action_name_alt is not None:
+            content += ctx_c(2, ctx_c(0, event_action_name_alt))
+        elif event_action_undefined:
+            content += ctx_c(2, ctx_p(1, b""))
+    content += ctx_p(4, b"\x01" if mms_deletable else b"\x00")
+    content += ctx_p(5, ber_int(enrollment_class))
+    content += ctx_p(6, ber_int(duration))
+    if invoke_id is not None:
+        content += ctx_p(7, ber_int(invoke_id))
+    if remaining_acceptable_delay is not None:
+        content += ctx_p(8, ber_int(remaining_acceptable_delay))
+    return uni_c(16, content)  # SEQUENCE
+
+
+def geteventenrollmentattributes_response(entries, more_follows: bool = None) -> bytes:
+    content = ctx_c(0, b"".join(entries))
+    if more_follows is not None:
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(61, True, content)
+
+
+# ---- Alarm (mms.cpp's own "Alarm" section, ROADMAP: MMS confirmed-service clearance, closed) --
+# acknowledgeEventNotification, getAlarmSummary, getAlarmEnrollmentSummary. Fields declared
+# ObjectName/EventTime with no IMPLICIT keyword get the strict EXPLICIT wrap (ctx_c), same
+# convention as the Events group above.
+
+def acknowledgeeventnotification_request(event_enrollment_name_alt: bytes, acknowledged_state: int,
+                                          time_of_acknowledged_transition_alt: bytes) -> bytes:
+    content = ctx_c(0, event_enrollment_name_alt) + ctx_p(2, ber_int(acknowledged_state))
+    content += ctx_c(3, time_of_acknowledged_transition_alt)
+    return svc(62, True, content)
+    # AcknowledgeEventNotification-Response ::= NULL -- no builder needed
+
+
+def getalarmsummary_request(enrollments_only: bool = None, active_alarms_only: bool = None,
+                             acknowledgment_filter: int = None, most_severe: int = None,
+                             least_severe: int = None, continue_after_alt: bytes = None) -> bytes:
+    content = b""
+    if enrollments_only is not None:
+        content += ctx_p(0, b"\x01" if enrollments_only else b"\x00")
+    if active_alarms_only is not None:
+        content += ctx_p(1, b"\x01" if active_alarms_only else b"\x00")
+    if acknowledgment_filter is not None:
+        content += ctx_p(2, ber_int(acknowledgment_filter))
+    if most_severe is not None and least_severe is not None:
+        content += ctx_c(3, ctx_p(0, ber_int(most_severe)) + ctx_p(1, ber_int(least_severe)))
+    if continue_after_alt is not None:
+        content += ctx_c(5, continue_after_alt)
+    return svc(63, True, content)
+
+
+def alarm_summary_entry(event_condition_name_alt: bytes, severity: int, current_state: int,
+                         unacknowledged_state: int, time_of_last_transition_to_active: bytes = None,
+                         time_of_last_transition_to_idle: bytes = None) -> bytes:
+    content = ctx_c(0, event_condition_name_alt) + ctx_p(1, ber_int(severity))
+    content += ctx_p(2, ber_int(current_state)) + ctx_p(3, ber_int(unacknowledged_state))
+    if time_of_last_transition_to_active is not None:
+        content += ctx_c(5, time_of_last_transition_to_active)
+    if time_of_last_transition_to_idle is not None:
+        content += ctx_c(6, time_of_last_transition_to_idle)
+    return uni_c(16, content)
+
+
+def getalarmsummary_response(entries, more_follows: bool = None) -> bytes:
+    content = ctx_c(0, b"".join(entries))
+    if more_follows is not None:
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(63, True, content)
+
+
+def getalarmenrollmentsummary_request(enrollments_only: bool = None, active_alarms_only: bool = None,
+                                       acknowledgment_filter: int = None, most_severe: int = None,
+                                       least_severe: int = None, continue_after_alt: bytes = None) -> bytes:
+    content = b""
+    if enrollments_only is not None:
+        content += ctx_p(0, b"\x01" if enrollments_only else b"\x00")
+    if active_alarms_only is not None:
+        content += ctx_p(1, b"\x01" if active_alarms_only else b"\x00")
+    if acknowledgment_filter is not None:
+        content += ctx_p(2, ber_int(acknowledgment_filter))
+    if most_severe is not None and least_severe is not None:
+        content += ctx_c(3, ctx_p(0, ber_int(most_severe)) + ctx_p(1, ber_int(least_severe)))
+    if continue_after_alt is not None:
+        content += ctx_c(5, continue_after_alt)
+    return svc(64, True, content)
+
+
+def alarm_enrollment_summary_entry(event_enrollment_name_alt: bytes, severity: int, current_state: int,
+                                    has_client_application: bool = False, notification_lost: bool = None,
+                                    alarm_ack_rule: int = None, enrollment_state: int = None,
+                                    time_of_last_transition_to_active: bytes = None,
+                                    time_active_acknowledged: bytes = None,
+                                    time_of_last_transition_to_idle: bytes = None,
+                                    time_idle_acknowledged: bytes = None) -> bytes:
+    content = ctx_c(0, event_enrollment_name_alt)
+    if has_client_application:
+        content += ctx_c(2, b"")  # clientApplication[2] -- presence-only placeholder, not decoded
+    content += ctx_p(3, ber_int(severity)) + ctx_p(4, ber_int(current_state))
+    if notification_lost is not None:
+        content += ctx_p(6, b"\x01" if notification_lost else b"\x00")
+    if alarm_ack_rule is not None:
+        content += ctx_p(7, ber_int(alarm_ack_rule))
+    if enrollment_state is not None:
+        content += ctx_p(8, ber_int(enrollment_state))
+    if time_of_last_transition_to_active is not None:
+        content += ctx_c(9, time_of_last_transition_to_active)
+    if time_active_acknowledged is not None:
+        content += ctx_c(10, time_active_acknowledged)
+    if time_of_last_transition_to_idle is not None:
+        content += ctx_c(11, time_of_last_transition_to_idle)
+    if time_idle_acknowledged is not None:
+        content += ctx_c(12, time_idle_acknowledged)
+    return uni_c(16, content)
+
+
+def getalarmenrollmentsummary_response(entries, more_follows: bool = None) -> bytes:
+    content = ctx_c(0, b"".join(entries))
+    if more_follows is not None:
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(64, True, content)
+
+
+# ---- Journal (mms.cpp's own "Journal" section, ROADMAP: MMS confirmed-service clearance,
+# closed) -- readJournal, writeJournal, initializeJournal, reportJournalStatus, createJournal,
+# deleteJournal. originatingApplication (ApplicationReference) gets the same "structurally
+# present, not deep-decoded" posture used elsewhere.
+
+def time_of_day_raw(days: int, ms: int) -> bytes:
+    """Raw 6-byte TimeOfDay content (mms.cpp's format_time_of_day) -- used directly (not through
+    the EventTime CHOICE wrapper) by the several Journal fields that carry a bare TimeOfDay."""
+    return struct.pack("!H", days) + struct.pack("!I", ms)
+
+
+def readjournal_request(journal_name_alt: bytes, range_start_starting_time: bytes = None,
+                         range_start_starting_entry: bytes = None, range_stop_ending_time: bytes = None,
+                         range_stop_number_of_entries: int = None, list_of_variables=None,
+                         entry_to_start_after_time: bytes = None, entry_to_start_after_entry: bytes = None) -> bytes:
+    content = ctx_c(0, journal_name_alt)
+    if range_start_starting_time is not None:
+        content += ctx_c(1, ctx_p(0, range_start_starting_time))
+    elif range_start_starting_entry is not None:
+        content += ctx_c(1, ctx_p(1, range_start_starting_entry))
+    if range_stop_ending_time is not None:
+        content += ctx_c(2, ctx_p(0, range_stop_ending_time))
+    elif range_stop_number_of_entries is not None:
+        content += ctx_c(2, ctx_p(1, ber_int(range_stop_number_of_entries)))
+    if list_of_variables:
+        content += ctx_c(4, b"".join(uni_p(26, v.encode("ascii")) for v in list_of_variables))
+    if entry_to_start_after_time is not None and entry_to_start_after_entry is not None:
+        content += ctx_c(5, ctx_p(0, entry_to_start_after_time) + ctx_p(1, entry_to_start_after_entry))
+    return svc(65, True, content)
+
+
+def readjournal_response(entries, more_follows: bool = None) -> bytes:
+    content = ctx_c(0, b"".join(entries))
+    if more_follows is not None:
+        content += ctx_p(1, b"\x01" if more_follows else b"\x00")
+    return svc(65, True, content)
+
+
+def entry_content_fields(occurrence_time_raw: bytes, event_condition_name_alt: bytes = None,
+                          event_current_state: int = None, has_event: bool = False,
+                          variables=None, annotation: str = None) -> bytes:
+    """EntryContent's own direct field bytes (occurenceTime + entryForm), unwrapped -- callers
+    decide how to tag/wrap this: ctx_c(2, ...) for JournalEntry's own IMPLICIT entryContent field
+    (journal_entry, below), or uni_c(16, ...) for a standalone SEQUENCE OF EntryContent element
+    (entry_content_standalone, below, used by WriteJournal-Request's own listOfJournalEntry)."""
+    content = ctx_p(0, occurrence_time_raw)
+    if has_event or variables:
+        data_content = b""
+        if has_event:
+            event_content = ctx_c(0, event_condition_name_alt) + ctx_p(1, ber_int(event_current_state))
+            data_content += ctx_c(0, event_content)  # event[0] IMPLICIT SEQUENCE
+        if variables:
+            var_entries = b""
+            for tag, value_data in variables:
+                var_entries += uni_c(16, ctx_p(0, tag.encode("ascii")) + ctx_c(1, value_data))
+            data_content += ctx_c(1, var_entries)  # listOfVariables[1] IMPLICIT SEQUENCE OF SEQUENCE
+        content += ctx_c(2, data_content)  # entryForm's data[2] alternative
+    elif annotation is not None:
+        content += ctx_p(3, annotation.encode("ascii"))  # entryForm's annotation[3] alternative
+    return content
+
+
+def entry_content_standalone(*args, **kwargs) -> bytes:
+    return uni_c(16, entry_content_fields(*args, **kwargs))
+
+
+def journal_entry(entry_identifier: bytes, entry_content_field_bytes: bytes) -> bytes:
+    content = ctx_p(0, entry_identifier)
+    content += ctx_c(1, b"")  # originatingApplication[1] -- presence-only placeholder, not decoded
+    content += ctx_c(2, entry_content_field_bytes)  # entryContent[2], IMPLICIT -- the fields directly
+    return uni_c(16, content)
+
+
+def writejournal_request(journal_name_alt: bytes, entries) -> bytes:
+    content = ctx_c(0, journal_name_alt) + ctx_c(1, b"".join(entries))
+    return svc(66, True, content)
+    # WriteJournal-Response ::= NULL -- no builder needed
+
+
+def initializejournal_request(journal_name_alt: bytes, limiting_time_raw: bytes = None,
+                               limiting_entry: bytes = None, has_limit_specification: bool = False) -> bytes:
+    content = ctx_c(0, journal_name_alt)
+    if has_limit_specification:
+        limit_content = ctx_p(0, limiting_time_raw)
+        if limiting_entry is not None:
+            limit_content += ctx_p(1, limiting_entry)
+        content += ctx_c(1, limit_content)
+    return svc(67, True, content)
+
+
+def initializejournal_response(entries_deleted: int) -> bytes:
+    return svc(67, False, ber_int(entries_deleted))
+
+
+def reportjournalstatus_request(journal_name_alt: bytes) -> bytes:
+    return svc(68, True, journal_name_alt)  # bare ObjectName body
+
+
+def reportjournalstatus_response(current_entries: int, mms_deletable: bool) -> bytes:
+    content = ctx_p(0, ber_int(current_entries)) + ctx_p(1, b"\x01" if mms_deletable else b"\x00")
+    return svc(68, True, content)
+
+
+def createjournal_request(journal_name_alt: bytes) -> bytes:
+    return svc(69, True, ctx_c(0, journal_name_alt))
+    # CreateJournal-Response ::= NULL -- no builder needed
+
+
+def deletejournal_request(journal_name_alt: bytes) -> bytes:
+    return svc(70, True, ctx_c(0, journal_name_alt))
+    # DeleteJournal-Response ::= NULL -- no builder needed
 
 
 # ---- confirmed-RequestPDU/ResponsePDU wrapper (mms.cpp's decode_confirmed_request/response) -------
@@ -5639,33 +6605,367 @@ def build_mms_sample():
         report_var, [access_result_success(data_bool(True)),
                      access_result_success(data_utc_time(1_700_000_000, 0, 0x0A))])))))
 
-    # 40) & 41) Tier2 demo -- takeControl(19) is a real, named confirmedServiceRequest/Response
-    #     alternative (see kConfirmedServiceNames) that this decoder's own Tier1 dispatch does NOT
-    #     further decode (mirrors the real tests/real_captures/mms/mms-takeControl.pcap finding):
-    #     service_recognized=true, service_name=takeControl, but the body is shown as hex, not
-    #     structurally decoded.
+    # 40) & 41) TakeControl -- now fully field-decoded (ROADMAP: MMS confirmed-service clearance,
+    #     closed; this exact byte sequence used to be this file's "Tier2 demo", shown as hex --
+    #     it independently exercises decode_object_name_flexible's bare-primitive-Identifier
+    #     fallback for semaphoreName[0], since that is how this frame happens to encode it (not
+    #     the strict EXPLICIT wrap the grammar names -- see mms.cpp's own header comment on that
+    #     function), and its own empty response body exercises TakeControl-Response's "no
+    #     alternative present" degenerate case.
     add(True, dt(ongoing(confirmed_request_pdu(18, svc(19, True, ctx_p(0, b"IED1Device"))))))
     add(False, dt(ongoing(confirmed_response_pdu(18, svc(19, True, b"")))))
 
-    # 42) ServiceError -- a Read request answered with confirmed-ErrorPDU instead of a normal
+    # 42) & 43) Rename -- objectClass=namedVariable(0).
+    add(True, dt(ongoing(confirmed_request_pdu(
+        21, rename_request(0, object_name_domain("IED1Device", "GGIO1$ST$Ind1$stVal"), "stVal2")))))
+    add(False, dt(ongoing(confirmed_response_pdu(21, svc(3, False, b"")))))  # Rename-Response ::= NULL
+
+    # 44) & 45) DefineNamedVariable.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        22, definenamedvariable_request(object_name_domain("IED1Device", "GGIO1$ST$Ind2$stVal"),
+                                         address_symbolic("DB5,X6"), type_spec_boolean())))))
+    add(False, dt(ongoing(confirmed_response_pdu(22, svc(7, False, b"")))))  # DefineNamedVariable-Response ::= NULL
+
+    # 46) & 47) DefineScatteredAccess / GetScatteredAccessAttributes (sharing one entry list).
+    sa_entries = [scattered_access_entry(
+        "stVal", var_spec_name(object_name_domain("IED1Device", "GGIO1$ST$Ind1$stVal")))]
+    add(True, dt(ongoing(confirmed_request_pdu(
+        23, definescatteredaccess_request(object_name_vmd("MyScatteredAccess"), sa_entries)))))
+    add(False, dt(ongoing(confirmed_response_pdu(23, svc(8, False, b"")))))  # Response ::= NULL
+
+    # 48) & 49) GetScatteredAccessAttributes.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        24, getscatteredaccessattributes_request(object_name_vmd("MyScatteredAccess"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(24, getscatteredaccessattributes_response(True, sa_entries)))))
+
+    # 50) & 51) DeleteVariableAccess.
+    add(True, dt(ongoing(confirmed_request_pdu(25, deletevariableaccess_request(domain_name="IED1Device")))))
+    add(False, dt(ongoing(confirmed_response_pdu(25, deletevariableaccess_response(1, 1)))))
+
+    # 52) & 53) DefineNamedType.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        26, definenamedtype_request(object_name_vmd("MyType1"), type_spec_integer(16))))))
+    add(False, dt(ongoing(confirmed_response_pdu(26, svc(14, False, b"")))))  # DefineNamedType-Response ::= NULL
+
+    # 54) & 55) GetNamedTypeAttributes.
+    add(True, dt(ongoing(confirmed_request_pdu(27, getnamedtypeattributes_request(object_name_vmd("MyType1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(27, getnamedtypeattributes_response(False, type_spec_integer(16))))))
+
+    # 56) & 57) DeleteNamedType.
+    add(True, dt(ongoing(confirmed_request_pdu(28, deletenamedtype_request(domain_name="IED1Device")))))
+    add(False, dt(ongoing(confirmed_response_pdu(28, deletenamedtype_response(1, 1)))))
+
+    # 58) & 59) Input -- operator prompt/response.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        29, input_request("OP1", echo=False, prompt_data=["Enter value:"], input_timeout=30)))))
+    add(False, dt(ongoing(confirmed_response_pdu(29, input_response("42")))))
+
+    # 60) & 61) Output -- operator display.
+    add(True, dt(ongoing(confirmed_request_pdu(30, output_request("OP1", ["Trip breaker 1"])))))
+    add(False, dt(ongoing(confirmed_response_pdu(30, svc(18, False, b"")))))  # Output-Response ::= NULL
+
+    # 62) & 63) TakeControl, second example -- the namedToken response alternative (the OTHER
+    #     TakeControl-Response CHOICE branch; frame 41 above already exercises the empty/no-
+    #     alternative-present case), and semaphoreName[0] encoded via the strict EXPLICIT wrap the
+    #     grammar names this time (contrast with frame 40's bare-primitive form).
+    add(True, dt(ongoing(confirmed_request_pdu(
+        31, takecontrol_request(object_name_vmd("MyLock"), priority=10, acceptable_delay=5,
+                                 relinquish_if_connection_lost=True)))))
+    add(False, dt(ongoing(confirmed_response_pdu(31, takecontrol_response_named_token("TOKEN-1")))))
+
+    # 64) & 65) RelinquishControl.
+    add(True, dt(ongoing(confirmed_request_pdu(32, relinquishcontrol_request(object_name_vmd("MyLock"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(32, svc(20, False, b"")))))  # Response ::= NULL
+
+    # 66) & 67) DefineSemaphore.
+    add(True, dt(ongoing(confirmed_request_pdu(33, definesemaphore_request(object_name_vmd("MyPool"), 4)))))
+    add(False, dt(ongoing(confirmed_response_pdu(33, svc(21, False, b"")))))  # Response ::= NULL
+
+    # 68) & 69) DeleteSemaphore.
+    add(True, dt(ongoing(confirmed_request_pdu(34, deletesemaphore_request(object_name_vmd("MyPool"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(34, svc(22, False, b"")))))  # Response ::= NULL
+
+    # 70) & 71) ReportSemaphoreStatus.
+    add(True, dt(ongoing(confirmed_request_pdu(35, reportsemaphorestatus_request(object_name_vmd("MyLock"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(35, reportsemaphorestatus_response(False, 0, 1, 1, 0)))))
+
+    # 72) & 73) ReportPoolSemaphoreStatus.
+    add(True, dt(ongoing(confirmed_request_pdu(36, reportpoolsemaphorestatus_request(object_name_vmd("MyPool"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        36, reportpoolsemaphorestatus_response([("free", "Tok1"), ("owned", "Tok2")])))))
+
+    # 74) & 75) ReportSemaphoreEntryStatus.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        37, reportsemaphoreentrystatus_request(object_name_vmd("MyPool"), state=1)))))
+    semaphore_entry_1 = semaphore_entry(b"\x01\x02", 0, named_token="Tok2", priority=10,
+                                         relinquish_if_connection_lost=True)
+    add(False, dt(ongoing(confirmed_response_pdu(37, reportsemaphoreentrystatus_response([semaphore_entry_1])))))
+
+    # 76) & 77) InitiateDownloadSequence -- the start of a firmware/configuration transfer to a
+    #     new domain.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        38, initiatedownloadsequence_request("FW_Update1", ["simple", "cdef"], sharable=False)))))
+    add(False, dt(ongoing(confirmed_response_pdu(38, svc(26, False, b"")))))  # Response ::= NULL
+
+    # 78) & 79) DownloadSegment -- one firmware chunk.
+    add(True, dt(ongoing(confirmed_request_pdu(39, downloadsegment_request("FW_Update1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        39, load_data_response(27, non_coded=bytes(range(16)), more_follows=True)))))
+
+    # 80) & 81) TerminateDownloadSequence -- the server-aborted case, carrying a discard
+    #     ServiceError (errorClass=resource(3), "firmware image rejected: CRC mismatch").
+    add(True, dt(ongoing(confirmed_request_pdu(
+        40, terminatedownloadsequence_request(
+            "FW_Update1", discard=service_error_fields(
+                3, 1, additional_description="firmware image rejected: CRC mismatch"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(40, svc(28, False, b"")))))  # Response ::= NULL
+
+    # 82) & 83) InitiateUploadSequence -- reading a domain's content back off the device.
+    add(True, dt(ongoing(confirmed_request_pdu(41, initiateuploadsequence_request("FW_Update1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        41, initiateuploadsequence_response(7, ["simple", "cdef"])))))
+
+    # 84) & 85) UploadSegment / TerminateUploadSequence.
+    add(True, dt(ongoing(confirmed_request_pdu(42, uploadsegment_request(7)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        42, load_data_response(30, non_coded=bytes(range(16, 32)), more_follows=False)))))
+    add(True, dt(ongoing(confirmed_request_pdu(43, terminateuploadsequence_request(7)))))
+    add(False, dt(ongoing(confirmed_response_pdu(43, svc(31, False, b"")))))  # Response ::= NULL
+
+    # 86) & 87) RequestDomainDownload -- the file-based variant of InitiateDownloadSequence,
+    #     pointing at a COMTRADE-style firmware image file already on the IED.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        44, requestdomaindownload_request("FW_Update2", ("DISK", "fw_v2.bin"), sharable=True,
+                                           capabilities=["simple"])))))
+    add(False, dt(ongoing(confirmed_response_pdu(44, svc(32, False, b"")))))  # Response ::= NULL
+
+    # 88) & 89) RequestDomainUpload.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        45, requestdomainupload_request("FW_Update2", ("DISK", "fw_v2_readback.bin"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(45, svc(33, False, b"")))))  # Response ::= NULL
+
+    # 90) & 91) LoadDomainContent -- thirdParty included (structurally present, not decoded).
+    add(True, dt(ongoing(confirmed_request_pdu(
+        46, loaddomaincontent_request("FW_Update3", ("DISK", "fw_v3.bin"), sharable=False,
+                                       include_third_party=True)))))
+    add(False, dt(ongoing(confirmed_response_pdu(46, svc(34, False, b"")))))  # Response ::= NULL
+
+    # 92) & 93) StoreDomainContent.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        47, storedomaincontent_request("FW_Update3", ("DISK", "fw_v3_backup.bin"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(47, svc(35, False, b"")))))  # Response ::= NULL
+
+    # 94) & 95) DeleteDomain -- cleans up the completed firmware transfer's domain.
+    add(True, dt(ongoing(confirmed_request_pdu(48, deletedomain_request("FW_Update1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(48, svc(36, False, b"")))))  # Response ::= NULL
+
+    # 96) & 97) CreateProgramInvocation -- monitorType=PERMANENT.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        49, createprograminvocation_request("PI1", ["FW_Update1"], reusable=False, monitor_type=True)))))
+    add(False, dt(ongoing(confirmed_response_pdu(49, svc(38, False, b"")))))  # Response ::= NULL
+
+    # 98) & 99) Start -- with a simpleString executionArgument.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        50, start_request("PI1", execution_argument_simple("--verbose"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(50, svc(40, False, b"")))))  # Response ::= NULL
+
+    # 100) & 101) Stop.
+    add(True, dt(ongoing(confirmed_request_pdu(51, stop_request("PI1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(51, svc(41, False, b"")))))  # Response ::= NULL
+
+    # 102) & 103) Resume.
+    add(True, dt(ongoing(confirmed_request_pdu(52, resume_request("PI1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(52, svc(42, False, b"")))))  # Response ::= NULL
+
+    # 104) & 105) Reset.
+    add(True, dt(ongoing(confirmed_request_pdu(53, reset_request("PI1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(53, svc(43, False, b"")))))  # Response ::= NULL
+
+    # 106) & 107) GetProgramInvocationAttributes -- state=running(3), with a simpleString
+    #     executionArgument.
+    add(True, dt(ongoing(confirmed_request_pdu(54, getprograminvocationattributes_request("PI1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        54, getprograminvocationattributes_response(
+            3, ["FW_Update1"], deletable=False, reusable=False, monitor=True, start_argument="--verbose",
+            execution_argument=execution_argument_simple("--verbose"))))))
+
+    # 108) & 109) Kill.
+    add(True, dt(ongoing(confirmed_request_pdu(55, kill_request("PI1")))))
+    add(False, dt(ongoing(confirmed_response_pdu(55, svc(44, False, b"")))))  # Response ::= NULL
+
+    # 110) & 111) DefineEventCondition -- class=monitored(1), with a monitoredVariable.
+    monitored_var = var_spec_name(object_name_vmd("AlarmPoint"))
+    add(True, dt(ongoing(confirmed_request_pdu(
+        56, defineeventcondition_request(object_name_vmd("EC1"), ec_class=1, priority=10, severity=5,
+                                          alarm_summary_reports=True, monitored_var_spec_alt=monitored_var,
+                                          evaluation_interval=1000)))))
+    add(False, dt(ongoing(confirmed_response_pdu(56, svc(47, False, b"")))))  # DefineEventCondition-Response ::= NULL
+
+    # 112) & 113) DeleteEventCondition -- the "specific" CHOICE alternative, one name.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        57, deleteeventcondition_request_specific([object_name_vmd("EC1")])))))
+    add(False, dt(ongoing(confirmed_response_pdu(57, deleteeventcondition_response(0)))))
+
+    # 114) & 115) GetEventConditionAttributes.
+    add(True, dt(ongoing(confirmed_request_pdu(58, geteventconditionattributes_request(object_name_vmd("EC1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        58, geteventconditionattributes_response(
+            mms_deletable=True, ec_class=1, priority=10, severity=5, alarm_summary_reports=True,
+            monitored_var_spec_alt=monitored_var, evaluation_interval=1000)))))
+
+    # 116) & 117) ReportEventConditionStatus -- currentState=active(2), with both EventTime fields.
+    add(True, dt(ongoing(confirmed_request_pdu(59, reporteventconditionstatus_request(object_name_vmd("EC1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        59, reporteventconditionstatus_response(
+            current_state=2, number_of_event_enrollments=1, enabled=True,
+            time_of_last_transition_to_active=event_time_of_day(15000, 36000000),
+            time_of_last_transition_to_idle=event_time_sequence(42))))))
+
+    # 118) & 119) AlterEventConditionMonitoring.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        60, altereventconditionmonitoring_request(object_name_vmd("EC1"), enabled=True, priority=20,
+                                                    alarm_summary_reports=False, evaluation_interval=500)))))
+    add(False, dt(ongoing(confirmed_response_pdu(60, svc(51, False, b"")))))  # Response ::= NULL
+
+    # 120) & 121) TriggerEvent.
+    add(True, dt(ongoing(confirmed_request_pdu(61, triggerevent_request(object_name_vmd("EC1"), priority=15)))))
+    add(False, dt(ongoing(confirmed_response_pdu(61, svc(52, False, b"")))))  # Response ::= NULL
+
+    # 122) & 123) DefineEventAction -- one attach-to-event-condition modifier.
+    modifier_1 = modifier_attach_to_event_condition(object_name_vmd("EE1"), object_name_vmd("EC1"))
+    add(True, dt(ongoing(confirmed_request_pdu(
+        62, defineeventaction_request(object_name_vmd("EA1"), modifiers=[modifier_1])))))
+    add(False, dt(ongoing(confirmed_response_pdu(62, svc(53, False, b"")))))  # Response ::= NULL
+
+    # 124) & 125) DeleteEventAction -- the "specific" CHOICE alternative.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        63, deleteeventaction_request_specific([object_name_vmd("EA1")])))))
+    add(False, dt(ongoing(confirmed_response_pdu(63, deleteeventaction_response(0)))))
+
+    # 126) & 127) GetEventActionAttributes.
+    modifier_2 = modifier_attach_to_semaphore(object_name_vmd("MyLock"))
+    add(True, dt(ongoing(confirmed_request_pdu(64, geteventactionattributes_request(object_name_vmd("EA1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        64, geteventactionattributes_response(mms_deletable=True, modifiers=[modifier_1, modifier_2])))))
+
+    # 128) & 129) ReportEventActionStatus.
+    add(True, dt(ongoing(confirmed_request_pdu(65, reporteventactionstatus_request(object_name_vmd("EA1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(65, reporteventactionstatus_response(3)))))
+
+    # 130) & 131) DefineEventEnrollment -- transitions {disabled-to-active, idle-to-active},
+    #     alarmAcknowledgementRule=ack-all(3).
+    add(True, dt(ongoing(confirmed_request_pdu(
+        66, defineeventenrollment_request(object_name_vmd("EE1"), object_name_vmd("EC1"),
+                                           event_condition_transition_bits=[4, 5], alarm_ack_rule=3,
+                                           event_action_name_alt=object_name_vmd("EA1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(66, svc(57, False, b"")))))  # Response ::= NULL
+
+    # 132) & 133) DeleteEventEnrollment -- the "specific" CHOICE alternative.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        67, deleteeventenrollment_request_specific([object_name_vmd("EE1")])))))
+    add(False, dt(ongoing(confirmed_response_pdu(67, deleteeventenrollment_response(0)))))
+
+    # 134) & 135) AlterEventEnrollment -- response reports currentState=active(2) with a
+    #     timeOfDay transitionTime.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        68, altereventenrollment_request(object_name_vmd("EE1"), event_condition_transition_bits=[4, 5],
+                                          alarm_ack_rule=3)))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        68, altereventenrollment_response(current_state=2, transition_time_alt=event_time_of_day(15000, 36000000))))))
+
+    # 136) & 137) ReportEventEnrollmentStatus -- duration=permanent(1), currentState=active(2).
+    add(True, dt(ongoing(confirmed_request_pdu(69, reporteventenrollmentstatus_request(object_name_vmd("EE1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        69, reporteventenrollmentstatus_response(event_condition_transition_bits=[4, 5], duration=1,
+                                                  current_state=2, notification_lost=False, alarm_ack_rule=3)))))
+
+    # 138) & 139) GetEventEnrollmentAttributes -- scopeOfRequest=ec(2), one listed enrollment.
+    entry_1 = event_enrollment_entry(object_name_vmd("EE1"), event_condition_name_alt=object_name_vmd("EC1"),
+                                      has_event_action=True, event_action_name_alt=object_name_vmd("EA1"),
+                                      mms_deletable=True, enrollment_class=1, duration=1, invoke_id=66)
+    add(True, dt(ongoing(confirmed_request_pdu(
+        70, geteventenrollmentattributes_request(scope_of_request=2, event_condition_name_alt=object_name_vmd("EC1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        70, geteventenrollmentattributes_response([entry_1], more_follows=False)))))
+
+    # 141) & 142) AcknowledgeEventNotification -- acknowledgedState=active(2), with a timeOfDay
+    #     EventTime alternative.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        71, acknowledgeeventnotification_request(
+            object_name_vmd("EE1"), acknowledged_state=2,
+            time_of_acknowledged_transition_alt=event_time_of_day(15000, 36000000))))))
+    add(False, dt(ongoing(confirmed_response_pdu(71, svc(62, False, b"")))))  # Response ::= NULL
+
+    # 143) & 144) GetAlarmSummary -- one active, unacknowledged alarm.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        72, getalarmsummary_request(enrollments_only=False, active_alarms_only=True,
+                                     acknowledgment_filter=0, most_severe=1, least_severe=10)))))
+    alarm_summary_1 = alarm_summary_entry(
+        object_name_vmd("EC1"), severity=5, current_state=2, unacknowledged_state=1,
+        time_of_last_transition_to_active=event_time_of_day(15000, 36000000))
+    add(False, dt(ongoing(confirmed_response_pdu(72, getalarmsummary_response([alarm_summary_1], more_follows=False)))))
+
+    # 145) & 146) GetAlarmEnrollmentSummary.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        73, getalarmenrollmentsummary_request(enrollments_only=False, active_alarms_only=True)))))
+    alarm_enrollment_summary_1 = alarm_enrollment_summary_entry(
+        object_name_vmd("EE1"), severity=5, current_state=2, notification_lost=False, alarm_ack_rule=3,
+        enrollment_state=7, time_of_last_transition_to_active=event_time_of_day(15000, 36000000))
+    add(False, dt(ongoing(confirmed_response_pdu(
+        73, getalarmenrollmentsummary_response([alarm_enrollment_summary_1], more_follows=False)))))
+
+    # 147) & 148) ReadJournal -- a range bounded by starting/ending TimeOfDay, one returned
+    #     entry carrying both an event sub-record and a data variable.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        74, readjournal_request(
+            object_name_vmd("Journal1"), range_start_starting_time=time_of_day_raw(15000, 0),
+            range_stop_ending_time=time_of_day_raw(15001, 0), list_of_variables=["stVal"])))))
+    journal_entry_1 = journal_entry(
+        b"\x00\x00\x00\x01",
+        entry_content_fields(time_of_day_raw(15000, 36000000), event_condition_name_alt=object_name_vmd("EC1"),
+                              event_current_state=2, has_event=True, variables=[("stVal", data_bool(True))]))
+    add(False, dt(ongoing(confirmed_response_pdu(74, readjournal_response([journal_entry_1], more_follows=False)))))
+
+    # 149) & 150) WriteJournal -- one EntryContent carrying a plain annotation.
+    annotation_entry = entry_content_standalone(time_of_day_raw(15002, 0), annotation="operator note")
+    add(True, dt(ongoing(confirmed_request_pdu(75, writejournal_request(object_name_vmd("Journal1"), [annotation_entry])))))
+    add(False, dt(ongoing(confirmed_response_pdu(75, svc(66, False, b"")))))  # Response ::= NULL
+
+    # 151) & 152) InitializeJournal -- with a limitSpecification.
+    add(True, dt(ongoing(confirmed_request_pdu(
+        76, initializejournal_request(object_name_vmd("Journal1"), limiting_time_raw=time_of_day_raw(15010, 0),
+                                       has_limit_specification=True)))))
+    add(False, dt(ongoing(confirmed_response_pdu(76, initializejournal_response(3)))))
+
+    # 153) & 154) ReportJournalStatus.
+    add(True, dt(ongoing(confirmed_request_pdu(77, reportjournalstatus_request(object_name_vmd("Journal1"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(77, reportjournalstatus_response(42, True)))))
+
+    # 155) & 156) CreateJournal / DeleteJournal.
+    add(True, dt(ongoing(confirmed_request_pdu(78, createjournal_request(object_name_vmd("Journal2"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(78, svc(69, False, b"")))))  # Response ::= NULL
+    add(True, dt(ongoing(confirmed_request_pdu(79, deletejournal_request(object_name_vmd("Journal2"))))))
+    add(False, dt(ongoing(confirmed_response_pdu(79, svc(70, False, b"")))))  # Response ::= NULL
+
+    # 157) ServiceError -- a Read request answered with confirmed-ErrorPDU instead of a normal
     #     response (errorClass=resource(3)).
     add(True, dt(ongoing(confirmed_request_pdu(19, read_request(False, read_var)))))
     add(False, dt(ongoing(confirmed_error_pdu(
         19, category_tag=3, code=1, additional_description="variable not found"))))
 
-    # 43) RejectPDU -- server rejects invokeID 20 outright (confirmed-requestPDU category).
+    # 77) RejectPDU -- server rejects invokeID 20 outright (confirmed-requestPDU category).
     add(False, dt(ongoing(reject_pdu(20, reason_tag=1, reason_code=1))))
 
-    # 44) & 45) Cancel-Request/Response -- client cancels the earlier GetVariableAccessAttributes
+    # 78) & 79) Cancel-Request/Response -- client cancels the earlier GetVariableAccessAttributes
     #     (invokeID 5).
     add(True, dt(ongoing(cancel_request_pdu(5))))
     add(False, dt(ongoing(cancel_response_pdu(5))))
 
-    # 46) & 47) Cancel-Error -- a cancel for an invokeID the server has nothing outstanding for.
+    # 80) & 81) Cancel-Error -- a cancel for an invokeID the server has nothing outstanding for.
     add(True, dt(ongoing(cancel_request_pdu(99))))
     add(False, dt(ongoing(cancel_error_pdu(99, category_tag=10, code=1))))
 
-    # 48) & 49) Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service
+    # 82) & 83) Malformed/truncated confirmedServiceRequest/Response -- invokeID present, service
     #     field missing entirely. Mirrors the real, genuinely truncated frame 18 of
     #     tests/real_captures/mms/iec61850_read.pcap (see its own ATTRIBUTION.md) -- this decoder
     #     degrades to an honest note rather than guessing or crashing.

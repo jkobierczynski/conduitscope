@@ -358,18 +358,182 @@ std::string decode_object_name(const BerTlv& tlv) {
     return "<unrecognized ObjectName alternative " + std::to_string(tlv.tag_number) + ">";
 }
 
-// `tlv` is VariableSpecification's own chosen alternative TLV. Only name[0] (wrapping an
-// ObjectName, itself EXPLICITLY tagged -- see mms.hpp) is decoded to a readable tag; every other
-// alternative (address/variableDescription/scatteredAccessDescription/invalidated) is rare in
-// real IEC 61850 traffic and shown structurally only.
+// Address CHOICE (mms.hpp's own "Variables" section; ROADMAP: Address/TypeSpecification
+// decoding, closed) -- numericAddress[0] Unsigned32, symbolicAddress[1] VisibleString,
+// unconstrainedAddress[2] OCTET STRING. Sourcing: Wireshark's own mms.asn and libiec61850's own
+// asn1c-generated Address.h/Address.c tag table agree byte-for-byte on these three tag numbers --
+// an independent cross-check between the two primary sources this codebase already uses for MMS.
+std::string decode_address(const BerTlv& tlv) {
+    switch (tlv.tag_number) {
+        case 0: return "numeric=" + std::to_string(ber_unsigned(tlv.content));
+        case 1: return "symbolic=\"" + ber_visible_string(tlv.content) + "\"";
+        case 2: return "unconstrained=" + hex_of(tlv.content);
+        default: return "<Address alternative " + std::to_string(tlv.tag_number) + ", not decoded>";
+    }
+}
+
+// TypeSpecification CHOICE (mms.hpp's own "Variables" section; ROADMAP: Address/TypeSpecification
+// decoding, closed) -- describes a variable's TYPE, not a value: despite sharing most tag numbers
+// with Data's own CHOICE (decode_data_value above), TypeSpecification is a genuinely distinct
+// ASN.1 type with no real[8]/booleanArray[14]/mMSString[16]/utc-time[17] alternatives (confirmed
+// against both Wireshark's own mms.asn and libiec61850's own asn1c-generated tag table, which
+// agree on this exactly). Recursive (array/structure both nest TypeSpecification again) --
+// depth-capped the same way and for the same reason as decode_data_value (see mms.hpp's
+// "Recursion depth cap").
+std::string decode_type_specification(const BerTlv& tlv, int depth) {
+    if (depth > max_data_recursion_depth()) {
+        return "<type recursion depth limit reached>";
+    }
+    switch (tlv.tag_number) {
+        case 0: {  // typeName -- EXPLICIT wrap around ObjectName's own alternative
+            auto inner = ber_children(tlv.content);
+            if (!inner.empty()) return "typeName=" + decode_object_name(inner[0]);
+            return "<empty typeName>";
+        }
+        case 1: {  // array -- IMPLICIT SEQUENCE{packed DEFAULT FALSE, numberOfElements, elementType}
+            bool packed = false;
+            uint64_t count = 0;
+            std::string element = "?";
+            for (const auto& f : ber_children(tlv.content)) {
+                if (ber_class(f.tag_byte) != kBerClassContext) continue;
+                if (f.tag_number == 0) {
+                    packed = !f.content.empty() && f.content.at(0) != 0;
+                } else if (f.tag_number == 1) {
+                    count = ber_unsigned(f.content);
+                } else if (f.tag_number == 2) {  // elementType -- EXPLICIT wrap (no IMPLICIT given)
+                    auto inner = ber_children(f.content);
+                    if (!inner.empty()) element = decode_type_specification(inner[0], depth + 1);
+                }
+            }
+            return "array[" + std::to_string(count) + " x " + element + (packed ? ", packed" : "") + "]";
+        }
+        case 2: {  // structure -- IMPLICIT SEQUENCE{packed DEFAULT FALSE, components SEQUENCE OF SEQUENCE{...}}
+            bool packed = false;
+            std::vector<std::string> members;
+            for (const auto& f : ber_children(tlv.content)) {
+                if (ber_class(f.tag_byte) != kBerClassContext) continue;
+                if (f.tag_number == 0) {
+                    packed = !f.content.empty() && f.content.at(0) != 0;
+                } else if (f.tag_number == 1) {  // components -- IMPLICIT SEQUENCE OF SEQUENCE
+                    for (const auto& comp : ber_children(f.content)) {
+                        std::string comp_name;
+                        std::string comp_type = "?";
+                        for (const auto& cf : ber_children(comp.content)) {
+                            if (ber_class(cf.tag_byte) != kBerClassContext) continue;
+                            if (cf.tag_number == 0) {  // componentName -- IMPLICIT Identifier OPTIONAL
+                                comp_name = ber_visible_string(cf.content);
+                            } else if (cf.tag_number == 1) {  // componentType -- EXPLICIT wrap
+                                auto inner = ber_children(cf.content);
+                                if (!inner.empty()) comp_type = decode_type_specification(inner[0], depth + 1);
+                            }
+                        }
+                        members.push_back(comp_name.empty() ? comp_type : comp_name + ": " + comp_type);
+                    }
+                }
+            }
+            std::ostringstream s;
+            s << "structure{";
+            for (size_t i = 0; i < members.size(); ++i) {
+                if (i) s << ", ";
+                s << members[i];
+            }
+            s << "}" << (packed ? " packed" : "");
+            return s.str();
+        }
+        case 3: return "boolean";
+        case 4: return "bit-string(" + std::to_string(ber_integer(tlv.content)) + " bits)";
+        case 5: return "integer(" + std::to_string(ber_unsigned(tlv.content)) + ")";
+        case 6: return "unsigned(" + std::to_string(ber_unsigned(tlv.content)) + ")";
+        case 9: return "octet-string(" + std::to_string(ber_integer(tlv.content)) + " bytes)";
+        case 10: return "visible-string(" + std::to_string(ber_integer(tlv.content)) + " chars)";
+        case 11: return "generalized-time";
+        case 12:
+            return std::string("binary-time") +
+                   ((!tlv.content.empty() && tlv.content.at(0) != 0) ? "(with-date)" : "(time-only)");
+        case 13: return "bcd(" + std::to_string(ber_unsigned(tlv.content)) + " digits)";
+        case 15: return "objId";
+        default: return "<TypeSpecification alternative " + std::to_string(tlv.tag_number) + ", not decoded>";
+    }
+}
+
+// Forward declaration -- decode_variable_specification (below) and decode_scattered_access_
+// description (further below) are mutually recursive: a VariableSpecification can choose
+// scatteredAccessDescription[3], each of whose own entries names a nested VariableSpecification.
+std::string decode_scattered_access_description(ByteSpan seq_of_content);
+
+// Forward declaration -- ServiceError (defined much further below, alongside confirmed-ErrorPDU/
+// cancel-ErrorPDU/conclude-ErrorPDU/initiate-ErrorPDU) is reused as-is by TerminateDownloadSequence-
+// Request's own discard[1] IMPLICIT ServiceError OPTIONAL field (ROADMAP: MMS confirmed-service
+// clearance, closed) -- the same per-service *-Error detail convention this file already uses.
+std::string decode_service_error(const BerTlv& seq, std::vector<std::string>* extra_notes);
+
+// `tlv` is VariableSpecification's own chosen alternative TLV. name[0] (wrapping an ObjectName,
+// itself EXPLICITLY tagged -- see mms.hpp), address[1], variableDescription[2] (address +
+// typeSpecification), and scatteredAccessDescription[3] are all decoded (ROADMAP: Address/
+// TypeSpecification decoding, closed); invalidated[4] needs no further decode (NULL).
 std::string decode_variable_specification(const BerTlv& tlv) {
     if (tlv.tag_number == 0) {  // name -- EXPLICIT wrap around ObjectName's own alternative
         auto inner = ber_children(tlv.content);
         if (!inner.empty()) return decode_object_name(inner[0]);
         return "<empty name>";
     }
+    if (tlv.tag_number == 1) {  // address -- EXPLICIT wrap around Address's own alternative
+        auto inner = ber_children(tlv.content);
+        if (!inner.empty()) return "address:" + decode_address(inner[0]);
+        return "<empty address>";
+    }
+    if (tlv.tag_number == 2) {
+        // variableDescription -- IMPLICIT SEQUENCE{address, typeSpecification}: both fields are
+        // bare (untagged) CHOICEs, so there is no per-field context tag to dispatch on -- their
+        // own alternative tags (0-2 for Address, 0-15 for TypeSpecification) genuinely overlap.
+        // This decoder instead takes them positionally, which the ASN.1 SEQUENCE's own fixed
+        // field order (address always before typeSpecification, both mandatory) makes safe.
+        auto fields = ber_children(tlv.content);
+        if (fields.size() >= 2) {
+            return "address:" + decode_address(fields[0]) + ", type=" + decode_type_specification(fields[1], 0);
+        }
+        return "<malformed variableDescription>";
+    }
+    if (tlv.tag_number == 3) {  // scatteredAccessDescription -- IMPLICIT ScatteredAccessDescription
+        return "scattered:" + decode_scattered_access_description(tlv.content);
+    }
     if (tlv.tag_number == 4) return "invalidated";
     return "<VariableSpecification alternative " + std::to_string(tlv.tag_number) + ", not decoded>";
+}
+
+// ScatteredAccessDescription ::= SEQUENCE OF SEQUENCE{componentName[0] Identifier OPTIONAL,
+// variableSpecification[1] VariableSpecification (EXPLICIT -- no IMPLICIT given), alternateAccess
+// [2] AlternateAccess OPTIONAL}. alternateAccess's own recursive AlternateAccessSelection grammar
+// is structurally noted present but not deep-decoded this round (a separate, narrower still-open
+// item -- see mms.hpp's "Deliberately NOT implemented"), the same "present, not decoded" posture
+// already used elsewhere in this file for ACSE AP-title/ObtainFile-Request's sourceFileServer.
+std::string decode_scattered_access_description(ByteSpan seq_of_content) {
+    std::ostringstream s;
+    s << "[";
+    bool first = true;
+    for (const auto& entry : ber_children(seq_of_content)) {
+        std::string comp_name;
+        std::string var_spec = "?";
+        bool has_alt = false;
+        for (const auto& f : ber_children(entry.content)) {
+            if (ber_class(f.tag_byte) != kBerClassContext) continue;
+            if (f.tag_number == 0) {
+                comp_name = ber_visible_string(f.content);
+            } else if (f.tag_number == 1) {  // EXPLICIT wrap around VariableSpecification's own alternative
+                auto inner = ber_children(f.content);
+                if (!inner.empty()) var_spec = decode_variable_specification(inner[0]);
+            } else if (f.tag_number == 2) {
+                has_alt = true;
+            }
+        }
+        if (!first) s << ", ";
+        first = false;
+        if (!comp_name.empty()) s << comp_name << ":";
+        s << var_spec;
+        if (has_alt) s << "+alternateAccess";
+    }
+    s << "]";
+    return s.str();
 }
 
 // Decodes a VariableAccessSpecification CHOICE TLV into a flat list of human-readable variable
@@ -455,20 +619,37 @@ std::string session_pdu_name(uint8_t type) {
 // Recurses only into the genuine Parameter Group Indicator codes (1/5/33); captures the first
 // User_Data(193)/Extended_User_Data(194) parameter's own raw content as `user_data` (the next
 // layer's bytes) without recursing into it.
+//
+// Extended length form (ROADMAP: MMS Session-layer extended length, closed): ISO 8327-1's own LI
+// is a plain 1-byte length for 0-254; the value 255 (0xFF) is reserved to mean "this parameter's
+// real length is a 2-byte big-endian value immediately following the LI byte, then that many
+// content bytes" -- i.e. LI=0xFF is itself never a literal length, only an escape. Never observed
+// in real IEC 61850 MMS traffic (every session parameter seen in practice is well under 254
+// bytes), but a large presentation-context-definition-list or a sizable InitRequestDetail/AARQ
+// user-data could legitimately need it, so this decoder now reads it rather than silently
+// mis-framing the rest of the SPDU (which a literal "LI=255 means a 255-byte parameter"
+// interpretation would do, since 0xFF is never a valid plain length here).
 void walk_session_parameters(ByteSpan buf, std::optional<ByteSpan>& user_data, int depth) {
     if (depth > 6) return;
     size_t offset = 0;
     while (offset + 2 <= buf.size()) {
         uint8_t code = buf.at(offset);
-        uint8_t len = buf.at(offset + 1);
-        if (offset + 2 + len > buf.size()) break;  // trailing malformed parameter -- stop quietly
-        ByteSpan content = buf.subspan(offset + 2, len);
+        uint8_t len_byte = buf.at(offset + 1);
+        size_t header_len = 2;
+        size_t len = len_byte;
+        if (len_byte == 0xFF) {
+            if (offset + 4 > buf.size()) break;  // not enough bytes for the extended length field
+            len = (static_cast<size_t>(buf.at(offset + 2)) << 8) | buf.at(offset + 3);
+            header_len = 4;
+        }
+        if (offset + header_len + len > buf.size()) break;  // trailing malformed parameter -- stop quietly
+        ByteSpan content = buf.subspan(offset + header_len, len);
         if (code == 193 || code == 194) {
             if (!user_data) user_data = content;
         } else if (code == 1 || code == 5 || code == 33) {
             walk_session_parameters(content, user_data, depth + 1);
         }
-        offset += 2 + len;
+        offset += header_len + len;
     }
 }
 
@@ -998,17 +1179,26 @@ void decode_getvariableaccessattributes_request(const BerTlv& body, MmsFrame& fr
     auto inner = ber_children(body.content);
     if (inner.empty()) return;
     const auto& choice = inner[0];
-    if (choice.tag_number == 0) frame.values.push_back("name=" + decode_object_name_flexible(choice));
-    else if (choice.tag_number == 1) frame.values.push_back("address=<Address, not decoded>");
+    if (choice.tag_number == 0) {
+        frame.values.push_back("name=" + decode_object_name_flexible(choice));
+    } else if (choice.tag_number == 1) {  // address -- EXPLICIT wrap around Address's own alternative
+        auto addr_inner = ber_children(choice.content);
+        if (!addr_inner.empty()) frame.values.push_back("address=" + decode_address(addr_inner[0]));
+    }
 }
 
 void decode_getvariableaccessattributes_response(const BerTlv& body, MmsFrame& frame) {
     for (const auto& f : ber_children(body.content)) {
         if (ber_class(f.tag_byte) != kBerClassContext) continue;
-        if (f.tag_number == 0)
+        if (f.tag_number == 0) {
             frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
-        else if (f.tag_number == 2)
-            frame.values.push_back("typeSpecification=<TypeSpecification, not decoded>");
+        } else if (f.tag_number == 1) {  // address OPTIONAL -- EXPLICIT wrap
+            auto addr_inner = ber_children(f.content);
+            if (!addr_inner.empty()) frame.values.push_back("address=" + decode_address(addr_inner[0]));
+        } else if (f.tag_number == 2) {  // typeSpecification -- EXPLICIT wrap
+            auto type_inner = ber_children(f.content);
+            if (!type_inner.empty()) frame.values.push_back("typeSpecification=" + decode_type_specification(type_inner[0], 0));
+        }
     }
 }
 
@@ -1332,6 +1522,1791 @@ void decode_filedirectory_response(const BerTlv& body, MmsFrame& frame) {
     }
 }
 
+// ==============================================================================================
+// Variable/type definition and management (ROADMAP: MMS confirmed-service clearance, closed) --
+// rename, defineNamedVariable, defineScatteredAccess, getScatteredAccessAttributes,
+// deleteVariableAccess, defineNamedType, getNamedTypeAttributes, deleteNamedType. Sourcing for
+// this and every remaining group below: the authoritative ISO 9506-2 ASN.1 module (Wireshark's
+// own mms.asn, fetched directly via a sparse `git clone` of github.com/wireshark/wireshark for
+// this round -- the same primary source this file's own header comment already names).
+// Validation: hand-built synthetic BER fixtures (tools/make_sample_pcap.py) -- libiec61850 (this
+// project's own independent-stack validation tool) implements none of these services, and no real
+// capture of most of them was found; see docs/DEVELOPMENT.md's ROADMAP entry for this item's full,
+// per-group validation-posture disclosure (takeControl/relinquishControl, in the semaphore group
+// below, are the one exception with real-capture validation).
+
+const char* object_class_name(int idx) {
+    static const char* names[] = {"namedVariable", "scatteredAccess", "namedVariableList", "namedType",
+                                   "semaphore",     "eventCondition",  "eventAction",       "eventEnrollment",
+                                   "journal",       "domain",          "programInvocation", "operatorStation"};
+    return (idx >= 0 && idx <= 11) ? names[idx] : "unknown";
+}
+
+// Rename-Request ::= SEQUENCE{extendedObjectClass[0] CHOICE{objectClass[0] IMPLICIT INTEGER{...}},
+// currentName[1] ObjectName, newIdentifier[2] IMPLICIT Identifier}. Field 0 is itself a CHOICE
+// (currently a single-alternative one) and so EXPLICIT-wrapped like every other CHOICE field tag
+// in this file; currentName[1] likewise (ObjectName is a CHOICE).
+void decode_rename_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) {
+                frame.values.push_back(std::string("extendedObjectClass=") +
+                                        object_class_name(static_cast<int>(ber_integer(inner[0].content))));
+            }
+        } else if (f.tag_number == 1) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("currentName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("newIdentifier=" + ber_visible_string(f.content));
+        }
+    }
+}
+
+// DefineNamedVariable-Request ::= SEQUENCE{variableName[0] ObjectName, address[1] Address,
+// typeSpecification[2] TypeSpecification OPTIONAL} -- all three EXPLICIT (CHOICE fields, no
+// IMPLICIT given).
+void decode_definenamedvariable_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        auto inner = ber_children(f.content);
+        if (inner.empty()) continue;
+        if (f.tag_number == 0) frame.values.push_back("variableName=" + decode_object_name(inner[0]));
+        else if (f.tag_number == 1) frame.values.push_back("address=" + decode_address(inner[0]));
+        else if (f.tag_number == 2)
+            frame.values.push_back("typeSpecification=" + decode_type_specification(inner[0], 0));
+    }
+}
+
+// DefineScatteredAccess-Request ::= SEQUENCE{scatteredAccessName[0] ObjectName,
+// scatteredAccessDescription[1] IMPLICIT ScatteredAccessDescription}.
+void decode_definescatteredaccess_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("scatteredAccessName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("scatteredAccessDescription=" + decode_scattered_access_description(f.content));
+        }
+    }
+}
+
+void decode_getscatteredaccessattributes_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("scatteredAccessName=" + decode_object_name_flexible(body));
+}
+
+// GetScatteredAccessAttributes-Response ::= SEQUENCE{mmsDeletable[0] IMPLICIT BOOLEAN,
+// scatteredAccessDescription[1] IMPLICIT ScatteredAccessDescription}.
+void decode_getscatteredaccessattributes_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("scatteredAccessDescription=" + decode_scattered_access_description(f.content));
+        }
+    }
+}
+
+// DeleteVariableAccess-Request ::= SEQUENCE{scopeOfDelete[0] IMPLICIT INTEGER{...} DEFAULT
+// specific, listOfName[1] IMPLICIT SEQUENCE OF ObjectName OPTIONAL, domainName[2] IMPLICIT
+// Identifier OPTIONAL} -- scopeOfDelete shown as the raw integer, matching this file's own
+// existing deleteNamedVariableList-Request precedent (same enumerated values, never named there
+// either).
+void decode_deletevariableaccess_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("scopeOfDelete=" + std::to_string(ber_integer(f.content)));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& n : ber_children(f.content))
+                frame.values.push_back("listOfName[" + std::to_string(idx++) + "]=" + decode_object_name_flexible(n));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        }
+    }
+}
+
+void decode_deletevariableaccess_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("numberMatched=" + std::to_string(ber_unsigned(f.content)));
+        else if (f.tag_number == 1) frame.values.push_back("numberDeleted=" + std::to_string(ber_unsigned(f.content)));
+    }
+}
+
+// DefineNamedType-Request ::= SEQUENCE{typeName ObjectName, typeSpecification TypeSpecification}
+// -- BOTH fields are entirely untagged (no "[n]" at all in the ASN.1), so each is encoded using
+// its own chosen alternative's natural tag directly, with no field-level wrap of any kind. This
+// decoder reads the two children positionally rather than by tag number (ObjectName's own tags
+// 0-2 and TypeSpecification's own tags 0-2/3/.../15 overlap, so tag-number dispatch alone would
+// be ambiguous here -- unlike every other tagged field in this file).
+void decode_definenamedtype_request(const BerTlv& body, MmsFrame& frame) {
+    auto children = ber_children(body.content);
+    if (children.size() >= 1) frame.values.push_back("typeName=" + decode_object_name(children[0]));
+    if (children.size() >= 2) frame.values.push_back("typeSpecification=" + decode_type_specification(children[1], 0));
+}
+
+void decode_getnamedtypeattributes_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("typeName=" + decode_object_name_flexible(body));
+}
+
+// GetNamedTypeAttributes-Response ::= SEQUENCE{mmsDeletable[0] IMPLICIT BOOLEAN, typeSpecification
+// TypeSpecification} -- typeSpecification is untagged here too (same positional reasoning as
+// DefineNamedType-Request above -- it would otherwise collide with mmsDeletable's own tag 0 for
+// the typeName[0] alternative specifically).
+void decode_getnamedtypeattributes_response(const BerTlv& body, MmsFrame& frame) {
+    auto children = ber_children(body.content);
+    if (children.size() >= 1) {
+        frame.values.push_back(std::string("mmsDeletable=") +
+                                (ber_integer(children[0].content) != 0 ? "true" : "false"));
+    }
+    if (children.size() >= 2) {
+        frame.values.push_back("typeSpecification=" + decode_type_specification(children[1], 0));
+    }
+}
+
+// DeleteNamedType-Request ::= SEQUENCE{scopeOfDelete[0] IMPLICIT INTEGER{...} DEFAULT specific,
+// listOfTypeName[1] IMPLICIT SEQUENCE OF ObjectName OPTIONAL, domainName[2] IMPLICIT Identifier
+// OPTIONAL} -- same shape as deleteVariableAccess-Request above.
+void decode_deletenamedtype_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("scopeOfDelete=" + std::to_string(ber_integer(f.content)));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& n : ber_children(f.content))
+                frame.values.push_back("listOfTypeName[" + std::to_string(idx++) + "]=" + decode_object_name_flexible(n));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        }
+    }
+}
+
+void decode_deletenamedtype_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("numberMatched=" + std::to_string(ber_unsigned(f.content)));
+        else if (f.tag_number == 1) frame.values.push_back("numberDeleted=" + std::to_string(ber_unsigned(f.content)));
+    }
+}
+
+// ==============================================================================================
+// Operator communication (ROADMAP: MMS confirmed-service clearance, closed) -- input, output.
+// Trivial SEQUENCEs of VisibleString/BOOLEAN/Unsigned32; sourcing/validation posture per the
+// "Variable/type definition and management" section's own header comment above (Wireshark's
+// mms.asn, synthetic-fixture-only validation).
+
+// Input-Request ::= SEQUENCE{operatorStationName[0] IMPLICIT Identifier, echo[1] IMPLICIT BOOLEAN
+// DEFAULT TRUE, listOfPromptData[2] IMPLICIT SEQUENCE OF VisibleString OPTIONAL, inputTimeOut[3]
+// IMPLICIT Unsigned32 OPTIONAL}.
+void decode_input_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("operatorStationName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("echo=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 2) {
+            int idx = 0;
+            for (const auto& p : ber_children(f.content)) {
+                frame.values.push_back("listOfPromptData[" + std::to_string(idx++) + "]=\"" +
+                                        ber_visible_string(p.content) + "\"");
+            }
+        } else if (f.tag_number == 3) {
+            frame.values.push_back("inputTimeOut=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// Input-Response ::= VisibleString -- bare: the whole confirmed-service body IS the string,
+// IMPLICIT per the generated dissector table (ConfirmedServiceResponse_choice[17]), so
+// body.content is the raw string bytes directly, same posture as e.g. decode_getdomainattributes_
+// request's domainName above.
+void decode_input_response(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("inputString=\"" + ber_visible_string(body.content) + "\"");
+}
+
+// Output-Request ::= SEQUENCE{operatorStationName[0] IMPLICIT Identifier, listOfOutputData[1]
+// IMPLICIT SEQUENCE OF VisibleString}. (Output-Response ::= NULL -- nothing to decode.)
+void decode_output_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("operatorStationName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& p : ber_children(f.content)) {
+                frame.values.push_back("listOfOutputData[" + std::to_string(idx++) + "]=\"" +
+                                        ber_visible_string(p.content) + "\"");
+            }
+        }
+    }
+}
+
+// ==============================================================================================
+// Semaphore (ROADMAP: MMS confirmed-service clearance, closed) -- takeControl, relinquishControl,
+// defineSemaphore, deleteSemaphore, reportSemaphoreStatus, reportPoolSemaphoreStatus,
+// reportSemaphoreEntryStatus. takeControl/relinquishControl are the one pair in this whole round
+// with real-capture validation available (tests/real_captures/mms/mms-takeControl.pcap); every
+// other service in this group is synthetic-fixture-only. applicationToPreempt/applicationReference
+// (both ApplicationReference) get the same "structurally present, not deep-decoded" posture
+// already used for ObtainFile-Request's own sourceFileServer above.
+
+// TakeControl-Request ::= SEQUENCE{semaphoreName[0] ObjectName, namedToken[1] IMPLICIT Identifier
+// OPTIONAL, priority[2] IMPLICIT Priority DEFAULT 64, acceptableDelay[3] IMPLICIT Unsigned32
+// OPTIONAL, controlTimeOut[4] IMPLICIT Unsigned32 OPTIONAL, abortOnTimeOut[5] IMPLICIT BOOLEAN
+// OPTIONAL, relinquishIfConnectionLost[6] IMPLICIT BOOLEAN DEFAULT TRUE, applicationToPreempt[7]
+// IMPLICIT ApplicationReference OPTIONAL}. semaphoreName[0] is the one EXPLICIT field here
+// (ObjectName is a CHOICE, no IMPLICIT keyword given).
+void decode_takecontrol_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            // semaphoreName is nominally EXPLICIT (ObjectName, no IMPLICIT keyword) but at least
+            // one real-world fixture encodes it as a bare primitive Identifier instead (as if
+            // IMPLICIT vmd-specific) -- decode_object_name_flexible handles both forms.
+            frame.values.push_back("semaphoreName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("namedToken=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("priority=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back("acceptableDelay=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("controlTimeOut=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 5) {
+            frame.values.push_back(std::string("abortOnTimeOut=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 6) {
+            frame.values.push_back(std::string("relinquishIfConnectionLost=") +
+                                    (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 7) {
+            frame.values.push_back("applicationToPreempt=<ApplicationReference, not decoded>");
+        }
+    }
+}
+
+// TakeControl-Response ::= CHOICE{noResult[0] IMPLICIT NULL, namedToken[1] IMPLICIT Identifier}.
+// Genuinely EXPLICIT-wrapped as a whole -- unlike every other ConfirmedServiceResponse alternative
+// in this file: mms.asn's own ConfirmedServiceResponse entry reads "takeControl [19]
+// TakeControl-Response" with no IMPLICIT keyword, unlike its neighbors on both sides and unlike
+// the request-side "takeControl [19] IMPLICIT TakeControl-Request". Verified independently
+// against Wireshark's own generated dissector table (epan/dissectors/packet-mms.c's
+// ConfirmedServiceResponse_choice array, produced mechanically from this exact ASN.1 text by
+// asn2wrs): entry 19 is the only one of the 78 without BER_FLAGS_IMPLTAG. The project's one real
+// takeControl capture (tests/real_captures/mms/mms-takeControl.pcap) could not settle this
+// directly -- its own response frames carry a corrupted/short TPKT length field (a pre-existing
+// artifact of that capture, unrelated to this question) that keeps even tshark from reassembling
+// them -- so this one extra level of unwrap rests on the cross-checked dissector-table evidence
+// above rather than a byte-level real-capture read.
+void decode_takecontrol_response(const BerTlv& body, MmsFrame& frame) {
+    auto inner = ber_children(body.content);
+    if (inner.empty()) return;
+    const auto& choice = inner[0];
+    if (ber_class(choice.tag_byte) != kBerClassContext) return;
+    if (choice.tag_number == 0) frame.values.push_back("result=noResult");
+    else if (choice.tag_number == 1) frame.values.push_back("namedToken=" + ber_visible_string(choice.content));
+}
+
+// RelinquishControl-Request ::= SEQUENCE{semaphoreName[0] ObjectName, namedToken[1] IMPLICIT
+// Identifier OPTIONAL}. (RelinquishControl-Response ::= NULL -- nothing to decode.)
+void decode_relinquishcontrol_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            // semaphoreName is nominally EXPLICIT (ObjectName, no IMPLICIT keyword) but at least
+            // one real-world fixture encodes it as a bare primitive Identifier instead (as if
+            // IMPLICIT vmd-specific) -- decode_object_name_flexible handles both forms.
+            frame.values.push_back("semaphoreName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("namedToken=" + ber_visible_string(f.content));
+        }
+    }
+}
+
+// DefineSemaphore-Request ::= SEQUENCE{semaphoreName[0] ObjectName, numbersOfTokens[1] IMPLICIT
+// Unsigned16}. (DefineSemaphore-Response ::= NULL -- nothing to decode.)
+void decode_definesemaphore_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            // semaphoreName is nominally EXPLICIT (ObjectName, no IMPLICIT keyword) but at least
+            // one real-world fixture encodes it as a bare primitive Identifier instead (as if
+            // IMPLICIT vmd-specific) -- decode_object_name_flexible handles both forms.
+            frame.values.push_back("semaphoreName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("numbersOfTokens=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// DeleteSemaphore-Request ::= ObjectName (bare -- the whole body is the CHOICE directly).
+// (DeleteSemaphore-Response ::= NULL -- nothing to decode.)
+void decode_deletesemaphore_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("semaphoreName=" + decode_object_name_flexible(body));
+}
+
+// ReportSemaphoreStatus-Request ::= ObjectName (bare, same shape as DeleteSemaphore-Request).
+void decode_reportsemaphorestatus_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("semaphoreName=" + decode_object_name_flexible(body));
+}
+
+// ReportSemaphoreStatus-Response ::= SEQUENCE{mmsDeletable[0] IMPLICIT BOOLEAN, class[1] IMPLICIT
+// INTEGER{token(0), pool(1)}, numberOfTokens[2] IMPLICIT Unsigned16, numberOfOwnedTokens[3]
+// IMPLICIT Unsigned16, numberOfHungTokens[4] IMPLICIT Unsigned16}.
+void decode_reportsemaphorestatus_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("class=") + (ber_integer(f.content) == 1 ? "pool" : "token"));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("numberOfTokens=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back("numberOfOwnedTokens=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("numberOfHungTokens=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// ReportPoolSemaphoreStatus-Request ::= SEQUENCE{semaphoreName[0] ObjectName, nameToStartAfter[1]
+// IMPLICIT Identifier OPTIONAL}.
+void decode_reportpoolsemaphorestatus_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            // semaphoreName is nominally EXPLICIT (ObjectName, no IMPLICIT keyword) but at least
+            // one real-world fixture encodes it as a bare primitive Identifier instead (as if
+            // IMPLICIT vmd-specific) -- decode_object_name_flexible handles both forms.
+            frame.values.push_back("semaphoreName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("nameToStartAfter=" + ber_visible_string(f.content));
+        }
+    }
+}
+
+// ReportPoolSemaphoreStatus-Response ::= SEQUENCE{listOfNamedTokens[0] IMPLICIT SEQUENCE OF
+// CHOICE{freeNamedToken[0] IMPLICIT Identifier, ownedNamedToken[1] IMPLICIT Identifier,
+// hungNamedToken[2] IMPLICIT Identifier}, moreFollows[1] IMPLICIT BOOLEAN DEFAULT TRUE}.
+void decode_reportpoolsemaphorestatus_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            int idx = 0;
+            for (const auto& t : ber_children(f.content)) {
+                if (ber_class(t.tag_byte) != kBerClassContext) continue;
+                const char* kind = t.tag_number == 0 ? "free" : (t.tag_number == 1 ? "owned" : "hung");
+                frame.values.push_back("listOfNamedTokens[" + std::to_string(idx++) + "]=" + kind + ":" +
+                                        ber_visible_string(t.content));
+            }
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// ReportSemaphoreEntryStatus-Request ::= SEQUENCE{semaphoreName[0] ObjectName, state[1] IMPLICIT
+// INTEGER{queued(0), owner(1), hung(2)}, entryIdToStartAfter[2] IMPLICIT OCTET STRING OPTIONAL}.
+void decode_reportsemaphoreentrystatus_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            // semaphoreName is nominally EXPLICIT (ObjectName, no IMPLICIT keyword) but at least
+            // one real-world fixture encodes it as a bare primitive Identifier instead (as if
+            // IMPLICIT vmd-specific) -- decode_object_name_flexible handles both forms.
+            frame.values.push_back("semaphoreName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 1) {
+            int64_t v = ber_integer(f.content);
+            const char* state = v == 0 ? "queued" : (v == 1 ? "owner" : (v == 2 ? "hung" : "unknown"));
+            frame.values.push_back(std::string("state=") + state);
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("entryIdToStartAfter=" + hex_of(f.content));
+        }
+    }
+}
+
+// SemaphoreEntry ::= SEQUENCE{entryId[0] IMPLICIT OCTET STRING, entryClass[1] IMPLICIT
+// INTEGER{simple(0), modifier(1)}, applicationReference[2] ApplicationReference (EXPLICIT --
+// structurally present only, not deep-decoded, same posture as ObtainFile-Request's
+// sourceFileServer), namedToken[3] IMPLICIT Identifier OPTIONAL, priority[4] IMPLICIT Priority
+// DEFAULT 64, remainingTimeOut[5] IMPLICIT Unsigned32 OPTIONAL, abortOnTimeOut[6] IMPLICIT BOOLEAN
+// OPTIONAL, relinquishIfConnectionLost[7] IMPLICIT BOOLEAN DEFAULT TRUE}. Reused per-entry by
+// decode_reportsemaphoreentrystatus_response below.
+std::string decode_semaphore_entry(const BerTlv& entry) {
+    std::string entry_id, entry_class = "simple", named_token;
+    bool has_named_token = false, has_priority = false, has_remaining = false;
+    bool has_abort = false, has_relinquish = false;
+    uint64_t priority = 0, remaining = 0;
+    bool abort_on_timeout = false, relinquish_on_loss = false;
+    for (const auto& f : ber_children(entry.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        switch (f.tag_number) {
+            case 0: entry_id = hex_of(f.content); break;
+            case 1: entry_class = (ber_integer(f.content) == 1 ? "modifier" : "simple"); break;
+            case 2: break;  // applicationReference -- structurally present, not decoded (see above)
+            case 3: named_token = ber_visible_string(f.content); has_named_token = true; break;
+            case 4: priority = ber_unsigned(f.content); has_priority = true; break;
+            case 5: remaining = ber_unsigned(f.content); has_remaining = true; break;
+            case 6: abort_on_timeout = ber_integer(f.content) != 0; has_abort = true; break;
+            case 7: relinquish_on_loss = ber_integer(f.content) != 0; has_relinquish = true; break;
+            default: break;
+        }
+    }
+    std::ostringstream s;
+    s << "{entryId=" << entry_id << ", entryClass=" << entry_class << ", applicationReference=<not decoded>";
+    if (has_named_token) s << ", namedToken=" << named_token;
+    if (has_priority) s << ", priority=" << priority;
+    if (has_remaining) s << ", remainingTimeOut=" << remaining;
+    if (has_abort) s << ", abortOnTimeOut=" << (abort_on_timeout ? "true" : "false");
+    if (has_relinquish) s << ", relinquishIfConnectionLost=" << (relinquish_on_loss ? "true" : "false");
+    s << "}";
+    return s.str();
+}
+
+// ReportSemaphoreEntryStatus-Response ::= SEQUENCE{listOfSemaphoreEntry[0] IMPLICIT SEQUENCE OF
+// SemaphoreEntry, moreFollows[1] IMPLICIT BOOLEAN DEFAULT TRUE}.
+void decode_reportsemaphoreentrystatus_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            int idx = 0;
+            for (const auto& entry : ber_children(f.content)) {
+                frame.values.push_back("listOfSemaphoreEntry[" + std::to_string(idx++) +
+                                        "]=" + decode_semaphore_entry(entry));
+            }
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// ==============================================================================================
+// Domain / firmware download-upload (ROADMAP: MMS confirmed-service clearance, closed) --
+// initiateDownloadSequence, downloadSegment, terminateDownloadSequence, initiateUploadSequence,
+// uploadSegment, terminateUploadSequence, requestDomainDownload, requestDomainUpload,
+// loadDomainContent, storeDomainContent, deleteDomain. The highest OT-security-relevant group in
+// this round (configuration/firmware transfer to a domain). thirdParty (ApplicationReference) gets
+// the same "structurally present, not deep-decoded" posture already used elsewhere in this file.
+
+// InitiateDownloadSequence-Request ::= SEQUENCE{domainName[0] IMPLICIT Identifier,
+// listOfCapabilities[1] IMPLICIT SEQUENCE OF VisibleString, sharable[2] IMPLICIT BOOLEAN}.
+// (InitiateDownloadSequence-Response ::= NULL -- nothing to decode.)
+void decode_initiatedownloadsequence_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("listOfCapabilities=[" + join_visible_strings(f.content) + "]");
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("sharable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// DownloadSegment-Request ::= Identifier -- bare: the whole body IS the string, IMPLICIT per the
+// generated dissector table, same posture as decode_getdomainattributes_request's domainName.
+void decode_downloadsegment_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("dataName=" + ber_visible_string(body.content));
+}
+
+// DownloadSegment-Response ::= SEQUENCE{loadData CHOICE{non-coded[0] IMPLICIT OCTET STRING,
+// coded EXTERNALt}, moreFollows[1] IMPLICIT BOOLEAN DEFAULT TRUE}. loadData has no field-level tag
+// of its own -- it is encoded using whichever alternative's own natural tag was chosen, directly;
+// non-coded is shown as a hex dump (same posture as fileRead-Response's own fileData), coded (an
+// ASN.1 EXTERNAL, never observed on the wire) is shown as present but not decoded. Shared by
+// UploadSegment-Response below (identical grammar).
+void decode_load_data_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) == kBerClassContext && f.tag_number == 0) {
+            frame.values.push_back("loadData=non-coded:" + hex_of(f.content));
+        } else if (ber_class(f.tag_byte) == kBerClassContext && f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else {
+            frame.values.push_back("loadData=<coded EXTERNAL, not decoded>");
+        }
+    }
+}
+
+// TerminateDownloadSequence-Request ::= SEQUENCE{domainName[0] IMPLICIT Identifier, discard[1]
+// IMPLICIT ServiceError OPTIONAL}. discard reuses decode_service_error exactly as cancel-ErrorPDU
+// does elsewhere in this file (forward-declared near this file's own Address/TypeSpecification
+// section). (TerminateDownloadSequence-Response ::= NULL -- nothing to decode.)
+void decode_terminatedownloadsequence_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("discard=" + decode_service_error(f, &frame.notes));
+        }
+    }
+}
+
+// InitiateUploadSequence-Request ::= Identifier (bare, Domain Name).
+void decode_initiateuploadsequence_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("domainName=" + ber_visible_string(body.content));
+}
+
+// InitiateUploadSequence-Response ::= SEQUENCE{ulsmID[0] IMPLICIT Integer32,
+// listOfCapabilities[1] IMPLICIT SEQUENCE OF VisibleString}.
+void decode_initiateuploadsequence_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("ulsmID=" + std::to_string(ber_integer(f.content)));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("listOfCapabilities=[" + join_visible_strings(f.content) + "]");
+        }
+    }
+}
+
+// UploadSegment-Request ::= Integer32 (bare, ULSM Identifier).
+void decode_uploadsegment_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("ulsmID=" + std::to_string(ber_integer(body.content)));
+}
+
+// TerminateUploadSequence-Request ::= Integer32 (bare, ULSM Identifier).
+// (TerminateUploadSequence-Response ::= NULL -- nothing to decode.)
+void decode_terminateuploadsequence_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("ulsmID=" + std::to_string(ber_integer(body.content)));
+}
+
+// RequestDomainDownload-Request ::= SEQUENCE{domainName[0] IMPLICIT Identifier,
+// listOfCapabilities[1] IMPLICIT SEQUENCE OF VisibleString OPTIONAL, sharable[2] IMPLICIT BOOLEAN,
+// fileName[4] IMPLICIT FileName} -- tag 3 is genuinely absent from this SEQUENCE (not a typo in
+// this file; matches the grammar as written). (Response ::= NULL -- nothing to decode.)
+void decode_requestdomaindownload_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("listOfCapabilities=[" + join_visible_strings(f.content) + "]");
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("sharable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("fileName=" + decode_file_name(f.content));
+        }
+    }
+}
+
+// RequestDomainUpload-Request ::= SEQUENCE{domainName[0] IMPLICIT Identifier, fileName[1] IMPLICIT
+// FileName}. (Response ::= NULL -- nothing to decode.)
+void decode_requestdomainupload_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        else if (f.tag_number == 1) frame.values.push_back("fileName=" + decode_file_name(f.content));
+    }
+}
+
+// LoadDomainContent-Request ::= SEQUENCE{domainName[0] IMPLICIT Identifier, listOfCapabilities[1]
+// IMPLICIT SEQUENCE OF VisibleString OPTIONAL, sharable[2] IMPLICIT BOOLEAN, fileName[4] IMPLICIT
+// FileName, thirdParty[5] IMPLICIT ApplicationReference OPTIONAL} -- same tag-3 gap as
+// RequestDomainDownload-Request above. (Response ::= NULL -- nothing to decode.)
+void decode_loaddomaincontent_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("listOfCapabilities=[" + join_visible_strings(f.content) + "]");
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("sharable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("fileName=" + decode_file_name(f.content));
+        } else if (f.tag_number == 5) {
+            frame.values.push_back("thirdParty=<ApplicationReference, not decoded>");
+        }
+    }
+}
+
+// StoreDomainContent-Request ::= SEQUENCE{domainName[0] IMPLICIT Identifier, filenName[1] IMPLICIT
+// FileName (sic -- "filenName" is the grammar's own spelling), thirdParty[2] IMPLICIT
+// ApplicationReference OPTIONAL}. (Response ::= NULL -- nothing to decode.)
+void decode_storedomaincontent_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("domainName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("fileName=" + decode_file_name(f.content));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("thirdParty=<ApplicationReference, not decoded>");
+        }
+    }
+}
+
+// DeleteDomain-Request ::= Identifier (bare, Domain Name). (Response ::= NULL -- nothing to decode.)
+void decode_deletedomain_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("domainName=" + ber_visible_string(body.content));
+}
+
+// ==============================================================================================
+// Program invocation control (ROADMAP: MMS confirmed-service clearance, closed) --
+// createProgramInvocation, deleteProgramInvocation, start, stop, resume, reset, kill,
+// getProgramInvocationAttributes. Direct control-plane impact (start/stop/kill a program
+// invocation). executionArgument's own EXTERNAL alternative (encodedString) is never observed on
+// the wire and is shown as present but not decoded, same posture as Group 4's loadData CHOICE.
+
+const char* program_invocation_state_name(int64_t v) {
+    static const char* names[] = {"non-existent", "unrunable", "idle",     "running",  "stopped",
+                                   "starting",     "stopping",  "resuming", "resetting"};
+    if (v >= 0 && v <= 8) return names[v];
+    return "unknown";
+}
+
+// CreateProgramInvocation-Request ::= SEQUENCE{programInvocationName[0] IMPLICIT Identifier,
+// listOfDomainName[1] IMPLICIT SEQUENCE OF Identifier, reusable[2] IMPLICIT BOOLEAN DEFAULT TRUE,
+// monitorType[3] IMPLICIT BOOLEAN OPTIONAL -- TRUE=PERMANENT, FALSE=CURRENT monitoring}.
+// (CreateProgramInvocation-Response ::= NULL -- nothing to decode.)
+void decode_createprograminvocation_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("programInvocationName=" + ber_visible_string(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("listOfDomainName=[" + join_visible_strings(f.content) + "]");
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("reusable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back(std::string("monitorType=") +
+                                    (ber_integer(f.content) != 0 ? "permanent" : "current"));
+        }
+    }
+}
+
+// DeleteProgramInvocation-Request ::= Identifier (bare, Program Invocation Name).
+void decode_deleteprograminvocation_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("programInvocationName=" + ber_visible_string(body.content));
+}
+
+// executionArgument CHOICE (Start-Request/Resume-Request/GetProgramInvocationAttributes-Response)
+// -- has no field-level tag of its own; simpleString is a bare primitive context-tag-1
+// VisibleString, encodedString is an ASN.1 EXTERNAL (never observed on the wire, shown as present
+// but not decoded). Reused by all three callers below.
+std::string decode_execution_argument(const BerTlv& f) {
+    if (ber_class(f.tag_byte) == kBerClassContext && f.tag_number == 1 && !f.constructed) {
+        return "executionArgument=\"" + ber_visible_string(f.content) + "\"";
+    }
+    return "executionArgument=<encodedString EXTERNAL, not decoded>";
+}
+
+// Start-Request ::= SEQUENCE{programInvocationName[0] IMPLICIT Identifier, executionArgument
+// CHOICE{...} OPTIONAL}. (Start-Response ::= NULL -- nothing to decode.)
+void decode_start_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("programInvocationName=" + ber_visible_string(f.content));
+        } else {
+            frame.values.push_back(decode_execution_argument(f));
+        }
+    }
+}
+
+// Stop-Request ::= SEQUENCE{programInvocationName[0] IMPLICIT Identifier}.
+// (Stop-Response ::= NULL -- nothing to decode.)
+void decode_stop_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) == kBerClassContext && f.tag_number == 0) {
+            frame.values.push_back("programInvocationName=" + ber_visible_string(f.content));
+        }
+    }
+}
+
+// Resume-Request -- identical grammar to Start-Request. (Resume-Response ::= NULL.)
+void decode_resume_request(const BerTlv& body, MmsFrame& frame) { decode_start_request(body, frame); }
+
+// Reset-Request -- identical grammar to Stop-Request. (Reset-Response ::= NULL.)
+void decode_reset_request(const BerTlv& body, MmsFrame& frame) { decode_stop_request(body, frame); }
+
+// Kill-Request -- identical grammar to Stop-Request. (Kill-Response ::= NULL.)
+void decode_kill_request(const BerTlv& body, MmsFrame& frame) { decode_stop_request(body, frame); }
+
+// GetProgramInvocationAttributes-Request ::= Identifier (bare, Program Invocation Name).
+void decode_getprograminvocationattributes_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("programInvocationName=" + ber_visible_string(body.content));
+}
+
+// GetProgramInvocationAttributes-Response ::= SEQUENCE{state[0] IMPLICIT ProgramInvocationState,
+// listOfDomainNames[1] IMPLICIT SEQUENCE OF Identifier, mmsDeletable[2] IMPLICIT BOOLEAN,
+// reusable[3] IMPLICIT BOOLEAN, monitor[4] IMPLICIT BOOLEAN, startArgument[5] IMPLICIT
+// VisibleString, executionArgument CHOICE{...} OPTIONAL}. listOfDomainNames[1] (constructed) and
+// executionArgument's own simpleString[1] (primitive) share a tag NUMBER but not the constructed
+// bit -- dispatch checks both so the two can't be confused.
+void decode_getprograminvocationattributes_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("state=") +
+                                    program_invocation_state_name(ber_integer(f.content)));
+        } else if (f.tag_number == 1 && f.constructed) {
+            frame.values.push_back("listOfDomainNames=[" + join_visible_strings(f.content) + "]");
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back(std::string("reusable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back(std::string("monitor=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 5) {
+            frame.values.push_back("startArgument=\"" + ber_visible_string(f.content) + "\"");
+        } else {
+            frame.values.push_back(decode_execution_argument(f));
+        }
+    }
+}
+
+// ==============================================================================================
+// Events -- condition/action/enrollment (ROADMAP: MMS confirmed-service clearance, closed) --
+// defineEventCondition, deleteEventCondition, getEventConditionAttributes,
+// reportEventConditionStatus, alterEventConditionMonitoring, triggerEvent, defineEventAction,
+// deleteEventAction, getEventActionAttributes, reportEventActionStatus, defineEventEnrollment,
+// deleteEventEnrollment, alterEventEnrollment, reportEventEnrollmentStatus,
+// getEventEnrollmentAttributes. clientApplication (ApplicationReference) gets the same
+// "structurally present, not deep-decoded" posture already used elsewhere in this file.
+//
+// Three of these (deleteEventCondition[48], deleteEventAction[54], deleteEventEnrollment[58])
+// have a request type that is itself a CHOICE (DeleteEventCondition-Request et al.), and their
+// mms.asn entries correspondly omit IMPLICIT on the request side while keeping it on the NULL/
+// Unsigned32-typed response side -- confirmed, exactly like TakeControl-Response's own asymmetry
+// above, against Wireshark's generated dissector table (packet-mms.c's ConfirmedServiceRequest_
+// choice array has BER_FLAGS_IMPLTAG unset only for these three plus the pre-existing
+// getVariableAccessAttributes[6] and the five bare-ObjectName services [49,50,55,56,60] below --
+// all of them genuinely CHOICE-typed, including ObjectName itself).
+
+const char* ec_class_name(int64_t v) { return v == 1 ? "monitored" : "network-triggered"; }
+
+const char* ec_state_name(int64_t v) {
+    static const char* names[] = {"disabled", "idle", "active"};
+    return (v >= 0 && v <= 2) ? names[v] : "unknown";
+}
+
+const char* ee_state_name(int64_t v) {
+    static const char* names[] = {"disabled",    "idle",      "active",   "activeNoAckA",
+                                   "idleNoAckI",  "idleNoAckA", "idleAcked", "activeAcked"};
+    return (v >= 0 && v <= 7) ? names[v] : "unknown";
+}
+
+const char* ee_class_name(int64_t v) { return v == 1 ? "notification" : "modifier"; }
+const char* ee_duration_name(int64_t v) { return v == 1 ? "permanent" : "current"; }
+
+const char* alarm_ack_rule_name(int64_t v) {
+    static const char* names[] = {"none", "simple", "ack-active", "ack-all"};
+    return (v >= 0 && v <= 3) ? names[v] : "unknown";
+}
+
+const char* event_enrollment_scope_name(int64_t v) {
+    static const char* names[] = {"specific", "client", "ec", "ea"};
+    return (v >= 0 && v <= 3) ? names[v] : "unknown";
+}
+
+constexpr BitName kTransitionsNames[] = {
+    {0, "idle-to-disabled"}, {1, "active-to-disabled"}, {2, "disabled-to-idle"}, {3, "active-to-idle"},
+    {4, "disabled-to-active"}, {5, "idle-to-active"}, {6, "any-to-deleted"},
+};
+
+std::string decode_transitions(ByteSpan content) {
+    return "[" + bitstring_names(content, kTransitionsNames,
+                                  sizeof(kTransitionsNames) / sizeof(kTransitionsNames[0])) + "]";
+}
+
+// EventTime ::= CHOICE{timeOfDayT[0] IMPLICIT TimeOfDay, timeSequenceIdentifier[1] IMPLICIT
+// Unsigned32}. TimeOfDay ::= OCTET STRING (SIZE(4|6)) -- MMS's own binary time-of-day encoding
+// (distinct from Data's own IEC 61850-8-1 utc-time[17]): the documented 6-byte form is a 2-byte
+// big-endian day count since 1984-01-01 plus a 4-byte big-endian milliseconds-since-midnight
+// count; the rarer 4-byte-only form and any other length degrade to a raw hex dump (same "decode
+// the common case, degrade honestly" posture decode_data_value's own floating-point/utc-time
+// cases already take). `tlv` is EventTime's own chosen alternative TLV.
+std::string decode_event_time(const BerTlv& tlv) {
+    if (tlv.tag_number == 0) {
+        if (tlv.content.size() == 6) {
+            uint32_t days = (static_cast<uint32_t>(tlv.content.at(0)) << 8) | tlv.content.at(1);
+            uint32_t ms = (static_cast<uint32_t>(tlv.content.at(2)) << 24) |
+                          (static_cast<uint32_t>(tlv.content.at(3)) << 16) |
+                          (static_cast<uint32_t>(tlv.content.at(4)) << 8) | tlv.content.at(5);
+            return "timeOfDay=" + std::to_string(days) + "d+" + std::to_string(ms) + "ms(since 1984-01-01)";
+        }
+        if (tlv.content.size() == 4) {
+            uint32_t ms = (static_cast<uint32_t>(tlv.content.at(0)) << 24) |
+                          (static_cast<uint32_t>(tlv.content.at(1)) << 16) |
+                          (static_cast<uint32_t>(tlv.content.at(2)) << 8) | tlv.content.at(3);
+            return "timeOfDay=" + std::to_string(ms) + "ms";
+        }
+        return "timeOfDay=<unexpected length: " + hex_of(tlv.content) + ">";
+    }
+    if (tlv.tag_number == 1) return "timeSequenceIdentifier=" + std::to_string(ber_unsigned(tlv.content));
+    return "<EventTime alternative " + std::to_string(tlv.tag_number) + ", not decoded>";
+}
+
+// DefineEventCondition-Request ::= SEQUENCE{eventConditionName[0] ObjectName, class[1] IMPLICIT
+// EC-Class, prio-rity[2] IMPLICIT Priority DEFAULT 64, severity[3] IMPLICIT Unsigned8 DEFAULT 64,
+// alarmSummaryReports[4] IMPLICIT BOOLEAN OPTIONAL, monitoredVariable[6] VariableSpecification
+// OPTIONAL, evaluationInterval[7] IMPLICIT Unsigned32 OPTIONAL} -- tag 5 genuinely absent.
+// (DefineEventCondition-Response ::= NULL -- nothing to decode.)
+void decode_defineeventcondition_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventConditionName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("class=") + ec_class_name(ber_integer(f.content)));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("priority=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back("severity=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back(std::string("alarmSummaryReports=") +
+                                    (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 6) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("monitoredVariable=" + decode_variable_specification(inner[0]));
+        } else if (f.tag_number == 7) {
+            frame.values.push_back("evaluationInterval=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// DeleteEventCondition-Request ::= CHOICE{specific[0] IMPLICIT SEQUENCE OF ObjectName,
+// aa-specific[1] IMPLICIT NULL, domain[2] IMPLICIT Identifier, vmd[3] IMPLICIT NULL} -- the whole
+// body is EXPLICIT-wrapped (see this section's own header comment on why).
+void decode_deleteeventcondition_request(const BerTlv& body, MmsFrame& frame) {
+    auto inner = ber_children(body.content);
+    if (inner.empty()) return;
+    const auto& choice = inner[0];
+    if (ber_class(choice.tag_byte) != kBerClassContext) return;
+    switch (choice.tag_number) {
+        case 0: {
+            int idx = 0;
+            for (const auto& n : ber_children(choice.content))
+                frame.values.push_back("specific[" + std::to_string(idx++) + "]=" + decode_object_name_flexible(n));
+            break;
+        }
+        case 1: frame.values.push_back("aa-specific"); break;
+        case 2: frame.values.push_back("domain=" + ber_visible_string(choice.content)); break;
+        case 3: frame.values.push_back("vmd"); break;
+        default: break;
+    }
+}
+
+// DeleteEventCondition-Response ::= Unsigned32 (bare, Candidates Not Deleted).
+void decode_deleteeventcondition_response(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("candidatesNotDeleted=" + std::to_string(ber_unsigned(body.content)));
+}
+
+// GetEventConditionAttributes-Request ::= ObjectName (bare, Event Condition Name).
+void decode_geteventconditionattributes_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("eventConditionName=" + decode_object_name_flexible(body));
+}
+
+// GetEventConditionAttributes-Response ::= SEQUENCE{mmsDeletable[0] IMPLICIT BOOLEAN DEFAULT
+// FALSE, class[1] IMPLICIT EC-Class, prio-rity[2] IMPLICIT Priority DEFAULT 64, severity[3]
+// IMPLICIT Unsigned8 DEFAULT 64, alarmSummaryReports[4] IMPLICIT BOOLEAN DEFAULT FALSE,
+// monitoredVariable[6] CHOICE{variableReference[0] VariableSpecification, undefined[1] IMPLICIT
+// NULL} OPTIONAL, evaluationInterval[7] IMPLICIT Unsigned32 OPTIONAL} -- monitoredVariable[6] has
+// no IMPLICIT (EXPLICIT wrap around its own inner CHOICE), and that inner CHOICE's own
+// variableReference[0] also has no IMPLICIT (a second EXPLICIT wrap around VariableSpecification).
+void decode_geteventconditionattributes_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("class=") + ec_class_name(ber_integer(f.content)));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("priority=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back("severity=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back(std::string("alarmSummaryReports=") +
+                                    (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 6) {
+            auto outer = ber_children(f.content);
+            if (!outer.empty()) {
+                const auto& choice = outer[0];
+                if (choice.tag_number == 0) {
+                    auto inner = ber_children(choice.content);
+                    if (!inner.empty())
+                        frame.values.push_back("monitoredVariable=" + decode_variable_specification(inner[0]));
+                } else {
+                    frame.values.push_back("monitoredVariable=undefined");
+                }
+            }
+        } else if (f.tag_number == 7) {
+            frame.values.push_back("evaluationInterval=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// ReportEventConditionStatus-Request ::= ObjectName (bare, EventConditionName).
+void decode_reporteventconditionstatus_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("eventConditionName=" + decode_object_name_flexible(body));
+}
+
+// ReportEventConditionStatus-Response ::= SEQUENCE{currentState[0] IMPLICIT EC-State,
+// numberOfEventEnrollments[1] IMPLICIT Unsigned32, enabled[2] IMPLICIT BOOLEAN OPTIONAL,
+// timeOfLastTransitionToActive[3] EventTime OPTIONAL, timeOfLastTransitionToIdle[4] EventTime
+// OPTIONAL} -- both EventTime fields have no IMPLICIT (EXPLICIT wrap).
+void decode_reporteventconditionstatus_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("currentState=") + ec_state_name(ber_integer(f.content)));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("numberOfEventEnrollments=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("enabled=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 3) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("timeOfLastTransitionToActive=" + decode_event_time(inner[0]));
+        } else if (f.tag_number == 4) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("timeOfLastTransitionToIdle=" + decode_event_time(inner[0]));
+        }
+    }
+}
+
+// AlterEventConditionMonitoring-Request ::= SEQUENCE{eventConditionName[0] ObjectName,
+// enabled[1] IMPLICIT BOOLEAN OPTIONAL, priority[2] IMPLICIT Priority OPTIONAL,
+// alarmSummaryReports[3] IMPLICIT BOOLEAN OPTIONAL, evaluationInterval[4] IMPLICIT Unsigned32
+// OPTIONAL}. (Response ::= NULL -- nothing to decode.)
+void decode_altereventconditionmonitoring_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventConditionName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("enabled=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("priority=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back(std::string("alarmSummaryReports=") +
+                                    (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("evaluationInterval=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// TriggerEvent-Request ::= SEQUENCE{eventConditionName[0] ObjectName, priority[1] IMPLICIT
+// Priority OPTIONAL}. (Response ::= NULL -- nothing to decode.)
+void decode_triggerevent_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventConditionName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("priority=" + std::to_string(ber_unsigned(f.content)));
+        }
+    }
+}
+
+// Modifier ::= CHOICE{attach-To-Event-Condition[0] IMPLICIT AttachToEventCondition,
+// attach-To-Semaphore[1] IMPLICIT AttachToSemaphore} -- used by DefineEventAction-Request's own
+// listOfModifier and GetEventActionAttributes-Response's own listOfModifier below. Each
+// alternative's own identifying name field(s) are decoded; AttachToEventCondition's own
+// causingTransitions/acceptableDelay and AttachToSemaphore's own timing/priority fields are left
+// out, matching this file's general "decode the identifying detail" posture for nested helper
+// SEQUENCEs that are themselves several levels removed from the service's own primary subject.
+std::string decode_modifier(const BerTlv& tlv) {
+    if (tlv.tag_number == 0) {  // attach-To-Event-Condition -- AttachToEventCondition
+        std::string enrollment, condition;
+        for (const auto& f : ber_children(tlv.content)) {
+            if (ber_class(f.tag_byte) != kBerClassContext) continue;
+            if (f.tag_number == 0) {
+                auto inner = ber_children(f.content);
+                if (!inner.empty()) enrollment = decode_object_name(inner[0]);
+            } else if (f.tag_number == 1) {
+                auto inner = ber_children(f.content);
+                if (!inner.empty()) condition = decode_object_name(inner[0]);
+            }
+        }
+        return "attachToEventCondition{eventEnrollmentName=" + enrollment + ", eventConditionName=" + condition + "}";
+    }
+    if (tlv.tag_number == 1) {  // attach-To-Semaphore -- AttachToSemaphore
+        std::string semaphore;
+        for (const auto& f : ber_children(tlv.content)) {
+            if (ber_class(f.tag_byte) == kBerClassContext && f.tag_number == 0) {
+                auto inner = ber_children(f.content);
+                if (!inner.empty()) semaphore = decode_object_name(inner[0]);
+            }
+        }
+        return "attachToSemaphore{semaphoreName=" + semaphore + "}";
+    }
+    return "<Modifier alternative " + std::to_string(tlv.tag_number) + ", not decoded>";
+}
+
+// DefineEventAction-Request ::= SEQUENCE{eventActionName[0] ObjectName, listOfModifier[1]
+// IMPLICIT SEQUENCE OF Modifier OPTIONAL}. (Response ::= NULL -- nothing to decode.)
+void decode_defineeventaction_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventActionName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& m : ber_children(f.content))
+                frame.values.push_back("listOfModifier[" + std::to_string(idx++) + "]=" + decode_modifier(m));
+        }
+    }
+}
+
+// DeleteEventAction-Request ::= CHOICE{specific[0] IMPLICIT SEQUENCE OF ObjectName,
+// aa-specific[1] IMPLICIT NULL, domain[3] IMPLICIT Identifier, vmd[4] IMPLICIT NULL} -- note tags
+// 3/4 here (not 2/3 like DeleteEventCondition-Request above); the whole body is EXPLICIT-wrapped,
+// same reasoning as DeleteEventCondition-Request.
+void decode_deleteeventaction_request(const BerTlv& body, MmsFrame& frame) {
+    auto inner = ber_children(body.content);
+    if (inner.empty()) return;
+    const auto& choice = inner[0];
+    if (ber_class(choice.tag_byte) != kBerClassContext) return;
+    switch (choice.tag_number) {
+        case 0: {
+            int idx = 0;
+            for (const auto& n : ber_children(choice.content))
+                frame.values.push_back("specific[" + std::to_string(idx++) + "]=" + decode_object_name_flexible(n));
+            break;
+        }
+        case 1: frame.values.push_back("aa-specific"); break;
+        case 3: frame.values.push_back("domain=" + ber_visible_string(choice.content)); break;
+        case 4: frame.values.push_back("vmd"); break;
+        default: break;
+    }
+}
+
+// DeleteEventAction-Response ::= Unsigned32 (bare, candidates not deleted).
+void decode_deleteeventaction_response(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("candidatesNotDeleted=" + std::to_string(ber_unsigned(body.content)));
+}
+
+// GetEventActionAttributes-Request ::= ObjectName (bare, Event Action Name).
+void decode_geteventactionattributes_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("eventActionName=" + decode_object_name_flexible(body));
+}
+
+// GetEventActionAttributes-Response ::= SEQUENCE{mmsDeletable[0] IMPLICIT BOOLEAN DEFAULT FALSE,
+// listOfModifier[1] IMPLICIT SEQUENCE OF Modifier}.
+void decode_geteventactionattributes_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& m : ber_children(f.content))
+                frame.values.push_back("listOfModifier[" + std::to_string(idx++) + "]=" + decode_modifier(m));
+        }
+    }
+}
+
+// ReportEventActionStatus-Request ::= ObjectName (bare, EventActionName).
+void decode_reporteventactionstatus_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("eventActionName=" + decode_object_name_flexible(body));
+}
+
+// ReportEventActionStatus-Response ::= Unsigned32 (bare, Number of Event Enrollments).
+void decode_reporteventactionstatus_response(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("numberOfEventEnrollments=" + std::to_string(ber_unsigned(body.content)));
+}
+
+// DefineEventEnrollment-Request ::= SEQUENCE{eventEnrollmentName[0] ObjectName,
+// eventConditionName[1] ObjectName, eventConditionTransition[2] IMPLICIT Transitions,
+// alarmAcknowledgementRule[3] IMPLICIT AlarmAckRule, eventActionName[4] ObjectName OPTIONAL,
+// clientApplication[5] ApplicationReference OPTIONAL}. (Response ::= NULL -- nothing to decode.)
+void decode_defineeventenrollment_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventEnrollmentName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventConditionName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("eventConditionTransition=" + decode_transitions(f.content));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back(std::string("alarmAcknowledgementRule=") +
+                                    alarm_ack_rule_name(ber_integer(f.content)));
+        } else if (f.tag_number == 4) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventActionName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 5) {
+            frame.values.push_back("clientApplication=<ApplicationReference, not decoded>");
+        }
+    }
+}
+
+// DeleteEventEnrollment-Request ::= CHOICE{specific[0] IMPLICIT SEQUENCE OF ObjectName,
+// ec[1] ObjectName, ea[2] ObjectName} -- the whole body is EXPLICIT-wrapped (same reasoning as
+// DeleteEventCondition-Request above); ec[1]/ea[2] themselves also have no IMPLICIT, so
+// decode_object_name_flexible(choice) handles that second wrap too.
+void decode_deleteeventenrollment_request(const BerTlv& body, MmsFrame& frame) {
+    auto inner = ber_children(body.content);
+    if (inner.empty()) return;
+    const auto& choice = inner[0];
+    if (ber_class(choice.tag_byte) != kBerClassContext) return;
+    if (choice.tag_number == 0) {
+        int idx = 0;
+        for (const auto& n : ber_children(choice.content))
+            frame.values.push_back("specific[" + std::to_string(idx++) + "]=" + decode_object_name_flexible(n));
+    } else if (choice.tag_number == 1) {
+        frame.values.push_back("ec=" + decode_object_name_flexible(choice));
+    } else if (choice.tag_number == 2) {
+        frame.values.push_back("ea=" + decode_object_name_flexible(choice));
+    }
+}
+
+// DeleteEventEnrollment-Response ::= Unsigned32 (bare, candidates not deleted).
+void decode_deleteeventenrollment_response(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("candidatesNotDeleted=" + std::to_string(ber_unsigned(body.content)));
+}
+
+// AlterEventEnrollment-Request ::= SEQUENCE{eventEnrollmentName[0] ObjectName,
+// eventConditionTransitions[1] IMPLICIT Transitions OPTIONAL, alarmAcknowledgmentRule[2] IMPLICIT
+// AlarmAckRule OPTIONAL}.
+void decode_altereventenrollment_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventEnrollmentName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back("eventConditionTransitions=" + decode_transitions(f.content));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("alarmAcknowledgmentRule=") +
+                                    alarm_ack_rule_name(ber_integer(f.content)));
+        }
+    }
+}
+
+// AlterEventEnrollment-Response ::= SEQUENCE{currentState[0] CHOICE{state[0] IMPLICIT EE-State,
+// undefined[1] IMPLICIT NULL}, transitionTime[1] EventTime} -- both fields have no IMPLICIT
+// (EXPLICIT wrap each).
+void decode_altereventenrollment_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto outer = ber_children(f.content);
+            if (!outer.empty()) {
+                const auto& choice = outer[0];
+                if (choice.tag_number == 0) {
+                    frame.values.push_back(std::string("currentState=") + ee_state_name(ber_integer(choice.content)));
+                } else {
+                    frame.values.push_back("currentState=undefined");
+                }
+            }
+        } else if (f.tag_number == 1) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("transitionTime=" + decode_event_time(inner[0]));
+        }
+    }
+}
+
+// ReportEventEnrollmentStatus-Request ::= ObjectName (bare, Event Enrollment Name).
+void decode_reporteventenrollmentstatus_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("eventEnrollmentName=" + decode_object_name_flexible(body));
+}
+
+// ReportEventEnrollmentStatus-Response ::= SEQUENCE{eventConditionTransitions[0] IMPLICIT
+// Transitions, notificationLost[1] IMPLICIT BOOLEAN DEFAULT FALSE, duration[2] IMPLICIT
+// EE-Duration, alarmAcknowledgmentRule[3] IMPLICIT AlarmAckRule OPTIONAL, currentState[4]
+// IMPLICIT EE-State}.
+void decode_reporteventenrollmentstatus_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("eventConditionTransitions=" + decode_transitions(f.content));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("notificationLost=") +
+                                    (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("duration=") + ee_duration_name(ber_integer(f.content)));
+        } else if (f.tag_number == 3) {
+            frame.values.push_back(std::string("alarmAcknowledgmentRule=") +
+                                    alarm_ack_rule_name(ber_integer(f.content)));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back(std::string("currentState=") + ee_state_name(ber_integer(f.content)));
+        }
+    }
+}
+
+// GetEventEnrollmentAttributes-Request ::= SEQUENCE{scopeOfRequest[0] IMPLICIT
+// INTEGER{specific(0),client(1),ec(2),ea(3)} DEFAULT client, eventEnrollmentNames[1] IMPLICIT
+// SEQUENCE OF ObjectName OPTIONAL, clientApplication[2] ApplicationReference OPTIONAL,
+// eventConditionName[3] ObjectName OPTIONAL, eventActionName[4] ObjectName OPTIONAL,
+// continueAfter[5] ObjectName OPTIONAL}.
+void decode_geteventenrollmentattributes_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("scopeOfRequest=") +
+                                    event_enrollment_scope_name(ber_integer(f.content)));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& n : ber_children(f.content)) {
+                frame.values.push_back("eventEnrollmentNames[" + std::to_string(idx++) +
+                                        "]=" + decode_object_name_flexible(n));
+            }
+        } else if (f.tag_number == 2) {
+            frame.values.push_back("clientApplication=<ApplicationReference, not decoded>");
+        } else if (f.tag_number == 3) {
+            frame.values.push_back("eventConditionName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("eventActionName=" + decode_object_name_flexible(f));
+        } else if (f.tag_number == 5) {
+            frame.values.push_back("continueAfter=" + decode_object_name_flexible(f));
+        }
+    }
+}
+
+// eventConditionName[1]/eventActionName[2] in EventEnrollment (below) share this CHOICE{X[0]
+// ObjectName, undefined[1] IMPLICIT NULL} shape, itself EXPLICIT-wrapped by the enclosing field
+// (no IMPLICIT given at either level) -- `f` is the enclosing field TLV.
+std::string decode_optional_object_name_choice(const BerTlv& f) {
+    auto outer = ber_children(f.content);
+    if (outer.empty()) return "undefined";
+    const auto& choice = outer[0];
+    if (choice.tag_number == 0) return decode_object_name_flexible(choice);
+    return "undefined";
+}
+
+// EventEnrollment ::= SEQUENCE{eventEnrollmentName[0] ObjectName, eventConditionName[1]
+// CHOICE{...}, eventActionName[2] CHOICE{...} OPTIONAL, clientApplication[3] ApplicationReference
+// OPTIONAL, mmsDeletable[4] IMPLICIT BOOLEAN DEFAULT FALSE, enrollmentClass[5] IMPLICIT EE-Class,
+// duration[6] IMPLICIT EE-Duration DEFAULT current, invokeID[7] IMPLICIT Unsigned32,
+// remainingAcceptableDelay[8] IMPLICIT Unsigned32 OPTIONAL}. Reused per-entry by
+// decode_geteventenrollmentattributes_response below.
+std::string decode_event_enrollment(const BerTlv& entry) {
+    std::string name, condition, action;
+    bool has_action = false, deletable = false, has_invoke_id = false;
+    uint64_t invoke_id = 0;
+    std::string cls = "modifier", duration = "current";
+    for (const auto& f : ber_children(entry.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) name = decode_object_name(inner[0]);
+        } else if (f.tag_number == 1) {
+            condition = decode_optional_object_name_choice(f);
+        } else if (f.tag_number == 2) {
+            action = decode_optional_object_name_choice(f);
+            has_action = true;
+        } else if (f.tag_number == 4) {
+            deletable = ber_integer(f.content) != 0;
+        } else if (f.tag_number == 5) {
+            cls = ee_class_name(ber_integer(f.content));
+        } else if (f.tag_number == 6) {
+            duration = ee_duration_name(ber_integer(f.content));
+        } else if (f.tag_number == 7) {
+            invoke_id = ber_unsigned(f.content);
+            has_invoke_id = true;
+        }
+    }
+    std::ostringstream s;
+    s << "{eventEnrollmentName=" << name << ", eventConditionName=" << condition;
+    if (has_action) s << ", eventActionName=" << action;
+    s << ", mmsDeletable=" << (deletable ? "true" : "false") << ", enrollmentClass=" << cls
+      << ", duration=" << duration;
+    if (has_invoke_id) s << ", invokeID=" << invoke_id;
+    s << "}";
+    return s.str();
+}
+
+// GetEventEnrollmentAttributes-Response ::= SEQUENCE{listOfEventEnrollment[0] IMPLICIT SEQUENCE
+// OF EventEnrollment, moreFollows[1] IMPLICIT BOOLEAN DEFAULT FALSE}.
+void decode_geteventenrollmentattributes_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            int idx = 0;
+            for (const auto& e : ber_children(f.content)) {
+                frame.values.push_back("listOfEventEnrollment[" + std::to_string(idx++) +
+                                        "]=" + decode_event_enrollment(e));
+            }
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// ==============================================================================================
+// Alarm (ROADMAP: MMS confirmed-service clearance, closed) -- acknowledgeEventNotification,
+// getAlarmSummary, getAlarmEnrollmentSummary. Cross-checked against Wireshark's generated
+// dissector table (packet-mms.c's ConfirmedServiceRequest_choice array has BER_FLAGS_IMPLTAG SET
+// for tags 62-70, unlike the Events group above -- these are ordinary IMPLICIT services, no
+// EXPLICIT-wrap quirk).
+
+const char* alarm_ack_filter_name(int64_t v) {
+    static const char* names[] = {"not-acked", "acked", "all"};
+    return (v >= 0 && v <= 2) ? names[v] : "unknown";
+}
+
+const char* alarm_unacked_state_name(int64_t v) {
+    static const char* names[] = {"none", "active", "idle", "both"};
+    return (v >= 0 && v <= 3) ? names[v] : "unknown";
+}
+
+// AcknowledgeEventNotification-Request ::= SEQUENCE{eventEnrollmentName[0] ObjectName,
+// acknowledgedState[2] IMPLICIT EC-State, timeOfAcknowledgedTransition[3] EventTime} -- tag 1
+// genuinely absent; eventEnrollmentName[0]/timeOfAcknowledgedTransition[3] both have no IMPLICIT
+// (EXPLICIT wrap each). (Response ::= NULL -- nothing to decode.)
+void decode_acknowledgeeventnotification_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("eventEnrollmentName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("acknowledgedState=") + ec_state_name(ber_integer(f.content)));
+        } else if (f.tag_number == 3) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty())
+                frame.values.push_back("timeOfAcknowledgedTransition=" + decode_event_time(inner[0]));
+        }
+    }
+}
+
+// GetAlarmSummary-Request ::= SEQUENCE{enrollmentsOnly[0] IMPLICIT BOOLEAN DEFAULT TRUE,
+// activeAlarmsOnly[1] IMPLICIT BOOLEAN DEFAULT TRUE, acknowledgmentFilter[2] IMPLICIT INTEGER
+// DEFAULT not-acked, severityFilter[3] IMPLICIT SEQUENCE{mostSevere[0] IMPLICIT Unsigned8,
+// leastSevere[1] IMPLICIT Unsigned8} OPTIONAL, continueAfter[5] ObjectName OPTIONAL} -- tag 4
+// genuinely absent; GetAlarmEnrollmentSummary-Request shares this exact grammar (reused directly).
+void decode_getalarmsummary_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back(std::string("enrollmentsOnly=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("activeAlarmsOnly=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        } else if (f.tag_number == 2) {
+            frame.values.push_back(std::string("acknowledgmentFilter=") +
+                                    alarm_ack_filter_name(ber_integer(f.content)));
+        } else if (f.tag_number == 3) {
+            std::string most, least;
+            for (const auto& sf : ber_children(f.content)) {
+                if (ber_class(sf.tag_byte) != kBerClassContext) continue;
+                if (sf.tag_number == 0) most = std::to_string(ber_unsigned(sf.content));
+                else if (sf.tag_number == 1) least = std::to_string(ber_unsigned(sf.content));
+            }
+            frame.values.push_back("severityFilter={mostSevere=" + most + ", leastSevere=" + least + "}");
+        } else if (f.tag_number == 5) {
+            frame.values.push_back("continueAfter=" + decode_object_name_flexible(f));
+        }
+    }
+}
+
+// GetAlarmEnrollmentSummary-Request -- identical grammar to GetAlarmSummary-Request.
+void decode_getalarmenrollmentsummary_request(const BerTlv& body, MmsFrame& frame) {
+    decode_getalarmsummary_request(body, frame);
+}
+
+// AlarmSummary ::= SEQUENCE{eventConditionName[0] ObjectName, severity[1] IMPLICIT Unsigned8,
+// currentState[2] IMPLICIT EC-State, unacknowledgedState[3] IMPLICIT INTEGER{...},
+// timeOfLastTransitionToActive[5] EventTime OPTIONAL, timeOfLastTransitionToIdle[6] EventTime
+// OPTIONAL} -- tag 4 genuinely absent. Reused per-entry by decode_getalarmsummary_response below.
+std::string decode_alarm_summary(const BerTlv& entry) {
+    std::string name, severity, state, unacked, active_t, idle_t;
+    bool has_active_t = false, has_idle_t = false;
+    for (const auto& f : ber_children(entry.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) name = decode_object_name(inner[0]);
+        } else if (f.tag_number == 1) {
+            severity = std::to_string(ber_unsigned(f.content));
+        } else if (f.tag_number == 2) {
+            state = ec_state_name(ber_integer(f.content));
+        } else if (f.tag_number == 3) {
+            unacked = alarm_unacked_state_name(ber_integer(f.content));
+        } else if (f.tag_number == 5) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) { active_t = decode_event_time(inner[0]); has_active_t = true; }
+        } else if (f.tag_number == 6) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) { idle_t = decode_event_time(inner[0]); has_idle_t = true; }
+        }
+    }
+    std::ostringstream s;
+    s << "{eventConditionName=" << name << ", severity=" << severity << ", currentState=" << state
+      << ", unacknowledgedState=" << unacked;
+    if (has_active_t) s << ", timeOfLastTransitionToActive=" << active_t;
+    if (has_idle_t) s << ", timeOfLastTransitionToIdle=" << idle_t;
+    s << "}";
+    return s.str();
+}
+
+// GetAlarmSummary-Response ::= SEQUENCE{listOfAlarmSummary[0] IMPLICIT SEQUENCE OF AlarmSummary,
+// moreFollows[1] IMPLICIT BOOLEAN DEFAULT FALSE}.
+void decode_getalarmsummary_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            int idx = 0;
+            for (const auto& e : ber_children(f.content))
+                frame.values.push_back("listOfAlarmSummary[" + std::to_string(idx++) + "]=" + decode_alarm_summary(e));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// AlarmEnrollmentSummary ::= SEQUENCE{eventEnrollmentName[0] ObjectName, clientApplication[2]
+// ApplicationReference OPTIONAL, severity[3] IMPLICIT Unsigned8, currentState[4] IMPLICIT
+// EC-State, notificationLost[6] IMPLICIT BOOLEAN DEFAULT FALSE, alarmAcknowledgmentRule[7]
+// IMPLICIT AlarmAckRule OPTIONAL, enrollementState[8] IMPLICIT EE-State OPTIONAL,
+// timeOfLastTransitionToActive[9] EventTime OPTIONAL, timeActiveAcknowledged[10] EventTime
+// OPTIONAL, timeOfLastTransitionToIdle[11] EventTime OPTIONAL, timeIdleAcknowledged[12] EventTime
+// OPTIONAL} -- tags 1/5 genuinely absent; clientApplication gets the same "structurally present,
+// not deep-decoded" posture used elsewhere in this file. Reused per-entry by
+// decode_getalarmenrollmentsummary_response below.
+std::string decode_alarm_enrollment_summary(const BerTlv& entry) {
+    std::string name, severity, state, ack_rule, enrollment_state, active_t, active_ack_t, idle_t, idle_ack_t;
+    bool has_client_app = false, notification_lost = false, has_ack_rule = false, has_enrollment_state = false;
+    bool has_active_t = false, has_active_ack_t = false, has_idle_t = false, has_idle_ack_t = false;
+    for (const auto& f : ber_children(entry.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) name = decode_object_name(inner[0]);
+        } else if (f.tag_number == 2) {
+            has_client_app = true;
+        } else if (f.tag_number == 3) {
+            severity = std::to_string(ber_unsigned(f.content));
+        } else if (f.tag_number == 4) {
+            state = ec_state_name(ber_integer(f.content));
+        } else if (f.tag_number == 6) {
+            notification_lost = ber_integer(f.content) != 0;
+        } else if (f.tag_number == 7) {
+            ack_rule = alarm_ack_rule_name(ber_integer(f.content));
+            has_ack_rule = true;
+        } else if (f.tag_number == 8) {
+            enrollment_state = ee_state_name(ber_integer(f.content));
+            has_enrollment_state = true;
+        } else if (f.tag_number == 9) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) { active_t = decode_event_time(inner[0]); has_active_t = true; }
+        } else if (f.tag_number == 10) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) { active_ack_t = decode_event_time(inner[0]); has_active_ack_t = true; }
+        } else if (f.tag_number == 11) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) { idle_t = decode_event_time(inner[0]); has_idle_t = true; }
+        } else if (f.tag_number == 12) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) { idle_ack_t = decode_event_time(inner[0]); has_idle_ack_t = true; }
+        }
+    }
+    std::ostringstream s;
+    s << "{eventEnrollmentName=" << name;
+    if (has_client_app) s << ", clientApplication=<ApplicationReference, not decoded>";
+    s << ", severity=" << severity << ", currentState=" << state
+      << ", notificationLost=" << (notification_lost ? "true" : "false");
+    if (has_ack_rule) s << ", alarmAcknowledgmentRule=" << ack_rule;
+    if (has_enrollment_state) s << ", enrollementState=" << enrollment_state;
+    if (has_active_t) s << ", timeOfLastTransitionToActive=" << active_t;
+    if (has_active_ack_t) s << ", timeActiveAcknowledged=" << active_ack_t;
+    if (has_idle_t) s << ", timeOfLastTransitionToIdle=" << idle_t;
+    if (has_idle_ack_t) s << ", timeIdleAcknowledged=" << idle_ack_t;
+    s << "}";
+    return s.str();
+}
+
+// GetAlarmEnrollmentSummary-Response ::= SEQUENCE{listOfAlarmEnrollmentSummary[0] IMPLICIT
+// SEQUENCE OF AlarmEnrollmentSummary, moreFollows[1] IMPLICIT BOOLEAN DEFAULT FALSE}.
+void decode_getalarmenrollmentsummary_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            int idx = 0;
+            for (const auto& e : ber_children(f.content)) {
+                frame.values.push_back("listOfAlarmEnrollmentSummary[" + std::to_string(idx++) +
+                                        "]=" + decode_alarm_enrollment_summary(e));
+            }
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// ==============================================================================================
+// Journal (ROADMAP: MMS confirmed-service clearance, closed) -- readJournal, writeJournal,
+// initializeJournal, reportJournalStatus, createJournal, deleteJournal. originatingApplication
+// (ApplicationReference) gets the same "structurally present, not deep-decoded" posture used
+// elsewhere in this file.
+
+// TimeOfDay ::= OCTET STRING (SIZE(4|6)) decoded directly from its own raw bytes, for the several
+// Journal fields that carry a bare TimeOfDay rather than going through EventTime's own CHOICE
+// wrapper (decode_event_time, Events section above) -- same "decode the common case, degrade
+// honestly" posture, factored out here to avoid duplicating decode_event_time's own logic.
+std::string format_time_of_day(ByteSpan content) {
+    if (content.size() == 6) {
+        uint32_t days = (static_cast<uint32_t>(content.at(0)) << 8) | content.at(1);
+        uint32_t ms = (static_cast<uint32_t>(content.at(2)) << 24) | (static_cast<uint32_t>(content.at(3)) << 16) |
+                      (static_cast<uint32_t>(content.at(4)) << 8) | content.at(5);
+        return std::to_string(days) + "d+" + std::to_string(ms) + "ms(since 1984-01-01)";
+    }
+    if (content.size() == 4) {
+        uint32_t ms = (static_cast<uint32_t>(content.at(0)) << 24) | (static_cast<uint32_t>(content.at(1)) << 16) |
+                      (static_cast<uint32_t>(content.at(2)) << 8) | content.at(3);
+        return std::to_string(ms) + "ms";
+    }
+    return "<unexpected length: " + hex_of(content) + ">";
+}
+
+// ReadJournal-Request ::= SEQUENCE{journalName[0] ObjectName, rangeStartSpecification[1]
+// CHOICE{startingTime[0] IMPLICIT TimeOfDay, startingEntry[1] IMPLICIT OCTET STRING} OPTIONAL,
+// rangeStopSpecification[2] CHOICE{endingTime[0] IMPLICIT TimeOfDay, numberOfEntries[1] IMPLICIT
+// Integer32} OPTIONAL, listOfVariables[4] IMPLICIT SEQUENCE OF VisibleString OPTIONAL,
+// entryToStartAfter[5] IMPLICIT SEQUENCE{timeSpecification[0] IMPLICIT TimeOfDay,
+// entrySpecification[1] IMPLICIT OCTET STRING}} -- tag 3 genuinely absent; journalName[0]/
+// rangeStartSpecification[1]/rangeStopSpecification[2] all have no IMPLICIT (EXPLICIT wrap each,
+// the CHOICE fields for the X.680 reason this file's own helpers already document).
+void decode_readjournal_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("journalName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) {
+                const auto& choice = inner[0];
+                if (choice.tag_number == 0)
+                    frame.values.push_back("rangeStartSpecification=startingTime:" + format_time_of_day(choice.content));
+                else if (choice.tag_number == 1)
+                    frame.values.push_back("rangeStartSpecification=startingEntry:" + hex_of(choice.content));
+            }
+        } else if (f.tag_number == 2) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) {
+                const auto& choice = inner[0];
+                if (choice.tag_number == 0)
+                    frame.values.push_back("rangeStopSpecification=endingTime:" + format_time_of_day(choice.content));
+                else if (choice.tag_number == 1)
+                    frame.values.push_back("rangeStopSpecification=numberOfEntries:" +
+                                            std::to_string(ber_integer(choice.content)));
+            }
+        } else if (f.tag_number == 4) {
+            frame.values.push_back("listOfVariables=[" + join_visible_strings(f.content) + "]");
+        } else if (f.tag_number == 5) {
+            std::string time_spec, entry_spec;
+            for (const auto& sf : ber_children(f.content)) {
+                if (ber_class(sf.tag_byte) != kBerClassContext) continue;
+                if (sf.tag_number == 0) time_spec = format_time_of_day(sf.content);
+                else if (sf.tag_number == 1) entry_spec = hex_of(sf.content);
+            }
+            frame.values.push_back("entryToStartAfter={timeSpecification=" + time_spec +
+                                    ", entrySpecification=" + entry_spec + "}");
+        }
+    }
+}
+
+// EntryContent ::= SEQUENCE{occurenceTime[0] IMPLICIT TimeOfDay, additionalDetail[1]
+// JOU-Additional-Detail OPTIONAL (NULL -- "shall be omitted from abstract syntax defined in this
+// standard" per the grammar's own comment, so not decoded), entryForm CHOICE{data[2] IMPLICIT
+// SEQUENCE{event[0] IMPLICIT SEQUENCE{eventConditionName[0] ObjectName, currentState[1] IMPLICIT
+// EC-State} OPTIONAL, listOfVariables[1] IMPLICIT SEQUENCE OF SEQUENCE{variableTag[0] IMPLICIT
+// VisibleString, valueSpecification[1] Data} OPTIONAL}, annotation[3] IMPLICIT VisibleString}} --
+// entryForm is itself untagged, so its own data[2]/annotation[3] alternative tags appear directly
+// as siblings of occurenceTime[0] within EntryContent's own SEQUENCE. Reused by both
+// decode_readjournal_response (per JournalEntry) and decode_writejournal_request (listOfJournalEntry
+// is SEQUENCE OF EntryContent directly, no enclosing JournalEntry wrapper).
+std::string decode_entry_content(const BerTlv& entry) {
+    std::string occurrence_time, form;
+    bool has_occurrence_time = false;
+    for (const auto& f : ber_children(entry.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            occurrence_time = format_time_of_day(f.content);
+            has_occurrence_time = true;
+        } else if (f.tag_number == 2) {  // entryForm's data[2] alternative
+            std::string event_detail, vars_detail;
+            bool has_event = false, has_vars = false;
+            for (const auto& df : ber_children(f.content)) {
+                if (ber_class(df.tag_byte) != kBerClassContext) continue;
+                if (df.tag_number == 0) {
+                    std::string ec_name, ec_state;
+                    for (const auto& ef : ber_children(df.content)) {
+                        if (ber_class(ef.tag_byte) != kBerClassContext) continue;
+                        if (ef.tag_number == 0) {
+                            auto inner = ber_children(ef.content);
+                            if (!inner.empty()) ec_name = decode_object_name(inner[0]);
+                        } else if (ef.tag_number == 1) {
+                            ec_state = ec_state_name(ber_integer(ef.content));
+                        }
+                    }
+                    event_detail = "{eventConditionName=" + ec_name + ", currentState=" + ec_state + "}";
+                    has_event = true;
+                } else if (df.tag_number == 1) {
+                    std::string vars;
+                    int idx = 0;
+                    for (const auto& ventry : ber_children(df.content)) {
+                        std::string tag_name, value;
+                        for (const auto& vf : ber_children(ventry.content)) {
+                            if (ber_class(vf.tag_byte) != kBerClassContext) continue;
+                            if (vf.tag_number == 0) {
+                                tag_name = ber_visible_string(vf.content);
+                            } else if (vf.tag_number == 1) {
+                                auto inner = ber_children(vf.content);
+                                if (!inner.empty()) value = decode_data_value(inner[0], 0);
+                            }
+                        }
+                        if (idx++ > 0) vars += ", ";
+                        vars += tag_name + "=" + value;
+                    }
+                    vars_detail = "[" + vars + "]";
+                    has_vars = true;
+                }
+            }
+            form = "data{";
+            bool first = true;
+            if (has_event) { form += "event=" + event_detail; first = false; }
+            if (has_vars) { if (!first) form += ", "; form += "listOfVariables=" + vars_detail; }
+            form += "}";
+        } else if (f.tag_number == 3) {  // entryForm's annotation[3] alternative
+            form = "annotation=\"" + ber_visible_string(f.content) + "\"";
+        }
+    }
+    std::ostringstream s;
+    s << "{occurenceTime=";
+    if (has_occurrence_time) s << occurrence_time;
+    s << ", entryForm=" << form << "}";
+    return s.str();
+}
+
+// JournalEntry ::= SEQUENCE{entryIdentifier[0] IMPLICIT OCTET STRING, originatingApplication[1]
+// ApplicationReference, entryContent[2] IMPLICIT EntryContent}.
+std::string decode_journal_entry(const BerTlv& entry) {
+    std::string entry_id, content_str;
+    bool has_entry_id = false, has_content = false;
+    for (const auto& f : ber_children(entry.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            entry_id = hex_of(f.content);
+            has_entry_id = true;
+        } else if (f.tag_number == 2) {
+            content_str = decode_entry_content(f);
+            has_content = true;
+        }
+    }
+    std::ostringstream s;
+    s << "{";
+    if (has_entry_id) s << "entryIdentifier=" << entry_id << ", ";
+    s << "originatingApplication=<ApplicationReference, not decoded>";
+    if (has_content) s << ", entryContent=" << content_str;
+    s << "}";
+    return s.str();
+}
+
+// ReadJournal-Response ::= SEQUENCE{listOfJournalEntry[0] IMPLICIT SEQUENCE OF JournalEntry,
+// moreFollows[1] IMPLICIT BOOLEAN DEFAULT FALSE}.
+void decode_readjournal_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            int idx = 0;
+            for (const auto& e : ber_children(f.content))
+                frame.values.push_back("listOfJournalEntry[" + std::to_string(idx++) + "]=" + decode_journal_entry(e));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("moreFollows=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// WriteJournal-Request ::= SEQUENCE{journalName[0] ObjectName, listOfJournalEntry[1] IMPLICIT
+// SEQUENCE OF EntryContent}. (Response ::= NULL -- nothing to decode.)
+void decode_writejournal_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("journalName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            int idx = 0;
+            for (const auto& e : ber_children(f.content))
+                frame.values.push_back("listOfJournalEntry[" + std::to_string(idx++) + "]=" + decode_entry_content(e));
+        }
+    }
+}
+
+// InitializeJournal-Request ::= SEQUENCE{journalName[0] ObjectName, limitSpecification[1]
+// IMPLICIT SEQUENCE{limitingTime[0] IMPLICIT TimeOfDay, limitingEntry[1] IMPLICIT OCTET STRING
+// OPTIONAL} OPTIONAL}.
+void decode_initializejournal_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("journalName=" + decode_object_name(inner[0]));
+        } else if (f.tag_number == 1) {
+            std::string limiting_time, limiting_entry;
+            bool has_limiting_entry = false;
+            for (const auto& sf : ber_children(f.content)) {
+                if (ber_class(sf.tag_byte) != kBerClassContext) continue;
+                if (sf.tag_number == 0) {
+                    limiting_time = format_time_of_day(sf.content);
+                } else if (sf.tag_number == 1) {
+                    limiting_entry = hex_of(sf.content);
+                    has_limiting_entry = true;
+                }
+            }
+            std::string s = "limitSpecification={limitingTime=" + limiting_time;
+            if (has_limiting_entry) s += ", limitingEntry=" + limiting_entry;
+            s += "}";
+            frame.values.push_back(s);
+        }
+    }
+}
+
+// InitializeJournal-Response ::= Unsigned32 (bare, entries deleted).
+void decode_initializejournal_response(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("entriesDeleted=" + std::to_string(ber_unsigned(body.content)));
+}
+
+// ReportJournalStatus-Request ::= ObjectName (bare, Journal Name).
+void decode_reportjournalstatus_request(const BerTlv& body, MmsFrame& frame) {
+    frame.values.push_back("journalName=" + decode_object_name_flexible(body));
+}
+
+// ReportJournalStatus-Response ::= SEQUENCE{currentEntries[0] IMPLICIT Unsigned32,
+// mmsDeletable[1] IMPLICIT BOOLEAN}.
+void decode_reportjournalstatus_response(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) != kBerClassContext) continue;
+        if (f.tag_number == 0) {
+            frame.values.push_back("currentEntries=" + std::to_string(ber_unsigned(f.content)));
+        } else if (f.tag_number == 1) {
+            frame.values.push_back(std::string("mmsDeletable=") + (ber_integer(f.content) != 0 ? "true" : "false"));
+        }
+    }
+}
+
+// CreateJournal-Request ::= SEQUENCE{journalName[0] ObjectName}. (Response ::= NULL.)
+void decode_createjournal_request(const BerTlv& body, MmsFrame& frame) {
+    for (const auto& f : ber_children(body.content)) {
+        if (ber_class(f.tag_byte) == kBerClassContext && f.tag_number == 0) {
+            auto inner = ber_children(f.content);
+            if (!inner.empty()) frame.values.push_back("journalName=" + decode_object_name(inner[0]));
+        }
+    }
+}
+
+// DeleteJournal-Request -- identical grammar to CreateJournal-Request. (Response ::= NULL.)
+void decode_deletejournal_request(const BerTlv& body, MmsFrame& frame) {
+    decode_createjournal_request(body, frame);
+}
+
 // ---- InformationReport (unconfirmed-PDU's own [0] alternative) -- the MMS analog of this
 // codebase's own GOOSE decoder, see mms.hpp.
 void decode_information_report(const BerTlv& top, MmsFrame& frame) {
@@ -1551,14 +3526,74 @@ void dispatch_confirmed_service(const BerTlv& svc, MmsFrame& frame, bool is_resp
             case 0: decode_status_request(svc, frame); break;
             case 1: decode_getnamelist_request(svc, frame); break;
             case 2: break;  // identify-Request ::= NULL -- nothing to decode
+            case 3: decode_rename_request(svc, frame); break;
             case 4: decode_read_request(svc, frame); break;
             case 5: decode_write_request(svc, frame); break;
             case 6: decode_getvariableaccessattributes_request(svc, frame); break;
+            case 7: decode_definenamedvariable_request(svc, frame); break;
+            case 8: decode_definescatteredaccess_request(svc, frame); break;
+            case 9: decode_getscatteredaccessattributes_request(svc, frame); break;
+            case 10: decode_deletevariableaccess_request(svc, frame); break;
             case 11: decode_definenamedvariablelist_request(svc, frame); break;
             case 12: decode_getnamedvariablelistattributes_request(svc, frame); break;
             case 13: decode_deletenamedvariablelist_request(svc, frame); break;
+            case 14: decode_definenamedtype_request(svc, frame); break;
+            case 15: decode_getnamedtypeattributes_request(svc, frame); break;
+            case 16: decode_deletenamedtype_request(svc, frame); break;
+            case 17: decode_input_request(svc, frame); break;
+            case 18: decode_output_request(svc, frame); break;
+            case 19: decode_takecontrol_request(svc, frame); break;
+            case 20: decode_relinquishcontrol_request(svc, frame); break;
+            case 21: decode_definesemaphore_request(svc, frame); break;
+            case 22: decode_deletesemaphore_request(svc, frame); break;
+            case 23: decode_reportsemaphorestatus_request(svc, frame); break;
+            case 24: decode_reportpoolsemaphorestatus_request(svc, frame); break;
+            case 25: decode_reportsemaphoreentrystatus_request(svc, frame); break;
+            case 26: decode_initiatedownloadsequence_request(svc, frame); break;
+            case 27: decode_downloadsegment_request(svc, frame); break;
+            case 28: decode_terminatedownloadsequence_request(svc, frame); break;
+            case 29: decode_initiateuploadsequence_request(svc, frame); break;
+            case 30: decode_uploadsegment_request(svc, frame); break;
+            case 31: decode_terminateuploadsequence_request(svc, frame); break;
+            case 32: decode_requestdomaindownload_request(svc, frame); break;
+            case 33: decode_requestdomainupload_request(svc, frame); break;
+            case 34: decode_loaddomaincontent_request(svc, frame); break;
+            case 35: decode_storedomaincontent_request(svc, frame); break;
+            case 36: decode_deletedomain_request(svc, frame); break;
             case 37: decode_getdomainattributes_request(svc, frame); break;
+            case 38: decode_createprograminvocation_request(svc, frame); break;
+            case 39: decode_deleteprograminvocation_request(svc, frame); break;
+            case 40: decode_start_request(svc, frame); break;
+            case 41: decode_stop_request(svc, frame); break;
+            case 42: decode_resume_request(svc, frame); break;
+            case 43: decode_reset_request(svc, frame); break;
+            case 44: decode_kill_request(svc, frame); break;
+            case 45: decode_getprograminvocationattributes_request(svc, frame); break;
             case 46: decode_obtainfile_request(svc, frame); break;
+            case 47: decode_defineeventcondition_request(svc, frame); break;
+            case 48: decode_deleteeventcondition_request(svc, frame); break;
+            case 49: decode_geteventconditionattributes_request(svc, frame); break;
+            case 50: decode_reporteventconditionstatus_request(svc, frame); break;
+            case 51: decode_altereventconditionmonitoring_request(svc, frame); break;
+            case 52: decode_triggerevent_request(svc, frame); break;
+            case 53: decode_defineeventaction_request(svc, frame); break;
+            case 54: decode_deleteeventaction_request(svc, frame); break;
+            case 55: decode_geteventactionattributes_request(svc, frame); break;
+            case 56: decode_reporteventactionstatus_request(svc, frame); break;
+            case 57: decode_defineeventenrollment_request(svc, frame); break;
+            case 58: decode_deleteeventenrollment_request(svc, frame); break;
+            case 59: decode_altereventenrollment_request(svc, frame); break;
+            case 60: decode_reporteventenrollmentstatus_request(svc, frame); break;
+            case 61: decode_geteventenrollmentattributes_request(svc, frame); break;
+            case 62: decode_acknowledgeeventnotification_request(svc, frame); break;
+            case 63: decode_getalarmsummary_request(svc, frame); break;
+            case 64: decode_getalarmenrollmentsummary_request(svc, frame); break;
+            case 65: decode_readjournal_request(svc, frame); break;
+            case 66: decode_writejournal_request(svc, frame); break;
+            case 67: decode_initializejournal_request(svc, frame); break;
+            case 68: decode_reportjournalstatus_request(svc, frame); break;
+            case 69: decode_createjournal_request(svc, frame); break;
+            case 70: decode_deletejournal_request(svc, frame); break;
             case 71: decode_getcapabilitylist_request(svc, frame); break;
             case 72: decode_fileopen_request(svc, frame); break;
             case 73: decode_fileread_request(svc, frame); break;
@@ -1573,14 +3608,74 @@ void dispatch_confirmed_service(const BerTlv& svc, MmsFrame& frame, bool is_resp
             case 0: decode_status_response(svc, frame); break;
             case 1: decode_getnamelist_response(svc, frame); break;
             case 2: decode_identify_response(svc, frame); break;
+            case 3: break;  // Rename-Response ::= NULL -- nothing to decode
             case 4: decode_read_response(svc, frame); break;
             case 5: decode_write_response(svc, frame); break;
             case 6: decode_getvariableaccessattributes_response(svc, frame); break;
+            case 7: break;  // DefineNamedVariable-Response ::= NULL -- nothing to decode
+            case 8: break;  // DefineScatteredAccess-Response ::= NULL -- nothing to decode
+            case 9: decode_getscatteredaccessattributes_response(svc, frame); break;
+            case 10: decode_deletevariableaccess_response(svc, frame); break;
             case 11: decode_definenamedvariablelist_response(frame); break;
             case 12: decode_getnamedvariablelistattributes_response(svc, frame); break;
             case 13: decode_deletenamedvariablelist_response(svc, frame); break;
+            case 14: break;  // DefineNamedType-Response ::= NULL -- nothing to decode
+            case 15: decode_getnamedtypeattributes_response(svc, frame); break;
+            case 16: decode_deletenamedtype_response(svc, frame); break;
+            case 17: decode_input_response(svc, frame); break;
+            case 18: break;  // Output-Response ::= NULL -- nothing to decode
+            case 19: decode_takecontrol_response(svc, frame); break;
+            case 20: break;  // RelinquishControl-Response ::= NULL -- nothing to decode
+            case 21: break;  // DefineSemaphore-Response ::= NULL -- nothing to decode
+            case 22: break;  // DeleteSemaphore-Response ::= NULL -- nothing to decode
+            case 23: decode_reportsemaphorestatus_response(svc, frame); break;
+            case 24: decode_reportpoolsemaphorestatus_response(svc, frame); break;
+            case 25: decode_reportsemaphoreentrystatus_response(svc, frame); break;
+            case 26: break;  // InitiateDownloadSequence-Response ::= NULL -- nothing to decode
+            case 27: decode_load_data_response(svc, frame); break;
+            case 28: break;  // TerminateDownloadSequence-Response ::= NULL -- nothing to decode
+            case 29: decode_initiateuploadsequence_response(svc, frame); break;
+            case 30: decode_load_data_response(svc, frame); break;  // UploadSegment-Response -- same shape
+            case 31: break;  // TerminateUploadSequence-Response ::= NULL -- nothing to decode
+            case 32: break;  // RequestDomainDownload-Response ::= NULL -- nothing to decode
+            case 33: break;  // RequestDomainUpload-Response ::= NULL -- nothing to decode
+            case 34: break;  // LoadDomainContent-Response ::= NULL -- nothing to decode
+            case 35: break;  // StoreDomainContent-Response ::= NULL -- nothing to decode
+            case 36: break;  // DeleteDomain-Response ::= NULL -- nothing to decode
             case 37: decode_getdomainattributes_response(svc, frame); break;
+            case 38: break;  // CreateProgramInvocation-Response ::= NULL -- nothing to decode
+            case 39: break;  // DeleteProgramInvocation-Response ::= NULL -- nothing to decode
+            case 40: break;  // Start-Response ::= NULL -- nothing to decode
+            case 41: break;  // Stop-Response ::= NULL -- nothing to decode
+            case 42: break;  // Resume-Response ::= NULL -- nothing to decode
+            case 43: break;  // Reset-Response ::= NULL -- nothing to decode
+            case 44: break;  // Kill-Response ::= NULL -- nothing to decode
+            case 45: decode_getprograminvocationattributes_response(svc, frame); break;
             case 46: break;  // ObtainFile-Response ::= NULL -- nothing to decode
+            case 47: break;  // DefineEventCondition-Response ::= NULL -- nothing to decode
+            case 48: decode_deleteeventcondition_response(svc, frame); break;
+            case 49: decode_geteventconditionattributes_response(svc, frame); break;
+            case 50: decode_reporteventconditionstatus_response(svc, frame); break;
+            case 51: break;  // AlterEventConditionMonitoring-Response ::= NULL -- nothing to decode
+            case 52: break;  // TriggerEvent-Response ::= NULL -- nothing to decode
+            case 53: break;  // DefineEventAction-Response ::= NULL -- nothing to decode
+            case 54: decode_deleteeventaction_response(svc, frame); break;
+            case 55: decode_geteventactionattributes_response(svc, frame); break;
+            case 56: decode_reporteventactionstatus_response(svc, frame); break;
+            case 57: break;  // DefineEventEnrollment-Response ::= NULL -- nothing to decode
+            case 58: decode_deleteeventenrollment_response(svc, frame); break;
+            case 59: decode_altereventenrollment_response(svc, frame); break;
+            case 60: decode_reporteventenrollmentstatus_response(svc, frame); break;
+            case 61: decode_geteventenrollmentattributes_response(svc, frame); break;
+            case 62: break;  // AcknowledgeEventNotification-Response ::= NULL -- nothing to decode
+            case 63: decode_getalarmsummary_response(svc, frame); break;
+            case 64: decode_getalarmenrollmentsummary_response(svc, frame); break;
+            case 65: decode_readjournal_response(svc, frame); break;
+            case 66: break;  // WriteJournal-Response ::= NULL -- nothing to decode
+            case 67: decode_initializejournal_response(svc, frame); break;
+            case 68: decode_reportjournalstatus_response(svc, frame); break;
+            case 69: break;  // CreateJournal-Response ::= NULL -- nothing to decode
+            case 70: break;  // DeleteJournal-Response ::= NULL -- nothing to decode
             case 71: decode_getcapabilitylist_response(svc, frame); break;
             case 72: decode_fileopen_response(svc, frame); break;
             case 73: decode_fileread_response(svc, frame); break;

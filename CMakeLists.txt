@@ -4644,7 +4644,7 @@ add_test(NAME mms_does_not_crash
 add_test(NAME mms_stats_counted
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap")
 set_tests_properties(mms_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +69[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +61\n *tcp +1.*\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +22\n *confirmed-ResponsePDU +23\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *defineNamedVariableList +2\n *deleteNamedVariableList +2\n *fileClose +2\n *fileDelete +2\n *fileDirectory +2\n *fileOpen +2\n *fileRead +2\n *fileRename +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getNameList +3\n *getNamedVariableListAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *obtainFile +2\n *read +3\n *status +2\n *takeControl +2\n *write +2")
+  PASS_REGULAR_EXPRESSION "packets: +187[^\n]*\n[^\n]*\nprotocols:\n *cotp +7\n *mms +179\n *tcp +1.*\nmms pdu types:\n *cancel-ErrorPDU +1\n *cancel-RequestPDU +3\n *cancel-ResponsePDU +1\n *conclude-ErrorPDU +1\n *conclude-RequestPDU +4\n *conclude-ResponsePDU +1\n *confirmed-ErrorPDU +1\n *confirmed-RequestPDU +81\n *confirmed-ResponsePDU +82\n *initiate-RequestPDU +1\n *initiate-ResponsePDU +1\n *rejectPDU +1\n *unconfirmed-PDU \\(informationReport\\) +1\nmms services:\n *acknowledgeEventNotification +2\n *alterEventConditionMonitoring +2\n *alterEventEnrollment +2\n *createJournal +2\n *createProgramInvocation +2\n *defineEventAction +2\n *defineEventCondition +2\n *defineEventEnrollment +2\n *defineNamedType +2\n *defineNamedVariable +2\n *defineNamedVariableList +2\n *defineScatteredAccess +2\n *defineSemaphore +2\n *deleteDomain +2\n *deleteEventAction +2\n *deleteEventCondition +2\n *deleteEventEnrollment +2\n *deleteJournal +2\n *deleteNamedType +2\n *deleteNamedVariableList +2\n *deleteSemaphore +2\n *deleteVariableAccess +2\n *downloadSegment +2\n *fileClose +2\n *fileDelete +2\n *fileDirectory +2\n *fileOpen +2\n *fileRead +2\n *fileRename +2\n *getAlarmEnrollmentSummary +2\n *getAlarmSummary +2\n *getCapabilityList +3\n *getDomainAttributes +2\n *getEventActionAttributes +2\n *getEventConditionAttributes +2\n *getEventEnrollmentAttributes +2\n *getNameList +3\n *getNamedTypeAttributes +2\n *getNamedVariableListAttributes +2\n *getProgramInvocationAttributes +2\n *getScatteredAccessAttributes +2\n *getVariableAccessAttributes +2\n *identify +4\n *informationReport +1\n *initializeJournal +2\n *initiateDownloadSequence +2\n *initiateUploadSequence +2\n *input +2\n *kill +2\n *loadDomainContent +2\n *obtainFile +2\n *output +2\n *read +3\n *readJournal +2\n *relinquishControl +2\n *rename +2\n *reportEventActionStatus +2\n *reportEventConditionStatus +2\n *reportEventEnrollmentStatus +2\n *reportJournalStatus +2\n *reportPoolSemaphoreStatus +2\n *reportSemaphoreEntryStatus +2\n *reportSemaphoreStatus +2\n *requestDomainDownload +2\n *requestDomainUpload +2\n *reset +2\n *resume +2\n *start +2\n *status +2\n *stop +2\n *storeDomainContent +2\n *takeControl +4\n *terminateDownloadSequence +2\n *terminateUploadSequence +2\n *triggerEvent +2\n *uploadSegment +2\n *write +2\n *writeJournal +2")
 
 add_test(NAME mms_association_aarq_aare
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text)
@@ -4681,7 +4681,7 @@ set_tests_properties(mms_identify_response_values PROPERTIES
 add_test(NAME mms_getvariableaccessattributes_values
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
 set_tests_properties(mms_getvariableaccessattributes_values PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"name=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\"\\],.*\"mms_values\": \\[\"mmsDeletable=false\", \"typeSpecification=<TypeSpecification, not decoded>\"\\],")
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"name=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\"\\],.*\"mms_values\": \\[\"mmsDeletable=false\", \"typeSpecification=boolean\"\\],")
 
 # DefineNamedVariableList/GetNamedVariableListAttributes/DeleteNamedVariableList -- also exercises
 # decode_object_name_flexible's own EXPLICIT-vs-natural-tag distinction (see mms.cpp): the request's
@@ -4765,10 +4765,120 @@ set_tests_properties(mms_information_report_values PROPERTIES
 # alternative this decoder recognizes by name but does not further decode (mirrors the real
 # tests/real_captures/mms/mms-takeControl.pcap finding): service_recognized=true, but the body is
 # shown as hex, not structurally decoded.
-add_test(NAME mms_tier2_takecontrol_shown_as_hex
+# takeControl is now fully field-decoded (ROADMAP: MMS confirmed-service clearance, closed) --
+# this real capture's own takeControl-Request fixture encodes semaphoreName[0] as a bare
+# primitive Identifier (not the strictly-EXPLICIT form the grammar names), which
+# decode_object_name_flexible handles directly.
+add_test(NAME mms_takecontrol_request_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
-set_tests_properties(mms_tier2_takecontrol_shown_as_hex PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"mms_service\": \"takeControl\",\n *\"mms_service_tag\": 19,\n *\"mms_body_shown_as_hex\": true,\n *\"mms_body_length\": 12,\n *\"mms_body_hex\": \"800a49454431446576696365\"")
+set_tests_properties(mms_takecontrol_request_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_service\": \"takeControl\",\n *\"mms_service_tag\": 19,\n *\"mms_values\": \\[\"semaphoreName=IED1Device\"\\],\n *\"mms_body_shown_as_hex\": false")
+
+# Variable/type definition and management group (ROADMAP: MMS confirmed-service clearance,
+# closed) -- representative spot-checks, one per service, rather than one test per field.
+add_test(NAME mms_rename_and_definenamedvariable_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_rename_and_definenamedvariable_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"extendedObjectClass=namedVariable\", \"currentName=IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\", \"newIdentifier=stVal2\"\\].*\"mms_values\": \\[\"variableName=IED1Device/GGIO1\\$ST\\$Ind2\\$stVal\", \"address=symbolic=\\\\\"DB5,X6\\\\\"\", \"typeSpecification=boolean\"\\]")
+
+add_test(NAME mms_scatteredaccess_request_and_response_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_scatteredaccess_request_and_response_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"scatteredAccessName=MyScatteredAccess\", \"scatteredAccessDescription=\\[stVal:IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\\]\"\\].*\"mms_values\": \\[\"mmsDeletable=true\", \"scatteredAccessDescription=\\[stVal:IED1Device/GGIO1\\$ST\\$Ind1\\$stVal\\]\"\\]")
+
+add_test(NAME mms_deletevariableaccess_and_namedtype_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_deletevariableaccess_and_namedtype_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"numberMatched=1\", \"numberDeleted=1\"\\].*\"mms_values\": \\[\"typeName=MyType1\", \"typeSpecification=integer\\(16\\)\"\\].*\"mms_values\": \\[\"mmsDeletable=false\", \"typeSpecification=integer\\(16\\)\"\\]")
+
+# Operator communication group.
+add_test(NAME mms_input_and_output_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_input_and_output_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"operatorStationName=OP1\", \"echo=false\", \"listOfPromptData\\[0\\]=\\\\\"Enter value:\\\\\"\", \"inputTimeOut=30\"\\].*\"mms_values\": \\[\"inputString=\\\\\"42\\\\\"\"\\].*\"mms_values\": \\[\"operatorStationName=OP1\", \"listOfOutputData\\[0\\]=\\\\\"Trip breaker 1\\\\\"\"\\]")
+
+# Semaphore group -- second takeControl example exercises the namedToken response alternative
+# (frame 40/41 above already covers the bare-primitive semaphoreName encoding and the empty/
+# no-alternative-present response body).
+add_test(NAME mms_takecontrol_namedtoken_response
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_takecontrol_namedtoken_response PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"semaphoreName=MyLock\", \"priority=10\", \"acceptableDelay=5\", \"relinquishIfConnectionLost=true\"\\].*\"mms_values\": \\[\"namedToken=TOKEN-1\"\\]")
+
+add_test(NAME mms_semaphore_status_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_semaphore_status_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"mmsDeletable=false\", \"class=token\", \"numberOfTokens=1\", \"numberOfOwnedTokens=1\", \"numberOfHungTokens=0\"\\].*\"mms_values\": \\[\"listOfNamedTokens\\[0\\]=free:Tok1\", \"listOfNamedTokens\\[1\\]=owned:Tok2\"\\].*\"mms_values\": \\[\"listOfSemaphoreEntry\\[0\\]=\\{entryId=0102, entryClass=simple, applicationReference=<not decoded>, namedToken=Tok2, priority=10, relinquishIfConnectionLost=true\\}\"\\]")
+
+# Domain / firmware download-upload group -- the highest OT-security-relevant group in this round
+# (configuration/firmware transfer to a domain); representative spot-checks, one per service.
+add_test(NAME mms_firmware_download_sequence_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_firmware_download_sequence_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"domainName=FW_Update1\", \"listOfCapabilities=\\[simple,cdef\\]\", \"sharable=false\"\\].*\"mms_values\": \\[\"dataName=FW_Update1\"\\].*\"mms_values\": \\[\"loadData=non-coded:000102030405060708090a0b0c0d0e0f\", \"moreFollows=true\"\\].*\"mms_values\": \\[\"domainName=FW_Update1\", \"discard=resource\\(1\\)\"\\].*\"additionalDescription=firmware image rejected: CRC mismatch\"")
+
+add_test(NAME mms_firmware_upload_sequence_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_firmware_upload_sequence_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"domainName=FW_Update1\"\\].*\"mms_values\": \\[\"ulsmID=7\", \"listOfCapabilities=\\[simple,cdef\\]\"\\].*\"mms_values\": \\[\"ulsmID=7\"\\].*\"mms_values\": \\[\"loadData=non-coded:101112131415161718191a1b1c1d1e1f\", \"moreFollows=false\"\\]")
+
+add_test(NAME mms_domain_filebased_transfer_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_domain_filebased_transfer_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"domainName=FW_Update2\", \"listOfCapabilities=\\[simple\\]\", \"sharable=true\", \"fileName=DISK/fw_v2.bin\"\\].*\"mms_values\": \\[\"domainName=FW_Update2\", \"fileName=DISK/fw_v2_readback.bin\"\\].*\"mms_values\": \\[\"domainName=FW_Update3\", \"sharable=false\", \"fileName=DISK/fw_v3.bin\", \"thirdParty=<ApplicationReference, not decoded>\"\\].*\"mms_values\": \\[\"domainName=FW_Update3\", \"fileName=DISK/fw_v3_backup.bin\"\\].*\"mms_values\": \\[\"domainName=FW_Update1\"\\]")
+
+# Program invocation control group -- direct control-plane impact (start/stop/kill a program
+# invocation); representative spot-checks, one per service.
+add_test(NAME mms_programinvocation_lifecycle_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_programinvocation_lifecycle_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"programInvocationName=PI1\", \"listOfDomainName=\\[FW_Update1\\]\", \"reusable=false\", \"monitorType=permanent\"\\].*\"mms_values\": \\[\"programInvocationName=PI1\", \"executionArgument=\\\\\"--verbose\\\\\"\"\\].*\"mms_values\": \\[\"programInvocationName=PI1\"\\].*\"mms_values\": \\[\"programInvocationName=PI1\"\\].*\"mms_values\": \\[\"programInvocationName=PI1\"\\]")
+
+add_test(NAME mms_getprograminvocationattributes_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_getprograminvocationattributes_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"state=running\", \"listOfDomainNames=\\[FW_Update1\\]\", \"mmsDeletable=false\", \"reusable=false\", \"monitor=true\", \"startArgument=\\\\\"--verbose\\\\\"\", \"executionArgument=\\\\\"--verbose\\\\\"\"\\].*\"mms_values\": \\[\"programInvocationName=PI1\"\\]")
+
+# Events -- condition group (defineEventCondition, deleteEventCondition, getEventConditionAttributes,
+# reportEventConditionStatus); representative spot-checks, one per service.
+add_test(NAME mms_eventcondition_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_eventcondition_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"eventConditionName=EC1\", \"class=monitored\", \"priority=10\", \"severity=5\", \"alarmSummaryReports=true\", \"monitoredVariable=AlarmPoint\", \"evaluationInterval=1000\"\\].*\"mms_values\": \\[\"specific\\[0\\]=EC1\"\\].*\"mms_values\": \\[\"candidatesNotDeleted=0\"\\].*\"mms_values\": \\[\"eventConditionName=EC1\"\\].*\"mms_values\": \\[\"mmsDeletable=true\", \"class=monitored\", \"priority=10\", \"severity=5\", \"alarmSummaryReports=true\", \"monitoredVariable=AlarmPoint\", \"evaluationInterval=1000\"\\].*\"mms_values\": \\[\"eventConditionName=EC1\"\\].*\"mms_values\": \\[\"currentState=active\", \"numberOfEventEnrollments=1\", \"enabled=true\", \"timeOfLastTransitionToActive=timeOfDay=15000d\\+36000000ms\\(since 1984-01-01\\)\", \"timeOfLastTransitionToIdle=timeSequenceIdentifier=42\"\\]")
+
+# Events -- action group (defineEventAction, deleteEventAction, getEventActionAttributes,
+# reportEventActionStatus); representative spot-checks, one per service. Exercises the shared
+# Modifier CHOICE (attachToEventCondition and attachToSemaphore alternatives).
+add_test(NAME mms_eventaction_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_eventaction_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"eventActionName=EA1\", \"listOfModifier\\[0\\]=attachToEventCondition\\{eventEnrollmentName=EE1, eventConditionName=EC1\\}\"\\].*\"mms_values\": \\[\"specific\\[0\\]=EA1\"\\].*\"mms_values\": \\[\"candidatesNotDeleted=0\"\\].*\"mms_values\": \\[\"eventActionName=EA1\"\\].*\"mms_values\": \\[\"mmsDeletable=true\", \"listOfModifier\\[0\\]=attachToEventCondition\\{eventEnrollmentName=EE1, eventConditionName=EC1\\}\", \"listOfModifier\\[1\\]=attachToSemaphore\\{semaphoreName=MyLock\\}\"\\].*\"mms_values\": \\[\"eventActionName=EA1\"\\].*\"mms_values\": \\[\"numberOfEventEnrollments=3\"\\]")
+
+# Events -- enrollment group (defineEventEnrollment, deleteEventEnrollment, alterEventEnrollment,
+# reportEventEnrollmentStatus, getEventEnrollmentAttributes); representative spot-checks, one per
+# service. Exercises the Transitions BIT STRING, EventTime CHOICE, and the full EventEnrollment
+# SEQUENCE decode.
+add_test(NAME mms_eventenrollment_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_eventenrollment_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"eventEnrollmentName=EE1\", \"eventConditionName=EC1\", \"eventConditionTransition=\\[disabled-to-active,idle-to-active\\]\", \"alarmAcknowledgementRule=ack-all\", \"eventActionName=EA1\"\\].*\"mms_values\": \\[\"specific\\[0\\]=EE1\"\\].*\"mms_values\": \\[\"candidatesNotDeleted=0\"\\].*\"mms_values\": \\[\"eventEnrollmentName=EE1\", \"eventConditionTransitions=\\[disabled-to-active,idle-to-active\\]\", \"alarmAcknowledgmentRule=ack-all\"\\].*\"mms_values\": \\[\"currentState=active\", \"transitionTime=timeOfDay=15000d\\+36000000ms\\(since 1984-01-01\\)\"\\].*\"mms_values\": \\[\"eventEnrollmentName=EE1\"\\].*\"mms_values\": \\[\"eventConditionTransitions=\\[disabled-to-active,idle-to-active\\]\", \"notificationLost=false\", \"duration=permanent\", \"alarmAcknowledgmentRule=ack-all\", \"currentState=active\"\\].*\"mms_values\": \\[\"scopeOfRequest=ec\", \"eventConditionName=EC1\"\\].*\"mms_values\": \\[\"listOfEventEnrollment\\[0\\]=\\{eventEnrollmentName=EE1, eventConditionName=EC1, eventActionName=EA1, mmsDeletable=true, enrollmentClass=notification, duration=permanent, invokeID=66\\}\", \"moreFollows=false\"\\]")
+
+# Alarm group (acknowledgeEventNotification, getAlarmSummary, getAlarmEnrollmentSummary);
+# representative spot-checks, one per service. Exercises the EventTime CHOICE and the AlarmSummary/
+# AlarmEnrollmentSummary SEQUENCE decodes.
+add_test(NAME mms_alarm_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_alarm_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"eventEnrollmentName=EE1\", \"acknowledgedState=active\", \"timeOfAcknowledgedTransition=timeOfDay=15000d\\+36000000ms\\(since 1984-01-01\\)\"\\].*\"mms_values\": \\[\"enrollmentsOnly=false\", \"activeAlarmsOnly=true\", \"acknowledgmentFilter=not-acked\", \"severityFilter=\\{mostSevere=1, leastSevere=10\\}\"\\].*\"mms_values\": \\[\"listOfAlarmSummary\\[0\\]=\\{eventConditionName=EC1, severity=5, currentState=active, unacknowledgedState=active, timeOfLastTransitionToActive=timeOfDay=15000d\\+36000000ms\\(since 1984-01-01\\)\\}\", \"moreFollows=false\"\\].*\"mms_values\": \\[\"enrollmentsOnly=false\", \"activeAlarmsOnly=true\"\\].*\"mms_values\": \\[\"listOfAlarmEnrollmentSummary\\[0\\]=\\{eventEnrollmentName=EE1, severity=5, currentState=active, notificationLost=false, alarmAcknowledgmentRule=ack-all, enrollementState=activeAcked, timeOfLastTransitionToActive=timeOfDay=15000d\\+36000000ms\\(since 1984-01-01\\)\\}\", \"moreFollows=false\"\\]")
+
+# Journal group (readJournal, writeJournal, initializeJournal, reportJournalStatus, createJournal,
+# deleteJournal); representative spot-checks, one per service. Exercises the raw TimeOfDay decode,
+# the full JournalEntry/EntryContent nesting (including an embedded Data value), and the plain-
+# annotation EntryContent alternative.
+add_test(NAME mms_journal_values
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format json)
+set_tests_properties(mms_journal_values PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"mms_values\": \\[\"journalName=Journal1\", \"rangeStartSpecification=startingTime:15000d\\+0ms\\(since 1984-01-01\\)\", \"rangeStopSpecification=endingTime:15001d\\+0ms\\(since 1984-01-01\\)\", \"listOfVariables=\\[stVal\\]\"\\].*\"mms_values\": \\[\"listOfJournalEntry\\[0\\]=\\{entryIdentifier=00000001, originatingApplication=<ApplicationReference, not decoded>, entryContent=\\{occurenceTime=15000d\\+36000000ms\\(since 1984-01-01\\), entryForm=data\\{event=\\{eventConditionName=EC1, currentState=active\\}, listOfVariables=\\[stVal=true\\]\\}\\}\\}\", \"moreFollows=false\"\\].*\"mms_values\": \\[\"journalName=Journal1\", \"listOfJournalEntry\\[0\\]=\\{occurenceTime=15002d\\+0ms\\(since 1984-01-01\\), entryForm=annotation=\\\\\"operator note\\\\\"\\}\"\\].*\"mms_values\": \\[\"journalName=Journal1\", \"limitSpecification=\\{limitingTime=15010d\\+0ms\\(since 1984-01-01\\)\\}\"\\].*\"mms_values\": \\[\"entriesDeleted=3\"\\].*\"mms_values\": \\[\"journalName=Journal1\"\\].*\"mms_values\": \\[\"currentEntries=42\", \"mmsDeletable=true\"\\].*\"mms_values\": \\[\"journalName=Journal2\"\\].*\"mms_values\": \\[\"journalName=Journal2\"\\]")
 
 add_test(NAME mms_serviceerror_note
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" --format text --verbose)
@@ -18208,10 +18318,13 @@ set_tests_properties(decode_display_filter_mms_service_tag_json PROPERTIES
 add_test(NAME decode_display_filter_mms_service_tag_match
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mms.pcap" -Y "mms.service_tag == 4")
 set_tests_properties(decode_display_filter_mms_service_tag_match PROPERTIES
-  # #5/#6/#42 -- confirmed against this build's actual output; checking the first and last of that
-  # set is enough to prove the field mirrors correctly (same "weak positive check" intent the old
-  # --stats-histogram assertion had).
-  PASS_REGULAR_EXPRESSION "^#5 (.*\n)*#42 ")
+  # #5/#6/#160 -- confirmed against this build's actual output; checking the first and last of
+  # that set is enough to prove the field mirrors correctly (same "weak positive check" intent the
+  # old --stats-histogram assertion had). This frame was #42 before the MMS confirmed-service
+  # clearance round (ROADMAP) began adding new frames ahead of it in sample_mms.pcap, and has moved
+  # several times since as later groups (through #112, #142, then the Alarm/Journal groups) added
+  # still more.
+  PASS_REGULAR_EXPRESSION "^#5 (.*\n)*#160 ")
 
 # UMAS is nested under Modbus (ModbusFrame::umas), not its own top-level protocol -- see
 # display_filter_fields.cpp's own file header comment -- so `umas.function_code` (a dotted
