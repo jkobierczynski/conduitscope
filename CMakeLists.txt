@@ -9728,12 +9728,12 @@ set_tests_properties(policy_error_unknown_protocol_lists_full_widened_set PROPER
 add_test(NAME policy_error_vlan_zone_both_networks_and_vlans
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_both_networks_and_vlans.yaml")
 set_tests_properties(policy_error_vlan_zone_both_networks_and_vlans PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of 'networks'/'vlans'/'hostnames' -- a zone is exactly one kind")
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames' -- a zone is exactly one kind")
 
 add_test(NAME policy_error_vlan_zone_neither_networks_nor_vlans
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_neither_networks_nor_vlans.yaml")
 set_tests_properties(policy_error_vlan_zone_neither_networks_nor_vlans PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks', 'vlans', or 'hostnames' key")
+  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks', 'ipv6_networks', 'vlans', or 'hostnames' key")
 
 add_test(NAME policy_error_vlan_id_out_of_range
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_id_out_of_range.yaml")
@@ -10020,10 +10020,42 @@ add_test(NAME policy_error_idmz_unknown_type
 set_tests_properties(policy_error_idmz_unknown_type PROPERTIES
   PASS_REGULAR_EXPRESSION "unknown conduit type 'dmz' \\(the only recognized value so far is 'idmz'\\)")
 
-add_test(NAME policy_ipv6_flow_gets_ipv6_specific_reason
+# compliant.yaml declares no ipv6_networks zone, so the Modbus-over-IPv6 flow in sample_ipv6.pcap
+# is still Unclassified (verdict unchanged from before ROADMAP item 143) -- it now gets the same
+# generic "no declared zone contains <ip>" reason an unmatched IPv4 address already got, rather
+# than the old permanently-unsupported-sounding IPv6-specific text (see item 143).
+add_test(NAME policy_ipv6_flow_unclassified_generic_reason
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --policy "${POLICY_DIR}/compliant.yaml")
-set_tests_properties(policy_ipv6_flow_gets_ipv6_specific_reason PROPERTIES
-  PASS_REGULAR_EXPRESSION "2001:db8::50 is an IPv6 address\; policy zoning does not support IPv6 yet\; 2001:db8::10 is an IPv6 address\; policy zoning does not support IPv6 yet")
+set_tests_properties(policy_ipv6_flow_unclassified_generic_reason PROPERTIES
+  PASS_REGULAR_EXPRESSION "no declared zone contains 2001:db8::50 or 2001:db8::10")
+
+# ipv6_zone_compliant.yaml gives hmi_zone/plc_zone a dual-stack ipv6_networks block matching
+# sample_ipv6.pcap's own HMI6/PLC6 addresses, sharing the pre-existing IPv4 conduit unchanged --
+# proves zone match -> existing conduit match -> report all work for IPv6 with zero conduit-side
+# changes. The fixture's NO_COMPRESSION_ADDR packet (2001:db8:1:2:3:4:5:6) is outside both zones
+# and must still report the generic unclassified reason.
+add_test(NAME policy_ipv6_zone_modbus_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --policy "${POLICY_DIR}/ipv6_zone_compliant.yaml")
+set_tests_properties(policy_ipv6_zone_modbus_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "no declared zone contains 2001:db8:1:2:3:4:5:6.*ALLOWED \\(1\\):.*matched conduit \"HMI polls PLC via Modbus\"")
+
+# ipv6_only_zone.yaml's zones declare ipv6_networks with no networks key at all -- proves a
+# v6-only CIDR zone parses and matches entirely on its own, independent of the dual-stack case
+# above.
+add_test(NAME policy_ipv6_only_zone_modbus_allowed
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_ipv6.pcap" --policy "${POLICY_DIR}/ipv6_only_zone.yaml")
+set_tests_properties(policy_ipv6_only_zone_modbus_allowed PROPERTIES
+  PASS_REGULAR_EXPRESSION "zones: z1 -> z2, matched conduit \"c1\"")
+
+add_test(NAME policy_error_bad_ipv6_cidr
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_ipv6_cidr.yaml")
+set_tests_properties(policy_error_bad_ipv6_cidr PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'z1': '2001:db8::zz' is not a valid IPv6 address or CIDR block")
+
+add_test(NAME policy_error_ipv6_overlap
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_ipv6_overlap.yaml")
+set_tests_properties(policy_error_ipv6_overlap PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'z1' \\(2001:db8::/32\\) and zone 'z2' \\(2001:db8::1/128\\) overlap")
 
 add_test(NAME policy_hostname_zone_without_hosts_file_fails_fast
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/hostname_zone.yaml")
@@ -10038,7 +10070,7 @@ set_tests_properties(policy_hostname_zone_with_hosts_file_compliant PROPERTIES
 add_test(NAME policy_error_zone_hostname_and_networks
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_hostname_and_networks.yaml")
 set_tests_properties(policy_error_zone_hostname_and_networks PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of 'networks'/'vlans'/'hostnames'")
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames'")
 
 add_test(NAME policy_error_hostname_overlap
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_hostname_overlap.yaml")

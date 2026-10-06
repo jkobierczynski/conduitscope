@@ -2669,7 +2669,7 @@ tests/policies/compliant.yaml --sl-target SL2`, abbreviated):
 ```
 ConduitScope Evidence Pack
   generated: 2026-10-01 12:09:04.000000Z UTC
-  tool version: conduitscope 0.3.2  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
+  tool version: conduitscope 0.3.3  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
 
 SCOPE & HONESTY NOTE
   This report assembles already-validated conduitscope output (zone/conduit topology, policy
@@ -2716,7 +2716,7 @@ CAPTURE
   no engine hit a resource/complexity ceiling during this analysis
 
 7. INTEGRITY
-  tool version: conduitscope 0.3.2  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
+  tool version: conduitscope 0.3.3  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
   report generated: 2026-10-01 12:09:04.000000Z UTC
   capture file: tests/sample_modbus.pcap
     SHA-256: 20895004d0deacc4bf6b8342e45b094e8293dc77487ef6a2079ed7f69eb28b1d
@@ -3034,11 +3034,20 @@ zones:
   <zone name>:
     description: "<optional free text>"
     purdue_level: "<optional free text, e.g. \"1\", \"3.5\">"  # optional; informational only, see below
-    networks:                               # an IPv4 zone --
+    networks:                               # a CIDR zone --
       - <IPv4 address or CIDR block>        # for modbus/dnp3/s7comm/iec104/enip/
       - <...>                               # bacnet/hartip/opcua/mms/mqtt/ffhse
+    ipv6_networks:                          # same CIDR zone, IPv6 side -- optional,
+      - <IPv6 address or CIDR block>        # and independent of 'networks' (a zone can
+      - <...>                               # declare either, both, or (for a VLAN/hostname
+                                             # zone) neither)
   <zone name>:
     networks: [<address or CIDR>, <...>]    # a flow-style list works too
+  <zone name>:
+    ipv6_networks: [<IPv6 address or CIDR>, <...>]  # an IPv6-only CIDR zone -- 'networks' and
+                                             # 'ipv6_networks' are independent sub-keys of the
+                                             # same CIDR kind, not mutually exclusive with each
+                                             # other (only with 'vlans'/'hostnames' below)
   <zone name>:
     vlans: [<VLAN ID 1-4094>, <...>]        # a VLAN zone instead --
                                              # for profinet/goose/sv/ethercat
@@ -3059,9 +3068,9 @@ conduits:
     to: <zone name or [zone name, ...]>     # VLAN-zone conduit: must be the exact
                                              # same zone(s) as 'from' -- see "Conduits" below
     protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | twincat | ge-srtp | fox | foxs | s7comm-plus | melsec | fins | codesys | bsap | cclink-ie | udp | profinet | goose | sv | ethercat | powerlink | any>, <...>]
-    ports: [<port>, <...>]                  # omit entirely to mean "any port"; IPv4/hostname-zone conduits only
-    bidirectional: <true | false>           # default: false; IPv4/hostname-zone conduits only
-    functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; IPv4/hostname-zone conduits only
+    ports: [<port>, <...>]                  # omit entirely to mean "any port"; CIDR/hostname-zone conduits only
+    bidirectional: <true | false>           # default: false; CIDR/hostname-zone conduits only
+    functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; CIDR/hostname-zone conduits only
     from_macs: [<MAC address>, <...>]       # optional; see "from_macs" below; VLAN-zone conduits only
     to_macs: [<MAC address>, <...>]         # optional; see "to_macs" below; VLAN-zone conduits only
     ethertypes: [<0x0600-0xffff>, <...>]    # optional; see "ethertypes" below; VLAN-zone conduits only
@@ -3073,30 +3082,37 @@ assets:                                     # optional; see "Multi-homed assets 
     role: "<optional free text, e.g. \"jump_host\", \"hmi\">"
 ```
 
-**Zones.** Each zone name maps to EXACTLY ONE of: one or more IPv4 CIDR
-blocks (`10.10.10.0/24`) or bare addresses (`10.10.10.5`, treated as `/32`),
-under `networks`; one or more VLAN IDs (`1`-`4094`), under `vlans` (singular
-alias `vlan`, for a one-VLAN zone); or one or more hostnames, under
-`hostnames` (singular alias `hostname`, for a one-hostname zone) -- never
-more than one of the three on the same zone, and never none of them. Which
-kind a zone is drives which protocols a conduit referencing it can name (see
-"Conduits" below): `networks` and `hostnames` zones both classify
+**Zones.** Each zone name maps to EXACTLY ONE of: one or more CIDR blocks
+(`10.10.10.0/24`, `2001:db8::/32`) or bare addresses (`10.10.10.5`,
+`2001:db8::5`, each treated as a single-address `/32`/`/128`), under
+`networks` (IPv4) and/or `ipv6_networks` (IPv6) -- a CIDR zone may declare
+either one, or both for a dual-stack zone, since `networks` and
+`ipv6_networks` are independent sub-keys of the one "CIDR zone" kind, not
+mutually exclusive with each other; one or more VLAN IDs (`1`-`4094`), under
+`vlans` (singular alias `vlan`, for a one-VLAN zone); or one or more
+hostnames, under `hostnames` (singular alias `hostname`, for a one-hostname
+zone) -- a zone is never more than one of CIDR/VLAN/hostname, and never none
+of them. Which kind a zone is drives which protocols a conduit referencing it
+can name (see "Conduits" below): CIDR and `hostnames` zones both classify
 modbus/dnp3/s7comm/iec104/enip/bacnet/hartip/opcua/mms/mqtt/ffhse traffic by
-IPv4 address (a `hostnames` zone just identifies that address by a name
-instead of a CIDR block -- see "Hostname zones" below for exactly how);
-`vlans` zones classify profinet/goose/sv/ethercat/powerlink traffic -- the
-five protocols with no IP layer at all -- by which VLAN the frame was tagged
-with instead (docs/DEVELOPMENT.md's ROADMAP items 15 and 103; see
-"Addressing scope" below for the full rationale). At least one zone is
-required. **No two zones of
-the same kind may claim the same address, VLAN, or hostname** --
-`policy validate` needs to say definitively which single zone a packet
-belongs to, so overlap within a kind is rejected at load time, not silently
-resolved by declaration order (zones of different kinds can never overlap
-with each other, having no addressing scheme in common, so only same-kind
-pairs are checked). An address or VLAN matching no declared zone is reported
-as the reserved zone name `unclassified` (which you therefore can't declare
-yourself -- see "Validation errors" below).
+IP address, IPv4 or IPv6 (a `hostnames` zone just identifies an IPv4 address
+by a name instead of a CIDR block -- hostname zones stay IPv4-only, see
+"Hostname zones" below for exactly how and why); `vlans` zones classify
+profinet/goose/sv/ethercat/powerlink traffic -- the five protocols with no IP
+layer at all -- by which VLAN the frame was tagged with instead
+(docs/DEVELOPMENT.md's ROADMAP items 15 and 103; see "Addressing scope"
+below for the full rationale). At least one zone is required. **No two zones
+of the same kind may claim the same address, VLAN, or hostname** (an IPv4
+network and an IPv6 network can never overlap each other -- disjoint address
+spaces -- so a CIDR zone's `networks` and `ipv6_networks` are each checked
+for overlap against every other CIDR zone's own `networks`/`ipv6_networks`
+independently) -- `policy validate` needs to say definitively which single
+zone a packet belongs to, so overlap within a kind is rejected at load time,
+not silently resolved by declaration order (zones of different kinds can
+never overlap with each other, having no addressing scheme in common, so
+only same-kind pairs are checked). An address or VLAN matching no declared
+zone is reported as the reserved zone name `unclassified` (which you
+therefore can't declare yourself -- see "Validation errors" below).
 
 A zone may also carry an optional `purdue_level` (e.g. `"1"`, `"2"`,
 `"3.5"`) -- a free-text label recording that zone's declared Purdue
@@ -3111,13 +3127,16 @@ without cross-referencing the policy file by hand.
 ### Hostname zones
 
 A `hostnames` zone identifies an IPv4 endpoint by name instead of by CIDR
-block, but is matched through the exact same TCP-flow path a `networks` zone
-is -- `ports`, `bidirectional`, and `functions` all apply to it exactly as
-they do to an IPv4-zone conduit (see "Conduits" above); it is NOT the VLAN
-model. A flow's client/server IP is looked up against `networks` zones
-first; only on a miss, and only when the policy declares at least one
-hostname zone, is a hostname lookup attempted at all -- a policy using only
-`networks`/`vlans` zones is completely unaffected by this feature.
+block, but is matched through the exact same TCP-flow path a `networks`/
+`ipv6_networks` zone is -- `ports`, `bidirectional`, and `functions` all
+apply to it exactly as they do to a CIDR-zone conduit (see "Conduits"
+above); it is NOT the VLAN model. A flow's client/server IP is looked up
+against `networks` zones first, then `ipv6_networks` zones; only on a miss
+of both, and only when the policy declares at least one hostname zone, is a
+hostname lookup attempted -- and only for an IPv4 address, since that
+lookup (unlike zone matching itself) stays IPv4-only, see "Addressing scope"
+below. A policy using only CIDR/`vlans` zones is completely unaffected by
+this feature.
 
 That hostname lookup is **never live DNS** -- it reuses the exact same
 `--resolve`/`--hosts FILE` mechanism `decode` and `policy validate`'s own
@@ -3214,13 +3233,13 @@ entirely -- `twincat`, `ge-srtp`, `fox`, `foxs`, `s7comm-plus`, plus
 `melsec`/`fins`/`codesys` on their TCP forms -- the generic `udp`
 pseudo-protocol (see "UDP flow evaluation" below), and `powerlink` as a
 fifth VLAN-only protocol). Every zone a conduit references,
-on either side, must be the same kind -- a conduit can't mix an IPv4 zone
+on either side, must be the same kind -- a conduit can't mix a CIDR zone
 and a VLAN zone, since there's no shared addressing scheme to classify a
 packet against. That kind, in turn, restricts which protocol names the
 conduit can use: `profinet`/`goose`/`sv`/`ethercat`/`powerlink` (or `any`)
 only on a conduit whose zones are all VLAN zones, and every other protocol
-name (or `any`) only on a conduit whose zones are all IPv4 zones -- naming a
-TCP protocol on a VLAN-zone conduit, or a VLAN-only protocol on an IPv4-zone
+name (or `any`) only on a conduit whose zones are all CIDR zones -- naming a
+TCP protocol on a VLAN-zone conduit, or a VLAN-only protocol on a CIDR-zone
 conduit, is a load-time `PolicyError` either way (see "Validation errors"
 below). A COTP session
 that never carries a full S7comm message (e.g. only a connection
@@ -3640,7 +3659,7 @@ ETHERNET ALLOWED (4):
 
 Note the two distinct Ethernet flow sections -- separate from `Flows
 evaluated`/`VIOLATIONS`/`UNCLASSIFIED TRAFFIC`/`ALLOWED` above them, which
-stay IPv4-zone-only -- and that the VLAN-200 GOOSE traffic and the untagged
+stay CIDR/hostname-zone-only -- and that the VLAN-200 GOOSE traffic and the untagged
 EtherCAT traffic are both `Unclassified`, for two different reasons: no
 zone covers VLAN 200 at all, versus no VLAN tag to check membership on in
 the first place. `tests/policies/vlan_zone_mixed_results.yaml` adds a
@@ -4038,15 +4057,25 @@ such as a missing top-level key). None of these can be bypassed with
 error (see EXIT STATUS):
 
 - a missing top-level `zones` or `conduits` key, or either being empty
-- a zone declaring both `networks` and `vlans` (a zone is either an IPv4
-  zone or a VLAN zone, never both), or neither
-- a zone with no `networks`, or a network that isn't a valid IPv4
-  address/CIDR block
+- a zone declaring more than one of (`networks`/`ipv6_networks`)/`vlans`/
+  `hostnames` -- `networks` and `ipv6_networks` together still count as
+  exactly one occurrence of the CIDR kind, so a zone declaring both of
+  those (a dual-stack zone) is fine, but a zone also declaring `vlans` or
+  `hostnames` alongside either is not -- or a zone declaring none of the
+  four
+- a zone's `networks` entry (if given) that isn't a valid IPv4
+  address/CIDR block, or a present-but-empty `networks` key
+- a zone's `ipv6_networks` entry (if given) that isn't a valid IPv6
+  address/CIDR block (prefix length outside `[0, 128]` included), or a
+  present-but-empty `ipv6_networks` key
 - a zone with no `vlans`, or a VLAN ID outside `[1, 4094]` (VID 0 is
   reserved for priority-tagged, non-VLAN-member frames; 4095 is reserved
   outright)
-- two zones of the same kind whose networks, or VLANs, overlap (an IPv4
-  zone and a VLAN zone can never overlap with each other)
+- two zones of the same kind whose networks (IPv4 or IPv6, each checked
+  independently), or VLANs, overlap (a CIDR zone and a VLAN zone can never
+  overlap with each other; an IPv4 network and an IPv6 network can never
+  overlap each other either, being disjoint address spaces, so there's no
+  IPv4-vs-IPv6 overlap check -- only same-family pairs are checked)
 - a zone literally named `unclassified` (reserved -- see "Zones" above)
 - a duplicate zone name (a YAML-level error: mapping keys are inherently
   unique) or duplicate conduit name (a policy.cpp-level check: a conduit's
@@ -4061,11 +4090,11 @@ error (see EXIT STATUS):
   hartip, opcua, mms, mqtt, ffhse, twincat, ge-srtp, fox, foxs, s7comm-plus,
   melsec, fins, codesys, bsap, cclink-ie, udp, profinet, goose, sv, ethercat,
   powerlink, any}` (docs/DEVELOPMENT.md's ROADMAP items 14, 15, and 103)
-- a conduit's `from`/`to` referencing both an IPv4 zone and a VLAN zone
+- a conduit's `from`/`to` referencing both a CIDR zone and a VLAN zone
   (every zone a conduit references must be the same kind -- docs/DEVELOPMENT.md's ROADMAP item 15)
 - a conduit naming a TCP/IP protocol (e.g. `modbus`) while its zones are
   VLAN zones, or naming a VLAN-only protocol (`profinet`/`goose`/`sv`/
-  `ethercat`/`powerlink`) while its zones are IPv4 zones (docs/DEVELOPMENT.md's
+  `ethercat`/`powerlink`) while its zones are CIDR zones (docs/DEVELOPMENT.md's
   ROADMAP items 15 and 103)
 - a VLAN-zone conduit whose `from` and `to` don't name the exact same set
   of VLAN zone(s) (docs/DEVELOPMENT.md's ROADMAP item 15 -- see "Conduits" above for why)
@@ -4224,8 +4253,8 @@ disabled lookup (OUI/`--nn` left at their off-by-default posture, or `--resolve`
 `src_port_service`/`dst_port_service` fields.
 
 **`is_vlan_conduit`** (per conduit, docs/DEVELOPMENT.md's ROADMAP item 15) -- `true` when every
-zone this conduit references is a VLAN zone, `false` when every zone is an
-IPv4 zone (a conduit can never mix the two -- see "Conduits" above).
+zone this conduit references is a VLAN zone, `false` when every zone is a
+CIDR zone (a conduit can never mix the two -- see "Conduits" above).
 
 **`from_macs`** (per conduit, Phase 5, see "Conduits" above) -- the source-MAC allow-list, as an
 array of lowercase, colon-separated MAC strings; empty array (never omitted or `null`) when the
@@ -4521,43 +4550,58 @@ verbatim from that flow's own entry in `flows[]`/`udp_flows[]` -- this array
 never carries its own, separate verdict; a flow appears here regardless of
 whether that verdict is `allowed`, `violation`, or `unclassified`.
 
-### Hostname zones and the IPv6-flow reason string
+### Hostname zones and jump-host/asset modeling stay IPv4-only
 
 A hostname-zone conduit's flows appear in `flows[]` exactly like any other
-IPv4-zone conduit's -- see "Hostname zones" above for the addressing model
-and the `--resolve`/`--hosts` requirement.
+CIDR-zone conduit's -- see "Hostname zones" above for the addressing model
+and the `--resolve`/`--hosts` requirement. Unlike CIDR zones, hostname
+zones do NOT get an IPv6 counterpart (docs/DEVELOPMENT.md's ROADMAP item
+143) -- the `--hosts FILE` lookup a hostname zone relies on (`Resolver`,
+see "Name resolution" above) is itself IPv4-only, a separate, pre-existing
+limitation this item left untouched. A flow whose client/server address is
+IPv6-formatted is tried against `networks` zones, then `ipv6_networks`
+zones; only on a miss of both does the IPv4-only hostname fallback get a
+chance, so it never fires for an IPv6 address at all (see "Hostname zones"
+above). Multi-homed `assets:`/jump-host cross-referencing (see "Multi-homed
+assets and jump hosts" above) stays IPv4-only the same way -- `Asset::ips`
+only ever parses as IPv4 CIDR blocks, so an IPv6 endpoint is never matched
+against a declared asset, jump-host or not.
 
-An endpoint address that's IPv6-formatted (this decoder recognizes IPv6 on
-the wire -- docs/DEVELOPMENT.md's ROADMAP item 24 -- but `policy validate`'s
-zone matching is IPv4-only throughout, see "Addressing scope" below) gets
-its own, distinguishable `reason` text instead of the generic "no declared
-zone contains" wording used for an ordinary unmatched IPv4 address:
+An endpoint address that matches no declared zone at all -- CIDR
+(IPv4 or IPv6), VLAN, or hostname -- gets the same generic `reason` text
+regardless of address family:
 
 ```json
-"reason": "2001:db8::50 is an IPv6 address; policy zoning does not support IPv6 yet"
+"reason": "no declared zone contains 2001:db8::50 or 2001:db8::10"
 ```
 
-`verdict` stays `"unclassified"` either way -- this is a clarification of
-`reason`'s text, not a new verdict.
+`verdict` stays `"unclassified"`. Before ROADMAP item 143 wired IPv6 into
+zone matching, an IPv6-formatted endpoint got a distinguishable, permanently-
+unsupported-sounding `reason` instead ("`<ip>` is an IPv6 address; policy
+zoning does not support IPv6 yet") -- that special case is gone now that an
+IPv6 address can genuinely belong to a declared `ipv6_networks` zone; an
+unmatched IPv6 address is just as unclassified, and for the same reason, as
+an unmatched IPv4 one.
 
 ### Addressing scope: what a zone can (and can't yet) be built from
 
-A zone's underlying address matching is still IPv4-only throughout -- see
-"Zones" above and `policy.hpp`'s own `CidrBlock`, a plain 32-bit host-order
-integer plus prefix length. A `hostnames` zone (see "Hostname zones" above)
-just names an IPv4 address by a pinned hosts-file entry instead of writing
-the CIDR block directly; it doesn't add IPv6 support. There is no IPv6
-zone-matching anywhere in this tool (see `ipv4.hpp`'s own scope note) --
-`decode` itself DOES recognize IPv6 on the wire (docs/DEVELOPMENT.md's
-ROADMAP item 24), but a TCP flow between two IPv6 endpoints reaches
-`policy validate` only to be reported `unclassified`, with a `reason` that
-says plainly it's an unsupported address family (see "Hostname zones and
-the IPv6-flow reason string" above) rather than being silently
-indistinguishable from an ordinary unmatched IPv4 address. This section is
-an honest accounting of what all this means for the protocols `decode`
-recognizes but a zone can't classify by, and for the protocols a conduit
-can't yet name at all -- worth reading before assuming a conduit covers
-more than it actually does.
+A CIDR zone's address matching covers both IPv4 (`networks`, `policy.hpp`'s
+`CidrBlock`, a plain 32-bit host-order integer plus prefix length) and IPv6
+(`ipv6_networks`, `Ipv6CidrBlock`, a 16-byte big-endian address plus prefix
+length) -- see "Zones" above, and docs/DEVELOPMENT.md's ROADMAP item 143 for
+how this was wired in (`decode` itself has recognized IPv6 on the wire since
+item 24; this closed the separate gap of `policy validate` never matching an
+IPv6 flow against any zone at all). What's genuinely still IPv4-only, left
+deliberately untouched by item 143, is covered in "Hostname zones and
+jump-host/asset modeling stay IPv4-only" above: the `--hosts FILE` lookup a
+hostname zone relies on, and multi-homed `assets:`/jump-host
+cross-referencing. `inventory --policy-out`'s own zone inference (a
+different command, generating a *starting* policy file rather than
+evaluating one) is also still IPv4-only, independently of all of the above.
+This section is an honest accounting of what all this means for the
+protocols `decode` recognizes but a zone can't classify by, and for the
+protocols a conduit can't yet name at all -- worth reading before assuming a
+conduit covers more than it actually does.
 
 **The `protocols` enum names twenty-six values** (docs/DEVELOPMENT.md's ROADMAP items 14 and 103,
 done): `modbus`, `dnp3`, `s7comm`, `iec104`, `enip`, `bacnet`, `hartip`, `opcua`,
@@ -4626,7 +4670,7 @@ something `policy validate` needs to verify the way it verifies an IP
 conduit. The question worth asking about these four instead is whether
 the traffic is on the segment/VLAN it's supposed to be on AT ALL (a
 mis-patched switch port, an accidentally bridged VLAN) -- a
-VLAN-membership check, not an IPv4-zone check. docs/DEVELOPMENT.md's ROADMAP item 15 implements
+VLAN-membership check, not a CIDR-zone check. docs/DEVELOPMENT.md's ROADMAP item 15 implements
 exactly that: a zone can declare `vlans: [...]` instead of `networks:
 [...]`, and a VLAN-zone conduit is matched against these four protocols'
 own traffic, classified by whichever declared VLAN zone (if any) the
@@ -6764,10 +6808,10 @@ Low(0-3) -> Notice(5).
 
 ```
 $ conduitscope policy validate --read capture.pcap --policy plant.yaml --format cef
-CEF:0|conduitscope|conduitscope-policy|0.3.2|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3
+CEF:0|conduitscope|conduitscope-policy|0.3.3|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3
 
 $ conduitscope detect --read capture.pcap --format syslog
-<106>1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.3.2|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000
+<106>1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.3.3|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000
 ```
 
 ### Extension fields, by subcommand
@@ -8082,11 +8126,11 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   membership -- see docs/PROTOCOL_COVERAGE.md's link/IP-layer plumbing section and
   POLICY FILE FORMAT's "Addressing scope" section.
 - **A VLAN-zone conduit can't restrict WHICH direction a flow was
-  initiated, unlike an IPv4-zone conduit.** Its `from`/`to` are required to
+  initiated, unlike a CIDR-zone conduit.** Its `from`/`to` are required to
   name the exact same VLAN zone(s) (see POLICY FILE FORMAT's "Conduits"
   section for the full rationale: a single raw-Ethernet frame carries at
   most one VLAN tag, so there is no separate "source zone"/"destination
-  zone" the way an IPv4 conduit has a client zone and a server zone). This
+  zone" the way a CIDR-zone conduit has a client zone and a server zone). This
   is a deliberate design constraint of the VLAN-zone model itself, not
   something planned to be relaxed later.
 - **`functions`/per-flow service restriction is not available for

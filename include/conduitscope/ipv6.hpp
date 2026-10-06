@@ -31,14 +31,17 @@
 // implausible/zero IPv4 total_length does, see parse_ipv6's own comment); the Mobility (135)/HIP
 // (139)/Shim6 (140) extension headers (rare enough in real OT/IT traffic, and structurally
 // identical to Hop-by-Hop/Routing/Destination Options' own next-header+length-in-8-byte-units
-// shape, to add later with no redesign needed); parsing an IPv6 address back out of user-typed text
-// (parse_ipv4_string's own mirror) -- not needed until IPv6 is wired into `policy validate`'s own
-// conduit/zone model, which is its own, separately scoped follow-on (see ROADMAP item 24's own
-// "out of scope" paragraph).
+// shape, to add later with no redesign needed).
+//
+// Parsing an IPv6 address back out of user-typed text (parse_ipv4_string's own mirror) WAS also
+// listed here as out of scope, "not needed until IPv6 is wired into `policy validate`'s own
+// conduit/zone model" -- that follow-on is now done (ROADMAP item 143, docs/DEVELOPMENT.md):
+// see parse_ipv6_string below.
 #pragma once
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "conduitscope/byteio.hpp"
@@ -172,5 +175,20 @@ Ipv6FragmentResolution resolve_ipv6_fragment_upper_layer(uint8_t first_header_ty
 // dotted-quad-suffixed form the way some tools do -- out of scope for this first pass; plain RFC
 // 5952 output is what every consumer of this function gets today.
 std::string format_ipv6(const Ipv6Address& addr);
+
+// parse_ipv4_string's mirror (ipv4.hpp) -- RFC 4291 S2.2 general text form: 1-8 groups of 1-4
+// hex digits (case-insensitive; unlike parse_ipv4_string's decimal octets, a leading zero within
+// a hex group is NOT ambiguous with octal and is completely standard -- "2001:0db8::1" is valid
+// input and must be accepted), with at most one "::" run anywhere in the address (including "::"
+// alone, or at the very start/end) standing in for one-or-more all-zero groups it elides. Returns
+// std::nullopt (never throws) for anything else, including: a second "::"; a group count that
+// doesn't add up to exactly 8 once an elided run (if any) is accounted for; any group with zero,
+// or more than 4, hex digits, or containing a non-hex character (this also naturally rejects an
+// embedded IPv4-mapped dotted-decimal tail, e.g. "::ffff:1.2.3.4" -- out of scope, see this file's
+// own header comment, and '.' is simply never a valid hex digit here). Must round-trip whatever
+// format_ipv6 produces, but is intentionally more permissive than that function's own canonical-
+// output guarantee -- a `policy validate` policy file's own `ipv6_networks:` entries (ROADMAP item
+// 143) are hand-written by a person and need not already be in compressed, lowercase form.
+std::optional<Ipv6Address> parse_ipv6_string(const std::string& text);
 
 }  // namespace conduitscope

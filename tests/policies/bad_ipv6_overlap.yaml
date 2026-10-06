@@ -1,0 +1,14 @@
+# Regression fixture: z2's IPv6 network (2001:db8::1/128) is entirely inside z1's (2001:db8::/32)
+# -- an address in that range would belong to both zones, which parse_policy_text must reject
+# rather than silently picking whichever zone happens to be declared first. Mirrors
+# bad_overlap.yaml's own IPv4 case.
+zones:
+  z1:
+    ipv6_networks: ["2001:db8::/32"]
+  z2:
+    ipv6_networks: ["2001:db8::1/128"]
+conduits:
+  - name: c1
+    from: z1
+    to: z2
+    protocols: [any]

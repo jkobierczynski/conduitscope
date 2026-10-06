@@ -18753,6 +18753,169 @@ it done as its own patch.
     above (item 126's own already-confirmed understanding of this runner's argument-path
     translation, applied to a new call shape) rather than a locally-reproduced failure.
 
+142. **Version bump to v0.3.3.** Jurgen's own explicit statement: "I've released it as Version
+    v0.3.3." Matching item 125's own precedent (the v0.3.2 bump), this is a pure version-and-docs
+    synchronization pass with no behavior change -- it folds in every fix from items 133-141 (the
+    full patch295 security review, F1-F8, plus the item 141 Windows CI test-infrastructure fix)
+    under the version number Jurgen has now released.
+
+    **What was done.** `CMakeLists.txt`'s `project(conduitscope VERSION ...)` now reads `0.3.3`
+    (was `0.3.2`). Every place that quotes a live `conduitscope version`/`--version` output or an
+    export example containing that version string was updated to match: `docs/USER_GUIDE.md`'s two
+    `evidence` worked-example "tool version:" lines, and its CEF `policy`/`detect` example lines.
+    README.md's own "Status" line updated from "v0.3.2" to "v0.3.3", with its own separately-stale
+    test count fixed in the same edit (2493 -> 2500, the actual current total -- stale since at
+    least item 136, which added tests without ever updating this line). `docs/DEVELOPMENT.md`'s own
+    historical entries that quote a past `conduitscope 0.3.2` output as a point-in-time record of
+    what an earlier item's own verification actually ran against (this item's own 125 writeup, and
+    128's "version-bump gap from item 125" writeup) were deliberately left as `0.3.2` -- matching
+    125's own stated rule, they're historical fact about what version was running at the time, not
+    a live claim that needs to track the current one.
+
+    **Also caught: item 128's own `docs/manual/` gap, recurring.** Item 128 found and fixed the
+    v0.3.2 bump's own miss of `docs/manual/`'s dozen HTML pages (their sidebar "extended manual
+    &middot; vX.Y.Z" tag, plus several pages' worked-example output quoting a live version string)
+    -- a recurrence of exactly that gap was checked for here rather than assumed fixed once and
+    forgotten, and found: all twelve pages' sidebar tags and every worked-example line quoting
+    `0.3.2` (`evidence.html`, `policy.html`, `baseline.html`, `detect.html`, `setup.html`,
+    `index.html`'s own lede sentence) were still on `0.3.2` going into this item. All bumped to
+    `0.3.3` in the same pass as `docs/USER_GUIDE.md`/README.md, the same category of fix item 128
+    already applied once. `docs/manual/` is a directory of generated-looking HTML reference pages,
+    not `docs/MANUAL.md` (the separate, single Markdown file Jurgen asked to stop touching earlier
+    in this project's history) -- the two are easy to conflate by name alone, so this distinction
+    was re-confirmed by listing both paths before editing either.
+
+    **New tests.** None -- a version-string and doc-sync change, not new behavior or coverage.
+
+    **Docs.** `docs/USER_GUIDE.md`, `README.md`, and all twelve `docs/manual/*.html` pages updated
+    as above. `docs/MANUAL.md` itself was NOT touched, per Jurgen's standing instruction. No change
+    to any `docs/reviews/*.md` file -- a version bump isn't a finding from any of them.
+
+    **Verification.** `conduitscope version`/`--version` confirmed reporting `0.3.3` in every
+    config that builds a runnable binary. Default GCC `build`: full CTest suite, 2500/2500 passing
+    (unchanged count -- no new test). Clang ASan/UBSan `build-fuzz`: 2578/2578 (unchanged,
+    including all 78 `*_corpus_regression` tests), confirmed reporting `0.3.3`.
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2482/2482 (unchanged), confirmed
+    reporting `0.3.3`. MinGW cross-compile `build-mingw`: rebuilt clean, build-only as usual
+    (`conduitscope.exe`/`crypto_selftest.exe` both); the version string is compiled in via the same
+    `version.hpp.in`/`CONDUITSCOPE_REPORTED_VERSION` path every other config uses, not independently
+    runnable here. A full clean-room extract-rebuild-test cycle (fresh copy excluding build
+    directories, configure, build, full CTest): 2500/2500, zero failures, `conduitscope version`
+    confirmed reporting `0.3.3`.
+
+143. **IPv6 wired into `policy validate`'s zone/conduit matching.** Jurgen asked to "improve
+    IPv6" with no further detail. Research turned up several independently-scoped leftover gaps
+    from item 24 (the original IPv6 first pass): VRRP/HSRPv2-for-IPv6 address rendering, PIM's
+    IPv6 Encoded Address support, 6in4 inner-address extraction, and this one. Asked which via
+    `AskUserQuestion`; Jurgen chose this one -- the most consequential of the four, since every
+    IPv6 TCP/UDP flow reported `unclassified` with a canned, permanently-unsupported-sounding
+    reason ("`<ip>` is an IPv6 address; policy zoning does not support IPv6 yet", added by item
+    70 Phase 1), even though `decode` has recognized IPv6 on the wire since item 24 and dual-
+    stack OT/IT networks are routine. `ipv6.hpp`'s own file header already flagged this exact
+    follow-on by name as a separately-scoped gap; this item closes it.
+
+    **Design.** `ZoneKind::Cidr` stays ONE kind spanning both address families, rather than a
+    new `ZoneKind::Cidr6`. A new kind would force a conduit's `from`/`to` zones to be either
+    all-v4 or all-v6 (the existing conduit zone-kind-consistency check rejects mixing kinds) --
+    bad ergonomics for a real dual-stack network, where one logical "HMI zone -> PLC zone,
+    Modbus" rule should cover both families without duplicating the conduit. Nothing downstream
+    of a flow's matched `Zone*` (conduit `from_zones`/`to_zones` matching, `functions`, CEF/LEEF/
+    JSON/text rendering, `AssetZonePair` cross-referencing) branches on address family at all --
+    it's 100% keyed by `Zone::name` (a string) -- so a zone just gets a second, optional CIDR
+    list and a second lookup function, and everything else in the matching/reporting pipeline
+    needed zero changes. The new YAML key, confirmed with Jurgen via `AskUserQuestion`, is
+    `ipv6_networks`, matching this codebase's unbroken "spell ipv6 out in full, as a prefix"
+    convention (`Ipv6Address`, `format_ipv6`, `icmpv6_type_name`, `ipv6_attack_detect.hpp` --
+    never a bare "6" suffix). No `has_ipv6_zone()`-style backward-compat gate (unlike
+    `has_vlan_zone`/`has_hostname_zone`, which exist to gate a previously-nonexistent behavior
+    class): an IPv6 flow was *already* always `Unclassified` before this change, so a policy
+    declaring no `ipv6_networks` zone gets byte-for-byte identical behavior with or without a
+    gate -- confirmed empirically below, not just by code inspection.
+
+    **What was done.**
+    - `include/conduitscope/ipv6.hpp` / `src/ipv6.cpp`: new `std::optional<Ipv6Address>
+      parse_ipv6_string(const std::string&)`, mirroring `parse_ipv4_string`. Implements RFC 4291
+      §2.2's general text form from scratch: 1-8 groups of 1-4 hex digits (case-insensitive,
+      leading zeros permitted within a group -- unlike IPv4's octet parsing, hex has no octal-
+      ambiguity reason to reject them), at most one `::` run standing in for one-or-more all-
+      zero groups. Rejects a second `::`, a wrong group count, any malformed group, and an
+      embedded dotted-decimal tail (e.g. `::ffff:1.2.3.4`) -- out of scope, matching this file's
+      own existing scope note. Verified against 20 hand-written cases (including round-trips
+      through the pre-existing `format_ipv6`) via a standalone compile before wiring it in.
+    - `include/conduitscope/policy.hpp` / `src/policy.cpp`: new `Ipv6CidrBlock` struct (mirrors
+      `CidrBlock`: network, prefix length 0-128, original text) and free functions
+      `cidr_contains_ipv6`/`cidr_overlaps_ipv6`/`parse_cidr_ipv6`, all byte-array-masked (no
+      native 128-bit integer). `Zone` gained `std::vector<Ipv6CidrBlock> ipv6_networks`; `Policy`
+      gained `zone_for_ipv6()`, a linear scan mirroring `zone_for()` exactly. `parse_policy_text`
+      now reads an `ipv6_networks` node alongside `networks`/`vlans`/`hostnames` (no singular
+      alias, matching `networks` itself); `networks` and `ipv6_networks` together still count as
+      exactly one occurrence of the Cidr kind, so a dual-stack zone declaring both is not a
+      kind-count violation. The two `kind_count` error messages were updated to name all four
+      keys. The zone-overlap validation pass gained a second nested loop checking a zone's
+      `ipv6_networks` against every other same-kind zone's, independent of the pre-existing IPv4
+      check (an IPv4 and an IPv6 network can never overlap -- disjoint address spaces, no
+      cross-family check needed).
+    - `src/policy_engine.cpp`: `describe_unmatched_endpoint`/`zone_unclassified_reason` had their
+      `ip.find(':')`-sniffing IPv6 special case deleted entirely -- both now always emit the
+      generic "no declared zone contains `<ip>`" text an unmatched IPv4 address already got; the
+      special case becomes false now that IPv6 zones can exist, and no capture's `compliant()`
+      verdict changes either way. Both the TCP-flow and UDP-flow matching blocks in `finish()`
+      gained an IPv6 lookup attempt (`parse_ipv6_string` + `zone_for_ipv6`) between the existing
+      IPv4 CIDR lookup and the existing hostname fallback; the hostname fallback itself stays
+      gated on the IPv4 parse having *succeeded*, unchanged (`Resolver::hostname` is itself
+      IPv4-only, a separate, deliberately untouched limitation -- see Scope below). Everything
+      from the zone-name assignment onward needed zero changes, confirmed address-family-
+      agnostic end to end.
+
+    **Scope -- deliberately left untouched.** Hostname-zone `--hosts` resolution stays IPv4-only
+    (`Resolver` itself, pre-existing and separate from this item). `Asset`/multi-homed/jump-host
+    cross-referencing stays IPv4-only (`Asset::ips`, item 70 Phases 3-6's own still-unstarted
+    scope, untouched here). `inventory --policy-out`'s own independent IPv4-only zone inference
+    is a different command and code path entirely, not touched.
+
+    **New tests.** `tests/policies/ipv6_zone_compliant.yaml` (dual-stack `hmi_zone`/`plc_zone`,
+    each declaring both `networks` and `ipv6_networks`, sharing the pre-existing "HMI polls PLC
+    via Modbus" conduit unchanged) with `policy_ipv6_zone_modbus_allowed`, matched against
+    `tests/sample_ipv6.pcap`'s own pre-existing HMI6/PLC6 Modbus-over-IPv6 exchange: confirms
+    `ALLOWED` via the existing conduit with zero conduit-side changes, and that the fixture's
+    `NO_COMPRESSION_ADDR` packet (outside both zones) still reports the generic unclassified
+    reason. `tests/policies/ipv6_only_zone.yaml` (a zone declaring only `ipv6_networks`, no
+    `networks` at all) with `policy_ipv6_only_zone_modbus_allowed`: proves a v6-only CIDR zone
+    parses and matches entirely on its own. `tests/policies/bad_ipv6_cidr.yaml` (a malformed
+    entry) with `policy_error_bad_ipv6_cidr`, and `tests/policies/bad_ipv6_overlap.yaml` (two
+    zones' `ipv6_networks` overlapping) with `policy_error_ipv6_overlap`, both mirroring their
+    existing IPv4 siblings exactly. The pre-existing `policy_ipv6_flow_gets_ipv6_specific_reason`
+    was renamed to `policy_ipv6_flow_unclassified_generic_reason` and its expected text updated
+    to the new generic reason -- `compliant.yaml` still declares no `ipv6_networks` zone, so the
+    flow's verdict is unchanged (still `Unclassified`), only the reason text changed, empirically
+    confirming the no-gate design decision above. Three pre-existing error-message regexes
+    (`policy_error_vlan_zone_both_networks_and_vlans`, `policy_error_vlan_zone_neither_networks_
+    nor_vlans`, and `policy_error_zone_hostname_and_networks` -- the last one missed on a first
+    pass through `CMakeLists.txt` and only caught by the full-suite regression run below) were
+    updated for the `kind_count` wording change -- an intentional message-accuracy change, not a
+    regression. No new C++ `*_selftest` executable; every new edge case is reachable through an
+    ordinary `tests/policies/*.yaml` fixture, matching the existing IPv4 discipline.
+
+    **Docs.** `docs/USER_GUIDE.md`'s POLICY FILE FORMAT section: pervasive "IPv4 zone"/"IPv4-zone
+    conduit" -> "CIDR zone"/"CIDR-zone conduit" terminology pass; `ipv6_networks:` added to the
+    schema example; "Hostname zones and the IPv6-flow reason string" renamed and rewritten (its
+    premise -- IPv6 gets a permanently-unsupported reason -- is now false); "Addressing scope:
+    what a zone can (and can't yet) be built from" rewritten to drop the now-closed gap while
+    still documenting what's genuinely still not covered (the Scope section above); Validation
+    errors list updated for the new four-key wording. `man/conduitscope.1`: same "IPv4-zone" ->
+    "CIDR-zone" wording fix. `docs/manual/policy.html`/`docs/PROTOCOL_COVERAGE.md`: no changes --
+    neither made a stale IPv4-only claim about `policy validate` zone matching. `docs/MANUAL.md`
+    itself was NOT touched, per Jurgen's standing instruction.
+
+    **Verification.** Manual smoke-testing of every new/changed fixture against the real built
+    binary first (confirmed each fixture's exact verdict and reason text before writing its
+    `PASS_REGULAR_EXPRESSION`). The 7 new/changed CTest entries: 7/7 passing. Full default-build
+    CTest suite: 2504/2504 (+4 net new over item 142's 2500 -- 4 new tests, one renamed, zero
+    removed), with one real regression caught and fixed on the first full-suite run
+    (`policy_error_zone_hostname_and_networks`'s stale three-key regex, missed in the initial
+    `kind_count`-wording pass) before reaching 0 failures. Other build configs, the clean-room
+    cycle, and delivery are covered by this item's own packaging step below.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

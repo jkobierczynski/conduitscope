@@ -1,0 +1,24 @@
+# Regression fixture: dual-stack zones -- each zone declares BOTH an IPv4 'networks' block (the
+# existing compliant.yaml addresses) AND an IPv6 'ipv6_networks' block (tests/sample_ipv6.pcap's
+# own HMI6/PLC6 constants, see tools/make_sample_pcap.py), sharing the one pre-existing
+# "HMI polls PLC via Modbus" conduit. Proves a single logical conduit rule covers both address
+# families at once, with zero conduit-side changes -- the whole point of keeping ZoneKind::Cidr
+# as one kind rather than adding a separate IPv6 zone kind (see ROADMAP item 143).
+zones:
+  hmi_zone:
+    description: "HMI / engineering workstation (synthetic fixtures' HMI_IP / HMI6)"
+    networks:
+      - 192.168.1.50/32
+    ipv6_networks:
+      - 2001:db8::50/128
+  plc_zone:
+    description: "PLC (synthetic fixtures' PLC_IP / PLC6)"
+    networks: [192.168.1.10/32]
+    ipv6_networks: [2001:db8::10/128]
+
+conduits:
+  - name: "HMI polls PLC via Modbus"
+    from: hmi_zone
+    to: plc_zone
+    protocols: [modbus]
+    ports: [502]

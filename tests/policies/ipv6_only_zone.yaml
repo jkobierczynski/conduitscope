@@ -1,0 +1,14 @@
+# Regression fixture: a zone declaring ONLY 'ipv6_networks' -- no 'networks' key at all -- to
+# prove a v6-only CIDR zone parses and matches entirely on its own, independent of the dual-stack
+# case covered by ipv6_zone_compliant.yaml.
+zones:
+  z1:
+    ipv6_networks: ["2001:db8::50/128"]
+  z2:
+    ipv6_networks: ["2001:db8::10/128"]
+conduits:
+  - name: c1
+    from: z1
+    to: z2
+    protocols: [modbus]
+    ports: [502]

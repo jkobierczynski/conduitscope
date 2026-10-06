@@ -13,7 +13,11 @@
 // A zone is built from ONE of three addressing schemes, mutually exclusive
 // per zone (ROADMAP item 15, extended by the "match how plants are zoned"
 // work -- see docs/DEVELOPMENT.md):
-//   - IPv4 CIDR blocks (`networks:`) -- the original, TCP-flow-oriented
+//   - CIDR blocks (`networks:` for IPv4, `ipv6_networks:` for IPv6 -- ROADMAP
+//     item 143 added the latter; the two are NOT mutually exclusive with each
+//     other, only with `vlans:`/`hostnames:` below, so a single zone may
+//     declare either or both, for a dual-stack zone whose conduits need no
+//     duplicating per address family) -- the original, TCP-flow-oriented
 //     model, matched against a flow's client/server IP by PolicyEngine.
 //   - VLAN membership (`vlans:`) -- for the four protocols with no IP layer
 //     at all (PROFINET RT, GOOSE, Sampled Values, EtherCAT -- see
@@ -53,7 +57,11 @@
 //     fast, before evaluating anything, if a policy declares a hostname
 //     zone but `--resolve`/`--hosts` were not both given, rather than
 //     silently matching nothing. This keeps a compliance verdict
-//     reproducible run-to-run, which a live DNS lookup could never be.
+//     reproducible run-to-run, which a live DNS lookup could never be. Unlike
+//     a CIDR zone (both address families now, as of item 143), this fallback
+//     stays IPv4-only -- the Resolver's own `--hosts` file parsing is IPv4-
+//     dotted-quad-only (a pre-existing, separate limitation, resolver.hpp),
+//     so a hostname zone never matches an IPv6 flow today.
 //
 // `Zone::kind`/`Conduit::kind` (see below) is the explicit discriminator for
 // which of the three a given zone/conduit is -- never inferred from which
@@ -70,6 +78,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "conduitscope/ipv6.hpp"  // Ipv6Address -- Ipv6CidrBlock's own network field, below
 
 namespace conduitscope {
 
@@ -98,8 +108,39 @@ bool cidr_overlaps(const CidrBlock& a, const CidrBlock& b);
 // Parses "a.b.c.d" or "a.b.c.d/N" (N in [0,32]) into a CidrBlock. Returns
 // std::nullopt (never throws) for anything else -- including a bare address
 // with no "/", which is accepted and treated as /32, but not e.g. a hostname
-// or an IPv6 address (this tool is IPv4-only throughout, matching ipv4.hpp).
+// or an IPv6 address -- this one function is IPv4-only, matching ipv4.hpp;
+// see Ipv6CidrBlock/parse_cidr_ipv6 below for a zone's IPv6 side (ROADMAP item
+// 143, docs/DEVELOPMENT.md -- a zone's addressing is no longer IPv4-only
+// overall, even though this particular parser still only ever produces an
+// IPv4 CidrBlock).
 std::optional<CidrBlock> parse_cidr(const std::string& text);
+
+// Ipv6CidrBlock's own sibling to CidrBlock above, for a zone's `ipv6_networks:` list (ROADMAP item
+// 143) -- same shape and same "network already masked down to prefix_len bits" contract, just over
+// a 128-bit Ipv6Address (ipv6.hpp) instead of a host-order uint32_t, since there's no native
+// 128-bit integer type to mirror CidrBlock::network's own convenience with (see Ipv6Address's own
+// comment, ipv6.hpp, for why it's a plain 16-byte array instead).
+struct Ipv6CidrBlock {
+    Ipv6Address network{};
+    uint8_t prefix_len = 128;
+    std::string text;
+};
+
+// True if `ip` falls inside `block` -- Ipv6CidrBlock's sibling to cidr_contains above, masking
+// byte-by-byte (and, for the one byte straddling a non-multiple-of-8 prefix_len, bit-by-bit within
+// that byte) since there's no single native integer wide enough to mask in one shift the way
+// cidr_contains does for a uint32_t.
+bool cidr_contains_ipv6(const Ipv6CidrBlock& block, const Ipv6Address& ip);
+
+// Ipv6CidrBlock's sibling to cidr_overlaps above -- same "do these two blocks describe any address
+// in common" contract, used by the same same-kind-pair overlap check parse_policy_text already
+// runs for IPv4 zones (see policy.cpp).
+bool cidr_overlaps_ipv6(const Ipv6CidrBlock& a, const Ipv6CidrBlock& b);
+
+// Ipv6CidrBlock's sibling to parse_cidr above: parses "<ipv6>" or "<ipv6>/N" (N in [0,128]) via
+// parse_ipv6_string (ipv6.hpp) for the address part. A bare address with no "/" is accepted and
+// treated as /128, mirroring parse_cidr's own /32 default for a bare IPv4 address.
+std::optional<Ipv6CidrBlock> parse_cidr_ipv6(const std::string& text);
 
 // The 802.1Q-usable VLAN ID range a declared zone's `vlans:` entries are validated against. VID 0
 // is reserved by the standard for priority-tagged, non-VLAN-member frames (a frame with a "VLAN
@@ -120,13 +161,19 @@ enum class ZoneKind { Cidr, Vlan, Hostname };
 struct Zone {
     std::string name;
     std::string description;  // optional; empty if not given
-    // Exactly one of `networks`/`vlans`/`hostnames` is ever non-empty for a given zone --
-    // parse_policy_text rejects a zone declaring more than one or none. `kind` is the explicit
-    // discriminator (rather than callers inferring it from which vector is non-empty) so every
-    // place that needs to branch on zone kind (Conduit validation, PolicyEngine's dispatch) says so
-    // plainly. See this file's own header comment for why a zone is exactly one of the three.
+    // Exactly one of (`networks` and/or `ipv6_networks`)/`vlans`/`hostnames` is ever non-empty for
+    // a given zone -- parse_policy_text rejects a zone declaring more than one of the three or
+    // none. `kind` is the explicit discriminator (rather than callers inferring it from which
+    // vector is non-empty) so every place that needs to branch on zone kind (Conduit validation,
+    // PolicyEngine's dispatch) says so plainly. See this file's own header comment for why a zone
+    // is exactly one of the three. `networks`/`ipv6_networks` are NOT mutually exclusive with each
+    // other (ROADMAP item 143, docs/DEVELOPMENT.md) -- a single ZoneKind::Cidr zone may declare
+    // either, or both, for a true dual-stack zone whose IPv4 and IPv6 ranges are matched by the
+    // same conduits with no duplication; see Policy::zone_for/zone_for_ipv6 and PolicyEngine::
+    // finish for how a flow's endpoint is checked against whichever of the two actually apply.
     ZoneKind kind = ZoneKind::Cidr;
     std::vector<CidrBlock> networks;
+    std::vector<Ipv6CidrBlock> ipv6_networks;  // ZoneKind::Cidr only -- see the comment above
     std::vector<uint16_t> vlans;
     std::vector<std::string> hostnames;  // ZoneKind::Hostname only -- lowercase not enforced (matched
                                           // case-sensitively against the Resolver's hosts-file entries,
@@ -380,6 +427,18 @@ struct Policy {
     // most one zone can ever match -- this returns the first (only) one.
     const Zone* zone_for(uint32_t ip) const;
 
+    // Ipv6CidrBlock's sibling to zone_for above (ROADMAP item 143, docs/DEVELOPMENT.md) -- returns
+    // the zone whose `ipv6_networks` list contains `ip`, or nullptr if no declared zone does.
+    // Deliberately uncached/ungated, unlike has_vlan_zone/has_hostname_zone below: a policy that
+    // declares no `ipv6_networks` zone at all simply never matches here (every call returns
+    // nullptr), which is exactly the same Unclassified outcome an IPv6 flow already got before this
+    // function existed -- there is no previously-nonexistent behavior class to gate against the
+    // way VLAN/hostname zones' own caches guard (see PolicyEngine::finish, policy_engine.cpp, for
+    // where this is called). Same "parse_policy_text already rejects an overlap, so at most one
+    // zone ever matches" guarantee as zone_for -- see the IPv6 sibling of cidr_overlaps' own
+    // same-kind-pair check.
+    const Zone* zone_for_ipv6(const Ipv6Address& ip) const;
+
     // Same idea for a VLAN zone: returns the zone whose `vlans` list contains `vlan_id`, or
     // nullptr if no declared VLAN zone does (including when the policy declares no VLAN zone at
     // all). parse_policy_text rejects any policy where two VLAN zones share a VLAN ID (mirroring
@@ -451,20 +510,28 @@ struct PolicyError : std::runtime_error {
 // known, else "<source_name>: <message>". Throws PolicyError on:
 //   - a YAML-subset syntax problem (propagated from yaml_mini::YamlError)
 //   - a missing top-level 'zones' or 'conduits' key, or either being empty
-//   - a zone declaring none of 'networks'/'vlans'/'hostnames', or more than
-//     one of them -- each zone is exactly one kind (see this file's own
-//     header comment)
-//   - a zone's 'networks' containing a value that isn't a valid CIDR/address
+//   - a zone declaring none of ('networks'/'ipv6_networks')/'vlans'/
+//     'hostnames', or more than one of those three groups -- each zone is
+//     exactly one kind (see this file's own header comment); 'networks' and
+//     'ipv6_networks' together still count as only ONE occurrence of the
+//     CIDR kind (ROADMAP item 143, docs/DEVELOPMENT.md) -- a zone may declare
+//     either, or both, for a dual-stack zone
+//   - a zone's 'networks' containing a value that isn't a valid IPv4
+//     address/CIDR block, or its 'ipv6_networks' containing a value that
+//     isn't a valid IPv6 address/CIDR block (ROADMAP item 143)
 //   - a zone's 'vlans' containing a value that isn't an integer in
 //     [kMinVlanId, kMaxVlanId] ([1, 4094] -- VID 0 and 4095 are reserved,
 //     see kMinVlanId/kMaxVlanId's own comment)
 //   - a zone's 'hostnames' containing an empty value
 //   - two zones of the SAME kind overlapping/duplicating: two CIDR zones
-//     whose networks overlap (see cidr_overlaps), two VLAN zones sharing a
-//     VLAN ID, or two hostname zones sharing a hostname -- the same "each
-//     address/VLAN/hostname belongs to at most one zone" rule, checked
-//     separately per zone kind (zones of different kinds can never overlap
-//     with each other, having no addressing scheme in common)
+//     whose IPv4 networks overlap (see cidr_overlaps) OR whose IPv6 networks
+//     overlap (see cidr_overlaps_ipv6 -- checked independently of the IPv4
+//     check; an IPv4 network can never overlap an IPv6 one, disjoint address
+//     spaces), two VLAN zones sharing a VLAN ID, or two hostname zones
+//     sharing a hostname -- the same "each address/VLAN/hostname belongs to
+//     at most one zone" rule, checked separately per zone kind (zones of
+//     different kinds can never overlap with each other, having no
+//     addressing scheme in common)
 //   - a zone literally named "unclassified" -- that name is reserved for
 //     traffic PolicyEngine finds matches no declared zone; declaring it
 //     explicitly would make that reporting ambiguous

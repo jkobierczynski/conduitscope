@@ -13,6 +13,7 @@
 #include "conduitscope/enip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/yaml_mini.hpp"
@@ -285,6 +286,81 @@ const Zone* Policy::zone_for(uint32_t ip) const {
     return nullptr;
 }
 
+namespace {
+
+// Shared by cidr_contains_ipv6/cidr_overlaps_ipv6: true if `a` and `b` agree on every bit within
+// their first `prefix_len` bits -- byte-by-byte for every whole byte the prefix covers, then a
+// single bit-masked comparison on the one byte (if any) the prefix only partially covers, since
+// there's no native integer wide enough to mask all 128 bits in one shift the way cidr_contains/
+// cidr_overlaps do for a uint32_t.
+bool ipv6_prefix_matches(const Ipv6Address& a, const Ipv6Address& b, uint8_t prefix_len) {
+    size_t full_bytes = prefix_len / 8;
+    for (size_t i = 0; i < full_bytes; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    unsigned remaining_bits = prefix_len % 8;
+    if (remaining_bits == 0) return true;
+    uint8_t mask = static_cast<uint8_t>(0xFFu << (8 - remaining_bits));
+    return (a[full_bytes] & mask) == (b[full_bytes] & mask);
+}
+
+}  // namespace
+
+bool cidr_contains_ipv6(const Ipv6CidrBlock& block, const Ipv6Address& ip) {
+    return ipv6_prefix_matches(block.network, ip, block.prefix_len);
+}
+
+bool cidr_overlaps_ipv6(const Ipv6CidrBlock& a, const Ipv6CidrBlock& b) {
+    uint8_t shorter = std::min(a.prefix_len, b.prefix_len);
+    return ipv6_prefix_matches(a.network, b.network, shorter);
+}
+
+std::optional<Ipv6CidrBlock> parse_cidr_ipv6(const std::string& text) {
+    std::string addr_part = text;
+    int prefix = 128;
+    size_t slash = text.find('/');
+    if (slash != std::string::npos) {
+        addr_part = text.substr(0, slash);
+        std::string plen_text = text.substr(slash + 1);
+        if (plen_text.empty()) return std::nullopt;
+        for (char c : plen_text) {
+            if (c < '0' || c > '9') return std::nullopt;
+        }
+        if (plen_text.size() > 3) return std::nullopt;  // reject e.g. "/0200" outright, not just >128
+        prefix = std::stoi(plen_text);
+        if (prefix < 0 || prefix > 128) return std::nullopt;
+    }
+    auto addr = parse_ipv6_string(addr_part);
+    if (!addr) return std::nullopt;
+
+    Ipv6CidrBlock block;
+    block.prefix_len = static_cast<uint8_t>(prefix);
+    // Mask off any host bits past prefix_len, mirroring parse_cidr's own "silently clear host
+    // bits" contract for IPv4 (see CidrBlock's own comment) -- byte-by-byte, same shape
+    // ipv6_prefix_matches uses for comparison.
+    Ipv6Address masked = *addr;
+    size_t full_bytes = block.prefix_len / 8;
+    unsigned remaining_bits = block.prefix_len % 8;
+    if (remaining_bits != 0) {
+        uint8_t mask = static_cast<uint8_t>(0xFFu << (8 - remaining_bits));
+        masked[full_bytes] = static_cast<uint8_t>(masked[full_bytes] & mask);
+        ++full_bytes;
+    }
+    for (size_t i = full_bytes; i < masked.size(); ++i) masked[i] = 0;
+    block.network = masked;
+    block.text = text;
+    return block;
+}
+
+const Zone* Policy::zone_for_ipv6(const Ipv6Address& ip) const {
+    for (const auto& z : zones) {
+        for (const auto& n : z.ipv6_networks) {
+            if (cidr_contains_ipv6(n, ip)) return &z;
+        }
+    }
+    return nullptr;
+}
+
 const Zone* Policy::zone_for_vlan(uint16_t vlan_id) const {
     for (const auto& z : zones) {
         if (z.kind != ZoneKind::Vlan) continue;
@@ -384,35 +460,62 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
             if (purdue->type == NodeType::Scalar) zone.purdue_level = purdue->scalar;
         }
         const yaml_mini::Node* nets = zval.find("networks");
+        // ROADMAP item 143 (docs/DEVELOPMENT.md): `ipv6_networks` is a zone's IPv6 CIDR list,
+        // alongside (not instead of) `networks` -- the two are independent sub-keys of the same
+        // "CIDR zone" kind, not mutually exclusive with each other, only with `vlans`/`hostnames`
+        // below (see this file's own header comment and Zone::ipv6_networks's own comment). No
+        // singular alias -- `networks` itself has none either.
+        const yaml_mini::Node* ipv6_nets = zval.find("ipv6_networks");
         const yaml_mini::Node* vlans = zval.find("vlans");
         if (!vlans) vlans = zval.find("vlan");  // singular alias, for a one-VLAN zone
         const yaml_mini::Node* hostnames = zval.find("hostnames");
         if (!hostnames) hostnames = zval.find("hostname");  // singular alias, for a one-hostname zone
-        int kind_count = (nets ? 1 : 0) + (vlans ? 1 : 0) + (hostnames ? 1 : 0);
+        int kind_count = ((nets || ipv6_nets) ? 1 : 0) + (vlans ? 1 : 0) + (hostnames ? 1 : 0);
         if (kind_count > 1) {
             fail(source_name, zval.line,
                  "zone '" + zname +
-                     "' declares more than one of 'networks'/'vlans'/'hostnames' -- a zone is "
-                     "exactly one kind (see docs/USER_GUIDE.md's POLICY FILE FORMAT section)");
+                     "' declares more than one of ('networks'/'ipv6_networks')/'vlans'/'hostnames' "
+                     "-- a zone is exactly one kind (see docs/USER_GUIDE.md's POLICY FILE FORMAT "
+                     "section)");
         }
         if (kind_count == 0) {
             fail(source_name, zval.line,
-                 "zone '" + zname + "' has no 'networks', 'vlans', or 'hostnames' key");
+                 "zone '" + zname +
+                     "' has no 'networks', 'ipv6_networks', 'vlans', or 'hostnames' key");
         }
-        if (nets) {
-            auto net_list = as_scalar_list(*nets, source_name, "zone '" + zname + "'s 'networks'");
-            if (net_list.empty()) {
-                fail(source_name, nets->line, "zone '" + zname + "' declares no networks");
-            }
-            for (const auto& item : net_list) {
-                auto cidr = parse_cidr(item.text);
-                if (!cidr) {
-                    fail(source_name, item.line,
-                         "zone '" + zname + "': '" + item.text +
-                             "' is not a valid IPv4 address or CIDR block (expected e.g. '10.10.10.0/24' "
-                             "or a bare address)");
+        if (nets || ipv6_nets) {
+            // zone.kind is already ZoneKind::Cidr by default -- both sub-keys share it.
+            if (nets) {
+                auto net_list = as_scalar_list(*nets, source_name, "zone '" + zname + "'s 'networks'");
+                if (net_list.empty()) {
+                    fail(source_name, nets->line, "zone '" + zname + "' declares no networks");
                 }
-                zone.networks.push_back(*cidr);
+                for (const auto& item : net_list) {
+                    auto cidr = parse_cidr(item.text);
+                    if (!cidr) {
+                        fail(source_name, item.line,
+                             "zone '" + zname + "': '" + item.text +
+                                 "' is not a valid IPv4 address or CIDR block (expected e.g. "
+                                 "'10.10.10.0/24' or a bare address)");
+                    }
+                    zone.networks.push_back(*cidr);
+                }
+            }
+            if (ipv6_nets) {
+                auto net_list = as_scalar_list(*ipv6_nets, source_name, "zone '" + zname + "'s 'ipv6_networks'");
+                if (net_list.empty()) {
+                    fail(source_name, ipv6_nets->line, "zone '" + zname + "' declares no ipv6_networks");
+                }
+                for (const auto& item : net_list) {
+                    auto cidr = parse_cidr_ipv6(item.text);
+                    if (!cidr) {
+                        fail(source_name, item.line,
+                             "zone '" + zname + "': '" + item.text +
+                                 "' is not a valid IPv6 address or CIDR block (expected e.g. "
+                                 "'2001:db8::/32' or a bare address)");
+                    }
+                    zone.ipv6_networks.push_back(*cidr);
+                }
             }
         } else if (vlans) {
             zone.kind = ZoneKind::Vlan;
@@ -475,6 +578,19 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                 for (const auto& a : za.networks) {
                     for (const auto& b : zb.networks) {
                         if (cidr_overlaps(a, b)) {
+                            fail(source_name, zb.line,
+                                 "zone '" + za.name + "' (" + a.text + ") and zone '" + zb.name + "' (" +
+                                     b.text + ") overlap -- each address must belong to at most one zone");
+                        }
+                    }
+                }
+                // ROADMAP item 143: checked independently of the IPv4 loop above -- an IPv4 network
+                // can never overlap an IPv6 one (disjoint address spaces), so there's no cross-family
+                // check to add, only this same same-kind-pair check run a second time over
+                // ipv6_networks.
+                for (const auto& a : za.ipv6_networks) {
+                    for (const auto& b : zb.ipv6_networks) {
+                        if (cidr_overlaps_ipv6(a, b)) {
                             fail(source_name, zb.line,
                                  "zone '" + za.name + "' (" + a.text + ") and zone '" + zb.name + "' (" +
                                      b.text + ") overlap -- each address must belong to at most one zone");

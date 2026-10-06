@@ -13,6 +13,7 @@
 #include "conduitscope/enip.hpp"
 #include "conduitscope/iec104.hpp"
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"  // parse_ipv6_string -- ROADMAP item 143, docs/DEVELOPMENT.md
 #include "conduitscope/modbus.hpp"
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/resolver.hpp"
@@ -149,27 +150,22 @@ std::string join_comma(const std::vector<std::string>& items) {
     return out;
 }
 
-// An IPv6-formatted address (format_ipv6's colon-separated form -- this codebase's zone/CIDR
-// matching is IPv4-only throughout, see policy.hpp's parse_cidr) gets its own, honest reason instead
-// of the generic "no declared zone contains" text, which would otherwise be indistinguishable from
-// an ordinary unclassified IPv4 address -- see docs/USER_GUIDE.md's LIMITATIONS section. Shared by
-// the TCP-flow and UDP-flow loops in finish() below, both of which hit exactly this same "at least
-// one endpoint matched no declared zone" case and want identical reason text.
-std::string describe_unmatched_endpoint(const std::string& ip) {
-    if (ip.find(':') != std::string::npos) {
-        return ip + " is an IPv6 address; policy zoning does not support IPv6 yet";
-    }
-    return "no declared zone contains " + ip;
-}
+// The "at least one endpoint matched no declared zone" reason text -- shared by the TCP-flow and
+// UDP-flow loops in finish() below. Before ROADMAP item 143 (docs/DEVELOPMENT.md), an IPv6-
+// formatted address (format_ipv6's colon-separated form) got its own, different wording here
+// ("... is an IPv6 address; policy zoning does not support IPv6 yet"), since zone/CIDR matching
+// was IPv4-only throughout and this generic text would otherwise have been misleadingly
+// indistinguishable from an ordinary unclassified IPv4 address. Item 143 made that wording false
+// -- a declared `ipv6_networks:` zone can now match an IPv6 endpoint -- so an unmatched IPv6
+// address gets exactly the same honest "no declared zone contains" treatment an unmatched IPv4
+// address already did; there is nothing left to distinguish.
+std::string describe_unmatched_endpoint(const std::string& ip) { return "no declared zone contains " + ip; }
 
 // Builds the FlowReport::reason/UdpFlowReport::reason text for the "at least one endpoint didn't
 // match any declared zone" case -- `cz`/`sz` are whether the client/server endpoint's zone lookup
-// found anything. See describe_unmatched_endpoint's own comment for the IPv6-specific branch.
+// found anything.
 std::string zone_unclassified_reason(const std::string& client_ip, const std::string& server_ip, bool cz, bool sz) {
     if (!cz && !sz) {
-        if (client_ip.find(':') != std::string::npos || server_ip.find(':') != std::string::npos) {
-            return describe_unmatched_endpoint(client_ip) + "; " + describe_unmatched_endpoint(server_ip);
-        }
         return "no declared zone contains " + client_ip + " or " + server_ip;
     }
     if (!cz) return describe_unmatched_endpoint(client_ip);
@@ -715,6 +711,14 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         auto server_ip_u32 = parse_ipv4_string(fs.server_ip);
         const Zone* cz = client_ip_u32 ? policy_.zone_for(*client_ip_u32) : nullptr;
         const Zone* sz = server_ip_u32 ? policy_.zone_for(*server_ip_u32) : nullptr;
+        // IPv6 CIDR-zone lookup (ROADMAP item 143, docs/DEVELOPMENT.md): only even attempted once
+        // the IPv4 parse above has already failed (an address is never both), and deliberately
+        // ungated -- unlike the hostname fallback below, there's no "policy opted in" flag to check
+        // first, since a policy declaring no `ipv6_networks` zone at all simply never matches here
+        // (zone_for_ipv6 always returns nullptr), the exact same Unclassified outcome this flow
+        // already got before this lookup existed. See Policy::zone_for_ipv6's own comment.
+        if (!cz) { if (auto v6 = parse_ipv6_string(fs.client_ip)) cz = policy_.zone_for_ipv6(*v6); }
+        if (!sz) { if (auto v6 = parse_ipv6_string(fs.server_ip)) sz = policy_.zone_for_ipv6(*v6); }
         // Hostname-zone fallback: only attempted once a CIDR-zone lookup above missed, and only
         // when the policy declares at least one hostname zone at all (see Policy::has_hostname_zone's
         // own comment) -- a policy with no hostname zone is completely unaffected, the same
@@ -926,7 +930,9 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         auto server_ip_u32 = parse_ipv4_string(st.server_ip);
         const Zone* cz = client_ip_u32 ? policy_.zone_for(*client_ip_u32) : nullptr;
         const Zone* sz = server_ip_u32 ? policy_.zone_for(*server_ip_u32) : nullptr;
-        // Same CIDR-then-hostname fallback the TCP-flow loop above uses -- see its own comment.
+        // Same IPv6-then-hostname fallback the TCP-flow loop above uses -- see its own comment.
+        if (!cz) { if (auto v6 = parse_ipv6_string(st.client_ip)) cz = policy_.zone_for_ipv6(*v6); }
+        if (!sz) { if (auto v6 = parse_ipv6_string(st.server_ip)) sz = policy_.zone_for_ipv6(*v6); }
         if (!cz && client_ip_u32 && policy_.has_hostname_zone()) {
             if (auto host = resolver.hostname(st.client_ip)) cz = policy_.zone_for_hostname(*host);
         }

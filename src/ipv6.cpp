@@ -2,7 +2,9 @@
 #include "conduitscope/ipv6.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <sstream>
+#include <vector>
 
 #include "conduitscope/tunnel_vpn.hpp"  // ESP_IP_PROTOCOL, AH_IP_PROTOCOL -- shared IANA protocol
                                         // numbers, not IPv4-specific despite that file's name; see
@@ -12,6 +14,51 @@
 namespace conduitscope {
 
 namespace {
+
+// Splits `text` on ':' the way parse_ipv6_string needs: an empty input yields zero groups (not one
+// empty-string group) -- the caller relies on this to distinguish "nothing on this side of the ::"
+// from "an empty group," which must be rejected. A non-empty input with no ':' at all yields one
+// group (the whole string). Every group, including an empty one from a stray/doubled ':', is
+// returned verbatim for the caller to validate -- this function only splits, it doesn't judge.
+std::vector<std::string> split_on_colon(const std::string& text) {
+    std::vector<std::string> parts;
+    if (text.empty()) return parts;
+    size_t start = 0;
+    while (true) {
+        size_t colon = text.find(':', start);
+        if (colon == std::string::npos) {
+            parts.push_back(text.substr(start));
+            break;
+        }
+        parts.push_back(text.substr(start, colon - start));
+        start = colon + 1;
+    }
+    return parts;
+}
+
+// Parses one IPv6 address group: 1-4 hex digits (case-insensitive), no leading-zero restriction
+// (unlike parse_ipv4_string's decimal octets -- see parse_ipv6_string's own comment on why hex
+// leading zeros are fine). std::nullopt for anything else, including an empty string (a stray or
+// doubled ':') or a group longer than 4 hex digits.
+std::optional<uint16_t> parse_hex_group(const std::string& group) {
+    if (group.empty() || group.size() > 4) return std::nullopt;
+    uint16_t value = 0;
+    for (char c : group) {
+        int digit;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            digit = c - 'A' + 10;
+        } else {
+            return std::nullopt;
+        }
+        value = static_cast<uint16_t>((value << 4) | static_cast<unsigned>(digit));
+    }
+    return value;
+}
+
 constexpr uint8_t kHopByHop = 0;
 constexpr uint8_t kRouting = 43;
 constexpr uint8_t kFragment = 44;
@@ -314,6 +361,46 @@ std::string format_ipv6(const Ipv6Address& addr) {
         ++i;
     }
     return out.str();
+}
+
+std::optional<Ipv6Address> parse_ipv6_string(const std::string& text) {
+    if (text.empty()) return std::nullopt;
+    // '.' is rejected implicitly by parse_hex_group below (never a hex digit) wherever it appears
+    // in a group -- including an embedded IPv4-mapped dotted-decimal tail like "::ffff:1.2.3.4",
+    // out of scope per this file's own header comment -- so no separate check for it is needed
+    // here.
+    size_t first_run = text.find("::");
+    std::vector<std::string> groups;
+    if (first_run == std::string::npos) {
+        // No "::" at all -- every one of the 8 groups must be written out explicitly.
+        groups = split_on_colon(text);
+        if (groups.size() != 8) return std::nullopt;
+    } else {
+        std::string left = text.substr(0, first_run);
+        std::string right = text.substr(first_run + 2);
+        if (right.find("::") != std::string::npos) {
+            // A second "::" -- ambiguous (which run is the elided one?), rejected outright.
+            return std::nullopt;
+        }
+        std::vector<std::string> left_groups = split_on_colon(left);
+        std::vector<std::string> right_groups = split_on_colon(right);
+        size_t written = left_groups.size() + right_groups.size();
+        // "::" must stand in for at least one elided group -- a written count of all 8 would mean
+        // it elided nothing, which RFC 4291 doesn't sanction and real tooling never emits.
+        if (written >= 8) return std::nullopt;
+        groups = std::move(left_groups);
+        groups.resize(groups.size() + (8 - written), "0");
+        groups.insert(groups.end(), right_groups.begin(), right_groups.end());
+    }
+
+    Ipv6Address addr{};
+    for (size_t i = 0; i < 8; ++i) {
+        auto value = parse_hex_group(groups[i]);
+        if (!value) return std::nullopt;
+        addr[i * 2] = static_cast<uint8_t>(*value >> 8);
+        addr[i * 2 + 1] = static_cast<uint8_t>(*value & 0xFF);
+    }
+    return addr;
 }
 
 }  // namespace conduitscope

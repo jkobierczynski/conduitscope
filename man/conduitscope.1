@@ -1,4 +1,4 @@
-.TH CONDUITSCOPE 1 "2026" "conduitscope 0.3.3" "User Commands"
+.TH CONDUITSCOPE 1 "2026" "conduitscope 0.2.9" "User Commands"
 .SH NAME
 conduitscope \- decode Modbus/TCP, DNP3, IEC 60870-5-104, S7comm/COTP, S7comm-Plus (Siemens TIA Portal / S7-1200/1500), IEC 61850 MMS (Manufacturing Message Specification, ISO 9506), EtherNet/IP (CIP explicit and implicit messaging), PROFINET RT (DCP and cyclic real-time IO), IEC 61850-8-1 GOOSE, IEC 61850-9-2 Sampled Values, EtherCAT, BACnet/IP, HART-IP, OPC UA Binary, MQTT (v3.1/v3.1.1/v5.0, including Sparkplug B), FOUNDATION Fieldbus HSE (FDA/SM/FMS/LAN Redundancy), IEEE Spanning Tree Protocol (STP/RSTP/MSTP), DeviceNet (CAN-bus CIP, via SocketCAN pcap captures), Kerberos, LDAP, SMB2/NTLM (the Windows Active Directory suite), DNS, mDNS, LLMNR, and NetBIOS Name Service (NBT-NS), RIP, IGMP, VRRP, HSRP, IGRP, PIM, EIGRP, and OSPFv2, plus detect DNS-over-HTTPS (DoH) via TLS SNI matching, plus recognize (by name only, not full decode) RDP, VNC, TeamViewer, AnyDesk, and Zoom, plus recognize (by name only, and for SNMP also its cleartext community string) SSH, HTTP, HTTPS, SNMPv1/v2c, Telnet, FTP, and TFTP, plus recognize (by name only, and for DHCP also its message type) NTP, DHCP, LDAPS, RADIUS, TACACS+, and IEEE 802.1X/EAPOL, plus recognize (by name only, and for CAPWAP control and GTP-U also their message type) CAPWAP control/data, LWAPP control/data, GTP-U, and PPPoE, plus recognize (by name only, except for IP-in-IP's own inner src/dst addresses) GRE (and its NVGRE/Mikrotik EoIP sub-cases), IPsec ESP/AH, IP-in-IP, 6in4, L2TP/L2TPv3, IKE, VXLAN, Geneve, WireGuard, OpenVPN, a generic DTLS-tunnel structural check, STT, and MPLS, from offline pcap/pcapng captures
 .SH SYNOPSIS
@@ -446,20 +446,21 @@ below.
 .TP
 .B policy validate (\fB\-r\fR \fIFILE\fR | \fB\-i\fR \fIINTERFACE\fR) \fB\-\-policy\fR \fIFILE\fR [\fIOPTIONS\fR]
 Zone/conduit policy check: decodes the capture (or live interface) exactly
-as \fBdecode\fR would, groups it into TCP flows (for IPv4-zone conduits) and,
+as \fBdecode\fR would, groups it into TCP flows (for CIDR-zone conduits) and,
 when the policy declares any VLAN zone, also into PROFINET RT/GOOSE/Sampled
 Values/EtherCAT "Ethernet flows" keyed by protocol and MAC pair (for
 VLAN-zone conduits), and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
 YAML subset -- see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT section). A
-zone is a set of IPv4 CIDR blocks, a set of VLAN IDs (\fBvlans:\fR), or a
-set of hostnames (\fBhostnames:\fR, matched only via a pinned
+zone is a set of IPv4 and/or IPv6 CIDR blocks (\fBnetworks:\fR/\fBipv6_networks:\fR),
+a set of VLAN IDs (\fBvlans:\fR), or a
+set of hostnames (\fBhostnames:\fR, IPv4-only, matched only via a pinned
 \fB\-\-resolve\fR/\fB\-\-hosts\fR snapshot, never live DNS) -- exactly one of
-the three, never mixed on one zone or one conduit; a conduit may
+the three kinds, never mixed on one zone or one conduit; a conduit may
 optionally narrow itself to
 specific named functions/services
 within its one protocol via \fBfunctions:\fR (e.g. Modbus reads but not
-writes, IPv4- or hostname-zone conduits only) -- matched, flow-wide and strict-all, against the exact
+writes, CIDR- or hostname-zone conduits only) -- matched, flow-wide and strict-all, against the exact
 function/service name strings that protocol's decoder emits; see
 \fBdocs/USER_GUIDE.md\fR's "Function-level restrictions" subsection for the
 schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
