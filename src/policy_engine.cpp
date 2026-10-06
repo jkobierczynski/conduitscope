@@ -172,6 +172,18 @@ std::string zone_unclassified_reason(const std::string& client_ip, const std::st
     return describe_unmatched_endpoint(server_ip);
 }
 
+// ROADMAP item 144 sibling to zone_unclassified_reason above, for Dnp3LinkFlowReport::reason --
+// names "master"/"outstation" explicitly, by DNP3 link address rather than by IP, since that's
+// the addressing scheme this sub-flow is actually classified by.
+std::string dnp3_link_zone_unclassified_reason(uint16_t master_addr, uint16_t outstation_addr, bool mz, bool oz) {
+    if (!mz && !oz) {
+        return "no declared Dnp3Link zone contains master address " + std::to_string(master_addr) +
+               " or outstation address " + std::to_string(outstation_addr);
+    }
+    if (!mz) return "no declared Dnp3Link zone contains master address " + std::to_string(master_addr);
+    return "no declared Dnp3Link zone contains outstation address " + std::to_string(outstation_addr);
+}
+
 std::string verdict_name(FlowVerdict v) {
     switch (v) {
         case FlowVerdict::Allowed: return "allowed";
@@ -572,6 +584,49 @@ void PolicyEngine::observe(const DecodedPacket& dp) {
         if (dp.result) {
             const Dnp3Result& dr = dp.result->as<Dnp3Result>();
             if (dr.dnp3_has_function && !dr.dnp3_function_name.empty()) fs.functions.insert(dr.dnp3_function_name);
+
+            // ROADMAP item 144: fold this packet into a finer-grained, per-outstation sub-flow too
+            // (PolicyReport::dnp3_link_flows) -- LAYERED ON TOP OF, never instead of, the ordinary
+            // fs state above -- but only when the policy actually declares at least one Dnp3Link
+            // zone (any_dnp3_link_zone_, see its own comment for the backward-compatibility
+            // rationale). Needs no new DNP3 decoding at all: dr.source_address/destination_address
+            // (dnp3.hpp) already carry exactly the addresses needed, and this flow's own
+            // client_ip (the "master" side of this TCP session, already decided above by the
+            // SYN/SYN-ACK-first/port-heuristic priority order every TCP flow uses) tells us which
+            // of the two is the master for THIS packet: a frame travelling master->gateway
+            // (dp.src_ip == fs.client_ip) carries the master's own address in `source_address` and
+            // the addressed outstation's in `destination_address`; a frame travelling the other way
+            // (gateway->master) carries the reverse.
+            if (any_dnp3_link_zone_) {
+                bool src_is_master = (dp.src_ip == fs.client_ip);
+                uint16_t master_addr = src_is_master ? dr.source_address : dr.destination_address;
+                uint16_t outstation_addr = src_is_master ? dr.destination_address : dr.source_address;
+                std::string dnp3_key =
+                    key + ":" + std::to_string(master_addr) + ":" + std::to_string(outstation_addr);
+                auto dit = dnp3_link_flows_.find(dnp3_key);
+                // Deliberately do NOT bump skipped_non_tcp_ on refusal here (unlike udp_flows_'s/
+                // ethernet_flows_'s own refusal handling just above/below) -- this packet is
+                // already fully accounted for by its own parent FlowState/FlowReport; this map is
+                // strictly an additional, finer-grained VIEW layered on top, never a packet's only
+                // tracked representation, so refusing a new (master, outstation) pair must not
+                // double-subtract a packet the parent flow has already counted.
+                if (admit_tracked_key(dit != dnp3_link_flows_.end(), dnp3_link_flows_.size(),
+                                       limits_.max_dnp3_link_flows, "dnp3_link_flows_",
+                                       "--max-policy-dnp3-link-flows")) {
+                    if (dit == dnp3_link_flows_.end()) {
+                        Dnp3LinkFlowState dst;
+                        dst.session_key = key;
+                        dst.master_link_address = master_addr;
+                        dst.outstation_link_address = outstation_addr;
+                        dnp3_link_flow_order_.push_back(dnp3_key);
+                        dit = dnp3_link_flows_.emplace(dnp3_key, std::move(dst)).first;
+                    }
+                    ++dit->second.packet_count;
+                    if (dr.dnp3_has_function && !dr.dnp3_function_name.empty()) {
+                        dit->second.functions.insert(dr.dnp3_function_name);
+                    }
+                }
+            }
         }
     } else if (dp.protocol == "s7comm" || dp.protocol == "cotp") {
         // "cotp" (TPKT/COTP framing recognized, but not a decoded S7comm message -- e.g. a
@@ -1019,6 +1074,102 @@ PolicyReport PolicyEngine::finish(const Resolver& resolver) const {
         report.udp_flows.push_back(std::move(ur));
     }
 
+    // ROADMAP item 144: DNP3 link-address sub-flows -- see Dnp3LinkFlowReport's own comment.
+    // Mirrors the TCP-flow loop above almost exactly, just keyed/zoned by DNP3 data-link address
+    // (via Policy::zone_for_dnp3_link) instead of IP, and matched only against ZoneKind::Dnp3Link
+    // conduits.
+    for (const auto& key : dnp3_link_flow_order_) {
+        const Dnp3LinkFlowState& ds = dnp3_link_flows_.at(key);
+        const FlowState& parent = flows_.at(ds.session_key);
+        Dnp3LinkFlowReport dr;
+        dr.client_ip = parent.client_ip;
+        dr.server_ip = parent.server_ip;
+        dr.server_port = parent.server_port;
+        dr.master_link_address = ds.master_link_address;
+        dr.outstation_link_address = ds.outstation_link_address;
+        dr.packet_count = ds.packet_count;
+        dr.observed_functions.assign(ds.functions.begin(), ds.functions.end());
+        std::sort(dr.observed_functions.begin(), dr.observed_functions.end());
+
+        const Zone* mz = policy_.zone_for_dnp3_link(ds.master_link_address);
+        const Zone* oz = policy_.zone_for_dnp3_link(ds.outstation_link_address);
+        dr.master_zone = mz ? mz->name : "unclassified";
+        dr.outstation_zone = oz ? oz->name : "unclassified";
+        dr.master_zone_purdue_level = mz ? mz->purdue_level : std::string();
+        dr.outstation_zone_purdue_level = oz ? oz->purdue_level : std::string();
+
+        if (!mz || !oz) {
+            dr.verdict = FlowVerdict::Unclassified;
+            dr.reason = dnp3_link_zone_unclassified_reason(ds.master_link_address, ds.outstation_link_address,
+                                                            mz != nullptr, oz != nullptr);
+        } else {
+            const Conduit* matched = nullptr;
+            bool zone_pair_has_any_conduit = false;
+            for (const auto& c : policy_.conduits) {
+                if (c.kind != ZoneKind::Dnp3Link) continue;
+                bool forward = zone_list_contains(c.from_zones, dr.master_zone) &&
+                               zone_list_contains(c.to_zones, dr.outstation_zone);
+                bool reverse = c.bidirectional && zone_list_contains(c.to_zones, dr.master_zone) &&
+                               zone_list_contains(c.from_zones, dr.outstation_zone);
+                if (!forward && !reverse) continue;
+                zone_pair_has_any_conduit = true;
+
+                if (!c.ports.empty() &&
+                    std::find(c.ports.begin(), c.ports.end(), dr.server_port) == c.ports.end()) {
+                    continue;
+                }
+                bool protocol_ok = std::find(c.protocols.begin(), c.protocols.end(), "dnp3") != c.protocols.end() ||
+                                     std::find(c.protocols.begin(), c.protocols.end(), "any") != c.protocols.end();
+                if (!protocol_ok) continue;
+
+                matched = &c;
+                break;
+            }
+            if (matched) {
+                // Same functions-restriction logic the TCP-flow loop above uses -- see its own
+                // comment -- except scoped to just this (master, outstation) pair's own
+                // observed_functions, not the whole parent session's.
+                std::vector<std::string> disallowed;
+                if (!matched->functions.empty()) {
+                    for (const auto& fn : dr.observed_functions) {
+                        bool ok = std::any_of(matched->functions.begin(), matched->functions.end(),
+                                               [&](const std::string& allowed) { return equal_ci(fn, allowed); });
+                        if (!ok) disallowed.push_back(fn);
+                    }
+                }
+                if (!disallowed.empty()) {
+                    dr.verdict = FlowVerdict::Violation;
+                    std::ostringstream reason;
+                    reason << (disallowed.size() > 1 ? "functions " : "function ");
+                    for (size_t i = 0; i < disallowed.size(); ++i) {
+                        if (i) reason << ", ";
+                        reason << "'" << disallowed[i] << "'";
+                    }
+                    reason << " observed; conduit '" << matched->name << "' permits only: "
+                           << join_comma(matched->functions);
+                    dr.reason = reason.str();
+                } else {
+                    dr.verdict = FlowVerdict::Allowed;
+                    dr.matched_conduit = matched->name;
+                    exercised_conduits.insert(matched->name);
+                }
+            } else {
+                dr.verdict = FlowVerdict::Violation;
+                std::ostringstream reason;
+                if (!zone_pair_has_any_conduit) {
+                    reason << "no conduit permits any traffic from zone '" << dr.master_zone << "' to zone '"
+                           << dr.outstation_zone << "'";
+                } else {
+                    reason << "a conduit exists between zone '" << dr.master_zone << "' and zone '"
+                           << dr.outstation_zone << "', but none permits dnp3 traffic on port "
+                           << dr.server_port;
+                }
+                dr.reason = reason.str();
+            }
+        }
+        report.dnp3_link_flows.push_back(std::move(dr));
+    }
+
     for (const auto& c : policy_.conduits) {
         if (!exercised_conduits.count(c.name)) report.unexercised_conduits.push_back(c.name);
     }
@@ -1155,7 +1306,9 @@ size_t PolicyReport::allowed_count() const {
            static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
                                               [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Allowed; })) +
            static_cast<size_t>(std::count_if(udp_flows.begin(), udp_flows.end(),
-                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Allowed; })) +
+           static_cast<size_t>(std::count_if(dnp3_link_flows.begin(), dnp3_link_flows.end(),
+                                              [](const Dnp3LinkFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
 }
 size_t PolicyReport::violation_count() const {
     return static_cast<size_t>(std::count_if(flows.begin(), flows.end(),
@@ -1163,7 +1316,9 @@ size_t PolicyReport::violation_count() const {
            static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
                                               [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Violation; })) +
            static_cast<size_t>(std::count_if(udp_flows.begin(), udp_flows.end(),
-                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Violation; })) +
+           static_cast<size_t>(std::count_if(dnp3_link_flows.begin(), dnp3_link_flows.end(),
+                                              [](const Dnp3LinkFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
 }
 size_t PolicyReport::unclassified_count() const {
     return static_cast<size_t>(std::count_if(
@@ -1171,7 +1326,9 @@ size_t PolicyReport::unclassified_count() const {
            static_cast<size_t>(std::count_if(ethernet_flows.begin(), ethernet_flows.end(),
                                               [](const EthernetFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; })) +
            static_cast<size_t>(std::count_if(udp_flows.begin(), udp_flows.end(),
-                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+                                              [](const UdpFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; })) +
+           static_cast<size_t>(std::count_if(dnp3_link_flows.begin(), dnp3_link_flows.end(),
+                                              [](const Dnp3LinkFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
 }
 
 namespace {
@@ -1532,6 +1689,102 @@ void write_unclassified_udp_flow_group_summarized_text(std::ostream& out, const 
     }
 }
 
+// ROADMAP item 144 sibling to write_udp_flow_group_text, for Dnp3LinkFlowReport -- rendered under a
+// "master -> outstation" (by DNP3 link address) heading rather than client/server IP, since that's
+// the addressing scheme this sub-flow is actually classified by; client_ip/server_ip/server_port are
+// still shown (copied from the parent TCP flow) purely for context, so an auditor can see which
+// gateway session this sub-flow belongs to.
+void write_dnp3_link_flow_group_text(std::ostream& out, const std::vector<const Dnp3LinkFlowReport*>& group,
+                                      const char* label, const Resolver& resolver) {
+    out << label << " (" << group.size() << "):\n";
+    if (group.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < group.size(); ++i) {
+        const Dnp3LinkFlowReport& f = *group[i];
+        out << "  [" << (i + 1) << "] master " << f.master_link_address << " -> outstation "
+            << f.outstation_link_address << "  (via " << f.client_ip << " -> " << f.server_ip << ":"
+            << f.server_port;
+        if (auto s = resolver.service_name(f.server_port, "tcp")) out << " (" << *s << ")";
+        out << ", " << f.packet_count << " packet(s))";
+        out << "\n      zones: " << f.master_zone;
+        if (!f.master_zone_purdue_level.empty()) out << " (Level " << f.master_zone_purdue_level << ")";
+        out << " -> " << f.outstation_zone;
+        if (!f.outstation_zone_purdue_level.empty()) out << " (Level " << f.outstation_zone_purdue_level << ")";
+        if (f.verdict == FlowVerdict::Allowed) {
+            out << ", matched conduit \"" << f.matched_conduit << "\"";
+        }
+        out << "\n";
+        if (!f.reason.empty()) {
+            out << "      " << f.reason << "\n";
+        }
+    }
+}
+
+// DNP3-link analog of UnclassifiedUdpFlowGroup/summarize_unclassified_udp_flows -- one collapsed
+// group of UNCLASSIFIED Dnp3LinkFlowReport entries sharing the same (master address, outstation
+// address, master zone, outstation zone). Dnp3LinkFlowReport::reason is always safe to reuse
+// verbatim once grouped -- the only Unclassified reason a DNP3 link sub-flow can have is
+// dnp3_link_zone_unclassified_reason's, which never embeds a per-flow count.
+struct UnclassifiedDnp3LinkFlowGroup {
+    const Dnp3LinkFlowReport* first = nullptr;
+    size_t flow_count = 0;
+    size_t packet_total = 0;
+};
+
+std::vector<UnclassifiedDnp3LinkFlowGroup> summarize_unclassified_dnp3_link_flows(
+    const std::vector<const Dnp3LinkFlowReport*>& group) {
+    std::vector<UnclassifiedDnp3LinkFlowGroup> result;
+    std::unordered_map<std::string, size_t> index_of_key;
+    result.reserve(group.size());
+    for (const Dnp3LinkFlowReport* f : group) {
+        std::string key = std::to_string(f->master_link_address) + ":" +
+                           std::to_string(f->outstation_link_address) + ":" + f->master_zone + ":" +
+                           f->outstation_zone;
+        auto it = index_of_key.find(key);
+        if (it == index_of_key.end()) {
+            index_of_key.emplace(key, result.size());
+            result.push_back(UnclassifiedDnp3LinkFlowGroup{f, 1, f->packet_count});
+        } else {
+            UnclassifiedDnp3LinkFlowGroup& g = result[it->second];
+            ++g.flow_count;
+            g.packet_total += f->packet_count;
+        }
+    }
+    return result;
+}
+
+void write_unclassified_dnp3_link_flow_group_summarized_text(std::ostream& out,
+                                                               const std::vector<const Dnp3LinkFlowReport*>& group,
+                                                               const Resolver& resolver) {
+    std::vector<UnclassifiedDnp3LinkFlowGroup> groups = summarize_unclassified_dnp3_link_flows(group);
+    out << "DNP3 LINK UNCLASSIFIED TRAFFIC (" << group.size() << " flow(s), summarized into " << groups.size()
+        << " distinct pattern(s) -- rerun without --summarize-unclassified, or with --format json, "
+           "for the full per-flow listing):\n";
+    if (groups.empty()) {
+        out << "  (none)\n";
+        return;
+    }
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const UnclassifiedDnp3LinkFlowGroup& g = groups[i];
+        const Dnp3LinkFlowReport& f = *g.first;
+        out << "  [" << (i + 1) << "] master " << f.master_link_address << " -> outstation "
+            << f.outstation_link_address << "  (via " << f.client_ip << " -> " << f.server_ip << ":"
+            << f.server_port;
+        if (auto s = resolver.service_name(f.server_port, "tcp")) out << " (" << *s << ")";
+        out << ")  -- " << g.flow_count << " flow(s), " << g.packet_total << " packet(s) total\n";
+        out << "      zones: " << f.master_zone;
+        if (!f.master_zone_purdue_level.empty()) out << " (Level " << f.master_zone_purdue_level << ")";
+        out << " -> " << f.outstation_zone;
+        if (!f.outstation_zone_purdue_level.empty()) out << " (Level " << f.outstation_zone_purdue_level << ")";
+        out << "\n";
+        if (!f.reason.empty()) {
+            out << "      " << f.reason << "\n";
+        }
+    }
+}
+
 // Renders PolicyReport::notable_protocols -- see that field's own comment for why this is always
 // printed (never grouped by, or gated on, Allowed/Violation/Unclassified the way write_flow_group_
 // text's three groups are) and NotableProtocolFinding's own comment for exactly what each field
@@ -1783,6 +2036,47 @@ void write_policy_report_text(std::ostream& out, const PolicyReport& report, con
         }
         out << "\n";
         write_udp_flow_group_text(out, udp_allowed_list, "UDP ALLOWED", resolver);
+        out << "\n";
+    }
+
+    // Only printed at all once the policy declares at least one Dnp3Link zone (see
+    // PolicyEngine::observe's own comment) -- a report from a policy that never does renders
+    // byte-for-byte identically to before this feature existed (ROADMAP item 144).
+    if (!report.dnp3_link_flows.empty()) {
+        size_t dnp3_link_allowed = static_cast<size_t>(std::count_if(
+            report.dnp3_link_flows.begin(), report.dnp3_link_flows.end(),
+            [](const Dnp3LinkFlowReport& f) { return f.verdict == FlowVerdict::Allowed; }));
+        size_t dnp3_link_violation = static_cast<size_t>(std::count_if(
+            report.dnp3_link_flows.begin(), report.dnp3_link_flows.end(),
+            [](const Dnp3LinkFlowReport& f) { return f.verdict == FlowVerdict::Violation; }));
+        size_t dnp3_link_unclassified = static_cast<size_t>(std::count_if(
+            report.dnp3_link_flows.begin(), report.dnp3_link_flows.end(),
+            [](const Dnp3LinkFlowReport& f) { return f.verdict == FlowVerdict::Unclassified; }));
+        out << "DNP3 LINK flows evaluated: " << report.dnp3_link_flows.size() << " (" << dnp3_link_allowed
+            << " allowed, " << dnp3_link_violation << " violation(s), " << dnp3_link_unclassified
+            << " unclassified)\n";
+        out << "  Per-outstation DNP3 data-link-address sub-flows (serial-to-IP gateway multiplexing),\n";
+        out << "  classified by DNP3 link address rather than IP -- see docs/USER_GUIDE.md's POLICY "
+               "FILE FORMAT section\n\n";
+
+        std::vector<const Dnp3LinkFlowReport*> dnp3_link_violations, dnp3_link_unclassified_list,
+            dnp3_link_allowed_list;
+        for (const auto& f : report.dnp3_link_flows) {
+            if (f.verdict == FlowVerdict::Violation) dnp3_link_violations.push_back(&f);
+            else if (f.verdict == FlowVerdict::Unclassified) dnp3_link_unclassified_list.push_back(&f);
+            else dnp3_link_allowed_list.push_back(&f);
+        }
+
+        write_dnp3_link_flow_group_text(out, dnp3_link_violations, "DNP3 LINK VIOLATIONS", resolver);
+        out << "\n";
+        if (summarize_unclassified) {
+            write_unclassified_dnp3_link_flow_group_summarized_text(out, dnp3_link_unclassified_list, resolver);
+        } else {
+            write_dnp3_link_flow_group_text(out, dnp3_link_unclassified_list, "DNP3 LINK UNCLASSIFIED TRAFFIC",
+                                             resolver);
+        }
+        out << "\n";
+        write_dnp3_link_flow_group_text(out, dnp3_link_allowed_list, "DNP3 LINK ALLOWED", resolver);
         out << "\n";
     }
 
@@ -2217,6 +2511,54 @@ void write_policy_report_json(std::ostream& out, const PolicyReport& report, con
         out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\"")) << "\n";
         out << "    }" << (i + 1 < report.jump_host_flows.size() ? "," : "") << "\n";
     }
+    out << "  ],\n";
+
+    // DNP3 data-link-address sub-flows (ROADMAP item 144) -- see Dnp3LinkFlowReport's own comment.
+    // Appended last, after every pre-existing field (jump_host_flows was the prior last field) --
+    // always present as an array, empty when the policy declares no Dnp3Link zone at all (see
+    // Policy::has_dnp3_link_zone), so a policy that never uses this feature gets one more (empty)
+    // field, same posture every earlier addition to this schema took when it was new.
+    out << "  \"dnp3_link_flows\": [\n";
+    for (size_t i = 0; i < report.dnp3_link_flows.size(); ++i) {
+        const Dnp3LinkFlowReport& f = report.dnp3_link_flows[i];
+        out << "    {\n";
+        out << "      \"protocol\": \"" << json_escape(f.protocol) << "\",\n";
+        out << "      \"client_ip\": \"" << json_escape(f.client_ip) << "\",\n";
+        out << "      \"server_ip\": \"" << json_escape(f.server_ip) << "\",\n";
+        out << "      \"server_port\": " << f.server_port << ",\n";
+        if (auto h = resolver.hostname(f.client_ip)) {
+            out << "      \"client_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        if (auto h = resolver.hostname(f.server_ip)) {
+            out << "      \"server_hostname\": \"" << json_escape(*h) << "\",\n";
+        }
+        if (auto s = resolver.service_name(f.server_port, "tcp")) {
+            out << "      \"server_port_service\": \"" << json_escape(*s) << "\",\n";
+        }
+        out << "      \"master_link_address\": " << f.master_link_address << ",\n";
+        out << "      \"outstation_link_address\": " << f.outstation_link_address << ",\n";
+        out << "      \"master_zone\": \"" << json_escape(f.master_zone) << "\",\n";
+        out << "      \"outstation_zone\": \"" << json_escape(f.outstation_zone) << "\",\n";
+        out << "      \"observed_functions\": [";
+        for (size_t j = 0; j < f.observed_functions.size(); ++j) {
+            if (j) out << ", ";
+            out << "\"" << json_escape(f.observed_functions[j]) << "\"";
+        }
+        out << "],\n";
+        out << "      \"packet_count\": " << f.packet_count << ",\n";
+        out << "      \"verdict\": \"" << verdict_name(f.verdict) << "\",\n";
+        out << "      \"matched_conduit\": " << (f.matched_conduit.empty() ? "null" : ("\"" + json_escape(f.matched_conduit) + "\"")) << ",\n";
+        out << "      \"reason\": " << (f.reason.empty() ? "null" : ("\"" + json_escape(f.reason) + "\""));
+        if (!f.master_zone_purdue_level.empty()) {
+            out << ",\n      \"master_zone_purdue_level\": \"" << json_escape(f.master_zone_purdue_level) << "\"";
+        }
+        if (!f.outstation_zone_purdue_level.empty()) {
+            out << ",\n      \"outstation_zone_purdue_level\": \"" << json_escape(f.outstation_zone_purdue_level)
+                << "\"";
+        }
+        out << "\n";
+        out << "    }" << (i + 1 < report.dnp3_link_flows.size() ? "," : "") << "\n";
+    }
     out << "  ]\n";
     out << "}\n";
 }
@@ -2278,6 +2620,31 @@ std::vector<std::pair<std::string, std::string>> ethernet_flow_violation_extensi
     return fields;
 }
 
+// ROADMAP item 144 sibling to udp_flow_violation_extension_fields, for Dnp3LinkFlowReport -- cs1/
+// cs2 carry the master/outstation zone (mirroring every other *_violation_extension_fields helper's
+// "cs1/cs2 = the two zones" convention), cs3/cs4 the two link addresses themselves, since those are
+// this sub-flow's own matching key, not an IP.
+std::vector<std::pair<std::string, std::string>> dnp3_link_flow_violation_extension_fields(
+    const Dnp3LinkFlowReport& f) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    fields.emplace_back("src", f.client_ip);
+    fields.emplace_back("dst", f.server_ip);
+    if (f.server_port != 0) fields.emplace_back("dpt", std::to_string(f.server_port));
+    fields.emplace_back("proto", f.protocol);
+    fields.emplace_back("cat", kPolicyViolationEventClassId);
+    fields.emplace_back("msg", f.reason);
+    fields.emplace_back("cs1Label", "Master Zone");
+    fields.emplace_back("cs1", f.master_zone);
+    fields.emplace_back("cs2Label", "Outstation Zone");
+    fields.emplace_back("cs2", f.outstation_zone);
+    fields.emplace_back("cs3Label", "Master Link Address");
+    fields.emplace_back("cs3", std::to_string(f.master_link_address));
+    fields.emplace_back("cs4Label", "Outstation Link Address");
+    fields.emplace_back("cs4", std::to_string(f.outstation_link_address));
+    fields.emplace_back("cnt", std::to_string(f.packet_count));
+    return fields;
+}
+
 }  // namespace
 
 void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
@@ -2308,6 +2675,12 @@ void write_policy_report_cef(std::ostream& out, const PolicyReport& report) {
                                 kPolicyViolationCefSeverity, udp_flow_violation_extension_fields(f))
             << "\n";
     }
+    for (const auto& f : report.dnp3_link_flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        out << render_cef_line("conduitscope-policy", kPolicyViolationEventClassId, kPolicyViolationName,
+                                kPolicyViolationCefSeverity, dnp3_link_flow_violation_extension_fields(f))
+            << "\n";
+    }
 }
 
 void write_policy_report_leef(std::ostream& out, const PolicyReport& report) {
@@ -2334,6 +2707,12 @@ void write_policy_report_leef(std::ostream& out, const PolicyReport& report) {
         fields.emplace_back("sev", std::to_string(kPolicyViolationCefSeverity));
         out << render_leef_line("conduitscope-policy", kPolicyViolationEventClassId, fields) << "\n";
     }
+    for (const auto& f : report.dnp3_link_flows) {
+        if (f.verdict != FlowVerdict::Violation) continue;
+        auto fields = dnp3_link_flow_violation_extension_fields(f);
+        fields.emplace_back("sev", std::to_string(kPolicyViolationCefSeverity));
+        out << render_leef_line("conduitscope-policy", kPolicyViolationEventClassId, fields) << "\n";
+    }
 }
 
 void write_policy_report_syslog(std::ostream& out, const PolicyReport& report) {
@@ -2357,6 +2736,9 @@ void write_policy_report_syslog(std::ostream& out, const PolicyReport& report) {
     }
     for (const auto& f : report.udp_flows) {
         if (f.verdict == FlowVerdict::Violation) emit(udp_flow_violation_extension_fields(f));
+    }
+    for (const auto& f : report.dnp3_link_flows) {
+        if (f.verdict == FlowVerdict::Violation) emit(dnp3_link_flow_violation_extension_fields(f));
     }
 }
 

@@ -687,6 +687,7 @@ conduitscope policy validate (-r FILE | -i INTERFACE) --policy POLICY_FILE [opti
 | `--max-policy-udp-flows N` | `100,000` | Cap the number of distinct UDP flows (BACnet/IP, CIP I/O, HART-IP, FF-HSE) `PolicyEngine` tracks per capture -- only populated once the policy names `bacnet`/`enip`/`hartip`/`ffhse`/`any` on a CIDR- or hostname-zone conduit. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
 | `--max-policy-ethernet-flows N` | `100,000` | Cap the number of distinct raw-Ethernet L2 flows (PROFINET RT/GOOSE/SV/EtherCAT) `PolicyEngine` tracks per capture -- only populated once the policy declares at least one VLAN zone. `0` = leave it at its own compiled default. Past this, further new flows are not evaluated and the result is marked incomplete. |
 | `--max-policy-notable-protocols N` | `50,000` | Cap the number of distinct notable-IT-protocol observations (see POLICY FILE FORMAT's "Notable IT protocols" subsection below) `PolicyEngine` records per capture. `0` = leave it at its own compiled default. Past this, further new combinations are not recorded and the result is marked incomplete. |
+| `--max-policy-dnp3-link-flows N` | `100,000` | Cap the number of distinct DNP3 data-link-address sub-flows (see POLICY FILE FORMAT's "DNP3-link-zone conduits" subsection, ROADMAP item 144) `PolicyEngine` tracks per capture -- only populated once the policy declares at least one `dnp3_link_addresses` zone. `0` = leave it at its own compiled default. Past this, further new (master, outstation) pairs are not evaluated and the result is marked incomplete. |
 
 #### Resource bounds and OBSERVATION INCOMPLETE
 
@@ -3058,19 +3059,27 @@ zones:
                                              # zone, but by a pinned --hosts file, see below
   <zone name>:
     hostname: <hostname>                    # singular alias, for a one-hostname zone
+  <zone name>:
+    dnp3_link_addresses: [<0-65519>, <...>] # a DNP3 link-address zone instead (ROADMAP item 144)
+                                             # -- for a serial-to-IP DNP3 gateway multiplexing
+                                             # several outstations behind one IP; see "DNP3-link-
+                                             # zone conduits" below
+  <zone name>:
+    dnp3_link_address: <address>            # singular alias, for a one-address zone
 
 conduits:
   - name: "<conduit name>"
     description: "<optional free text>"
     type: idmz                              # optional; marks an IT-OT/iDMZ boundary crossing,
                                              # see "iDMZ / IT-OT crossing conduits" below
-    from: <zone name or [zone name, ...]>
+    from: <zone name or [zone name, ...]>   # Dnp3Link-zone conduit: the master station zone(s)
     to: <zone name or [zone name, ...]>     # VLAN-zone conduit: must be the exact
-                                             # same zone(s) as 'from' -- see "Conduits" below
-    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | twincat | ge-srtp | fox | foxs | s7comm-plus | melsec | fins | codesys | bsap | cclink-ie | udp | profinet | goose | sv | ethercat | powerlink | any>, <...>]
-    ports: [<port>, <...>]                  # omit entirely to mean "any port"; CIDR/hostname-zone conduits only
-    bidirectional: <true | false>           # default: false; CIDR/hostname-zone conduits only
-    functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; CIDR/hostname-zone conduits only
+                                             # same zone(s) as 'from' -- see "Conduits" below;
+                                             # Dnp3Link-zone conduit: the outstation zone(s)
+    protocols: [<modbus | dnp3 | s7comm | iec104 | enip | bacnet | hartip | opcua | mms | mqtt | ffhse | twincat | ge-srtp | fox | foxs | s7comm-plus | melsec | fins | codesys | bsap | cclink-ie | udp | profinet | goose | sv | ethercat | powerlink | any>, <...>]  # dnp3/any only on a Dnp3Link-zone conduit
+    ports: [<port>, <...>]                  # omit entirely to mean "any port"; CIDR/hostname/Dnp3Link-zone conduits only
+    bidirectional: <true | false>           # default: false; CIDR/hostname/Dnp3Link-zone conduits only
+    functions: [<function/service name | read | write>, <...>]  # optional; see "Function-level restrictions" below; CIDR/hostname/Dnp3Link-zone conduits only
     from_macs: [<MAC address>, <...>]       # optional; see "from_macs" below; VLAN-zone conduits only
     to_macs: [<MAC address>, <...>]         # optional; see "to_macs" below; VLAN-zone conduits only
     ethertypes: [<0x0600-0xffff>, <...>]    # optional; see "ethertypes" below; VLAN-zone conduits only
@@ -3089,30 +3098,36 @@ assets:                                     # optional; see "Multi-homed assets 
 either one, or both for a dual-stack zone, since `networks` and
 `ipv6_networks` are independent sub-keys of the one "CIDR zone" kind, not
 mutually exclusive with each other; one or more VLAN IDs (`1`-`4094`), under
-`vlans` (singular alias `vlan`, for a one-VLAN zone); or one or more
+`vlans` (singular alias `vlan`, for a one-VLAN zone); one or more
 hostnames, under `hostnames` (singular alias `hostname`, for a one-hostname
-zone) -- a zone is never more than one of CIDR/VLAN/hostname, and never none
-of them. Which kind a zone is drives which protocols a conduit referencing it
-can name (see "Conduits" below): CIDR and `hostnames` zones both classify
-modbus/dnp3/s7comm/iec104/enip/bacnet/hartip/opcua/mms/mqtt/ffhse traffic by
-IP address, IPv4 or IPv6 (a `hostnames` zone just identifies an IPv4 address
-by a name instead of a CIDR block -- hostname zones stay IPv4-only, see
-"Hostname zones" below for exactly how and why); `vlans` zones classify
-profinet/goose/sv/ethercat/powerlink traffic -- the five protocols with no IP
-layer at all -- by which VLAN the frame was tagged with instead
-(docs/DEVELOPMENT.md's ROADMAP items 15 and 103; see "Addressing scope"
-below for the full rationale). At least one zone is required. **No two zones
-of the same kind may claim the same address, VLAN, or hostname** (an IPv4
-network and an IPv6 network can never overlap each other -- disjoint address
-spaces -- so a CIDR zone's `networks` and `ipv6_networks` are each checked
-for overlap against every other CIDR zone's own `networks`/`ipv6_networks`
+zone); or one or more DNP3 data-link addresses (`0`-`65519`), under
+`dnp3_link_addresses` (singular alias `dnp3_link_address`, ROADMAP item 144)
+-- a zone is never more than one of CIDR/VLAN/hostname/Dnp3Link, and never
+none of them. Which kind a zone is drives which protocols a conduit
+referencing it can name (see "Conduits" below): CIDR and `hostnames` zones
+both classify modbus/dnp3/s7comm/iec104/enip/bacnet/hartip/opcua/mms/mqtt/
+ffhse traffic by IP address, IPv4 or IPv6 (a `hostnames` zone just identifies
+an IPv4 address by a name instead of a CIDR block -- hostname zones stay
+IPv4-only, see "Hostname zones" below for exactly how and why); `vlans`
+zones classify profinet/goose/sv/ethercat/powerlink traffic -- the five
+protocols with no IP layer at all -- by which VLAN the frame was tagged with
+instead (docs/DEVELOPMENT.md's ROADMAP items 15 and 103; see "Addressing
+scope" below for the full rationale); `dnp3_link_addresses` zones classify
+DNP3 traffic by its own data-link-layer source/destination address instead
+of IP -- see "DNP3-link-zone conduits" below for why and how. At least one
+zone is required. **No two zones of the same kind may claim the same
+address, VLAN, hostname, or DNP3 link address** (an IPv4 network and an IPv6
+network can never overlap each other -- disjoint address spaces -- so a
+CIDR zone's `networks` and `ipv6_networks` are each checked for overlap
+against every other CIDR zone's own `networks`/`ipv6_networks`
 independently) -- `policy validate` needs to say definitively which single
 zone a packet belongs to, so overlap within a kind is rejected at load time,
 not silently resolved by declaration order (zones of different kinds can
 never overlap with each other, having no addressing scheme in common, so
-only same-kind pairs are checked). An address or VLAN matching no declared
-zone is reported as the reserved zone name `unclassified` (which you
-therefore can't declare yourself -- see "Validation errors" below).
+only same-kind pairs are checked). An address, VLAN, or DNP3 link address
+matching no declared zone is reported as the reserved zone name
+`unclassified` (which you therefore can't declare yourself -- see
+"Validation errors" below).
 
 A zone may also carry an optional `purdue_level` (e.g. `"1"`, `"2"`,
 `"3.5"`) -- a free-text label recording that zone's declared Purdue
@@ -3453,6 +3468,80 @@ protocol, named or synthetic, not just undecoded ones. See also
 flow is Allowed, the two undecoded-EtherType flows are Violations (this
 conduit's `protocols` doesn't name `"non-ip"`) -- proving POWERLINK is now
 governable exactly like the four pre-existing VLAN-only protocols.
+
+### DNP3-link-zone conduits
+
+ROADMAP item 144 closes out a gap item 13 deliberately deferred: a
+serial-to-IP DNP3 gateway often relays traffic for several physically
+distinct outstations, all multiplexed behind ONE IP (the gateway's) and
+typically one TCP session. A plain `networks`/`ipv6_networks`/`hostnames`
+zone can only ever see that one IP, so `policy validate` would produce a
+single verdict for the whole session -- it couldn't tell outstation A's
+traffic from outstation B's, which is exactly the distinction a real OT
+audit needs ("the master may poll outstations 10 and 11, but never 12").
+`dnp3_link_addresses` zones (and conduits referencing them) exist to make
+that distinction, classifying DNP3 traffic by its own data-link-layer
+source/destination address -- a field every DNP3 frame carries
+unambiguously, independent of IP -- instead of by IP.
+
+A `dnp3_link_addresses` zone is a list of plain numeric DNP3 data-link
+addresses in `0`-`65519` (`65520`-`65535`/`0xfff0`-`0xffff` is reserved by
+the DNP3/IEEE 1815 standard for broadcast variants and the self-address
+feature, and is rejected outright -- see "Validation errors" below). The
+SAME zone kind is used for both a master station and an outstation -- a
+zone itself doesn't know or care which role it plays; that's purely a
+function of which side of a conduit's `from`/`to` it's named on.
+
+**Unlike a VLAN-zone conduit, a `dnp3_link_addresses`-zone conduit IS
+directional**, exactly like a CIDR-zone conduit: `from` names the master
+station zone(s), `to` names the outstation zone(s). This works because,
+unlike a single raw-Ethernet frame's one VLAN tag, a DNP3 data-link frame
+always carries both a source and a destination address, so which side sent
+a given frame is never ambiguous. `bidirectional: true` works exactly as it
+does on a CIDR-zone conduit. **`ports`, `bidirectional`, and `functions`
+all stay fully meaningful** on a `dnp3_link_addresses`-zone conduit, and are
+matched exactly the way a CIDR-zone conduit already matches them -- the
+underlying wire traffic is still ordinary bidirectional TCP, just
+classified by DNP3 link address instead of IP. `functions` reuses the exact
+same DNP3 function-name table `dnp3`-protocol conduits already use (see
+"Function-level restrictions" below), checked per (master, outstation)
+pair, not once for the whole multiplexed session -- restricting one
+outstation's permitted functions never affects another outstation sharing
+the same gateway IP/session. `protocols` on a `dnp3_link_addresses`-zone
+conduit is restricted to `dnp3`/`any` only -- naming anything else is a
+load-time `PolicyError` (see "Validation errors" below), since this zone
+kind exists purely to classify DNP3 traffic. `from_macs`/`to_macs`/
+`ethertypes` stay rejected on it, the same as on a CIDR-/hostname-zone
+conduit -- those three are VLAN-zone-only.
+
+This is a finer-grained view LAYERED ON TOP OF, never instead of, the
+ordinary IP-based flow evaluation every TCP session already gets: a
+policy's `flows`/`Flows evaluated` entry for the gateway's TCP session is
+computed and reported completely independently (and, with no
+`dnp3_link_addresses` zone declared at all, DNP3 traffic is classified
+purely by the ordinary CIDR/hostname zone its IP falls into, exactly as
+before this feature existed -- a policy written before ROADMAP item 144
+is completely unaffected). The new, additional per-outstation verdicts
+appear in their own `DNP3 LINK flows evaluated`/`DNP3 LINK VIOLATIONS`/`DNP3
+LINK UNCLASSIFIED TRAFFIC`/`DNP3 LINK ALLOWED` text-report sections, and
+their own `dnp3_link_flows` JSON array (see "JSON report schema" below).
+
+**Worked example.** `tests/sample_dnp3_gateway.pcap` carries one TCP
+session, one master (link address `1`), and three outstations (`1024`,
+`2048`, `4096`) all multiplexed on it. Against
+`tests/policies/dnp3_link_zone_mixed_results.yaml` (a `master_station` zone
+for address `1`, an `outstation_1024` zone for address `1024` only, and one
+directional conduit between them): the gateway session's own ordinary
+`flows` entry stays `unclassified` (no CIDR/hostname zone contains either
+IP), but the DNP3 link sub-flows split three ways -- outstation `1024` is
+Allowed, while outstations `2048` and `4096` are Unclassified, since
+neither address is in any declared `dnp3_link_addresses` zone at all. See
+also `tests/policies/dnp3_link_zone_functions.yaml`, which restricts
+outstation `2048`'s own conduit to only the `Response` function: the `Read`
+request observed on that pair is a Violation, while the exact same `Read`
+function on outstation `1024`'s own, separately-configured conduit is
+Allowed -- proving the restriction is scoped per outstation, not to the
+whole session.
 
 ### UDP flow evaluation (BACnet/IP, CIP I/O, HART-IP, FF-HSE, MELSEC, FINS, CODESYS, BSAP, CC-Link IE, and generic UDP)
 
@@ -4058,11 +4147,11 @@ error (see EXIT STATUS):
 
 - a missing top-level `zones` or `conduits` key, or either being empty
 - a zone declaring more than one of (`networks`/`ipv6_networks`)/`vlans`/
-  `hostnames` -- `networks` and `ipv6_networks` together still count as
-  exactly one occurrence of the CIDR kind, so a zone declaring both of
-  those (a dual-stack zone) is fine, but a zone also declaring `vlans` or
-  `hostnames` alongside either is not -- or a zone declaring none of the
-  four
+  `hostnames`/`dnp3_link_addresses` -- `networks` and `ipv6_networks`
+  together still count as exactly one occurrence of the CIDR kind, so a
+  zone declaring both of those (a dual-stack zone) is fine, but a zone also
+  declaring `vlans`, `hostnames`, or `dnp3_link_addresses` alongside either
+  is not -- or a zone declaring none of the five
 - a zone's `networks` entry (if given) that isn't a valid IPv4
   address/CIDR block, or a present-but-empty `networks` key
 - a zone's `ipv6_networks` entry (if given) that isn't a valid IPv6
@@ -4071,11 +4160,16 @@ error (see EXIT STATUS):
 - a zone with no `vlans`, or a VLAN ID outside `[1, 4094]` (VID 0 is
   reserved for priority-tagged, non-VLAN-member frames; 4095 is reserved
   outright)
+- a zone with no `dnp3_link_addresses`, or a DNP3 link address outside
+  `[0, 65519]` (`65520`-`65535`/`0xfff0`-`0xffff` is reserved by the
+  DNP3/IEEE 1815 standard for broadcast variants and the self-address
+  feature -- ROADMAP item 144)
 - two zones of the same kind whose networks (IPv4 or IPv6, each checked
-  independently), or VLANs, overlap (a CIDR zone and a VLAN zone can never
-  overlap with each other; an IPv4 network and an IPv6 network can never
-  overlap each other either, being disjoint address spaces, so there's no
-  IPv4-vs-IPv6 overlap check -- only same-family pairs are checked)
+  independently), VLANs, or DNP3 link addresses overlap (a CIDR zone, a
+  VLAN zone, and a Dnp3Link zone can never overlap with each other; an
+  IPv4 network and an IPv6 network can never overlap each other either,
+  being disjoint address spaces, so there's no IPv4-vs-IPv6 overlap check
+  -- only same-kind pairs are checked)
 - a zone literally named `unclassified` (reserved -- see "Zones" above)
 - a duplicate zone name (a YAML-level error: mapping keys are inherently
   unique) or duplicate conduit name (a policy.cpp-level check: a conduit's
@@ -4090,24 +4184,29 @@ error (see EXIT STATUS):
   hartip, opcua, mms, mqtt, ffhse, twincat, ge-srtp, fox, foxs, s7comm-plus,
   melsec, fins, codesys, bsap, cclink-ie, udp, profinet, goose, sv, ethercat,
   powerlink, any}` (docs/DEVELOPMENT.md's ROADMAP items 14, 15, and 103)
-- a conduit's `from`/`to` referencing both a CIDR zone and a VLAN zone
-  (every zone a conduit references must be the same kind -- docs/DEVELOPMENT.md's ROADMAP item 15)
+- a conduit's `from`/`to` referencing zones of more than one kind (CIDR/
+  VLAN/hostname/Dnp3Link) -- every zone a conduit references must be the
+  same kind (docs/DEVELOPMENT.md's ROADMAP items 15 and 144)
 - a conduit naming a TCP/IP protocol (e.g. `modbus`) while its zones are
   VLAN zones, or naming a VLAN-only protocol (`profinet`/`goose`/`sv`/
   `ethercat`/`powerlink`) while its zones are CIDR zones (docs/DEVELOPMENT.md's
   ROADMAP items 15 and 103)
+- a Dnp3Link-zone conduit naming any protocol other than `dnp3`/`any` -- a
+  DNP3 link-address zone exists purely to classify DNP3 traffic by
+  data-link address, so nothing else can ever appear on it
+  (docs/DEVELOPMENT.md's ROADMAP item 144)
 - a VLAN-zone conduit whose `from` and `to` don't name the exact same set
   of VLAN zone(s) (docs/DEVELOPMENT.md's ROADMAP item 15 -- see "Conduits" above for why)
 - a VLAN-zone conduit giving `ports`, `bidirectional: true`, or
   `functions`/`function` -- none of these three has a meaning on a
   VLAN-zone conduit (docs/DEVELOPMENT.md's ROADMAP item 15 -- see "Conduits" above)
-- a CIDR- or hostname-zone conduit giving `from_macs`/`from_mac`,
-  `to_macs`/`to_mac`, or `ethertypes`/`ethertype` -- source-MAC,
+- a CIDR-, hostname-, or Dnp3Link-zone conduit giving `from_macs`/
+  `from_mac`, `to_macs`/`to_mac`, or `ethertypes`/`ethertype` -- source-MAC,
   destination-MAC, and raw-EtherType restriction only have a meaning on a
   VLAN-zone conduit, which has no client/server IP pair to restrict by the
-  way a CIDR-/hostname-zone conduit already can (see "Conduits" above;
-  ROADMAP item 103 added `to_macs`/`ethertypes` alongside the pre-existing
-  `from_macs`)
+  way a CIDR-/hostname-/Dnp3Link-zone conduit already can (see "Conduits"
+  above; ROADMAP item 103 added `to_macs`/`ethertypes` alongside the
+  pre-existing `from_macs`)
 - a conduit's `from_macs`/`from_mac` or `to_macs`/`to_mac` entry that isn't
   a valid MAC address (exactly six colon-separated hex octets, e.g.
   `00:0c:29:11:22:33`; hex digits are case-insensitive on input,
@@ -4210,7 +4309,12 @@ an array depending on how the policy file happened to write it:
   ],
   "ethernet_flows": [],
   "unexercised_conduits": [],
-  "notable_protocols": []
+  "notable_protocols": [],
+  "idmz_conduits": [],
+  "udp_flows": [],
+  "multi_homed_assets": [],
+  "jump_host_flows": [],
+  "dnp3_link_flows": []
 }
 ```
 
@@ -4519,11 +4623,10 @@ from the policy file itself, independent of the capture -- unaffected by,
 and never affecting, `compliant`/`allowed_count`/`violation_count`/
 `unclassified_count` above.
 
-**`jump_host_flows[]`** -- the true last field in this report today,
-appended after `multi_homed_assets[]`, always present, empty when the
-policy declares no `role: "jump_host"` asset (or one is declared but no
-observed flow ever touched it). One entry per matching TCP or UDP flow, in
-first-seen order (TCP flows first, then UDP flows):
+**`jump_host_flows[]`** -- appended after `multi_homed_assets[]`, always
+present, empty when the policy declares no `role: "jump_host"` asset (or one
+is declared but no observed flow ever touched it). One entry per matching
+TCP or UDP flow, in first-seen order (TCP flows first, then UDP flows):
 
 ```json
 {
@@ -4549,6 +4652,43 @@ this entry came from). `verdict`/`matched_conduit`/`reason` are copied
 verbatim from that flow's own entry in `flows[]`/`udp_flows[]` -- this array
 never carries its own, separate verdict; a flow appears here regardless of
 whether that verdict is `allowed`, `violation`, or `unclassified`.
+
+**`dnp3_link_flows[]`** (ROADMAP item 144) -- the true last field in this
+report today, appended after `jump_host_flows[]`, always present, empty
+when the policy declares no `dnp3_link_addresses` zone at all. One entry
+per observed (master, outstation) DNP3 link sub-flow, in first-seen order
+-- see "DNP3-link-zone conduits" above for the semantics:
+
+```json
+{
+  "protocol": "dnp3",
+  "client_ip": "192.168.1.50",
+  "server_ip": "192.168.1.10",
+  "server_port": 20000,
+  "master_link_address": 1,
+  "outstation_link_address": 1024,
+  "master_zone": "master_station",
+  "outstation_zone": "outstation_1024",
+  "observed_functions": ["Read", "Response"],
+  "packet_count": 2,
+  "verdict": "allowed",
+  "matched_conduit": "Master polls outstation 1024 via DNP3",
+  "reason": null
+}
+```
+
+`client_ip`/`server_ip`/`server_port` are copied from the parent TCP
+session this sub-flow belongs to, purely for context -- NOT part of this
+entry's own matching key, which is `master_link_address`/
+`outstation_link_address`. `master_zone`/`outstation_zone` are
+`"unclassified"` when no declared `dnp3_link_addresses` zone contains that
+address (same convention `client_zone`/`server_zone` already use above);
+`master_zone_purdue_level`/`outstation_zone_purdue_level` are present only
+when that zone declared a `purdue_level` (same omit-rather-than-`null`
+convention every other `*_purdue_level` field uses). `observed_functions`
+is scoped to just this (master, outstation) pair -- narrower than the
+parent flow's own `observed_functions`, which spans every outstation
+multiplexed on the session.
 
 ### Hostname zones and jump-host/asset modeling stay IPv4-only
 
@@ -4714,20 +4854,20 @@ this tool does with it today:**
   policy could reference.
 - **DNP3's data-link header** carries its own 2-byte source/destination
   address (the outstation/master address) -- parsed internally
-  (`Dnp3LinkFrame::source`/`destination` in `dnp3.hpp`) and now exposed to
+  (`Dnp3LinkFrame::source`/`destination` in `dnp3.hpp`) and exposed to
   `DecodedPacket`/JSON output as `dnp3_source_address`/
-  `dnp3_destination_address` (docs/DEVELOPMENT.md's ROADMAP item 13, done): `decode`'s own
-  output can now show which DNP3 address a frame was for, always set
-  whenever `protocol == "dnp3"` (even a link-layer-only control frame with
-  no user data still has a header carrying both addresses), mirroring the
-  first data-link frame found in a TCP payload, same "first frame only"
-  convention as `dnp3_link_crc_valid`/`dnp3_header_crc_valid`. Still NOT
-  consulted by the zone engine, though: serial-to-IP DNP3 gateways
-  routinely multiplex several outstations behind one IP address, so an
-  IP-only zone model can under-identify the actual field device on a
-  shared gateway in a way none of the other protocols here are exposed
-  to -- a zone model keyed on this address (in addition to, or instead
-  of, IP) remains open future work. See docs/DEVELOPMENT.md's ROADMAP.
+  `dnp3_destination_address` (docs/DEVELOPMENT.md's ROADMAP item 13, done):
+  `decode`'s own output shows which DNP3 address a frame was for, always
+  set whenever `protocol == "dnp3"` (even a link-layer-only control frame
+  with no user data still has a header carrying both addresses), mirroring
+  the first data-link frame found in a TCP payload, same "first frame
+  only" convention as `dnp3_link_crc_valid`/`dnp3_header_crc_valid`. **Now
+  ALSO consulted by the zone engine** (docs/DEVELOPMENT.md's ROADMAP item
+  144, done): a `dnp3_link_addresses` zone classifies DNP3 traffic by this
+  very address, closing exactly the gap this paragraph used to describe --
+  a serial-to-IP DNP3 gateway multiplexing several outstations behind one
+  IP address can now be distinguished per outstation, not just per IP. See
+  "DNP3-link-zone conduits" above for the full model.
 - **IEC 104's ASDU** carries a Common Address (station/sector address)
   and per-point Information Object Addresses, both decoded and exposed
   (`iec104_common_address`, IOAs inline in `iec104_object_values`). Not
@@ -4766,11 +4906,11 @@ a policy rule against it -- `ethertypes` closes that, and `to_macs` gives
 the same "consulted by the zone engine" treatment to a VLAN frame's
 destination, not just its source (`from_macs`, Phase 5).
 
-None of this changes what's Allowed/Violation/Unclassified today, items 15
-and 103 excepted -- every other item above describes information `decode`
-already surfaces (or, for DNP3's link address, doesn't yet) that
-`PolicyEngine` still doesn't use for zone classification. See
-docs/DEVELOPMENT.md's ROADMAP for what's actually planned.
+None of this changes what's Allowed/Violation/Unclassified today, items 15,
+103, and 144 excepted -- every other item above describes information
+`decode` already surfaces that `PolicyEngine` still doesn't use for zone
+classification. See docs/DEVELOPMENT.md's ROADMAP for what's actually
+planned.
 
 ## OUTPUT FORMATS
 
@@ -5183,9 +5323,8 @@ packets where they apply:
   means these two values cannot be trusted either. This is the field a
   serial-to-IP DNP3 gateway multiplexing several outstations behind one
   shared IP needs to actually tell them apart -- see POLICY FILE FORMAT's
-  "Addressing scope" section for why an IP-only zone model can't do that
-  on its own, and docs/DEVELOPMENT.md's ROADMAP for the (still open) idea of a zone model keyed
-  on this address.
+  "DNP3-link-zone conduits" section for the zone model (ROADMAP item 144,
+  done) that's keyed on exactly this address.
 - `dnp3_link_crc_valid` / `dnp3_header_crc_valid` / `dnp3_block_count` /
   `dnp3_block_crc_failures`: data-link CRC-16 validation results, set
   whenever protocol is `dnp3` (unlike `dnp3_function` below, these need no

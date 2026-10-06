@@ -1,0 +1,22 @@
+# Worked example: a DNP3 data-link-address zone model (ROADMAP item 144) -- a "master_station"
+# zone (DNP3 link address 1) and an "outstation_1024" zone (DNP3 link address 1024 only), joined by
+# a directional conduit (from the master zone, to the outstation zone). Matched against
+# tests/sample_dnp3_gateway.pcap (one TCP session, one master multiplexing THREE outstations --
+# 1024, 2048, 4096 -- behind one gateway IP/session), this demonstrates the whole point of this
+# feature: outstation 1024's traffic is Allowed (it's inside the declared outstation_1024 zone),
+# while outstations 2048 and 4096 are Unclassified -- NOT because any conduit denies them, but
+# because neither address is in any declared Dnp3Link zone at all. A plain CIDR zone on the
+# gateway's IP alone could never draw this distinction -- all three outstations share one IP.
+zones:
+  master_station:
+    description: "The DNP3 master -- link address 1"
+    dnp3_link_addresses: [1]
+  outstation_1024:
+    description: "One specific outstation behind the gateway -- link address 1024 only"
+    dnp3_link_addresses: [1024]
+
+conduits:
+  - name: "Master polls outstation 1024 via DNP3"
+    from: master_station
+    to: outstation_1024
+    protocol: dnp3

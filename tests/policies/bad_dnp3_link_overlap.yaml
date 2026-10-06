@@ -1,0 +1,13 @@
+# Two Dnp3Link zones both claiming DNP3 link address 1024 -- rejected the same way
+# bad_vlan_overlap.yaml rejects two VLAN zones sharing a VLAN ID (ROADMAP item 144).
+zones:
+  outstation_a:
+    dnp3_link_addresses: [1024]
+  outstation_b:
+    dnp3_link_addresses: [1024, 2048]
+
+conduits:
+  - name: "c1"
+    from: outstation_a
+    to: outstation_b
+    protocol: dnp3

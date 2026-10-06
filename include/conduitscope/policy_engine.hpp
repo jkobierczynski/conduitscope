@@ -211,6 +211,46 @@ struct UdpFlowReport {
     std::string client_mac, server_mac;
 };
 
+// One observed DNP3 data-link-address "sub-flow" (ROADMAP item 144) -- a finer-grained view LAYERED
+// ON TOP OF (never instead of) the ordinary IP-based FlowReport for the same TCP session: a
+// serial-to-IP DNP3 gateway multiplexes several physically distinct outstations behind one gateway
+// IP (and typically one TCP session), so the parent FlowReport can only ever produce one verdict for
+// that whole session -- this struct exists to distinguish outstation A's traffic from outstation
+// B's, by DNP3 data-link address, the way a CIDR conduit distinguishes by IP. Only ever populated
+// once the policy declares at least one Dnp3Link zone (Policy::has_dnp3_link_zone) -- otherwise this
+// traffic stays folded into its parent FlowReport exactly as before this feature existed, so a
+// policy file written before it existed can never have its compliance verdict change just because a
+// capture happens to contain DNP3 traffic that policy's author never wrote a Dnp3Link zone/conduit
+// to address. Unlike EthernetFlowReport's mac_a/mac_b, master_link_address/outstation_link_address
+// is a DIRECTIONAL pair, not a canonicalized order-independent one -- a DNP3 frame unambiguously
+// carries both a source and destination data-link address, so "which one is the master" is always
+// known (see PolicyEngine::observe's own comment for exactly how it's derived, with zero new DNP3
+// decoding needed -- Dnp3Result::source_address/destination_address, dnp3.hpp, already carry it).
+struct Dnp3LinkFlowReport {
+    // Copied from the parent TCP flow (FlowReport) this sub-flow's session belongs to -- purely for
+    // report context, NEVER part of this struct's own matching key (see PolicyEngine::finish).
+    std::string client_ip, server_ip;
+    uint16_t server_port = 0;
+    std::string protocol = "dnp3";  // always "dnp3" -- this struct only ever exists for DNP3 traffic
+    uint16_t master_link_address = 0;
+    uint16_t outstation_link_address = 0;
+    std::string master_zone, outstation_zone;  // "unclassified" when Policy::zone_for_dnp3_link found
+                                                // nothing -- see FlowReport::client_zone's own comment,
+                                                // matched identically here
+    // Same idea as FlowReport::client_zone_purdue_level -- the matched zone's own Zone::purdue_level,
+    // or empty when unset/unclassified.
+    std::string master_zone_purdue_level, outstation_zone_purdue_level;
+    // Distinct, non-empty DNP3 function names observed on THIS (master, outstation) pair specifically
+    // -- narrower than the parent FlowReport::observed_functions, which spans every outstation
+    // multiplexed on the session. See dnp3_known_function_names (dnp3.hpp) for the full table a
+    // Dnp3Link conduit's own 'functions' allow-list is validated against.
+    std::vector<std::string> observed_functions;
+    size_t packet_count = 0;
+    FlowVerdict verdict = FlowVerdict::Unclassified;
+    std::string matched_conduit;  // set (non-empty) only when verdict == Allowed
+    std::string reason;           // set (non-empty) when verdict != Allowed: why, for the report
+};
+
 // One aggregated observation of a Tier 1-5 "IT protocol an OT auditor flags" (ROADMAP item 18;
 // notable_it_protocols.hpp names the exact 43 protocol values and their tier) -- recorded
 // independent of, and never affecting, this flow/L2-flow's own Allowed/Violation/Unclassified
@@ -329,11 +369,19 @@ struct PolicyReport {
     // protocols, not raw Ethernet), through the identical ports/bidirectional/protocol matching
     // logic `flows` above uses -- see UdpFlowReport's own comment.
     std::vector<UdpFlowReport> udp_flows;
+    // One per observed DNP3 data-link-address sub-flow -- see Dnp3LinkFlowReport's own comment.
+    // Only ever non-empty when the policy declares at least one Dnp3Link zone
+    // (Policy::has_dnp3_link_zone); otherwise this traffic stays folded into its parent `flows` entry
+    // exactly as before this feature existed (ROADMAP item 144). Layered ON TOP OF, never instead
+    // of, `flows` -- the parent TCP flow's own IP-based verdict is computed and reported
+    // independently of these finer-grained per-outstation verdicts.
+    std::vector<Dnp3LinkFlowReport> dnp3_link_flows;
     // Conduits declared in the policy that no observed flow ever matched -- informational only
     // (doesn't affect compliant()); useful for pruning a policy file or noticing a conduit that
-    // was supposed to be exercised by this capture but wasn't. Spans `flows`, `ethernet_flows`, AND
-    // `udp_flows` -- a VLAN-zone conduit no L2 flow ever matched appears here exactly like an
-    // IP-zone conduit no TCP or UDP flow ever matched.
+    // was supposed to be exercised by this capture but wasn't. Spans `flows`, `ethernet_flows`,
+    // `udp_flows`, AND `dnp3_link_flows` -- a VLAN-zone conduit no L2 flow ever matched appears here
+    // exactly like an IP-zone conduit no TCP or UDP flow ever matched, or a Dnp3Link-zone conduit no
+    // DNP3 sub-flow ever matched.
     std::vector<std::string> unexercised_conduits;
     size_t skipped_non_tcp = 0;  // packets with has_ip==false or has_tcp==false (including UDP),
                                   // and NOT one of PROFINET RT/GOOSE/SV/EtherCAT (see ethernet_flows
@@ -372,9 +420,10 @@ struct PolicyReport {
     // affects any FlowVerdict or compliant().
     std::vector<JumpHostFlowFinding> jump_host_flows;
 
-    // Every count below spans `flows`, `ethernet_flows`, AND `udp_flows` -- an L2 flow's or a UDP
-    // flow's verdict counts exactly like a TCP flow's for compliance purposes; there is no separate
-    // "ethernet compliant" or "UDP compliant" notion, one capture is either COMPLIANT or it isn't.
+    // Every count below spans `flows`, `ethernet_flows`, `udp_flows`, AND `dnp3_link_flows` -- an L2
+    // flow's, a UDP flow's, or a DNP3 link sub-flow's verdict counts exactly like a TCP flow's for
+    // compliance purposes; there is no separate "ethernet compliant"/"UDP compliant"/"DNP3 link
+    // compliant" notion, one capture is either COMPLIANT or it isn't.
     size_t allowed_count() const;
     size_t violation_count() const;
     size_t unclassified_count() const;
@@ -413,12 +462,17 @@ inline constexpr size_t kDefaultMaxPolicyTcpFlows = 200000;
 inline constexpr size_t kDefaultMaxPolicyUdpFlows = 100000;
 inline constexpr size_t kDefaultMaxPolicyEthernetFlows = 100000;
 inline constexpr size_t kDefaultMaxPolicyNotableProtocols = 50000;
+// ROADMAP item 144: sibling ceiling for dnp3_link_flows_ -- same sizing rationale as the four above
+// (a sub-flow map, strictly additive on top of flows_, so it's sized the same as
+// kDefaultMaxPolicyUdpFlows/kDefaultMaxPolicyEthernetFlows rather than smaller).
+inline constexpr size_t kDefaultMaxPolicyDnp3LinkFlows = 100000;
 
 struct PolicyEngineLimits {
     size_t max_tcp_flows = kDefaultMaxPolicyTcpFlows;
     size_t max_udp_flows = kDefaultMaxPolicyUdpFlows;
     size_t max_ethernet_flows = kDefaultMaxPolicyEthernetFlows;
     size_t max_notable_protocols = kDefaultMaxPolicyNotableProtocols;
+    size_t max_dnp3_link_flows = kDefaultMaxPolicyDnp3LinkFlows;  // ROADMAP item 144
 };
 
 class PolicyEngine {
@@ -426,7 +480,8 @@ public:
     explicit PolicyEngine(const Policy& policy, PolicyEngineLimits limits = PolicyEngineLimits{})
         : policy_(policy), any_vlan_zone_(policy.has_vlan_zone()),
           any_udp_ip_eligible_conduit_(policy.has_udp_eligible_conduit()),
-          any_ethertype_eligible_conduit_(policy.has_ethertype_eligible_conduit()), limits_(limits) {}
+          any_ethertype_eligible_conduit_(policy.has_ethertype_eligible_conduit()),
+          any_dnp3_link_zone_(policy.has_dnp3_link_zone()), limits_(limits) {}
 
     // True once at least one of limits_'s four growth ceilings refused to track something new at
     // least once -- see PolicyEngineLimits' own comment for why refusal, never eviction. Callers
@@ -605,6 +660,25 @@ private:
         std::string client_mac, server_mac;
     };
 
+    // Aggregated state for one DNP3 data-link-address sub-flow -- see Dnp3LinkFlowReport's own
+    // comment. Keyed (in dnp3_link_flows_) by a DIRECTIONAL triple: the parent TCP session's own
+    // canonical session_key(), PLUS master_link_address AND outstation_link_address (NOT a
+    // canonicalized order-independent pair like EthernetFlowState's mac_a/mac_b -- a DNP3 frame
+    // always has a known source and destination, see observe()'s own derivation). Deliberately does
+    // NOT duplicate client_ip/server_ip/server_port here -- those are read back from
+    // flows_.at(session_key) at report time instead, so an upgrade to the parent FlowState (e.g. a
+    // later SYN/SYN-ACK correcting client/server direction) is automatically reflected rather than
+    // going stale in a second, independently-cached copy.
+    struct Dnp3LinkFlowState {
+        std::string session_key;
+        uint16_t master_link_address = 0;
+        uint16_t outstation_link_address = 0;
+        // Distinct, non-empty DNP3 function names observed on this (master, outstation) pair
+        // specifically -- see Dnp3LinkFlowReport::observed_functions' own comment.
+        std::unordered_set<std::string> functions;
+        size_t packet_count = 0;
+    };
+
     // Aggregated state for one L2 flow (protocol + canonical MAC pair) -- see EthernetFlowReport's
     // own comment for why this has neither a port nor a client/server distinction.
     struct EthernetFlowState {
@@ -668,6 +742,8 @@ private:
                                           // observe()'s own comment
     bool any_ethertype_eligible_conduit_;  // cached Policy::has_ethertype_eligible_conduit() --
                                              // see observe()'s own comment (ROADMAP item 103)
+    bool any_dnp3_link_zone_;  // cached Policy::has_dnp3_link_zone() -- see observe()'s own comment
+                                 // (ROADMAP item 144)
     PolicyEngineLimits limits_;
     bool truncated_ = false;
     std::vector<std::string> truncation_reasons_;
@@ -678,6 +754,11 @@ private:
                                                                  // session key -- see UdpFlowState's
                                                                  // own comment
     std::vector<std::string> udp_flow_order_;  // udp_flows_ keys, first-seen order
+    std::unordered_map<std::string, Dnp3LinkFlowState> dnp3_link_flows_;  // keyed by the directional
+                                                                            // triple -- see
+                                                                            // Dnp3LinkFlowState's own
+                                                                            // comment (ROADMAP item 144)
+    std::vector<std::string> dnp3_link_flow_order_;  // dnp3_link_flows_ keys, first-seen order
     std::unordered_map<std::string, EthernetFlowState> ethernet_flows_;  // keyed by canonical L2 flow key
     std::vector<std::string> ethernet_flow_order_;                        // L2 flow keys, first-seen order
     std::unordered_map<std::string, NotableProtocolState> notable_protocols_;  // keyed by observe()'s

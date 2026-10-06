@@ -389,6 +389,20 @@ bool Policy::has_hostname_zone() const {
     return std::any_of(zones.begin(), zones.end(), [](const Zone& z) { return z.kind == ZoneKind::Hostname; });
 }
 
+const Zone* Policy::zone_for_dnp3_link(uint16_t link_address) const {
+    for (const auto& z : zones) {
+        if (z.kind != ZoneKind::Dnp3Link) continue;
+        for (uint16_t a : z.dnp3_link_addresses) {
+            if (a == link_address) return &z;
+        }
+    }
+    return nullptr;
+}
+
+bool Policy::has_dnp3_link_zone() const {
+    return std::any_of(zones.begin(), zones.end(), [](const Zone& z) { return z.kind == ZoneKind::Dnp3Link; });
+}
+
 bool Policy::has_udp_eligible_conduit() const {
     // ROADMAP item 103 widened this name list from the original four (bacnet/enip/hartip/ffhse)
     // to also include melsec/fins/codesys's own UDP forms, bsap, cclink-ie, and the generic "udp"
@@ -470,18 +484,25 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
         if (!vlans) vlans = zval.find("vlan");  // singular alias, for a one-VLAN zone
         const yaml_mini::Node* hostnames = zval.find("hostnames");
         if (!hostnames) hostnames = zval.find("hostname");  // singular alias, for a one-hostname zone
-        int kind_count = ((nets || ipv6_nets) ? 1 : 0) + (vlans ? 1 : 0) + (hostnames ? 1 : 0);
+        // ROADMAP item 144: `dnp3_link_addresses` is the fourth zone-kind sub-key, alongside
+        // `vlans`/`hostnames` -- see this file's own header comment and Zone::dnp3_link_addresses's
+        // own comment.
+        const yaml_mini::Node* dnp3_links = zval.find("dnp3_link_addresses");
+        if (!dnp3_links) dnp3_links = zval.find("dnp3_link_address");  // singular alias
+        int kind_count = ((nets || ipv6_nets) ? 1 : 0) + (vlans ? 1 : 0) + (hostnames ? 1 : 0) +
+                          (dnp3_links ? 1 : 0);
         if (kind_count > 1) {
             fail(source_name, zval.line,
                  "zone '" + zname +
-                     "' declares more than one of ('networks'/'ipv6_networks')/'vlans'/'hostnames' "
-                     "-- a zone is exactly one kind (see docs/USER_GUIDE.md's POLICY FILE FORMAT "
-                     "section)");
+                     "' declares more than one of ('networks'/'ipv6_networks')/'vlans'/'hostnames'/"
+                     "'dnp3_link_addresses' -- a zone is exactly one kind (see docs/USER_GUIDE.md's "
+                     "POLICY FILE FORMAT section)");
         }
         if (kind_count == 0) {
             fail(source_name, zval.line,
                  "zone '" + zname +
-                     "' has no 'networks', 'ipv6_networks', 'vlans', or 'hostnames' key");
+                     "' has no 'networks', 'ipv6_networks', 'vlans', 'hostnames', or "
+                     "'dnp3_link_addresses' key");
         }
         if (nets || ipv6_nets) {
             // zone.kind is already ZoneKind::Cidr by default -- both sub-keys share it.
@@ -544,7 +565,7 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                 }
                 zone.vlans.push_back(static_cast<uint16_t>(value));
             }
-        } else {
+        } else if (hostnames) {
             zone.kind = ZoneKind::Hostname;
             auto host_list = as_scalar_list(*hostnames, source_name, "zone '" + zname + "'s 'hostnames'");
             if (host_list.empty()) {
@@ -555,6 +576,36 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                     fail(source_name, item.line, "zone '" + zname + "': a 'hostnames' entry is empty");
                 }
                 zone.hostnames.push_back(item.text);
+            }
+        } else {  // ROADMAP item 144: dnp3_links
+            zone.kind = ZoneKind::Dnp3Link;
+            auto link_list = as_scalar_list(*dnp3_links, source_name,
+                                             "zone '" + zname + "'s 'dnp3_link_addresses'");
+            if (link_list.empty()) {
+                fail(source_name, dnp3_links->line, "zone '" + zname + "' declares no dnp3_link_addresses");
+            }
+            for (const auto& item : link_list) {
+                bool all_digits = !item.text.empty() &&
+                                   std::all_of(item.text.begin(), item.text.end(),
+                                               [](unsigned char ch) { return std::isdigit(ch); });
+                int value = -1;
+                if (all_digits) {
+                    try {
+                        value = std::stoi(item.text);
+                    } catch (const std::exception&) {
+                        value = -1;
+                    }
+                }
+                if (value < kMinDnp3LinkAddress || value > kMaxDnp3LinkAddress) {
+                    fail(source_name, item.line,
+                         "zone '" + zname + "': '" + item.text +
+                             "' is not a valid DNP3 link address (expected " +
+                             std::to_string(kMinDnp3LinkAddress) + "-" +
+                             std::to_string(kMaxDnp3LinkAddress) +
+                             " -- 65520-65535/0xFFF0-0xFFFF is reserved by the DNP3/IEEE 1815 standard "
+                             "for broadcast variants and the self-address feature)");
+                }
+                zone.dnp3_link_addresses.push_back(static_cast<uint16_t>(value));
             }
         }
         policy.zones.push_back(std::move(zone));
@@ -607,13 +658,24 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                         }
                     }
                 }
-            } else {  // ZoneKind::Hostname
+            } else if (za.kind == ZoneKind::Hostname) {
                 for (const auto& a : za.hostnames) {
                     for (const auto& b : zb.hostnames) {
                         if (a == b) {
                             fail(source_name, zb.line,
                                  "zone '" + za.name + "' and zone '" + zb.name + "' both claim hostname '" +
                                      a + "' -- each hostname must belong to at most one zone");
+                        }
+                    }
+                }
+            } else {  // ZoneKind::Dnp3Link (ROADMAP item 144)
+                for (uint16_t a : za.dnp3_link_addresses) {
+                    for (uint16_t b : zb.dnp3_link_addresses) {
+                        if (a == b) {
+                            fail(source_name, zb.line,
+                                 "zone '" + za.name + "' and zone '" + zb.name +
+                                     "' both claim DNP3 link address " + std::to_string(a) +
+                                     " -- each link address must belong to at most one zone");
                         }
                     }
                 }
@@ -694,12 +756,17 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
         if (referenced_kinds.size() > 1) {
             fail(source_name, item.line,
                  "conduit '" + c.name +
-                     "' mixes zones of different kinds (CIDR/VLAN/hostname) in its 'from'/'to' -- "
-                     "every zone a conduit references must be the same kind (see "
+                     "' mixes zones of different kinds (CIDR/VLAN/hostname/Dnp3Link) in its "
+                     "'from'/'to' -- every zone a conduit references must be the same kind (see "
                      "docs/USER_GUIDE.md's POLICY FILE FORMAT section)");
         }
         c.kind = referenced_kinds.empty() ? ZoneKind::Cidr : referenced_kinds.front();
         bool is_vlan_conduit = (c.kind == ZoneKind::Vlan);
+        // ROADMAP item 144: a Dnp3Link-zone conduit is directional (from=master, to=outstation),
+        // exactly like a CIDR-zone conduit, so it deliberately does NOT join is_vlan_conduit's
+        // from==to / ports/bidirectional/functions-rejection checks below -- see policy.hpp's
+        // Conduit comment for why.
+        bool is_dnp3_link_conduit = (c.kind == ZoneKind::Dnp3Link);
 
         if (is_vlan_conduit) {
             // A single raw-Ethernet frame carries at most one VLAN tag, so a VLAN-zone conduit
@@ -774,6 +841,13 @@ Policy parse_policy_text(const std::string& text, const std::string& source_name
                          "' has no IP layer at all, so it can never appear on a CIDR- or hostname-zone "
                          "conduit -- declare a VLAN zone instead (see docs/USER_GUIDE.md's POLICY FILE "
                          "FORMAT section)");
+            }
+            if (is_dnp3_link_conduit && lower != "any" && lower != "dnp3") {
+                fail(source_name, p.line,
+                     "conduit '" + c.name + "': protocol '" + p.text +
+                         "' can never appear on a Dnp3Link-zone conduit -- a DNP3 link-address zone "
+                         "exists purely to classify DNP3 traffic by data-link address, so only 'dnp3' "
+                         "or 'any' can (ROADMAP item 144)");
             }
             c.protocols.push_back(lower);
         }

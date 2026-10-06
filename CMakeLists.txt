@@ -9728,12 +9728,12 @@ set_tests_properties(policy_error_unknown_protocol_lists_full_widened_set PROPER
 add_test(NAME policy_error_vlan_zone_both_networks_and_vlans
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_both_networks_and_vlans.yaml")
 set_tests_properties(policy_error_vlan_zone_both_networks_and_vlans PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames' -- a zone is exactly one kind")
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames'/'dnp3_link_addresses' -- a zone is exactly one kind")
 
 add_test(NAME policy_error_vlan_zone_neither_networks_nor_vlans
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_neither_networks_nor_vlans.yaml")
 set_tests_properties(policy_error_vlan_zone_neither_networks_nor_vlans PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks', 'ipv6_networks', 'vlans', or 'hostnames' key")
+  PASS_REGULAR_EXPRESSION "zone 'empty_zone' has no 'networks', 'ipv6_networks', 'vlans', 'hostnames', or 'dnp3_link_addresses' key")
 
 add_test(NAME policy_error_vlan_id_out_of_range
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_vlan_id_out_of_range.yaml")
@@ -9748,7 +9748,7 @@ set_tests_properties(policy_error_vlan_overlap PROPERTIES
 add_test(NAME policy_error_conduit_mixed_zone_kinds
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_mixed_zone_kinds.yaml")
 set_tests_properties(policy_error_conduit_mixed_zone_kinds PROPERTIES
-  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname\\) in its 'from'/'to' -- every zone a conduit references must be the same kind")
+  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname/Dnp3Link\\) in its 'from'/'to' -- every zone a conduit references must be the same kind")
 
 add_test(NAME policy_error_conduit_tcp_protocol_on_vlan_zone
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_tcp_protocol_on_vlan_zone.yaml")
@@ -10070,7 +10070,7 @@ set_tests_properties(policy_hostname_zone_with_hosts_file_compliant PROPERTIES
 add_test(NAME policy_error_zone_hostname_and_networks
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_hostname_and_networks.yaml")
 set_tests_properties(policy_error_zone_hostname_and_networks PROPERTIES
-  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames'")
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames'/'dnp3_link_addresses'")
 
 add_test(NAME policy_error_hostname_overlap
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_hostname_overlap.yaml")
@@ -10080,7 +10080,61 @@ set_tests_properties(policy_error_hostname_overlap PROPERTIES
 add_test(NAME policy_error_conduit_mixed_hostname_and_cidr
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_mixed_hostname_and_cidr.yaml")
 set_tests_properties(policy_error_conduit_mixed_hostname_and_cidr PROPERTIES
-  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname\\) in its 'from'/'to'")
+  PASS_REGULAR_EXPRESSION "conduit 'c1' mixes zones of different kinds \\(CIDR/VLAN/hostname/Dnp3Link\\) in its 'from'/'to'")
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 144 (docs/DEVELOPMENT.md) -- a DNP3 data-link-address zone model, closing out item
+# 13's own deliberately-deferred gap: a serial-to-IP DNP3 gateway multiplexing several outstations
+# behind one IP (and typically one TCP session) can now be classified per outstation, by DNP3 link
+# address, rather than producing a single IP-based verdict for the whole session. See
+# tests/sample_dnp3_gateway.pcap (one TCP session, one master address 1, three outstations --
+# 1024, 2048, 4096 -- multiplexed on it) and tests/policies/dnp3_link_zone_*.yaml /
+# bad_*dnp3_link*.yaml.
+add_test(NAME policy_dnp3_link_zone_mixed_results_text
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3_gateway.pcap" --policy "${POLICY_DIR}/dnp3_link_zone_mixed_results.yaml")
+set_tests_properties(policy_dnp3_link_zone_mixed_results_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "Result: NON-COMPLIANT \\(0 violation\\(s\\), 3 unclassified flow\\(s\\)\\).*DNP3 LINK flows evaluated: 3 \\(1 allowed, 0 violation\\(s\\), 2 unclassified\\).*DNP3 LINK UNCLASSIFIED TRAFFIC \\(2\\):.*master 1 -> outstation 2048.*no declared Dnp3Link zone contains outstation address 2048.*master 1 -> outstation 4096.*no declared Dnp3Link zone contains outstation address 4096.*DNP3 LINK ALLOWED \\(1\\):.*master 1 -> outstation 1024.*zones: master_station -> outstation_1024, matched conduit \"Master polls outstation 1024 via DNP3\"")
+
+add_test(NAME policy_dnp3_link_zone_mixed_results_json
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3_gateway.pcap" --policy "${POLICY_DIR}/dnp3_link_zone_mixed_results.yaml" --format json)
+set_tests_properties(policy_dnp3_link_zone_mixed_results_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"dnp3_link_flows\": \\[\n *\\{\n *\"protocol\": \"dnp3\",.*\"master_link_address\": 1,\n *\"outstation_link_address\": 1024,\n *\"master_zone\": \"master_station\",\n *\"outstation_zone\": \"outstation_1024\",.*\"verdict\": \"allowed\",\n *\"matched_conduit\": \"Master polls outstation 1024 via DNP3\",.*\\},\n *\\{\n *\"protocol\": \"dnp3\",.*\"master_link_address\": 1,\n *\"outstation_link_address\": 2048,.*\"outstation_zone\": \"unclassified\",.*\"verdict\": \"unclassified\",.*\\},\n *\\{\n *\"protocol\": \"dnp3\",.*\"outstation_link_address\": 4096,.*\"verdict\": \"unclassified\"")
+
+# Proves a Dnp3Link conduit's 'functions' allow-list is checked per outstation, not once for the
+# whole session -- outstation 1024 Allowed (both observed functions permitted), outstation 2048 a
+# Violation (its own conduit disallows "Read"), outstation 4096 Unclassified (undeclared).
+add_test(NAME policy_dnp3_link_zone_functions
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3_gateway.pcap" --policy "${POLICY_DIR}/dnp3_link_zone_functions.yaml")
+set_tests_properties(policy_dnp3_link_zone_functions PROPERTIES
+  PASS_REGULAR_EXPRESSION "DNP3 LINK flows evaluated: 3 \\(1 allowed, 1 violation\\(s\\), 1 unclassified\\).*DNP3 LINK VIOLATIONS \\(1\\):.*master 1 -> outstation 2048.*function 'Read' observed; conduit 'Master polls outstation 2048, Response only -- Read is not permitted' permits only: Response")
+
+add_test(NAME policy_error_zone_both_networks_and_dnp3_link
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_both_networks_and_dnp3_link.yaml")
+set_tests_properties(policy_error_zone_both_networks_and_dnp3_link PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'confused_zone' declares more than one of \\('networks'/'ipv6_networks'\\)/'vlans'/'hostnames'/'dnp3_link_addresses' -- a zone is exactly one kind")
+
+add_test(NAME policy_error_dnp3_link_overlap
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_dnp3_link_overlap.yaml")
+set_tests_properties(policy_error_dnp3_link_overlap PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'outstation_a' and zone 'outstation_b' both claim DNP3 link address 1024 -- each link address must belong to at most one zone")
+
+add_test(NAME policy_error_zone_dnp3_link_reserved_address
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_zone_dnp3_link_reserved_address.yaml")
+set_tests_properties(policy_error_zone_dnp3_link_reserved_address PROPERTIES
+  PASS_REGULAR_EXPRESSION "zone 'bad_zone': '65535' is not a valid DNP3 link address \\(expected 0-65519 -- 65520-65535/0xFFF0-0xFFFF is reserved by the DNP3/IEEE 1815 standard for broadcast variants and the self-address feature\\)")
+
+add_test(NAME policy_error_conduit_wrong_protocol_on_dnp3_link_zone
+  COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/bad_conduit_wrong_protocol_on_dnp3_link_zone.yaml")
+set_tests_properties(policy_error_conduit_wrong_protocol_on_dnp3_link_zone PROPERTIES
+  PASS_REGULAR_EXPRESSION "conduit 'c1': protocol 'modbus' can never appear on a Dnp3Link-zone conduit -- a DNP3 link-address zone exists purely to classify DNP3 traffic by data-link address, so only 'dnp3' or 'any' can")
+
+# sample_dnp3_gateway.pcap carries three distinct (master, outstation) DNP3 link sub-flows --
+# --max-policy-dnp3-link-flows 1 forces every sub-flow after the first to be refused on
+# dnp3_link_flows_, mirroring the tcp/udp/ethernet/notable-protocol resource-limit tests below.
+add_test(NAME policy_engine_limits_dnp3_link_flows_cap_marks_validate_incomplete
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' policy validate --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_dnp3_gateway.pcap' --policy '${POLICY_DIR}/dnp3_link_zone_mixed_results.yaml' --max-policy-dnp3-link-flows 1; echo EXITCODE=$?")
+set_tests_properties(policy_engine_limits_dnp3_link_flows_cap_marks_validate_incomplete PROPERTIES
+  PASS_REGULAR_EXPRESSION "OBSERVATION INCOMPLETE.*tracked-key limit \\(1\\) reached on dnp3_link_flows_.*--max-policy-dnp3-link-flows.*EXITCODE=6")
 
 # ---------------------------------------------------------------------------------------------
 # Phase 3 of "match how plants are zoned" (docs/design/policy-engine-zoning.md) -- BACnet/IP + CIP
@@ -10096,7 +10150,7 @@ set_tests_properties(policy_udp_bacnet_cip_io_compliant_text PROPERTIES
 add_test(NAME policy_udp_bacnet_cip_io_compliant_json
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_bacnet_cip_io.pcap" --policy "${POLICY_DIR}/udp_bacnet_cip_io_compliant.yaml" --format json)
 set_tests_properties(policy_udp_bacnet_cip_io_compliant_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"bacnet\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 47808,.*\"observed_functions\": \\[\"readProperty\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via BACnet/IP and CIP I/O\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"enip\",.*\"server_port\": 2222,.*\"verdict\": \"allowed\",.*\"direction_source\": \"port-heuristic\"\n *\\}\n *\\],\n *\"multi_homed_assets\": \\[\n *\\],\n *\"jump_host_flows\": \\[\n *\\]\n\\}")
+  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"bacnet\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 47808,.*\"observed_functions\": \\[\"readProperty\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via BACnet/IP and CIP I/O\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"enip\",.*\"server_port\": 2222,.*\"verdict\": \"allowed\",.*\"direction_source\": \"port-heuristic\"\n *\\}\n *\\],\n *\"multi_homed_assets\": \\[\n *\\],\n *\"jump_host_flows\": \\[\n *\\],\n *\"dnp3_link_flows\": \\[\n *\\]\n\\}")
 
 # udp_bacnet_only_violation.yaml names only "bacnet" -- proves gating is policy-wide, not
 # per-protocol (Policy::has_udp_eligible_conduit()): CIP I/O is still evaluated (and violates,
@@ -10155,7 +10209,7 @@ set_tests_properties(policy_udp_hartip_ffhse_compliant_text PROPERTIES
 add_test(NAME policy_udp_hartip_ffhse_compliant_json
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_policy_udp_hartip_ffhse.pcap" --policy "${POLICY_DIR}/udp_hartip_ffhse_compliant.yaml" --format json)
 set_tests_properties(policy_udp_hartip_ffhse_compliant_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"hartip\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 5094,.*\"observed_functions\": \\[\"Request\", \"Response\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via HART-IP and FF-HSE\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"ffhse\",.*\"server_port\": 1090,.*\"observed_functions\": \\[\"FMS Status Req\", \"FMS Status Rsp\"\\],.*\"verdict\": \"allowed\",.*\"matched_conduit\": \"HMI reads PLC via HART-IP and FF-HSE\",.*\"direction_source\": \"content\"\n *\\}\n *\\],\n *\"multi_homed_assets\": \\[\n *\\],\n *\"jump_host_flows\": \\[\n *\\]\n\\}")
+  PASS_REGULAR_EXPRESSION "\"idmz_conduits\": \\[\n *\\],\n *\"udp_flows\": \\[\n *\\{\n *\"protocol\": \"hartip\",\n *\"client_ip\": \"192.168.1.50\",\n *\"server_ip\": \"192.168.1.10\",\n *\"server_port\": 5094,.*\"observed_functions\": \\[\"Request\", \"Response\"\\],\n *\"packet_count\": 2,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI reads PLC via HART-IP and FF-HSE\",\n *\"reason\": null,\n *\"direction_source\": \"content\"\n *\\},\n *\\{\n *\"protocol\": \"ffhse\",.*\"server_port\": 1090,.*\"observed_functions\": \\[\"FMS Status Req\", \"FMS Status Rsp\"\\],.*\"verdict\": \"allowed\",.*\"matched_conduit\": \"HMI reads PLC via HART-IP and FF-HSE\",.*\"direction_source\": \"content\"\n *\\}\n *\\],\n *\"multi_homed_assets\": \\[\n *\\],\n *\"jump_host_flows\": \\[\n *\\],\n *\"dnp3_link_flows\": \\[\n *\\]\n\\}")
 
 # udp_hartip_only_violation.yaml names only "hartip" -- proves the gate is still policy-wide, not
 # per-protocol: FF-HSE is still evaluated (and violates, since no conduit here permits "ffhse")
@@ -17021,7 +17075,7 @@ set_tests_properties(policy_assets_flagged_uncovered_bridge PROPERTIES
 add_test(NAME policy_assets_multi_zone_covered_json
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_multi_zone_covered.yaml" --format json)
 set_tests_properties(policy_assets_multi_zone_covered_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"multi_homed_assets\": \\[\n *\\{\n *\"name\": \"engineering_workstation\",\n *\"role\": \"engineering_ws\",\n *\"ips\": \\[\"192\\.168\\.1\\.50\", \"10\\.0\\.0\\.50\"\\],\n *\"zones\": \\[\"hmi_zone\", \"corp_zone\"\\],\n *\"zone_pairs\": \\[\\{\"zone_a\": \"corp_zone\", \"zone_b\": \"hmi_zone\", \"covered\": true\\}\\],\n *\"flagged\": false\n *\\}\n *\\],\n *\"jump_host_flows\": \\[\n *\\]\n\\}")
+  PASS_REGULAR_EXPRESSION "\"multi_homed_assets\": \\[\n *\\{\n *\"name\": \"engineering_workstation\",\n *\"role\": \"engineering_ws\",\n *\"ips\": \\[\"192\\.168\\.1\\.50\", \"10\\.0\\.0\\.50\"\\],\n *\"zones\": \\[\"hmi_zone\", \"corp_zone\"\\],\n *\"zone_pairs\": \\[\\{\"zone_a\": \"corp_zone\", \"zone_b\": \"hmi_zone\", \"covered\": true\\}\\],\n *\"flagged\": false\n *\\}\n *\\],\n *\"jump_host_flows\": \\[\n *\\],\n *\"dnp3_link_flows\": \\[\n *\\]\n\\}")
 
 # role: "jump_host" asset whose IP matches the flow's client -- called out in JUMP HOST FLOWS
 # regardless of the flow's own Allowed verdict.
@@ -17040,7 +17094,7 @@ set_tests_properties(policy_assets_jump_host_flow_violation PROPERTIES
 add_test(NAME policy_assets_jump_host_flow_allowed_json
   COMMAND conduitscope policy validate --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --policy "${POLICY_DIR}/assets_jump_host_flow_allowed.yaml" --format json)
 set_tests_properties(policy_assets_jump_host_flow_allowed_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"jump_host_flows\": \\[\n *\\{\n *\"asset_name\": \"remote_access_jump_box\",\n *\"jump_host_ip\": \"192\\.168\\.1\\.50\",\n *\"jump_host_is_client\": true,\n *\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"server_port\": 502,\n *\"protocol\": \"modbus\",\n *\"is_udp\": false,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI polls PLC via Modbus\",\n *\"reason\": null\n *\\}\n *\\]\n\\}")
+  PASS_REGULAR_EXPRESSION "\"jump_host_flows\": \\[\n *\\{\n *\"asset_name\": \"remote_access_jump_box\",\n *\"jump_host_ip\": \"192\\.168\\.1\\.50\",\n *\"jump_host_is_client\": true,\n *\"client_ip\": \"192\\.168\\.1\\.50\",\n *\"server_ip\": \"192\\.168\\.1\\.10\",\n *\"server_port\": 502,\n *\"protocol\": \"modbus\",\n *\"is_udp\": false,\n *\"verdict\": \"allowed\",\n *\"matched_conduit\": \"HMI polls PLC via Modbus\",\n *\"reason\": null\n *\\}\n *\\],\n *\"dnp3_link_flows\": \\[\n *\\]\n\\}")
 
 # --- assets: validation errors -----------------------------------------------------------------
 

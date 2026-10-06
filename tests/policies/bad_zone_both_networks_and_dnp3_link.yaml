@@ -1,0 +1,12 @@
+# A zone declaring both 'networks' and 'dnp3_link_addresses' -- rejected the same way
+# bad_zone_both_networks_and_vlans.yaml is: a zone is exactly one kind (ROADMAP item 144).
+zones:
+  confused_zone:
+    networks: ["10.0.0.0/24"]
+    dnp3_link_addresses: [1]
+
+conduits:
+  - name: "c1"
+    from: confused_zone
+    to: confused_zone
+    protocol: any

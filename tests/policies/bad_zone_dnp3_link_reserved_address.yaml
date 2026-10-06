@@ -1,0 +1,12 @@
+# A Dnp3Link zone naming 65535 (0xFFFF), the DNP3/IEEE 1815 universal broadcast address --
+# rejected: no single individually-addressable master/outstation could ever match this value (see
+# kMinDnp3LinkAddress/kMaxDnp3LinkAddress's own comment, policy.hpp -- ROADMAP item 144).
+zones:
+  bad_zone:
+    dnp3_link_addresses: [1, 65535]
+
+conduits:
+  - name: "c1"
+    from: bad_zone
+    to: bad_zone
+    protocol: dnp3

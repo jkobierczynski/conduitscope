@@ -1,0 +1,14 @@
+# A Dnp3Link-zone conduit naming "modbus" -- rejected: a DNP3 link-address zone exists purely to
+# classify DNP3 traffic by data-link address, so only 'dnp3'/'any' can ever appear on it (ROADMAP
+# item 144).
+zones:
+  master_station:
+    dnp3_link_addresses: [1]
+  outstation_1024:
+    dnp3_link_addresses: [1024]
+
+conduits:
+  - name: "c1"
+    from: master_station
+    to: outstation_1024
+    protocol: modbus

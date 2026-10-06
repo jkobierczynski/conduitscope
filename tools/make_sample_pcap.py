@@ -709,6 +709,53 @@ def build_dnp3_sample():
     (TESTS_DIR / "sample_dnp3.pcap").write_bytes(data)
 
 
+def build_dnp3_gateway_sample():
+    """ROADMAP item 144 (docs/DEVELOPMENT.md): a serial-to-IP DNP3 gateway multiplexing THREE
+    physically distinct outstations (link addresses 1024, 2048, 4096) behind one gateway IP and
+    ONE TCP session with one master (link address 1) -- the exact real-world scenario a DNP3
+    link-address zone model exists to distinguish, since a plain IP/CIDR zone can only ever see
+    "the gateway's IP" and would produce one verdict for the whole session. One request/response
+    exchange per outstation, same HMI_IP/PLC_IP (and HMI_MAC/PLC_MAC) pair, same TCP ports
+    throughout -- mirrors dnp3_link_frame/tcp_header/ipv4_header/eth_header usage in
+    build_dnp3_sample above exactly, just addressed to three different outstations instead of one."""
+    packets = []
+    src_port, dst_port = 51600, 20000
+    seq, ack = 7000, 8000
+
+    def request(outstation: int, ident: int):
+        nonlocal seq
+        # Class 0 poll (group=60 var=1 qualifier=0x06 "all") -- same shape build_dnp3_sample's
+        # read_class0 uses. Transport FIR=1 FIN=1 SEQ=0 -> 0xC0; application control FIR=1 FIN=1
+        # CON=0 UNS=0 SEQ=0 -> 0xC0; function code 0x01 (Read).
+        payload = bytes([0xC0, 0xC0, 0x01, 60, 1, 0x06])
+        frame = dnp3_link_frame(source=1, destination=outstation, user_data=payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(frame)) + frame
+        ip = ipv4_header(HMI_IP, PLC_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip)
+        seq += len(frame)
+
+    def response(outstation: int, ident: int):
+        nonlocal ack
+        # Function 0x81 (Response), IIN1=0x00/IIN2=0x00, one g1v2 (Binary Input w/ flags) point --
+        # same object shape build_dnp3_sample's resp_payload uses, just a single point.
+        payload = (bytes([0xC0, 0xC0, 0x81, 0x00, 0x00]) +
+                   bytes([1, 2, 0x00, 0, 0]) + bytes([0x81]))
+        frame = dnp3_link_frame(source=outstation, destination=1, user_data=payload)
+        tcp = tcp_header(dst_port, src_port, ack, seq, TCP_PSH | TCP_ACK, len(frame)) + frame
+        ip = ipv4_header(PLC_IP, HMI_IP, 6, len(tcp), ident) + tcp
+        packets.append(eth_header(HMI_MAC, PLC_MAC, 0x0800) + ip)
+        ack += len(frame)
+
+    for i, outstation in enumerate((1024, 2048, 4096)):
+        request(outstation, 0x3000 + 2 * i)
+        response(outstation, 0x3000 + 2 * i + 1)
+
+    data = pcap_global_header()
+    for i, pkt in enumerate(packets):
+        data += pcap_record(pkt, 1_700_000_200 + i, i * 1000)
+    (TESTS_DIR / "sample_dnp3_gateway.pcap").write_bytes(data)
+
+
 IEC104_PORT = 2404
 
 # U-format function-byte constants (bytes 1 of the 4-byte control field; bytes 2-4 are always
@@ -22069,6 +22116,7 @@ if __name__ == "__main__":
     build_nbns_sample()
     build_doh_sample()
     build_vlan_zones_sample()
+    build_dnp3_gateway_sample()
     build_rip_sample()
     build_igmp_sample()
     build_icmp_sample()

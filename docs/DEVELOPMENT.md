@@ -3781,14 +3781,15 @@ useful, none blocking anything else on this list.
     regardless), mirroring the first data-link frame found in a TCP
     payload, same "first frame only" convention this decoder's own DNP3
     CRC fields already use; reliability tracks `dnp3_header_crc_valid`.
-    Still open, left for a future round: the ROADMAP item's own further
+    ~~Still open, left for a future round: the ROADMAP item's own further
     suggestion of "a zone model that can classify by this address in
     addition to (or instead of) IP" -- the single most consequential
     addressing gap in this codebase, since serial-to-IP DNP3 gateways
     routinely multiplex several outstations behind one IP, but a genuinely
     separate scope of its own (policy file format changes, `PolicyEngine`
     matching logic, and its own test/documentation pass) from simply
-    exposing the two fields this round completed.
+    exposing the two fields this round completed.~~ **Done -- see item
+    144.**
 14. ~~**Widen the conduit `protocols` enum**~~ -- **done**: `protocols`/
     `protocol` now names twelve values -- the original
     `modbus, dnp3, s7comm, iec104, enip, any` plus `bacnet`, `hartip`,
@@ -18915,6 +18916,143 @@ it done as its own patch.
     (`policy_error_zone_hostname_and_networks`'s stale three-key regex, missed in the initial
     `kind_count`-wording pass) before reaching 0 failures. Other build configs, the clean-room
     cycle, and delivery are covered by this item's own packaging step below.
+
+144. **A DNP3 data-link-address zone model, closing item 13's own deferred gap.** Jurgen asked
+    to work the Protocol-depth backlog item: "DNP3: a zone model keyed on DNP3 link address (not
+    just IP) for serial-to-IP gateways multiplexing several outstations behind one IP -- flagged
+    as the single most consequential addressing gap in the codebase." Item 13 had already exposed
+    `Dnp3LinkFrame::source`/`destination` as `Dnp3Result::source_address`/`destination_address`
+    (fully decoded and populated for every DNP3 packet, even a link-layer-only control frame),
+    explicitly leaving "a zone model that can classify by this address in addition to (or instead
+    of) IP" for a future, separately-scoped round. This item is that round. The real-world
+    motivating case: a serial-to-IP DNP3 gateway relays traffic for several physically distinct
+    outstations, all multiplexed behind ONE IP (the gateway's) and typically one TCP session --
+    `policy validate` could previously only classify by IP CIDR, producing exactly one verdict
+    for that whole session, unable to distinguish outstation A's traffic from outstation B's,
+    which is precisely the distinction a real OT auditor needs ("the master may poll outstations
+    10 and 11, but never 12").
+
+    **Design.** A new, fourth `ZoneKind::Dnp3Link`, architecturally closest to `Vlan` zoning (a
+    new numeric addressing dimension, its own reserved-value exclusion, its own same-kind overlap
+    rule) but with two deliberate differences: (1) **directional**, not symmetric -- a DNP3-link
+    conduit's `from` names the master zone(s), `to` the outstation zone(s), since unlike a single
+    Ethernet frame's one VLAN tag, a DNP3 data-link frame unambiguously carries both a source and
+    a destination address on every frame (no DIR/PRM control-byte interpretation needed -- a
+    frame's own source field always identifies its sender); (2) `ports`/`bidirectional`/
+    `functions` ALL stay meaningful (unlike a VLAN conduit, which rejects all three), since the
+    underlying wire traffic is still ordinary bidirectional TCP, just classified by a different
+    address than the IP 4-tuple -- `functions` reuses `dnp3_known_function_names()`/
+    `dnp3_read_function_names()`/`dnp3_write_function_names()` (dnp3.hpp) completely unchanged.
+    `protocols` on a Dnp3Link conduit is restricted to `dnp3`/`any` only. The DNP3/IEEE 1815
+    reserved address range (0-65519 valid; 65520-65535 reserved for broadcast variants and the
+    self-address feature) was independently verified against a DNP3 validation reference
+    (Chipkin AN2013-004b, built from the IEEE 1815 spec table) before being baked into validation
+    logic. The new YAML key, confirmed with Jurgen via `AskUserQuestion`, is
+    `dnp3_link_addresses` (singular alias `dnp3_link_address`, matching every other list key's
+    own singular-alias convention).
+
+    A new, additional report type, `Dnp3LinkFlowReport`, is the fourth sibling alongside
+    `FlowReport`/`EthernetFlowReport`/`UdpFlowReport` -- layered ON TOP OF, never instead of, the
+    ordinary IP-based `FlowReport` for the same TCP session: that coarse, IP-only verdict keeps
+    existing unchanged (a policy with zero `Dnp3Link` zones is 100% unaffected -- the same
+    `has_vlan_zone()`-style backward-compat bar every prior zone-kind addition met), and this
+    item adds a NEW, finer-grained entry per distinct (master link address, outstation link
+    address) pair actually observed multiplexed on that session, gated entirely behind a new
+    `Policy::has_dnp3_link_zone()`. Per-packet master/outstation derivation needs zero new DNP3
+    decoding: for any dnp3 packet on a tracked TCP flow, if the packet travels master->gateway
+    (`dp.src_ip == fs.client_ip`), `dr.source_address` is the master's own address and
+    `dr.destination_address` the addressed outstation's; otherwise it's the reverse -- reusing
+    the flow's own already-decided client/server role. Sub-flow key: `(tcp session key,
+    master_link_address, outstation_link_address)` as a DIRECTIONAL triple (not a canonicalized
+    order-independent pair like `EthernetFlowReport::mac_a/mac_b`), mirroring `UdpFlowState`'s
+    own full-key precedent.
+
+    **What was done.**
+    - `include/conduitscope/policy.hpp` / `src/policy.cpp`: new `kMinDnp3LinkAddress`/
+      `kMaxDnp3LinkAddress` constants (0/65519); `ZoneKind::Dnp3Link`; `Zone::dnp3_link_addresses`
+      (`std::vector<uint16_t>`); `Policy::zone_for_dnp3_link()`/`has_dnp3_link_zone()` (mirror
+      `zone_for_vlan`/`has_vlan_zone` exactly). `parse_policy_text`'s zone-parsing loop widened to
+      a 4-way `kind_count`, with a new parse branch validating each entry against
+      `[kMinDnp3LinkAddress, kMaxDnp3LinkAddress]`; the same-kind-pair overlap-validation loop
+      gained a `Dnp3Link` arm; conduit validation gained `is_dnp3_link_conduit` and one new
+      targeted check (protocol name restricted to `dnp3`/`any`) -- every pre-existing VLAN-only
+      rejection in that function was confirmed, by direct code reading, to already be written as
+      `if (is_vlan_conduit)` rather than `if (!is_cidr_conduit)`, so a `Dnp3Link` conduit
+      automatically and correctly falls through those checks (from==to requirement,
+      ports/bidirectional/functions rejection) with zero further changes, while `from_macs`/
+      `to_macs`/`ethertypes` stay correctly rejected (already written as `if (!is_vlan_conduit)`).
+    - `include/conduitscope/policy_engine.hpp` / `src/policy_engine.cpp`: new
+      `Dnp3LinkFlowReport` struct (client_ip/server_ip/server_port/protocol copied from the
+      parent flow for context only, master/outstation link address + zone + purdue_level,
+      observed_functions scoped to just this pair, packet_count, verdict, matched_conduit,
+      reason); `PolicyReport::dnp3_link_flows` (appended after `jump_host_flows`, today's prior
+      last field); `PolicyEngineLimits::max_dnp3_link_flows` (default 100,000, same sizing as the
+      UDP/Ethernet ceilings); `PolicyEngine::any_dnp3_link_zone_`/`Dnp3LinkFlowState`/
+      `dnp3_link_flows_`/`dnp3_link_flow_order_`. `observe()`'s existing `dp.protocol == "dnp3"`
+      branch gained the per-outstation aggregation, gated entirely behind `any_dnp3_link_zone_`,
+      admitted via the same `admit_tracked_key` helper every other flow map uses -- deliberately
+      NOT bumping `skipped_non_tcp_` on a refusal here, since the packet is already fully
+      accounted for by its own parent `FlowState`; this map is strictly an additional,
+      finer-grained VIEW layered on top, never a packet's only tracked representation. `finish()`
+      gained a new matching loop mirroring the ordinary TCP-flow loop almost exactly (`zone_for_
+      dnp3_link` for both sides, matched only against `ZoneKind::Dnp3Link` conduits, identical
+      Allowed/Violation/Unclassified verdict shape), plus a new `dnp3_link_zone_unclassified_
+      reason` helper naming "master"/"outstation" explicitly. `allowed_count()`/
+      `violation_count()`/`unclassified_count()` each gained a fourth `count_if` term
+      (`compliant()` itself, being fully derived, needed no change). Text report: new "DNP3 LINK
+      flows evaluated"/"DNP3 LINK VIOLATIONS"/"DNP3 LINK UNCLASSIFIED TRAFFIC"/"DNP3 LINK ALLOWED"
+      sections (with `--summarize-unclassified` support, mirroring the UDP section's own
+      grouping). JSON report: new `"dnp3_link_flows": [...]` array, appended last, always
+      present. CEF/LEEF/syslog: new `dnp3_link_flow_violation_extension_fields` helper (cs1/cs2 =
+      master/outstation zone, cs3/cs4 = the two link addresses), wired into all three writers.
+    - `src/cli_main.cpp`: `add_policy_engine_limit_options`/`resolve_policy_engine_limits` widened
+      from 4 to 5 parameters; new `--max-policy-dnp3-link-flows` CLI option, same shape as the
+      other four `--max-policy-*-flows` flags.
+    - `tools/make_sample_pcap.py`: new `build_dnp3_gateway_sample()` -- one TCP session, master
+      address 1, THREE outstations (1024, 2048, 4096) multiplexed on it, one Read/Response
+      exchange per outstation -- the exact scenario this item exists for; no prior DNP3 fixture
+      exercised more than one outstation. Produces `tests/sample_dnp3_gateway.pcap`.
+    - `tests/policies/`: `dnp3_link_zone_mixed_results.yaml` (a master zone + one outstation zone
+      + directional conduit -- outstation 1024 Allowed, 2048/4096 Unclassified since undeclared),
+      `dnp3_link_zone_functions.yaml` (proves `functions` is restricted per outstation, not per
+      session -- outstation 2048's own conduit disallows "Read", outstation 1024's own, separate
+      conduit still allows it), `bad_zone_both_networks_and_dnp3_link.yaml`,
+      `bad_dnp3_link_overlap.yaml`, `bad_zone_dnp3_link_reserved_address.yaml` (address 65535),
+      `bad_conduit_wrong_protocol_on_dnp3_link_zone.yaml` (naming `modbus`).
+    - `CMakeLists.txt`: 8 new tests -- a text-format and a JSON-format worked example, a
+      functions-violation test, four bad-input `PolicyError` regressions, and a
+      `--max-policy-dnp3-link-flows 1` resource-limit test (matched against an existing
+      `--max-policy-*-flows`-capped test's exact wording before writing).
+
+    **Docs.** `docs/USER_GUIDE.md`: schema block gained `dnp3_link_addresses`/
+    `dnp3_link_address`; the "Zones" prose widened to four schemes; a new "DNP3-link-zone
+    conduits" subsection (mirroring "VLAN-zone conduits" but stating the directional/
+    ports-bidirectional-functions-meaningful differences explicitly, plus a worked example);
+    Validation errors list gained four new/widened bullets; JSON report schema example gained
+    `idmz_conduits`/`udp_flows`/`multi_homed_assets`/`jump_host_flows`/`dnp3_link_flows` (the
+    example had drifted behind several earlier items -- now matches the real field order) plus a
+    new `dnp3_link_flows[]` description; the CLI options table gained
+    `--max-policy-dnp3-link-flows`; "Addressing scope"'s own DNP3 paragraph (and a second mention
+    in the JSON OUTPUT FIELDS section) rewritten to close out the gap rather than describe it as
+    open. `man/conduitscope.1`: the zone-kind sentence widened from three to four, and the
+    resource-limits section gained the new flag. `docs/MANUAL.md` was NOT touched, per Jurgen's
+    standing instruction.
+
+    **Verification.** Manual smoke-testing of every new fixture against the real built binary
+    first (confirmed each fixture's exact verdict/reason text, including the resource-limit
+    truncation message, before writing its `PASS_REGULAR_EXPRESSION`). Regenerating every sample
+    pcap via `tools/make_sample_pcap.py` (pure, dependency-free, deterministic) reproduced every
+    pre-existing fixture byte-for-byte and added the one new file. The new gateway capture was
+    independently decoded with `conduitscope decode --protocol dnp3` first, confirming all three
+    outstations (1024/2048/4096) and the master (1) decode correctly on one TCP session before any
+    policy fixture was written against it. The 8 new/changed CTest entries: 8/8 passing. Full
+    default-build CTest suite: 2512/2512 (+8 net new over item 143's 2504, zero regressions) --
+    one real regression round caught on the first full-suite run (four pre-existing error-message
+    regexes whose expected text had shifted from widening `kind_count`/the mixed-zone-kinds
+    message from three groups/kinds to four or five, plus four JSON-exact-match tests whose
+    expected trailing field needed the new `dnp3_link_flows: []` appended) -- all fixed before
+    reaching 0 failures. Other build configs, the clean-room cycle, and delivery are covered by
+    this item's own packaging step below.
 
 ### Protocols not covered at all
 

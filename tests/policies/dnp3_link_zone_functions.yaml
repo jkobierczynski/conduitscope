@@ -1,0 +1,29 @@
+# Proves a Dnp3Link conduit's 'functions' allow-list is checked PER OUTSTATION, not just once for
+# the whole multiplexed TCP session (ROADMAP item 144) -- dnp3_known_function_names()/
+# dnp3_read_function_names()/dnp3_write_function_names() (dnp3.hpp) are reused completely
+# unchanged for this. Against tests/sample_dnp3_gateway.pcap: outstation 1024's conduit allows both
+# "Read" and "Response" (every function actually observed on that pair) -- Allowed. Outstation
+# 2048's conduit allows only "Response" -- the "Read" request observed on that pair is disallowed,
+# so that sub-flow is a Violation, even though the exact same "Read" function on outstation 1024's
+# OWN sub-flow is perfectly fine. Outstation 4096 is left undeclared, same as
+# dnp3_link_zone_mixed_results.yaml, to keep this fixture focused on the functions check alone.
+zones:
+  master_station:
+    description: "The DNP3 master -- link address 1"
+    dnp3_link_addresses: [1]
+  outstation_1024:
+    dnp3_link_addresses: [1024]
+  outstation_2048:
+    dnp3_link_addresses: [2048]
+
+conduits:
+  - name: "Master polls outstation 1024, Read and Response both permitted"
+    from: master_station
+    to: outstation_1024
+    protocol: dnp3
+    functions: [Read, Response]
+  - name: "Master polls outstation 2048, Response only -- Read is not permitted"
+    from: master_station
+    to: outstation_2048
+    protocol: dnp3
+    functions: [Response]

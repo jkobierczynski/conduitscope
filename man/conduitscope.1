@@ -453,14 +453,17 @@ VLAN-zone conduits), and checks each against the
 zones/conduits declared in the policy file (a restricted, dependency-free
 YAML subset -- see \fBdocs/USER_GUIDE.md\fR's POLICY FILE FORMAT section). A
 zone is a set of IPv4 and/or IPv6 CIDR blocks (\fBnetworks:\fR/\fBipv6_networks:\fR),
-a set of VLAN IDs (\fBvlans:\fR), or a
+a set of VLAN IDs (\fBvlans:\fR), a
 set of hostnames (\fBhostnames:\fR, IPv4-only, matched only via a pinned
-\fB\-\-resolve\fR/\fB\-\-hosts\fR snapshot, never live DNS) -- exactly one of
-the three kinds, never mixed on one zone or one conduit; a conduit may
+\fB\-\-resolve\fR/\fB\-\-hosts\fR snapshot, never live DNS), or a set of DNP3
+data-link addresses (\fBdnp3_link_addresses:\fR, for a serial-to-IP DNP3
+gateway multiplexing several outstations behind one IP -- see "DNP3-link-zone
+conduits" in \fBdocs/USER_GUIDE.md\fR) -- exactly one of
+the four kinds, never mixed on one zone or one conduit; a conduit may
 optionally narrow itself to
 specific named functions/services
 within its one protocol via \fBfunctions:\fR (e.g. Modbus reads but not
-writes, CIDR- or hostname-zone conduits only) -- matched, flow-wide and strict-all, against the exact
+writes, CIDR-, hostname-, or Dnp3Link-zone conduits only) -- matched, flow-wide and strict-all, against the exact
 function/service name strings that protocol's decoder emits; see
 \fBdocs/USER_GUIDE.md\fR's "Function-level restrictions" subsection for the
 schema, the one-protocol-only rule, and the EtherNet/IP ambiguous-name
@@ -1785,6 +1788,14 @@ Cap the number of distinct notable-IT-protocol observations
 \fBPolicyEngine\fR records per capture. Default: 50,000 (0 = leave it at
 its own compiled default). Past this, further new combinations are not
 recorded and the result is marked incomplete.
+.TP
+.B \-\-max\-policy\-dnp3\-link\-flows \fIN\fR
+Cap the number of distinct DNP3 data-link-address sub-flows
+\fBPolicyEngine\fR tracks per capture \-\- only populated once the policy
+declares at least one \fBdnp3_link_addresses\fR zone. Default: 100,000
+(0 = leave it at its own compiled default). Past this, further new
+(master, outstation) pairs are not evaluated and the result is marked
+incomplete.
 .SH OPTIONS (inventory)
 .TP
 .BR \-r ", " \-\-read " " \fIFILE\fR

@@ -982,12 +982,14 @@ AssetInventoryEngineLimits resolve_inventory_engine_limits(size_t max_assets, si
     return limits;
 }
 
-// patch257 security review finding 3 fix -- PolicyEngine's own four growth ceilings' CLI options,
+// patch257 security review finding 3 fix -- PolicyEngine's own growth ceilings' CLI options,
 // registered only on `policy validate` (same reasoning as add_baseline_engine_limit_options/
 // add_detect_engine_limit_options/add_inventory_engine_limit_options above). Same "0 = leave every
-// site at its own default" convention as every other --max-* flag in this file.
+// site at its own default" convention as every other --max-* flag in this file. ROADMAP item 144
+// widened this from four to five parameters, adding max_dnp3_link_flows.
 void add_policy_engine_limit_options(CLI::App* cmd, size_t& max_tcp_flows, size_t& max_udp_flows,
-                                       size_t& max_ethernet_flows, size_t& max_notable_protocols) {
+                                       size_t& max_ethernet_flows, size_t& max_notable_protocols,
+                                       size_t& max_dnp3_link_flows) {
     cmd->add_option(
            "--max-policy-tcp-flows", max_tcp_flows,
            "Cap the number of distinct TCP flows PolicyEngine tracks per capture (default "
@@ -1015,17 +1017,26 @@ void add_policy_engine_limit_options(CLI::App* cmd, size_t& max_tcp_flows, size_
            "past this, further new combinations are not recorded and the result is marked "
            "incomplete")->group("Resource limits (advanced)")
         ->capture_default_str();
+    cmd->add_option(
+           "--max-policy-dnp3-link-flows", max_dnp3_link_flows,
+           "Cap the number of distinct DNP3 data-link-address sub-flows (ROADMAP item 144) "
+           "PolicyEngine tracks per capture (default 100,000). 0 = leave it at its own default; "
+           "past this, further new (master, outstation) pairs observed in the capture are not "
+           "evaluated and the result is marked incomplete")->group("Resource limits (advanced)")
+        ->capture_default_str();
 }
 
-// Resolves the four raw CLI values (0 = unset) into a real PolicyEngineLimits, same "always a
+// Resolves the five raw CLI values (0 = unset) into a real PolicyEngineLimits, same "always a
 // fully-resolved struct, never a sentinel" convention as resolve_baseline_engine_limits above.
 PolicyEngineLimits resolve_policy_engine_limits(size_t max_tcp_flows, size_t max_udp_flows,
-                                                  size_t max_ethernet_flows, size_t max_notable_protocols) {
+                                                  size_t max_ethernet_flows, size_t max_notable_protocols,
+                                                  size_t max_dnp3_link_flows) {
     PolicyEngineLimits limits;
     if (max_tcp_flows != 0) limits.max_tcp_flows = max_tcp_flows;
     if (max_udp_flows != 0) limits.max_udp_flows = max_udp_flows;
     if (max_ethernet_flows != 0) limits.max_ethernet_flows = max_ethernet_flows;
     if (max_notable_protocols != 0) limits.max_notable_protocols = max_notable_protocols;
+    if (max_dnp3_link_flows != 0) limits.max_dnp3_link_flows = max_dnp3_link_flows;
     return limits;
 }
 
@@ -3838,7 +3849,7 @@ int main(int argc, char** argv) {
     std::string policy_hosts_file, policy_services_file;
     ResourceLimitCliVars policy_limit_vars;
     size_t policy_max_tcp_flows = 0, policy_max_udp_flows = 0, policy_max_ethernet_flows = 0,
-           policy_max_notable_protocols = 0;
+           policy_max_notable_protocols = 0, policy_max_dnp3_link_flows = 0;
     auto* policy_input_opt =
         policy_validate_cmd->add_option("-r,--read", policy_input,
                                          "Input capture file (classic pcap or pcapng, auto-detected)")->group("Input/output")
@@ -3887,7 +3898,8 @@ int main(int argc, char** argv) {
                                    "Abort on the first malformed packet instead of reporting it and continuing")->group("Display options");
     add_resource_limit_options(policy_validate_cmd, policy_limit_vars);
     add_policy_engine_limit_options(policy_validate_cmd, policy_max_tcp_flows, policy_max_udp_flows,
-                                     policy_max_ethernet_flows, policy_max_notable_protocols);
+                                     policy_max_ethernet_flows, policy_max_notable_protocols,
+                                     policy_max_dnp3_link_flows);
     policy_validate_cmd->add_flag(
         "--strict-it-protocols", policy_strict_it_protocols,
         "Also fail compliance (non-zero exit code) when any \"IT protocol an OT auditor flags\" "
@@ -4826,7 +4838,8 @@ int main(int argc, char** argv) {
                                     policy_limit_vars,
                                     resolve_policy_engine_limits(policy_max_tcp_flows, policy_max_udp_flows,
                                                                   policy_max_ethernet_flows,
-                                                                  policy_max_notable_protocols),
+                                                                  policy_max_notable_protocols,
+                                                                  policy_max_dnp3_link_flows),
                                     policy_mac_vendor, policy_resolve, policy_hosts_file,
                                     policy_service_names, policy_services_file, *diag);
     }

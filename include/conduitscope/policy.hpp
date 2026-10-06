@@ -10,9 +10,10 @@
 // Policy parsed here; this file only parses and validates the policy
 // document itself, independent of any capture.
 //
-// A zone is built from ONE of three addressing schemes, mutually exclusive
+// A zone is built from ONE of four addressing schemes, mutually exclusive
 // per zone (ROADMAP item 15, extended by the "match how plants are zoned"
-// work -- see docs/DEVELOPMENT.md):
+// work and by ROADMAP item 144's DNP3 link-address zones -- see
+// docs/DEVELOPMENT.md):
 //   - CIDR blocks (`networks:` for IPv4, `ipv6_networks:` for IPv6 -- ROADMAP
 //     item 143 added the latter; the two are NOT mutually exclusive with each
 //     other, only with `vlans:`/`hostnames:` below, so a single zone may
@@ -62,9 +63,36 @@
 //     stays IPv4-only -- the Resolver's own `--hosts` file parsing is IPv4-
 //     dotted-quad-only (a pre-existing, separate limitation, resolver.hpp),
 //     so a hostname zone never matches an IPv6 flow today.
+//   - DNP3 data-link addresses (`dnp3_link_addresses:`, singular alias
+//     `dnp3_link_address:` -- ROADMAP item 144) -- closes the gap ROADMAP
+//     item 13 deliberately deferred: "the single most consequential
+//     addressing gap in this codebase," since a serial-to-IP DNP3 gateway
+//     routinely multiplexes several physically distinct outstations behind
+//     ONE IP (and typically one TCP session), which a CIDR zone can never
+//     tell apart. A DNP3-link zone's members are plain numeric DNP3
+//     data-link addresses (0-65519; 65520-65535/0xFFF0-0xFFFF is reserved by
+//     the standard for broadcast variants and the self-address feature, see
+//     kMinDnp3LinkAddress/kMaxDnp3LinkAddress below), matched not against a
+//     flow's IP but against the DNP3 data-link source/destination address
+//     each individual frame already carries (Dnp3Result::source_address/
+//     destination_address, dnp3.hpp -- decoded since ROADMAP item 13,
+//     unchanged by this item). Unlike a VLAN zone, a DNP3-link-zone conduit
+//     IS directional (`from_zones` names the master station zone(s),
+//     `to_zones` the outstation zone(s) -- every DNP3 frame unambiguously
+//     carries both a source and a destination address, so there's no VLAN-
+//     style "no separate source/destination" problem here) and `ports`/
+//     `bidirectional`/`functions` all stay fully meaningful (the wire
+//     traffic is still ordinary bidirectional TCP, just classified by a
+//     different address) -- see Conduit's own comment below. This produces
+//     an ADDITIONAL, finer-grained report entry (PolicyEngine's
+//     Dnp3LinkFlowReport) layered on top of, never instead of, the ordinary
+//     IP-based FlowReport for the same TCP session: a policy declaring zero
+//     DNP3-link zones is completely unaffected (see Policy::
+//     has_dnp3_link_zone), exactly the backward-compatibility bar every
+//     earlier zone-kind addition met.
 //
 // `Zone::kind`/`Conduit::kind` (see below) is the explicit discriminator for
-// which of the three a given zone/conduit is -- never inferred from which
+// which of the four a given zone/conduit is -- never inferred from which
 // vector happens to be non-empty -- so every place that needs to branch on
 // zone kind (Conduit validation, PolicyEngine's dispatch) says so plainly.
 //
@@ -151,25 +179,39 @@ std::optional<Ipv6CidrBlock> parse_cidr_ipv6(const std::string& text);
 constexpr int kMinVlanId = 1;
 constexpr int kMaxVlanId = 4094;
 
-// Which of the three mutually-exclusive addressing schemes a Zone/Conduit uses -- see this file's
+// The DNP3/IEEE 1815 data-link address range a declared zone's `dnp3_link_addresses:` entries are
+// validated against (ROADMAP item 144). Addresses 65520-65535 (0xFFF0-0xFFFF) are reserved by the
+// standard: 65535 (0xFFFF) is the universal broadcast address; 65534/65533 (0xFFFE/0xFFFD) are
+// reserved broadcast variants; 65532 (0xFFFC) is the "self-address" feature's own reserved value
+// (meaningful only when that feature is enabled on a device); the remainder of that same top-16-
+// address block (65520-65531, 0xFFF0-0xFFFB) is reserved outright for future allocation. None of
+// these can ever be ONE individually-addressable master or outstation a zone could meaningfully
+// classify a single frame's sender/receiver by, so the whole block is rejected wholesale -- the
+// same conservative "reject a reserved block outright, don't carve out exceptions for the specific
+// values some profiles happen to use" posture kMinVlanId/kMaxVlanId already take toward VID 4095.
+constexpr int kMinDnp3LinkAddress = 0;
+constexpr int kMaxDnp3LinkAddress = 65519;  // 0xFFEF
+
+// Which of the four mutually-exclusive addressing schemes a Zone/Conduit uses -- see this file's
 // own header comment for what each means. A bool sufficed while there were only two (Cidr/Vlan);
 // this became a proper enum once Hostname was added, so every 2-way branch on the old
 // `is_vlan_zone`/`is_vlan_conduit` bool became a 3-way branch on `kind` instead (mechanical,
-// zero-behavior-change refactor -- see docs/DEVELOPMENT.md).
-enum class ZoneKind { Cidr, Vlan, Hostname };
+// zero-behavior-change refactor -- see docs/DEVELOPMENT.md); ROADMAP item 144 added a fourth value,
+// Dnp3Link, the same mechanical way.
+enum class ZoneKind { Cidr, Vlan, Hostname, Dnp3Link };
 
 struct Zone {
     std::string name;
     std::string description;  // optional; empty if not given
-    // Exactly one of (`networks` and/or `ipv6_networks`)/`vlans`/`hostnames` is ever non-empty for
-    // a given zone -- parse_policy_text rejects a zone declaring more than one of the three or
-    // none. `kind` is the explicit discriminator (rather than callers inferring it from which
-    // vector is non-empty) so every place that needs to branch on zone kind (Conduit validation,
-    // PolicyEngine's dispatch) says so plainly. See this file's own header comment for why a zone
-    // is exactly one of the three. `networks`/`ipv6_networks` are NOT mutually exclusive with each
-    // other (ROADMAP item 143, docs/DEVELOPMENT.md) -- a single ZoneKind::Cidr zone may declare
-    // either, or both, for a true dual-stack zone whose IPv4 and IPv6 ranges are matched by the
-    // same conduits with no duplication; see Policy::zone_for/zone_for_ipv6 and PolicyEngine::
+    // Exactly one of (`networks` and/or `ipv6_networks`)/`vlans`/`hostnames`/`dnp3_link_addresses`
+    // is ever non-empty for a given zone -- parse_policy_text rejects a zone declaring more than
+    // one of the four or none. `kind` is the explicit discriminator (rather than callers inferring
+    // it from which vector is non-empty) so every place that needs to branch on zone kind (Conduit
+    // validation, PolicyEngine's dispatch) says so plainly. See this file's own header comment for
+    // why a zone is exactly one of the four. `networks`/`ipv6_networks` are NOT mutually exclusive
+    // with each other (ROADMAP item 143, docs/DEVELOPMENT.md) -- a single ZoneKind::Cidr zone may
+    // declare either, or both, for a true dual-stack zone whose IPv4 and IPv6 ranges are matched by
+    // the same conduits with no duplication; see Policy::zone_for/zone_for_ipv6 and PolicyEngine::
     // finish for how a flow's endpoint is checked against whichever of the two actually apply.
     ZoneKind kind = ZoneKind::Cidr;
     std::vector<CidrBlock> networks;
@@ -178,6 +220,12 @@ struct Zone {
     std::vector<std::string> hostnames;  // ZoneKind::Hostname only -- lowercase not enforced (matched
                                           // case-sensitively against the Resolver's hosts-file entries,
                                           // which themselves preserve the file's own casing)
+    // ZoneKind::Dnp3Link only (ROADMAP item 144) -- a list of plain numeric DNP3 data-link
+    // addresses (see kMinDnp3LinkAddress/kMaxDnp3LinkAddress above for the validated range), used
+    // for BOTH a master station zone and an outstation zone -- the zone itself doesn't know or care
+    // which role it plays; that's purely a function of which side of a Dnp3Link conduit's
+    // from_zones/to_zones it's checked against (see PolicyEngine::finish).
+    std::vector<uint16_t> dnp3_link_addresses;
     // Optional, purely informational Purdue Enterprise Reference Architecture level label (e.g. "0",
     // "1", "2", "3", "3.5", "4") -- never read by any matching logic in PolicyEngine, just carried
     // through to reports so an auditor sees each zone's declared level alongside its name. Empty
@@ -199,7 +247,12 @@ struct Zone {
 // "bacnet", "hartip", "opcua", "mms", "mqtt", "ffhse", "profinet", "goose",
 // "sv", "ethercat", "powerlink", "twincat", "ge-srtp", "fox", "foxs",
 // "s7comm-plus", "melsec", "fins", "codesys", "bsap", "cclink-ie", "udp",
-// "any"} (parse_policy_text rejects anything else) -- "any" matches every
+// "any"} (parse_policy_text rejects anything else) -- a `Dnp3Link`-kind
+// conduit (ROADMAP item 144) further restricts this to `{"dnp3", "any"}`
+// only, since there's nothing else a DNP3-link address could ever classify
+// (parse_policy_text rejects any other name there, but a CIDR/hostname-zone
+// conduit's own `protocols` is completely unaffected by this -- "dnp3"
+// remains valid there exactly as before). "any" matches every
 // protocol reachable through this conduit's own zone kind (see below), not
 // literally every protocol conduitscope recognizes. "bacnet" names BACnet/IP,
 // which this decoder only ever recognizes over UDP (see decoder.cpp), so a
@@ -247,6 +300,19 @@ struct Zone {
 // restrict who/what it permits via `from_macs`/`to_macs` (source/destination
 // MAC allow-lists) and `ethertypes` (raw EtherType allow-list, ROADMAP item
 // 103) -- see each field's own comment on Conduit below for the full design.
+//
+// A `Dnp3Link`-kind conduit (ROADMAP item 144) is the opposite case: it IS
+// directional, exactly like a CIDR-zone conduit (`from_zones` names the
+// master station zone(s), `to_zones` the outstation zone(s) -- a DNP3 frame
+// unambiguously carries both a source and a destination data-link address,
+// unlike a single Ethernet frame's one VLAN tag), and `ports`/
+// `bidirectional`/`functions` ALL stay fully meaningful and are matched
+// exactly the way a CIDR-zone conduit already matches them (the underlying
+// traffic is still ordinary bidirectional TCP, just classified by DNP3
+// data-link address instead of IP -- see PolicyEngine::finish's own
+// Dnp3Link-conduit matching loop). `from_macs`/`to_macs`/`ethertypes` stay
+// rejected on a Dnp3Link conduit, the same as on a CIDR/hostname-zone one --
+// those three are VLAN-zone-only.
 struct Conduit {
     std::string name;
     std::string description;
@@ -469,6 +535,25 @@ struct Policy {
     // policy with no hostname zone is entirely unaffected by whether those flags were given.
     bool has_hostname_zone() const;
 
+    // Dnp3Link sibling to zone_for_vlan above (ROADMAP item 144): returns the zone whose
+    // `dnp3_link_addresses` list contains `link_address`, or nullptr if no declared Dnp3Link zone
+    // does. Used for BOTH the master-station side and the outstation side of an observed DNP3
+    // frame -- which role a given call means is purely a function of which side of a Dnp3Link
+    // conduit's `from_zones`/`to_zones` the result is checked against (see PolicyEngine::finish),
+    // never baked into the zone itself: the same zone could in principle be referenced as either a
+    // `from_zones` or `to_zones` member by different conduits. parse_policy_text rejects any policy
+    // where two Dnp3Link zones share an address, so at most one zone can ever match here too.
+    const Zone* zone_for_dnp3_link(uint16_t link_address) const;
+
+    // True if at least one declared zone is a Dnp3Link zone -- mirrors has_vlan_zone's own
+    // backward-compatibility purpose exactly: PolicyEngine::observe only ever builds its per-
+    // outstation (master link address, outstation link address) aggregation map when this is true
+    // (see PolicyEngine's own any_dnp3_link_zone_ comment, policy_engine.hpp), so a policy declaring
+    // zero Dnp3Link zones is byte-for-byte unaffected by this feature's existence -- DNP3 traffic
+    // keeps being classified purely by the ordinary CIDR/hostname zone its IP falls into, exactly as
+    // before ROADMAP item 144.
+    bool has_dnp3_link_zone() const;
+
     // True if at least one CIDR- or hostname-zone conduit (never a VLAN-zone conduit -- see below)
     // names "bacnet", "enip", "hartip", "ffhse", "melsec", "fins", "codesys", "bsap", "cclink-ie",
     // "udp", or "any" in its `protocols:` -- the opt-in gate for evaluating UDP traffic (all
@@ -511,11 +596,11 @@ struct PolicyError : std::runtime_error {
 //   - a YAML-subset syntax problem (propagated from yaml_mini::YamlError)
 //   - a missing top-level 'zones' or 'conduits' key, or either being empty
 //   - a zone declaring none of ('networks'/'ipv6_networks')/'vlans'/
-//     'hostnames', or more than one of those three groups -- each zone is
-//     exactly one kind (see this file's own header comment); 'networks' and
-//     'ipv6_networks' together still count as only ONE occurrence of the
-//     CIDR kind (ROADMAP item 143, docs/DEVELOPMENT.md) -- a zone may declare
-//     either, or both, for a dual-stack zone
+//     'hostnames'/'dnp3_link_addresses', or more than one of those four
+//     groups -- each zone is exactly one kind (see this file's own header
+//     comment); 'networks' and 'ipv6_networks' together still count as only
+//     ONE occurrence of the CIDR kind (ROADMAP item 143, docs/DEVELOPMENT.md)
+//     -- a zone may declare either, or both, for a dual-stack zone
 //   - a zone's 'networks' containing a value that isn't a valid IPv4
 //     address/CIDR block, or its 'ipv6_networks' containing a value that
 //     isn't a valid IPv6 address/CIDR block (ROADMAP item 143)
@@ -523,13 +608,20 @@ struct PolicyError : std::runtime_error {
 //     [kMinVlanId, kMaxVlanId] ([1, 4094] -- VID 0 and 4095 are reserved,
 //     see kMinVlanId/kMaxVlanId's own comment)
 //   - a zone's 'hostnames' containing an empty value
+//   - a zone's 'dnp3_link_addresses'/'dnp3_link_address' containing a value
+//     that isn't an integer in [kMinDnp3LinkAddress, kMaxDnp3LinkAddress]
+//     ([0, 65519] -- 65520-65535/0xFFF0-0xFFFF is reserved by the DNP3/IEEE
+//     1815 standard for broadcast variants and the self-address feature, see
+//     kMinDnp3LinkAddress/kMaxDnp3LinkAddress's own comment -- ROADMAP item
+//     144)
 //   - two zones of the SAME kind overlapping/duplicating: two CIDR zones
 //     whose IPv4 networks overlap (see cidr_overlaps) OR whose IPv6 networks
 //     overlap (see cidr_overlaps_ipv6 -- checked independently of the IPv4
 //     check; an IPv4 network can never overlap an IPv6 one, disjoint address
-//     spaces), two VLAN zones sharing a VLAN ID, or two hostname zones
-//     sharing a hostname -- the same "each address/VLAN/hostname belongs to
-//     at most one zone" rule, checked separately per zone kind (zones of
+//     spaces), two VLAN zones sharing a VLAN ID, two hostname zones sharing a
+//     hostname, or two Dnp3Link zones sharing a DNP3 link address (ROADMAP
+//     item 144) -- the same "each address/VLAN/hostname/link-address belongs
+//     to at most one zone" rule, checked separately per zone kind (zones of
 //     different kinds can never overlap with each other, having no
 //     addressing scheme in common)
 //   - a zone literally named "unclassified" -- that name is reserved for
@@ -551,6 +643,10 @@ struct PolicyError : std::runtime_error {
 //     conduit naming any of the IP-riding protocol names above (they have no VLAN-only wire
 //     presence a VLAN-zone conduit could ever match) -- 'any' is accepted on any kind, scoped to
 //     whichever protocols that zone kind can actually match
+//   - a Dnp3Link-zone conduit naming any protocol other than 'dnp3'/'any' (ROADMAP item 144) --
+//     a DNP3-link-address zone exists purely to classify DNP3 traffic by data-link address instead
+//     of IP, so nothing else can ever appear on it; 'any' is accepted and, on this conduit kind,
+//     matches only dnp3 (there's nothing else it could resolve to)
 //   - a conduit whose 'type' isn't 'idmz' (the only recognized value so far), or an 'idmz'-typed
 //     conduit whose 'protocols' resolves to 'any' while 'functions' is empty/omitted -- an "any
 //     protocol, no functions restriction" conduit at a declared IT-OT/iDMZ boundary is rejected,
