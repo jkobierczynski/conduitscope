@@ -9088,6 +9088,309 @@ def opcua_symmetric_message(message_type, secure_channel_id, token_id, sequence_
     return opcua_ua_tcp_header(message_type, chunk_type, 8 + len(inner)) + inner
 
 
+# --- ROADMAP item 146 (docs/DEVELOPMENT.md) builders -- Browse, the subscriptions group, and
+# HistoryRead, plus chunk-reassembly fixtures. Mirror src/opcua.cpp's own decode functions
+# byte-for-byte (the inverse of those readers) -- see each one's own comment there for the
+# cross-checked field order/types this is built from (python-opcua's own generated bindings plus
+# the OPC Foundation's own NodeIds.csv for every TypeId used below).
+
+def opcua_view_description(view_id_bytes=None, ts_ticks=0, version=0):
+    """ViewDescription -- ViewId(NodeId) + Timestamp(DateTime) + ViewVersion(UInt32). Null ViewId
+    means "no view" -- the common case every fixture below uses."""
+    if view_id_bytes is None:
+        view_id_bytes = null_node_id()
+    return view_id_bytes + struct.pack("<Q", ts_ticks & 0xFFFFFFFFFFFFFFFF) + struct.pack("<I", version)
+
+
+def opcua_browse_description(node_id_bytes, direction, ref_type_bytes, include_subtypes,
+                              node_class_mask, result_mask):
+    """BrowseDescription -- NodeId + BrowseDirection(UInt32) + ReferenceTypeId(NodeId) +
+    IncludeSubtypes(Boolean) + NodeClassMask(UInt32) + ResultMask(UInt32). See
+    decode_browse_request_params."""
+    return (node_id_bytes + struct.pack("<I", direction) + ref_type_bytes +
+            bytes([1 if include_subtypes else 0]) + struct.pack("<I", node_class_mask) +
+            struct.pack("<I", result_mask))
+
+
+def opcua_reference_description(ref_type_bytes, is_forward, target_bytes, browse_name_bytes,
+                                 display_name_bytes, node_class, type_def_bytes):
+    """ReferenceDescription -- ReferenceTypeId(NodeId) + IsForward(Boolean) + NodeId(ExpandedNodeId)
+    + BrowseName(QualifiedName) + DisplayName(LocalizedText) + NodeClass(UInt32) +
+    TypeDefinition(ExpandedNodeId). See decode_browse_response_params. `target_bytes`/
+    `type_def_bytes` use a plain (non-Expanded) NodeId encoding -- read_node_id handles both the
+    same way when the Expanded flag bits aren't set, see its own comment in opcua.cpp."""
+    return (ref_type_bytes + bytes([1 if is_forward else 0]) + target_bytes + browse_name_bytes +
+            display_name_bytes + struct.pack("<I", node_class) + type_def_bytes)
+
+
+def opcua_simple_attribute_operand(type_def_bytes, browse_path_qns, attribute, index_range=None):
+    """SimpleAttributeOperand -- TypeDefinitionId(NodeId) + BrowsePath(array<QualifiedName>) +
+    AttributeId(UInt32) + IndexRange(String). See decode_simple_attribute_operand."""
+    body = type_def_bytes + opcua_array_count(len(browse_path_qns))
+    for qn in browse_path_qns:
+        body += qn
+    body += struct.pack("<I", attribute) + opcua_string(index_range)
+    return body
+
+
+def opcua_content_filter(elements=()):
+    """ContentFilter -- Elements(array<ContentFilterElement{FilterOperator(UInt32) +
+    FilterOperands(array<ExtensionObject>)}>). `elements` is a list of (operator, [ext_object_bytes,
+    ...]) pairs. See decode_content_filter -- this decoder never looks past each operand's own
+    ExtensionObject envelope, so the fixtures below keep every element's own operand list empty."""
+    body = opcua_array_count(len(elements))
+    for op, operand_ext_objects in elements:
+        body += struct.pack("<I", op) + opcua_array_count(len(operand_ext_objects))
+        for eo in operand_ext_objects:
+            body += eo
+    return body
+
+
+def opcua_event_filter_body(select_clauses=(), content_filter_elements=()):
+    """EventFilter -- SelectClauses(array<SimpleAttributeOperand>) + WhereClause(ContentFilter).
+    See decode_event_filter. Shared, unwrapped, by both MonitoringFilter's own EventFilter
+    alternative (wrapped in an ExtensionObject -- see opcua_event_filter_ext below) and
+    HistoryRead's own ReadEventDetails (embedded directly, NOT re-wrapped -- see
+    opcua_read_event_details below)."""
+    body = opcua_array_count(len(select_clauses))
+    for sc in select_clauses:
+        body += sc
+    body += opcua_content_filter(content_filter_elements)
+    return body
+
+
+def opcua_aggregate_configuration(use_defaults=True, treat_uncertain_as_bad=True, percent_bad=0,
+                                   percent_good=100, use_sloped=False):
+    """AggregateConfiguration -- 5 flat bytes. See decode_aggregate_configuration."""
+    return bytes([1 if use_defaults else 0, 1 if treat_uncertain_as_bad else 0, percent_bad & 0xFF,
+                   percent_good & 0xFF, 1 if use_sloped else 0])
+
+
+def opcua_data_change_filter_ext(trigger, deadband_type, deadband_value):
+    """DataChangeFilter, wrapped as the MonitoringFilter ExtensionObject (TypeId 724). See
+    decode_monitoring_filter's own kDataChangeFilterTypeId branch."""
+    body = struct.pack("<II", trigger, deadband_type) + struct.pack("<d", deadband_value)
+    return opcua_extension_object(node_id_four_byte(724), 0x01, body)
+
+
+def opcua_event_filter_ext(select_clauses=(), content_filter_elements=()):
+    """EventFilter, wrapped as the MonitoringFilter ExtensionObject (TypeId 727). See
+    decode_monitoring_filter's own kEventFilterTypeId branch."""
+    body = opcua_event_filter_body(select_clauses, content_filter_elements)
+    return opcua_extension_object(node_id_four_byte(727), 0x01, body)
+
+
+def opcua_aggregate_filter_ext(start_ticks, aggregate_type_bytes, processing_interval, agg_config_bytes):
+    """AggregateFilter, wrapped as the MonitoringFilter ExtensionObject (TypeId 730). See
+    decode_monitoring_filter's own kAggregateFilterTypeId branch."""
+    body = (struct.pack("<Q", start_ticks & 0xFFFFFFFFFFFFFFFF) + aggregate_type_bytes +
+            struct.pack("<d", processing_interval) + agg_config_bytes)
+    return opcua_extension_object(node_id_four_byte(730), 0x01, body)
+
+
+def opcua_monitoring_parameters(client_handle, sampling_interval, filter_ext_bytes, queue_size,
+                                 discard_oldest):
+    """MonitoringParameters -- ClientHandle(UInt32) + SamplingInterval(Double) + Filter
+    (ExtensionObject) + QueueSize(UInt32) + DiscardOldest(Boolean). See
+    decode_monitoring_parameters. Pass opcua_extension_object_null() for "no filter requested"."""
+    return (struct.pack("<I", client_handle) + struct.pack("<d", sampling_interval) + filter_ext_bytes +
+            struct.pack("<I", queue_size) + bytes([1 if discard_oldest else 0]))
+
+
+def opcua_monitored_item_create_request(node_id_bytes, attribute, mode, params_bytes, index_range=None):
+    """MonitoredItemCreateRequest -- ItemToMonitor(ReadValueId) + MonitoringMode(UInt32) +
+    RequestedParameters(MonitoringParameters). See decode_create_monitored_items_request_params."""
+    return (opcua_read_value_id(node_id_bytes, attribute, index_range=index_range) +
+            struct.pack("<I", mode) + params_bytes)
+
+
+def opcua_monitored_item_create_result(status, mi_id, revised_sampling, revised_queue,
+                                        filter_result_ext=None):
+    """MonitoredItemCreateResult -- StatusCode + MonitoredItemId(UInt32) +
+    RevisedSamplingInterval(Double) + RevisedQueueSize(UInt32) + FilterResult(ExtensionObject). See
+    decode_create_monitored_items_response_params."""
+    if filter_result_ext is None:
+        filter_result_ext = opcua_extension_object_null()
+    return (struct.pack("<I", status) + struct.pack("<I", mi_id) + struct.pack("<d", revised_sampling) +
+            struct.pack("<I", revised_queue) + filter_result_ext)
+
+
+def opcua_monitored_item_modify_result(status, revised_sampling, revised_queue, filter_result_ext=None):
+    """MonitoredItemModifyResult -- StatusCode + RevisedSamplingInterval(Double) +
+    RevisedQueueSize(UInt32) + FilterResult(ExtensionObject). See
+    decode_modify_monitored_items_response_params."""
+    if filter_result_ext is None:
+        filter_result_ext = opcua_extension_object_null()
+    return (struct.pack("<I", status) + struct.pack("<d", revised_sampling) +
+            struct.pack("<I", revised_queue) + filter_result_ext)
+
+
+def opcua_data_change_notification_ext(items):
+    """DataChangeNotification, wrapped as a NotificationData ExtensionObject (TypeId 811). `items`
+    is a list of (client_handle, data_value_bytes) pairs. See decode_notification_message's own
+    kDataChangeNotificationTypeId branch."""
+    body = opcua_array_count(len(items))
+    for ch, dv in items:
+        body += struct.pack("<I", ch) + dv
+    body += opcua_array_count(0)  # DiagnosticInfos
+    return opcua_extension_object(node_id_four_byte(811), 0x01, body)
+
+
+def opcua_event_notification_list_ext(events):
+    """EventNotificationList, wrapped as a NotificationData ExtensionObject (TypeId 916). `events`
+    is a list of (client_handle, [variant_bytes, ...]) pairs. See decode_notification_message's own
+    kEventNotificationListTypeId branch."""
+    body = opcua_array_count(len(events))
+    for ch, fields in events:
+        body += struct.pack("<I", ch) + opcua_array_count(len(fields))
+        for f in fields:
+            body += f
+    return opcua_extension_object(node_id_four_byte(916), 0x01, body)
+
+
+def opcua_status_change_notification_ext(status):
+    """StatusChangeNotification, wrapped as a NotificationData ExtensionObject (TypeId 820). See
+    decode_notification_message's own kStatusChangeNotificationTypeId branch -- NOTE this is a
+    single DiagnosticInfo STRUCT, not an array of them, unlike every other diagnostic-infos tail in
+    this file."""
+    body = struct.pack("<I", status) + opcua_diagnostic_info_null()
+    return opcua_extension_object(node_id_four_byte(820), 0x01, body)
+
+
+def opcua_notification_message(sequence_number, publish_time_ticks, notification_data_exts):
+    """NotificationMessage -- SequenceNumber(UInt32) + PublishTime(DateTime) +
+    NotificationData(array<ExtensionObject>). See decode_notification_message. Shared, unwrapped,
+    by PublishResponse and RepublishResponse."""
+    body = (struct.pack("<I", sequence_number) + struct.pack("<Q", publish_time_ticks & 0xFFFFFFFFFFFFFFFF) +
+            opcua_array_count(len(notification_data_exts)))
+    for eo in notification_data_exts:
+        body += eo
+    return body
+
+
+def opcua_history_read_details_ext(type_id_numeric, body):
+    """Wraps a HistoryReadDetails sub-structure's own body as the HistoryReadDetails
+    ExtensionObject. See decode_history_read_details's own dispatch."""
+    return opcua_extension_object(node_id_four_byte(type_id_numeric), 0x01, body)
+
+
+def opcua_read_raw_modified_details(is_modified, start_ticks, end_ticks, num_values, return_bounds):
+    """ReadRawModifiedDetails (TypeId 649) -- IsReadModified(Boolean) + StartTime(DateTime) +
+    EndTime(DateTime) + NumValuesPerNode(UInt32) + ReturnBounds(Boolean)."""
+    body = (bytes([1 if is_modified else 0]) + struct.pack("<Q", start_ticks & 0xFFFFFFFFFFFFFFFF) +
+            struct.pack("<Q", end_ticks & 0xFFFFFFFFFFFFFFFF) + struct.pack("<I", num_values) +
+            bytes([1 if return_bounds else 0]))
+    return opcua_history_read_details_ext(649, body)
+
+
+def opcua_read_at_time_details(req_times_ticks, use_simple_bounds):
+    """ReadAtTimeDetails (TypeId 655) -- ReqTimes(array<DateTime>) + UseSimpleBounds(Boolean)."""
+    body = opcua_array_count(len(req_times_ticks))
+    for t in req_times_ticks:
+        body += struct.pack("<Q", t & 0xFFFFFFFFFFFFFFFF)
+    body += bytes([1 if use_simple_bounds else 0])
+    return opcua_history_read_details_ext(655, body)
+
+
+def opcua_read_processed_details(start_ticks, end_ticks, processing_interval, aggregate_type_list,
+                                  agg_config_bytes):
+    """ReadProcessedDetails (TypeId 652) -- StartTime + EndTime(DateTime) +
+    ProcessingInterval(Double) + AggregateType(array<NodeId>) + AggregateConfiguration."""
+    body = (struct.pack("<Q", start_ticks & 0xFFFFFFFFFFFFFFFF) +
+            struct.pack("<Q", end_ticks & 0xFFFFFFFFFFFFFFFF) + struct.pack("<d", processing_interval) +
+            opcua_array_count(len(aggregate_type_list)))
+    for at in aggregate_type_list:
+        body += at
+    body += agg_config_bytes
+    return opcua_history_read_details_ext(652, body)
+
+
+def opcua_read_event_details(num_values, start_ticks, end_ticks, event_filter_body_bytes):
+    """ReadEventDetails (TypeId 646) -- NumValuesPerNode(UInt32) + StartTime + EndTime(DateTime) +
+    Filter(EventFilter, embedded directly -- see opcua_event_filter_body's own comment)."""
+    body = (struct.pack("<I", num_values) + struct.pack("<Q", start_ticks & 0xFFFFFFFFFFFFFFFF) +
+            struct.pack("<Q", end_ticks & 0xFFFFFFFFFFFFFFFF) + event_filter_body_bytes)
+    return opcua_history_read_details_ext(646, body)
+
+
+def opcua_read_annotation_data_details(req_times_ticks):
+    """ReadAnnotationDataDetails (TypeId 23500) -- ReqTimes(array<DateTime>)."""
+    body = opcua_array_count(len(req_times_ticks))
+    for t in req_times_ticks:
+        body += struct.pack("<Q", t & 0xFFFFFFFFFFFFFFFF)
+    return opcua_history_read_details_ext(23500, body)
+
+
+def opcua_history_read_value_id(node_id_bytes, index_range=None, continuation=None):
+    """HistoryReadValueId -- NodeId + IndexRange(String) + DataEncoding(QualifiedName) +
+    ContinuationPoint(ByteString). See decode_history_read_request_params."""
+    return (node_id_bytes + opcua_string(index_range) + opcua_qualified_name(0, None) +
+            opcua_bytestring(continuation))
+
+
+def opcua_history_read_request_params(details_ext_bytes, timestamps_to_return, release_continuation,
+                                       nodes):
+    """HistoryReadRequest params -- HistoryReadDetails(ExtensionObject) +
+    TimestampsToReturn(UInt32) + ReleaseContinuationPoints(Boolean) +
+    NodesToRead(array<HistoryReadValueId>). See decode_history_read_request_params."""
+    body = (details_ext_bytes + struct.pack("<I", timestamps_to_return) +
+            bytes([1 if release_continuation else 0]) + opcua_array_count(len(nodes)))
+    for n in nodes:
+        body += n
+    return body
+
+
+def opcua_history_data_ext(data_values):
+    """HistoryData (TypeId 658) -- DataValues(array<DataValue>). See decode_history_data's own
+    kHistoryDataTypeId branch."""
+    body = opcua_array_count(len(data_values))
+    for dv in data_values:
+        body += dv
+    return opcua_extension_object(node_id_four_byte(658), 0x01, body)
+
+
+def opcua_history_modified_data_ext(data_values, modifications):
+    """HistoryModifiedData (TypeId 11227) -- DataValues(array<DataValue>) +
+    ModificationInfos(array<ModificationInfo{ModificationTime(DateTime) + UpdateType(UInt32) +
+    UserName(String)}>). `modifications` is a list of (mod_time_ticks, update_type, username). See
+    decode_history_data's own kHistoryModifiedDataTypeId branch."""
+    body = opcua_array_count(len(data_values))
+    for dv in data_values:
+        body += dv
+    body += opcua_array_count(len(modifications))
+    for mt, ut, un in modifications:
+        body += struct.pack("<Q", mt & 0xFFFFFFFFFFFFFFFF) + struct.pack("<I", ut) + opcua_string(un)
+    return opcua_extension_object(node_id_four_byte(11227), 0x01, body)
+
+
+def opcua_history_event_ext(events):
+    """HistoryEvent (TypeId 661) -- Events(array<HistoryEventFieldList{EventFields(array<Variant>)}>).
+    `events` is a list of [variant_bytes, ...] per event. See decode_history_data's own
+    kHistoryEventTypeId branch."""
+    body = opcua_array_count(len(events))
+    for fields in events:
+        body += opcua_array_count(len(fields))
+        for f in fields:
+            body += f
+    return opcua_extension_object(node_id_four_byte(661), 0x01, body)
+
+
+def opcua_history_read_result(status, continuation, history_data_ext_bytes):
+    """HistoryReadResult -- StatusCode + ContinuationPoint(ByteString) + HistoryData(ExtensionObject).
+    See decode_history_read_response_params."""
+    return struct.pack("<I", status) + opcua_bytestring(continuation) + history_data_ext_bytes
+
+
+def opcua_history_read_response_params(results):
+    """HistoryReadResponse params -- Results(array<HistoryReadResult>) + DiagnosticInfos(skip). See
+    decode_history_read_response_params."""
+    body = opcua_array_count(len(results))
+    for r in results:
+        body += r
+    body += opcua_array_count(0)  # DiagnosticInfos
+    return body
+
+
 def build_opcua_sample():
     """OPC UA Binary (UA-TCP / OPC UA Secure Conversation, TCP-only, conventionally port 4840) --
     the UA Connection Protocol handshake (Hello/Acknowledge), a full OpenSecureChannel/
@@ -9419,6 +9722,313 @@ def build_opcua_sample():
                     len(coalesced_payload), 0x7504) +
         tcp_header(53220, OPCUA_PORT, 1, 1, TCP_PSH | TCP_ACK, len(coalesced_payload)) + coalesced_payload,
         1_700_007_204, 0)
+
+    # ------------------------------------------------------------------------------------------
+    # ROADMAP item 146 (docs/DEVELOPMENT.md): Browse, the subscriptions group (9 pairs), and
+    # HistoryRead (6 pairs, covering all 5 HistoryReadDetails sub-structures plus all 3 HistoryData
+    # dispatch variants), followed by three chunk-reassembly fixtures and a widened-StatusCode
+    # fixture. One dedicated TCP flow (port 53300) carries 34)-53), continuing to use
+    # channel=500001/token=1 purely for plausibility -- this decoder never actually correlates a
+    # Message's channel/token against its own OpenSecureChannel history (see opcua.hpp's
+    # "Deliberately NOT implemented" section), so reusing those numbers here, well after packet 26
+    # above already closed that channel, causes no inconsistency the decoder itself would ever
+    # check.
+    client_seq2 = [1]
+    server_seq2 = [1]
+    _item146_ip_id = [0x7600]
+    _item146_ts = [1_700_007_300.0]
+
+    def add146(from_client: bool, payload: bytes):
+        nonlocal data
+        if from_client:
+            s_ip, d_ip = HMI_IP, PLC_IP
+            s_mac, d_mac = HMI_MAC, PLC_MAC
+            src_port, dst_port = 53300, OPCUA_PORT
+            seq, ack = client_seq2[0], server_seq2[0]
+            client_seq2[0] += len(payload)
+        else:
+            s_ip, d_ip = PLC_IP, HMI_IP
+            s_mac, d_mac = PLC_MAC, HMI_MAC
+            src_port, dst_port = OPCUA_PORT, 53300
+            seq, ack = server_seq2[0], client_seq2[0]
+            server_seq2[0] += len(payload)
+        tcp = tcp_header(src_port, dst_port, seq, ack, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(s_ip, d_ip, 6, len(tcp), _item146_ip_id[0]) + tcp
+        _item146_ip_id[0] += 1
+        _item146_ts[0] += 1.0
+        data += pcap_record(eth_header(d_mac, s_mac, 0x0800) + ip, int(_item146_ts[0]), 0)
+
+    # 34) & 35) Browse request/response -- one BrowseDescription (Forward, IncludeSubtypes) and one
+    #     ReferenceDescription in the result.
+    browse_req_params = (opcua_view_description() + struct.pack("<I", 10) + opcua_array_count(1) +
+                          opcua_browse_description(node_id_numeric(2, 3000), 0, null_node_id(), True,
+                                                    0, 0x3F))
+    browse_req_body = opcua_service_message(527, opcua_request_header(40), browse_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 40, 40, browse_req_body))
+
+    browse_ref = opcua_reference_description(
+        node_id_two_byte(40), True, node_id_numeric(2, 3001), opcua_qualified_name(2, "Temperature"),
+        opcua_localized_text("en", "Temperature"), 2, node_id_two_byte(63))
+    browse_resp_params = (opcua_array_count(1) + struct.pack("<I", 0) + opcua_bytestring(None) +
+                           opcua_array_count(1) + browse_ref + opcua_array_count(0))
+    browse_resp_body = opcua_service_message(530, opcua_response_header(40, 0), browse_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 40, 40, browse_resp_body))
+
+    # 36) & 37) CreateSubscription request/response.
+    subscription_id = 9001
+    create_sub_req_params = (struct.pack("<d", 1000.0) + struct.pack("<III", 2400, 10, 0) +
+                              bytes([1, 0]))
+    create_sub_req_body = opcua_service_message(787, opcua_request_header(41), create_sub_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 41, 41, create_sub_req_body))
+
+    create_sub_resp_params = (struct.pack("<I", subscription_id) + struct.pack("<d", 1000.0) +
+                               struct.pack("<II", 2400, 10))
+    create_sub_resp_body = opcua_service_message(790, opcua_response_header(41, 0), create_sub_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 41, 41, create_sub_resp_body))
+
+    # 38) & 39) ModifySubscription request/response.
+    mod_sub_req_params = (struct.pack("<I", subscription_id) + struct.pack("<d", 1000.0) +
+                           struct.pack("<III", 2400, 10, 0) + bytes([0]))
+    mod_sub_req_body = opcua_service_message(793, opcua_request_header(42), mod_sub_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 42, 42, mod_sub_req_body))
+
+    mod_sub_resp_params = struct.pack("<d", 1000.0) + struct.pack("<II", 2400, 10)
+    mod_sub_resp_body = opcua_service_message(796, opcua_response_header(42, 0), mod_sub_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 42, 42, mod_sub_resp_body))
+
+    # 40) & 41) SetPublishingMode request/response.
+    set_pub_req_params = bytes([1]) + opcua_array_count(1) + struct.pack("<I", subscription_id)
+    set_pub_req_body = opcua_service_message(799, opcua_request_header(43), set_pub_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 43, 43, set_pub_req_body))
+
+    set_pub_resp_params = opcua_array_count(1) + struct.pack("<I", 0) + opcua_array_count(0)
+    set_pub_resp_body = opcua_service_message(802, opcua_response_header(43, 0), set_pub_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 43, 43, set_pub_resp_body))
+
+    # 42) & 43) CreateMonitoredItems request/response -- three items, one each exercising
+    #     DataChangeFilter, EventFilter, and AggregateFilter (Jurgen's own "whole group" scope).
+    mi_item_datachange = opcua_monitored_item_create_request(
+        node_id_numeric(2, 1001), 13, 2,  # MonitoringMode=Reporting
+        opcua_monitoring_parameters(1, 250.0, opcua_data_change_filter_ext(2, 1, 0.5), 5, False))
+    mi_item_event = opcua_monitored_item_create_request(
+        node_id_numeric(2, 9000), 13, 2,
+        opcua_monitoring_parameters(
+            2, 0.0,
+            opcua_event_filter_ext(
+                select_clauses=[opcua_simple_attribute_operand(
+                    node_id_four_byte(2041), [opcua_qualified_name(0, "Message")], 13)],
+                content_filter_elements=[]),
+            10, False))
+    mi_item_aggregate = opcua_monitored_item_create_request(
+        node_id_numeric(2, 1002), 13, 1,  # MonitoringMode=Sampling
+        opcua_monitoring_parameters(
+            3, 5000.0,
+            opcua_aggregate_filter_ext(OPCUA_FIXED_TICKS, node_id_numeric(0, 2341), 60000.0,
+                                        opcua_aggregate_configuration()),
+            1, True))
+    create_mi_req_params = (struct.pack("<I", subscription_id) + struct.pack("<I", 2) +  # Both
+                             opcua_array_count(3) + mi_item_datachange + mi_item_event + mi_item_aggregate)
+    create_mi_req_body = opcua_service_message(751, opcua_request_header(44), create_mi_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 44, 44, create_mi_req_body))
+
+    create_mi_resp_params = (opcua_array_count(3) +
+                              opcua_monitored_item_create_result(0, 101, 250.0, 5) +
+                              opcua_monitored_item_create_result(0, 102, 0.0, 10) +
+                              opcua_monitored_item_create_result(0, 103, 5000.0, 1) +
+                              opcua_array_count(0))
+    create_mi_resp_body = opcua_service_message(754, opcua_response_header(44, 0), create_mi_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 44, 44, create_mi_resp_body))
+
+    # 44) & 45) ModifyMonitoredItems request/response.
+    mod_mi_item = (struct.pack("<I", 101) +
+                   opcua_monitoring_parameters(1, 500.0, opcua_extension_object_null(), 5, False))
+    mod_mi_req_params = (struct.pack("<I", subscription_id) + struct.pack("<I", 2) +
+                          opcua_array_count(1) + mod_mi_item)
+    mod_mi_req_body = opcua_service_message(763, opcua_request_header(45), mod_mi_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 45, 45, mod_mi_req_body))
+
+    mod_mi_resp_params = (opcua_array_count(1) + opcua_monitored_item_modify_result(0, 500.0, 5) +
+                           opcua_array_count(0))
+    mod_mi_resp_body = opcua_service_message(766, opcua_response_header(45, 0), mod_mi_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 45, 45, mod_mi_resp_body))
+
+    # 46) & 47) Publish request/response -- the response's own NotificationMessage exercises all 3
+    #     NotificationData dispatch variants (DataChangeNotification/EventNotificationList/
+    #     StatusChangeNotification) in a single array, the whole point of "the whole group".
+    publish_req_params = opcua_array_count(1) + struct.pack("<II", subscription_id, 1)
+    publish_req_body = opcua_service_message(826, opcua_request_header(46), publish_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 46, 46, publish_req_body))
+
+    publish_notification = opcua_notification_message(
+        1, OPCUA_FIXED_TICKS,
+        [opcua_data_change_notification_ext([(1, opcua_data_value(opcua_variant_int32(55), status=0))]),
+         opcua_event_notification_list_ext([(2, [opcua_variant_string_array(["AlarmActive"])])]),
+         opcua_status_change_notification_ext(0x80280000)])  # BadSubscriptionIdInvalid
+    publish_resp_params = (struct.pack("<I", subscription_id) + opcua_array_count(1) +
+                            struct.pack("<I", 1) + bytes([0]) + publish_notification +
+                            opcua_array_count(1) + struct.pack("<I", 0) + opcua_array_count(0))
+    publish_resp_body = opcua_service_message(829, opcua_response_header(46, 0), publish_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 46, 46, publish_resp_body))
+
+    # 48) & 49) Republish request/response -- just one NotificationMessage, no wrapping fields.
+    republish_req_params = struct.pack("<II", subscription_id, 1)
+    republish_req_body = opcua_service_message(832, opcua_request_header(47), republish_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 47, 47, republish_req_body))
+
+    republish_notification = opcua_notification_message(
+        2, OPCUA_FIXED_TICKS,
+        [opcua_data_change_notification_ext([(1, opcua_data_value(opcua_variant_int32(56), status=0))])])
+    republish_resp_body = opcua_service_message(835, opcua_response_header(47, 0), republish_notification)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 47, 47, republish_resp_body))
+
+    # 50) & 51) DeleteMonitoredItems request/response.
+    delete_mi_req_params = (struct.pack("<I", subscription_id) + opcua_array_count(3) +
+                             struct.pack("<III", 101, 102, 103))
+    delete_mi_req_body = opcua_service_message(781, opcua_request_header(48), delete_mi_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 48, 48, delete_mi_req_body))
+
+    delete_mi_resp_params = opcua_array_count(3) + struct.pack("<III", 0, 0, 0) + opcua_array_count(0)
+    delete_mi_resp_body = opcua_service_message(784, opcua_response_header(48, 0), delete_mi_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 48, 48, delete_mi_resp_body))
+
+    # 52) & 53) DeleteSubscriptions request/response -- closes out the group.
+    delete_sub_req_params = opcua_array_count(1) + struct.pack("<I", subscription_id)
+    delete_sub_req_body = opcua_service_message(847, opcua_request_header(49), delete_sub_req_params)
+    add146(True, opcua_symmetric_message("MSG", channel_id, token_id, 49, 49, delete_sub_req_body))
+
+    delete_sub_resp_params = opcua_array_count(1) + struct.pack("<I", 0) + opcua_array_count(0)
+    delete_sub_resp_body = opcua_service_message(850, opcua_response_header(49, 0), delete_sub_resp_params)
+    add146(False, opcua_symmetric_message("MSG", channel_id, token_id, 49, 49, delete_sub_resp_body))
+
+    # 54)-65) HistoryRead -- six request/response pairs covering all 5 HistoryReadDetails
+    # sub-structures (Jurgen's own "all 5 sub-structures" scope) and all 3 HistoryData dispatch
+    # variants (HistoryData/HistoryModifiedData/HistoryEvent).
+    hr_handle = [49]
+
+    def history_read_pair(details_ext_bytes, node_id_bytes, history_data_ext_bytes):
+        hr_handle[0] += 1
+        h = hr_handle[0]
+        req_params = opcua_history_read_request_params(
+            details_ext_bytes, 2, False, [opcua_history_read_value_id(node_id_bytes)])
+        req_body = opcua_service_message(664, opcua_request_header(h), req_params)
+        add146(True, opcua_symmetric_message("MSG", channel_id, token_id, h, h, req_body))
+
+        resp_params = opcua_history_read_response_params(
+            [opcua_history_read_result(0, None, history_data_ext_bytes)])
+        resp_body = opcua_service_message(667, opcua_response_header(h, 0), resp_params)
+        add146(False, opcua_symmetric_message("MSG", channel_id, token_id, h, h, resp_body))
+
+    one_hour_ticks = 3_600 * 10_000_000
+    half_hour_ticks = 1_800 * 10_000_000
+
+    # 54) & 55) ReadRawModifiedDetails (IsReadModified=false) + HistoryData.
+    history_read_pair(
+        opcua_read_raw_modified_details(False, OPCUA_FIXED_TICKS - one_hour_ticks, OPCUA_FIXED_TICKS,
+                                         100, True),
+        node_id_numeric(2, 1001),
+        opcua_history_data_ext([opcua_data_value(opcua_variant_int32(42), status=0,
+                                                  source_ts_ticks=OPCUA_FIXED_TICKS)]))
+
+    # 56) & 57) ReadRawModifiedDetails (IsReadModified=true) + HistoryModifiedData.
+    history_read_pair(
+        opcua_read_raw_modified_details(True, OPCUA_FIXED_TICKS - one_hour_ticks, OPCUA_FIXED_TICKS,
+                                         100, False),
+        node_id_numeric(2, 1001),
+        opcua_history_modified_data_ext(
+            [opcua_data_value(opcua_variant_int32(43), status=0, source_ts_ticks=OPCUA_FIXED_TICKS)],
+            [(OPCUA_FIXED_TICKS, 2, "operator1")]))  # UpdateType=2 Replace
+
+    # 58) & 59) ReadAtTimeDetails + HistoryData.
+    history_read_pair(
+        opcua_read_at_time_details([OPCUA_FIXED_TICKS - half_hour_ticks, OPCUA_FIXED_TICKS], False),
+        node_id_numeric(2, 1001),
+        opcua_history_data_ext([opcua_data_value(opcua_variant_int32(44), status=0)]))
+
+    # 60) & 61) ReadProcessedDetails + HistoryData.
+    history_read_pair(
+        opcua_read_processed_details(OPCUA_FIXED_TICKS - one_hour_ticks, OPCUA_FIXED_TICKS, 60000.0,
+                                      [node_id_numeric(0, 2341)], opcua_aggregate_configuration()),
+        node_id_numeric(2, 1001),
+        opcua_history_data_ext([opcua_data_value(opcua_variant_float(45.5), status=0)]))
+
+    # 62) & 63) ReadEventDetails + HistoryEvent.
+    history_read_event_filter = opcua_event_filter_body(
+        select_clauses=[opcua_simple_attribute_operand(
+            node_id_four_byte(2041), [opcua_qualified_name(0, "Message")], 13)],
+        content_filter_elements=[])
+    history_read_pair(
+        opcua_read_event_details(100, OPCUA_FIXED_TICKS - one_hour_ticks, OPCUA_FIXED_TICKS,
+                                  history_read_event_filter),
+        node_id_numeric(0, 2253),  # Server object -- the conventional event-notifier NodeId
+        opcua_history_event_ext([[opcua_variant_string_array(["High temperature alarm"])]]))
+
+    # 64) & 65) ReadAnnotationDataDetails + HistoryData.
+    history_read_pair(
+        opcua_read_annotation_data_details([OPCUA_FIXED_TICKS - half_hour_ticks, OPCUA_FIXED_TICKS]),
+        node_id_numeric(2, 1001),
+        opcua_history_data_ext([opcua_data_value(opcua_variant_null(), status=0)]))
+
+    # 66) & 67) True cross-packet SecureConversation chunk reassembly -- a complete ReadRequest
+    #     service body split into a 'C' chunk and an 'F' chunk sent as two SEPARATE TCP packets on
+    #     their own dedicated flow (port 53400), exercising OpcUaReassemblyState end-to-end (not
+    #     just same-payload coalescing, which packets 34-65 above never needed).
+    reassembly_chan, reassembly_token = 700002, 3
+    reassembly_rr_params = (struct.pack("<d", 5000.0) + struct.pack("<I", 2) + opcua_array_count(1) +
+                             opcua_read_value_id(node_id_numeric(2, 1001), 13))
+    reassembly_rr_body = opcua_service_message(631, opcua_request_header(50), reassembly_rr_params)
+    split_at = len(reassembly_rr_body) // 2
+    chunk1_service, chunk2_service = reassembly_rr_body[:split_at], reassembly_rr_body[split_at:]
+
+    chunk1_inner = (struct.pack("<I", reassembly_chan) + struct.pack("<I", reassembly_token) +
+                     opcua_sequence_header(1, 1) + chunk1_service)
+    chunk1_msg = opcua_ua_tcp_header("MSG", "C", 8 + len(chunk1_inner)) + chunk1_inner
+    chunk2_inner = (struct.pack("<I", reassembly_chan) + struct.pack("<I", reassembly_token) +
+                     opcua_sequence_header(2, 1) + chunk2_service)
+    chunk2_msg = opcua_ua_tcp_header("MSG", "F", 8 + len(chunk2_inner)) + chunk2_inner
+
+    def send_raw_packet(from_client: bool, sport: int, payload: bytes, seq: int, ip_id: int, ts: int):
+        nonlocal data
+        if from_client:
+            s_ip, d_ip, s_mac, d_mac = HMI_IP, PLC_IP, HMI_MAC, PLC_MAC
+            src_port, dst_port = sport, OPCUA_PORT
+        else:
+            s_ip, d_ip, s_mac, d_mac = PLC_IP, HMI_IP, PLC_MAC, HMI_MAC
+            src_port, dst_port = OPCUA_PORT, sport
+        tcp = tcp_header(src_port, dst_port, seq, 1, TCP_PSH | TCP_ACK, len(payload)) + payload
+        ip = ipv4_header(s_ip, d_ip, 6, len(tcp), ip_id) + tcp
+        data += pcap_record(eth_header(d_mac, s_mac, 0x0800) + ip, ts, 0)
+
+    send_raw_packet(True, 53400, chunk1_msg, 1, 0x7800, 1_700_007_400)
+    send_raw_packet(True, 53400, chunk2_msg, 1 + len(chunk1_msg), 0x7801, 1_700_007_401)
+
+    # 68) & 69) Chunk reassembly abandonment -- a 'C' chunk begins a reassembly on its own flow
+    #     (port 53401), then a DIFFERENT message's 'F' chunk (a different SecureChannelId) arrives
+    #     on that SAME flow before any continuation of the first ever does: finalize_chunk must
+    #     abandon the first (with a note) and decode the second normally, rather than concatenating
+    #     bytes from two unrelated messages.
+    abandon_chan1, abandon_token1 = 800001, 5
+    abandon_chunk1_inner = (struct.pack("<I", abandon_chan1) + struct.pack("<I", abandon_token1) +
+                             opcua_sequence_header(1, 1) + bytes([0xAA, 0xBB, 0xCC, 0xDD]))
+    abandon_chunk1_msg = opcua_ua_tcp_header("MSG", "C", 8 + len(abandon_chunk1_inner)) + abandon_chunk1_inner
+
+    abandon_chan2, abandon_token2 = 800002, 6
+    abandon_rr_params = (struct.pack("<d", 1000.0) + struct.pack("<I", 2) + opcua_array_count(1) +
+                          opcua_read_value_id(node_id_numeric(2, 1004), 13))
+    abandon_rr_body = opcua_service_message(631, opcua_request_header(60), abandon_rr_params)
+    abandon_chunk2_inner = (struct.pack("<I", abandon_chan2) + struct.pack("<I", abandon_token2) +
+                             opcua_sequence_header(1, 1) + abandon_rr_body)
+    abandon_chunk2_msg = opcua_ua_tcp_header("MSG", "F", 8 + len(abandon_chunk2_inner)) + abandon_chunk2_inner
+
+    send_raw_packet(True, 53401, abandon_chunk1_msg, 1, 0x7802, 1_700_007_402)
+    send_raw_packet(True, 53401, abandon_chunk2_msg, 1 + len(abandon_chunk1_msg), 0x7803, 1_700_007_403)
+
+    # 70) A widened-StatusCode fixture -- BadTooManyMonitoredItems (0x80DB0000), present in the new
+    #     181-entry status_code_name table (ROADMAP item 146) but NOT in the old 20-entry one, as a
+    #     standalone Error message (mirrors packet 27's own BadSecureChannelIdInvalid, which the old
+    #     table already named).
+    newcode_err_body = struct.pack("<I", 0x80DB0000) + opcua_string("Too many monitored items")
+    newcode_err_msg = opcua_simple_message("ERR", newcode_err_body)
+    send_raw_packet(False, 53402, newcode_err_msg, 1, 0x7804, 1_700_007_404)
 
     (TESTS_DIR / "sample_opcua.pcap").write_bytes(data)
 

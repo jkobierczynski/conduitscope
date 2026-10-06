@@ -280,32 +280,201 @@ void skip_signed_software_certificate(Cursor& c) {
 }
 
 // ------------------------------------------------------------------------------------------
-// StatusCode decode -- see opcua.hpp's "StatusCode decode" section. This first-pass table is
-// cross-checked directly against the OPC Foundation's own published StatusCode.csv
-// (github.com/OPCFoundation/UA-Nodeset); it covers the subset most relevant to an OT security
-// audit's own concerns, not an attempt at all ~700 named codes the full spec defines.
+// StatusCode decode -- see opcua.hpp's "StatusCode decode" section. This table is cross-checked
+// directly against the OPC Foundation's own published StatusCode.csv
+// (github.com/OPCFoundation/UA-Nodeset), which turned out to name only 273 StatusCode values
+// total, not the ~700 estimated when this round's scope was framed (see docs/DEVELOPMENT.md
+// ROADMAP item 146 for the honest accounting of that discrepancy). Of those 273, 181 are curated
+// here: everything relevant to a message type or service this decoder actually decodes, plus the
+// generic infrastructure codes. Excluded: Alarms&Conditions-specific, AddNodes/node-management-
+// specific, GDS/licensing/device-provisioning, PubSub, cascade/dual-variable-combinatorial codes,
+// low-level stream-API codes, and a handful of other codes tied to services this decoder leaves at
+// Tier 2 (registration services, software-certificate-signature specifics,
+// TranslateBrowsePaths-specific, HistoryUpdate-specific -- this decoder implements HistoryRead,
+// not HistoryUpdate).
 std::string status_code_name(uint32_t code) {
     static const std::pair<uint32_t, const char*> kNamed[] = {
         {0x00000000, "Good"},
         {0x40000000, "Uncertain"},
+        {0x80000000, "Bad"},
         {0x80010000, "BadUnexpectedError"},
+        {0x80020000, "BadInternalError"},
+        {0x80030000, "BadOutOfMemory"},
+        {0x80040000, "BadResourceUnavailable"},
+        {0x80050000, "BadCommunicationError"},
+        {0x80060000, "BadEncodingError"},
+        {0x80070000, "BadDecodingError"},
+        {0x80080000, "BadEncodingLimitsExceeded"},
+        {0x80B80000, "BadRequestTooLarge"},
+        {0x80B90000, "BadResponseTooLarge"},
+        {0x80090000, "BadUnknownResponse"},
         {0x800A0000, "BadTimeout"},
         {0x800B0000, "BadServiceUnsupported"},
+        {0x800C0000, "BadShutdown"},
+        {0x800D0000, "BadServerNotConnected"},
+        {0x800E0000, "BadServerHalted"},
+        {0x800F0000, "BadNothingToDo"},
+        {0x80100000, "BadTooManyOperations"},
+        {0x80DB0000, "BadTooManyMonitoredItems"},
+        {0x80110000, "BadDataTypeIdUnknown"},
         {0x80120000, "BadCertificateInvalid"},
         {0x80130000, "BadSecurityChecksFailed"},
+        {0x81140000, "BadCertificatePolicyCheckFailed"},
+        {0x80140000, "BadCertificateTimeInvalid"},
+        {0x80150000, "BadCertificateIssuerTimeInvalid"},
+        {0x80160000, "BadCertificateHostNameInvalid"},
+        {0x80170000, "BadCertificateUriInvalid"},
+        {0x80180000, "BadCertificateUseNotAllowed"},
+        {0x80190000, "BadCertificateIssuerUseNotAllowed"},
+        {0x801A0000, "BadCertificateUntrusted"},
+        {0x801B0000, "BadCertificateRevocationUnknown"},
+        {0x801C0000, "BadCertificateIssuerRevocationUnknown"},
+        {0x801D0000, "BadCertificateRevoked"},
+        {0x801E0000, "BadCertificateIssuerRevoked"},
+        {0x810D0000, "BadCertificateChainIncomplete"},
         {0x801F0000, "BadUserAccessDenied"},
         {0x80200000, "BadIdentityTokenInvalid"},
         {0x80210000, "BadIdentityTokenRejected"},
         {0x80220000, "BadSecureChannelIdInvalid"},
+        {0x80230000, "BadInvalidTimestamp"},
+        {0x80240000, "BadNonceInvalid"},
         {0x80250000, "BadSessionIdInvalid"},
         {0x80260000, "BadSessionClosed"},
+        {0x80270000, "BadSessionNotActivated"},
+        {0x80280000, "BadSubscriptionIdInvalid"},
+        {0x802A0000, "BadRequestHeaderInvalid"},
+        {0x802B0000, "BadTimestampsToReturnInvalid"},
+        {0x802C0000, "BadRequestCancelledByClient"},
+        {0x80E50000, "BadTooManyArguments"},
+        {0x80EE0000, "BadServerTooBusy"},
+        {0x00EF0000, "GoodPasswordChangeRequired"},
+        {0x002D0000, "GoodSubscriptionTransferred"},
+        {0x002E0000, "GoodCompletesAsynchronously"},
+        {0x002F0000, "GoodOverload"},
+        {0x00300000, "GoodClamped"},
+        {0x80310000, "BadNoCommunication"},
+        {0x80320000, "BadWaitingForInitialData"},
         {0x80330000, "BadNodeIdInvalid"},
         {0x80340000, "BadNodeIdUnknown"},
+        {0x80350000, "BadAttributeIdInvalid"},
+        {0x80360000, "BadIndexRangeInvalid"},
+        {0x80370000, "BadIndexRangeNoData"},
+        {0x80EA0000, "BadIndexRangeDataMismatch"},
+        {0x80380000, "BadDataEncodingInvalid"},
+        {0x80390000, "BadDataEncodingUnsupported"},
         {0x803A0000, "BadNotReadable"},
         {0x803B0000, "BadNotWritable"},
+        {0x803C0000, "BadOutOfRange"},
+        {0x40F20000, "UncertainOverRange"},
+        {0x40F30000, "UncertainUnderRange"},
+        {0x803D0000, "BadNotSupported"},
+        {0x803E0000, "BadNotFound"},
+        {0x803F0000, "BadObjectDeleted"},
+        {0x80400000, "BadNotImplemented"},
+        {0x80410000, "BadMonitoringModeInvalid"},
+        {0x80420000, "BadMonitoredItemIdInvalid"},
+        {0x80430000, "BadMonitoredItemFilterInvalid"},
+        {0x80440000, "BadMonitoredItemFilterUnsupported"},
+        {0x80450000, "BadFilterNotAllowed"},
+        {0x80460000, "BadStructureMissing"},
+        {0x80470000, "BadEventFilterInvalid"},
+        {0x80480000, "BadContentFilterInvalid"},
+        {0x80490000, "BadFilterOperandInvalid"},
+        {0x804A0000, "BadContinuationPointInvalid"},
+        {0x804B0000, "BadNoContinuationPoints"},
+        {0x804C0000, "BadReferenceTypeIdInvalid"},
+        {0x804D0000, "BadBrowseDirectionInvalid"},
+        {0x804E0000, "BadNodeNotInView"},
+        {0x80F00000, "BadNoValue"},
         {0x80530000, "BadRequestTypeInvalid"},
+        {0x80540000, "BadSecurityModeRejected"},
         {0x80550000, "BadSecurityPolicyRejected"},
+        {0x80560000, "BadTooManySessions"},
+        {0x806A0000, "BadServerIndexInvalid"},
+        {0x806B0000, "BadViewIdUnknown"},
+        {0x80C90000, "BadViewTimestampInvalid"},
+        {0x40C00000, "UncertainNotAllNodesAvailable"},
+        {0x00BA0000, "GoodResultsMayBeIncomplete"},
+        {0x80C80000, "BadNotTypeDefinition"},
+        {0x406C0000, "UncertainReferenceOutOfServer"},
+        {0x80700000, "BadMaxAgeInvalid"},
+        {0x80E60000, "BadSecurityModeInsufficient"},
+        {0x80710000, "BadHistoryOperationInvalid"},
+        {0x80720000, "BadHistoryOperationUnsupported"},
+        {0x80BD0000, "BadInvalidTimestampArgument"},
+        {0x80730000, "BadWriteNotSupported"},
         {0x80740000, "BadTypeMismatch"},
+        {0x80750000, "BadMethodInvalid"},
+        {0x80760000, "BadArgumentsMissing"},
+        {0x81110000, "BadNotExecutable"},
+        {0x80770000, "BadTooManySubscriptions"},
+        {0x80780000, "BadTooManyPublishRequests"},
+        {0x80790000, "BadNoSubscription"},
+        {0x807A0000, "BadSequenceNumberUnknown"},
+        {0x807B0000, "BadMessageNotAvailable"},
+        {0x807C0000, "BadInsufficientClientProfile"},
+        {0x80BF0000, "BadStateNotActive"},
+        {0x807D0000, "BadTcpServerTooBusy"},
+        {0x807E0000, "BadTcpMessageTypeInvalid"},
+        {0x807F0000, "BadTcpSecureChannelUnknown"},
+        {0x80800000, "BadTcpMessageTooLarge"},
+        {0x80810000, "BadTcpNotEnoughResources"},
+        {0x80820000, "BadTcpInternalError"},
+        {0x80830000, "BadTcpEndpointUrlInvalid"},
+        {0x80840000, "BadRequestInterrupted"},
+        {0x80850000, "BadRequestTimeout"},
+        {0x80860000, "BadSecureChannelClosed"},
+        {0x80870000, "BadSecureChannelTokenUnknown"},
+        {0x80880000, "BadSequenceNumberInvalid"},
+        {0x80BE0000, "BadProtocolVersionUnsupported"},
+        {0x80890000, "BadConfigurationError"},
+        {0x808A0000, "BadNotConnected"},
+        {0x808B0000, "BadDeviceFailure"},
+        {0x808C0000, "BadSensorFailure"},
+        {0x808D0000, "BadOutOfService"},
+        {0x808E0000, "BadDeadbandFilterInvalid"},
+        {0x408F0000, "UncertainNoCommunicationLastUsableValue"},
+        {0x40900000, "UncertainLastUsableValue"},
+        {0x40910000, "UncertainSubstituteValue"},
+        {0x40920000, "UncertainInitialValue"},
+        {0x40930000, "UncertainSensorNotAccurate"},
+        {0x40940000, "UncertainEngineeringUnitsExceeded"},
+        {0x40950000, "UncertainSubNormal"},
+        {0x00960000, "GoodLocalOverride"},
+        {0x00EB0000, "GoodSubNormal"},
+        {0x809B0000, "BadNoData"},
+        {0x80D70000, "BadBoundNotFound"},
+        {0x80D80000, "BadBoundNotSupported"},
+        {0x809D0000, "BadDataLost"},
+        {0x809E0000, "BadDataUnavailable"},
+        {0x80A10000, "BadTimestampNotSupported"},
+        {0x40A40000, "UncertainDataSubNormal"},
+        {0x00A50000, "GoodNoData"},
+        {0x00A60000, "GoodMoreData"},
+        {0x80D40000, "BadAggregateListMismatch"},
+        {0x80D50000, "BadAggregateNotSupported"},
+        {0x80D60000, "BadAggregateInvalidInputs"},
+        {0x80DA0000, "BadAggregateConfigurationRejected"},
+        {0x00D90000, "GoodDataIgnored"},
+        {0x80E40000, "BadRequestNotAllowed"},
+        {0x81130000, "BadRequestNotComplete"},
+        {0x80E80000, "BadTransactionPending"},
+        {0x80F10000, "BadTransactionFailed"},
+        {0x80E90000, "BadLocked"},
+        {0x80EC0000, "BadRequiresLock"},
+        {0x00DC0000, "GoodEdited"},
+        {0x00DD0000, "GoodPostActionFailed"},
+        {0x80AB0000, "BadInvalidArgument"},
+        {0x80AC0000, "BadConnectionRejected"},
+        {0x80AD0000, "BadDisconnect"},
+        {0x80AE0000, "BadConnectionClosed"},
+        {0x80AF0000, "BadInvalidState"},
+        {0x80B60000, "BadSyntaxError"},
+        {0x80B70000, "BadMaxConnectionsReached"},
+        {0x42080000, "UncertainTransducerInManual"},
+        {0x42090000, "UncertainSimulatedValue"},
+        {0x420A0000, "UncertainSensorCalibration"},
+        {0x420F0000, "UncertainConfigurationError"},
     };
     for (const auto& [value, name] : kNamed) {
         if (value == code) return name;
@@ -894,6 +1063,38 @@ void decode_close_session_request_params(Cursor& c, std::vector<std::string>& va
 // ExtensionObject), so promoting them is a separate, unrelated decode effort -- see ROADMAP in
 // docs/MANUAL.md.
 
+// ReadValueId -- NodeId + AttributeId(UInt32) + IndexRange(String) + DataEncoding(QualifiedName).
+// Shared by ReadRequest's own NodesToRead array and, since ROADMAP item 146
+// (docs/DEVELOPMENT.md), MonitoredItemCreateRequest's own ItemToMonitor -- the exact same wire
+// shape either way (cross-checked against python-opcua's own ReadValueId binding).
+struct ReadValueIdInfo {
+    OpcUaNodeIdInfo node;
+    uint32_t attribute = 0;
+    std::string index_range;
+    bool has_index_range = false;
+};
+
+ReadValueIdInfo read_value_id(Cursor& c) {
+    ReadValueIdInfo r;
+    r.node = read_node_id(c);
+    r.attribute = c.u32le();
+    auto index_range = read_string(c);
+    if (index_range.has_value() && !index_range->empty()) {
+        r.index_range = *index_range;
+        r.has_index_range = true;
+    }
+    read_qualified_name_display(c);  // DataEncoding -- consumed, not surfaced (only meaningful for
+                                       // a non-Binary encoding, which this decoder itself couldn't
+                                       // read anyway)
+    return r;
+}
+
+std::string read_value_id_display(const ReadValueIdInfo& r) {
+    std::string s = node_id_display(r.node) + " attribute=" + attribute_id_name(r.attribute);
+    if (r.has_index_range) s += " range=" + r.index_range;
+    return s;
+}
+
 // ReadValueId -- shared by ReadRequest's own NodesToRead array.
 void decode_read_request_params(Cursor& c, std::vector<std::string>& values, OpcUaMessage& msg) {
     double max_age_ms = bits_to_double(c.u64le());
@@ -903,17 +1104,9 @@ void decode_read_request_params(Cursor& c, std::vector<std::string>& values, Opc
     values.push_back("timestamps-to-return=" + timestamps_to_return_name(timestamps_to_return));
     values.push_back("nodes-to-read-count=" + std::to_string(n));
     for (int32_t i = 0; i < n; ++i) {
-        OpcUaNodeIdInfo node = read_node_id(c);
-        uint32_t attribute = c.u32le();
-        auto index_range = read_string(c);
-        read_qualified_name_display(c);  // DataEncoding -- consumed, not surfaced (only meaningful
-                                           // for a non-Binary encoding, which this decoder itself
-                                           // couldn't read anyway)
-        std::string entry = "nodes-to-read[" + std::to_string(i) + "]=" + node_id_display(node) +
-                             " attribute=" + attribute_id_name(attribute);
-        if (index_range.has_value() && !index_range->empty()) entry += " range=" + *index_range;
-        values.push_back(entry);
-        msg.node_ids.push_back(node_id_display(node));  // see OpcUaMessage::node_ids' own comment
+        ReadValueIdInfo rv = read_value_id(c);
+        values.push_back("nodes-to-read[" + std::to_string(i) + "]=" + read_value_id_display(rv));
+        msg.node_ids.push_back(node_id_display(rv.node));  // see OpcUaMessage::node_ids' own comment
     }
 }
 
@@ -1006,6 +1199,769 @@ void decode_call_response_params(Cursor& c, std::vector<std::string>& values) {
 }
 
 // ------------------------------------------------------------------------------------------
+// Browse, the subscription/MonitoredItem-management group, and HistoryRead -- promoted to Tier 1
+// by ROADMAP item 146 (docs/DEVELOPMENT.md), at Jurgen's own request. Every structure below is
+// cross-checked against python-opcua's own generated bindings (uaprotocol_auto.py) for field order
+// and type, the same sourcing standard this file's own header comment already states; every
+// ExtensionObject TypeId dispatched on below is cross-checked against the OPC Foundation's own
+// published NodeIds.csv. Grammar-plus-synthetic-fixture validation only (see ROADMAP item 146) --
+// the one real OPC UA capture this project has never exercises any of these services.
+
+// ------------------------------------------------------------------------------------------
+// Small enum name tables -- same style as security_mode_name/application_type_name above.
+
+std::string browse_direction_name(uint32_t v) {
+    switch (v) {
+        case 0: return "Forward";
+        case 1: return "Inverse";
+        case 2: return "Both";
+        case 3: return "Invalid";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+// NodeClass -- a single enum value in ReferenceDescription (unlike BrowseDescription's own
+// NodeClassMask, which is a bitmask of these same bit values and is rendered as a raw number,
+// not decoded bit-by-bit, since this round's own purpose is identifying a reference's target, not
+// re-deriving the request's own filter).
+std::string node_class_name(uint32_t v) {
+    switch (v) {
+        case 0: return "Unspecified";
+        case 1: return "Object";
+        case 2: return "Variable";
+        case 4: return "Method";
+        case 8: return "ObjectType";
+        case 16: return "VariableType";
+        case 32: return "ReferenceType";
+        case 64: return "DataType";
+        case 128: return "View";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+std::string monitoring_mode_name(uint32_t v) {
+    switch (v) {
+        case 0: return "Disabled";
+        case 1: return "Sampling";
+        case 2: return "Reporting";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+std::string data_change_trigger_name(uint32_t v) {
+    switch (v) {
+        case 0: return "Status";
+        case 1: return "StatusValue";
+        case 2: return "StatusValueTimestamp";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+std::string deadband_type_name(uint32_t v) {
+    switch (v) {
+        case 0: return "None";
+        case 1: return "Absolute";
+        case 2: return "Percent";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+// FilterOperator -- cross-checked against python-opcua's own FilterOperator IntEnum (OPC 10000-4
+// Table 119).
+std::string filter_operator_name(uint32_t v) {
+    switch (v) {
+        case 0: return "Equals";
+        case 1: return "IsNull";
+        case 2: return "GreaterThan";
+        case 3: return "LessThan";
+        case 4: return "GreaterThanOrEqual";
+        case 5: return "LessThanOrEqual";
+        case 6: return "Like";
+        case 7: return "Not";
+        case 8: return "Between";
+        case 9: return "InList";
+        case 10: return "And";
+        case 11: return "Or";
+        case 12: return "Cast";
+        case 13: return "InView";
+        case 14: return "OfType";
+        case 15: return "RelatedTo";
+        case 16: return "BitwiseAnd";
+        case 17: return "BitwiseOr";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+std::string history_update_type_name(uint32_t v) {
+    switch (v) {
+        case 1: return "Insert";
+        case 2: return "Replace";
+        case 3: return "Update";
+        case 4: return "Delete";
+        default: return "unknown(" + std::to_string(v) + ")";
+    }
+}
+
+// Same rendering `format_scalar_value`'s own ExtensionObject case (22) already uses -- factored
+// out here so FilterResult/HistoryData's own "not decoded further" fallback can reuse it instead
+// of re-deriving the same string shape.
+std::string extension_object_display(const OpcUaExtensionObjectInfo& eo) {
+    if (eo.encoding == 0x00) return "<ExtensionObject type=" + node_id_display(eo.type_id) + ", no body>";
+    return "<ExtensionObject type=" + node_id_display(eo.type_id) + ", " + std::to_string(eo.body.size()) +
+           " byte(s)>";
+}
+
+// ------------------------------------------------------------------------------------------
+// MonitoringFilter dispatch (DataChangeFilter/EventFilter/AggregateFilter) and
+// AggregateConfiguration -- shared by the subscription/MonitoredItem group below AND by
+// HistoryRead's own ReadProcessedDetails/ReadEventDetails (same structures either way).
+// TypeIds (namespace 0, _Encoding_DefaultBinary) cross-checked against NodeIds.csv.
+constexpr uint32_t kDataChangeFilterTypeId = 724;
+constexpr uint32_t kEventFilterTypeId = 727;
+constexpr uint32_t kAggregateFilterTypeId = 730;
+
+std::string decode_aggregate_configuration(Cursor& c) {
+    bool use_defaults = c.u8() != 0;
+    bool treat_uncertain_as_bad = c.u8() != 0;
+    unsigned percent_bad = c.u8();
+    unsigned percent_good = c.u8();
+    bool use_sloped_extrapolation = c.u8() != 0;
+    std::ostringstream s;
+    s << "{use-server-defaults=" << (use_defaults ? "true" : "false")
+      << ", treat-uncertain-as-bad=" << (treat_uncertain_as_bad ? "true" : "false")
+      << ", percent-data-bad=" << percent_bad << ", percent-data-good=" << percent_good
+      << ", use-sloped-extrapolation=" << (use_sloped_extrapolation ? "true" : "false") << "}";
+    return s.str();
+}
+
+// SimpleAttributeOperand -- TypeDefinitionId(NodeId) + BrowsePath(array<QualifiedName>) +
+// AttributeId(UInt32) + IndexRange(String). Shared by EventFilter's own SelectClauses.
+std::string decode_simple_attribute_operand(Cursor& c) {
+    OpcUaNodeIdInfo type_def = read_node_id(c);
+    int32_t n_path = read_array_count(c);
+    std::ostringstream path;
+    for (int32_t i = 0; i < n_path; ++i) {
+        if (i > 0) path << "/";
+        path << read_qualified_name_display(c);
+    }
+    uint32_t attribute = c.u32le();
+    auto index_range = read_string(c);
+    std::ostringstream s;
+    s << "{type=" << node_id_display(type_def) << " path=[" << path.str() << "] attribute="
+      << attribute_id_name(attribute);
+    if (index_range.has_value() && !index_range->empty()) s << " range=" << *index_range;
+    s << "}";
+    return s.str();
+}
+
+// ContentFilter -- Elements(array<ContentFilterElement{FilterOperator(UInt32) +
+// FilterOperands(array<ExtensionObject>)}>). Each element's own FilterOperands (one of
+// Element/Attribute/SimpleAttribute/Literal Operand, each potentially nesting a reference to
+// another ContentFilterElement) is a separate, deeper rabbit hole -- shown only as an operand
+// count, not decoded further (ROADMAP item 146's own "Deliberately NOT implemented" note, same
+// "decode the common case, degrade honestly" posture as MMS's AlternateAccess).
+std::string decode_content_filter(Cursor& c) {
+    int32_t n = read_array_count(c);
+    std::ostringstream s;
+    s << n << " element(s)";
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t op = c.u32le();
+        int32_t n_operands = read_array_count(c);
+        for (int32_t j = 0; j < n_operands; ++j) skip_extension_object(c);  // not decoded further
+        if (i > 0) s << ",";
+        s << " [" << i << "]=" << filter_operator_name(op) << "(" << n_operands << " operand(s), "
+                                                                                    "not decoded further)";
+    }
+    return s.str();
+}
+
+// EventFilter -- SelectClauses(array<SimpleAttributeOperand>) + WhereClause(ContentFilter).
+// Shared by MonitoringFilter's own EventFilter alternative and HistoryRead's own
+// ReadEventDetails -- the exact same structure in both places (ROADMAP item 146).
+std::string decode_event_filter(Cursor& c) {
+    int32_t n_select = read_array_count(c);
+    std::ostringstream select;
+    for (int32_t i = 0; i < n_select; ++i) {
+        if (i > 0) select << ", ";
+        select << decode_simple_attribute_operand(c);
+    }
+    std::string where = decode_content_filter(c);
+    return "{select=[" + select.str() + "] where=" + where + "}";
+}
+
+// MonitoringFilter -- an ExtensionObject dispatched by TypeId to DataChangeFilter/EventFilter/
+// AggregateFilter (the three standard MonitoringFilter subtypes an OPC UA client can request for a
+// MonitoredItem) or shown structurally when absent/unrecognized.
+std::string decode_monitoring_filter(Cursor& c) {
+    OpcUaExtensionObjectInfo eo = read_extension_object(c);
+    if (eo.encoding != 0x01 || eo.body.empty()) {
+        if (eo.encoding == 0x00 && eo.type_id.encoding == 0x00 && eo.type_id.numeric_id == 0) {
+            return "<none>";  // the common case -- no filter requested at all
+        }
+        return extension_object_display(eo);
+    }
+    Cursor fc(eo.body);
+    bool is_ns0 = eo.type_id.ns == 0;
+    uint32_t id = eo.type_id.numeric_id;
+    if (is_ns0 && id == kDataChangeFilterTypeId) {
+        uint32_t trigger = fc.u32le();
+        uint32_t deadband_type = fc.u32le();
+        double deadband_value = bits_to_double(fc.u64le());
+        return "DataChangeFilter{trigger=" + data_change_trigger_name(trigger) + " deadband-type=" +
+               deadband_type_name(deadband_type) + " deadband-value=" + format_double(deadband_value) + "}";
+    }
+    if (is_ns0 && id == kEventFilterTypeId) {
+        return "EventFilter" + decode_event_filter(fc);
+    }
+    if (is_ns0 && id == kAggregateFilterTypeId) {
+        int64_t start_ticks = static_cast<int64_t>(fc.u64le());
+        OpcUaNodeIdInfo aggregate_type = read_node_id(fc);
+        double processing_interval = bits_to_double(fc.u64le());
+        std::string config = decode_aggregate_configuration(fc);
+        return "AggregateFilter{start-time=" + format_opcua_datetime(start_ticks) + " aggregate-type=" +
+               node_id_display(aggregate_type) + " processing-interval-ms=" +
+               format_double(processing_interval) + " config=" + config + "}";
+    }
+    return extension_object_display(eo);
+}
+
+// MonitoringParameters -- ClientHandle(UInt32) + SamplingInterval(Double) + Filter(above) +
+// QueueSize(UInt32) + DiscardOldest(Boolean). Shared by MonitoredItemCreateRequest/
+// MonitoredItemModifyRequest's own RequestedParameters.
+std::string decode_monitoring_parameters(Cursor& c) {
+    uint32_t client_handle = c.u32le();
+    double sampling_interval = bits_to_double(c.u64le());
+    std::string filter = decode_monitoring_filter(c);
+    uint32_t queue_size = c.u32le();
+    bool discard_oldest = c.u8() != 0;
+    return "{client-handle=" + std::to_string(client_handle) + " sampling-interval-ms=" +
+           format_double(sampling_interval) + " filter=" + filter + " queue-size=" +
+           std::to_string(queue_size) + " discard-oldest=" + (discard_oldest ? "true" : "false") + "}";
+}
+
+// ------------------------------------------------------------------------------------------
+// Browse -- ROADMAP item 146. ViewDescription/BrowseDescription for the request, BrowseResult/
+// ReferenceDescription for the response.
+
+void decode_browse_request_params(Cursor& c, std::vector<std::string>& values, OpcUaMessage& msg) {
+    OpcUaNodeIdInfo view_id = read_node_id(c);
+    int64_t view_ts = static_cast<int64_t>(c.u64le());
+    uint32_t view_version = c.u32le();
+    uint32_t max_refs = c.u32le();
+    int32_t n = read_array_count(c);
+    values.push_back("view=" + node_id_display(view_id) + " timestamp=" + format_opcua_datetime(view_ts) +
+                      " version=" + std::to_string(view_version));
+    values.push_back("requested-max-references-per-node=" + std::to_string(max_refs));
+    values.push_back("nodes-to-browse-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        OpcUaNodeIdInfo node = read_node_id(c);
+        uint32_t direction = c.u32le();
+        OpcUaNodeIdInfo ref_type = read_node_id(c);
+        bool include_subtypes = c.u8() != 0;
+        uint32_t node_class_mask = c.u32le();
+        uint32_t result_mask = c.u32le();
+        values.push_back("nodes-to-browse[" + std::to_string(i) + "]=" + node_id_display(node) +
+                          " direction=" + browse_direction_name(direction) + " reference-type=" +
+                          node_id_display(ref_type) + " include-subtypes=" +
+                          (include_subtypes ? "true" : "false") + " node-class-mask=0x" +
+                          [&]{ std::ostringstream h; h << std::hex << node_class_mask; return h.str(); }() +
+                          " result-mask=0x" +
+                          [&]{ std::ostringstream h; h << std::hex << result_mask; return h.str(); }());
+        msg.node_ids.push_back(node_id_display(node));  // see OpcUaMessage::node_ids' own comment
+    }
+}
+
+void decode_browse_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("results-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t status = c.u32le();
+        OpcUaByteString continuation = read_bytestring(c);
+        int32_t n_refs = read_array_count(c);
+        std::ostringstream refs;
+        for (int32_t j = 0; j < n_refs; ++j) {
+            OpcUaNodeIdInfo ref_type = read_node_id(c);
+            bool is_forward = c.u8() != 0;
+            OpcUaNodeIdInfo target = read_node_id(c);  // ExpandedNodeId -- read_node_id already
+                                                         // handles the Expanded flags (see its own
+                                                         // comment)
+            std::string browse_name = read_qualified_name_display(c);
+            std::string display_name = read_localized_text(c);
+            uint32_t node_class = c.u32le();
+            OpcUaNodeIdInfo type_def = read_node_id(c);  // ExpandedNodeId
+            if (j > 0) refs << ", ";
+            refs << "{target=" << node_id_display(target) << " browse-name=" << browse_name
+                 << " display-name=" << display_name << " node-class=" << node_class_name(node_class)
+                 << " reference-type=" << node_id_display(ref_type) << " is-forward="
+                 << (is_forward ? "true" : "false") << " type-definition=" << node_id_display(type_def)
+                 << "}";
+        }
+        values.push_back("results[" + std::to_string(i) + "]=status=" + status_code_name(status) +
+                          " continuation=" +
+                          (continuation.present && continuation.length > 0
+                               ? "<" + std::to_string(continuation.length) + " byte(s)>"
+                               : "<none>") +
+                          " references=[" + refs.str() + "]");
+    }
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+// ------------------------------------------------------------------------------------------
+// Subscriptions / MonitoredItem management / Publish-Republish -- ROADMAP item 146, the whole
+// group promoted together at Jurgen's own request.
+
+void decode_create_subscription_request_params(Cursor& c, std::vector<std::string>& values) {
+    double publishing_interval = bits_to_double(c.u64le());
+    uint32_t lifetime_count = c.u32le();
+    uint32_t keep_alive_count = c.u32le();
+    uint32_t max_notifications = c.u32le();
+    bool publishing_enabled = c.u8() != 0;
+    unsigned priority = c.u8();
+    values.push_back("requested-publishing-interval-ms=" + format_double(publishing_interval));
+    values.push_back("requested-lifetime-count=" + std::to_string(lifetime_count));
+    values.push_back("requested-max-keep-alive-count=" + std::to_string(keep_alive_count));
+    values.push_back("max-notifications-per-publish=" + std::to_string(max_notifications));
+    values.push_back(std::string("publishing-enabled=") + (publishing_enabled ? "true" : "false"));
+    values.push_back("priority=" + std::to_string(priority));
+}
+
+void decode_create_subscription_response_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    double revised_publishing_interval = bits_to_double(c.u64le());
+    uint32_t revised_lifetime_count = c.u32le();
+    uint32_t revised_keep_alive_count = c.u32le();
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("revised-publishing-interval-ms=" + format_double(revised_publishing_interval));
+    values.push_back("revised-lifetime-count=" + std::to_string(revised_lifetime_count));
+    values.push_back("revised-max-keep-alive-count=" + std::to_string(revised_keep_alive_count));
+}
+
+void decode_modify_subscription_request_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    double publishing_interval = bits_to_double(c.u64le());
+    uint32_t lifetime_count = c.u32le();
+    uint32_t keep_alive_count = c.u32le();
+    uint32_t max_notifications = c.u32le();
+    unsigned priority = c.u8();
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("requested-publishing-interval-ms=" + format_double(publishing_interval));
+    values.push_back("requested-lifetime-count=" + std::to_string(lifetime_count));
+    values.push_back("requested-max-keep-alive-count=" + std::to_string(keep_alive_count));
+    values.push_back("max-notifications-per-publish=" + std::to_string(max_notifications));
+    values.push_back("priority=" + std::to_string(priority));
+}
+
+void decode_modify_subscription_response_params(Cursor& c, std::vector<std::string>& values) {
+    double revised_publishing_interval = bits_to_double(c.u64le());
+    uint32_t revised_lifetime_count = c.u32le();
+    uint32_t revised_keep_alive_count = c.u32le();
+    values.push_back("revised-publishing-interval-ms=" + format_double(revised_publishing_interval));
+    values.push_back("revised-lifetime-count=" + std::to_string(revised_lifetime_count));
+    values.push_back("revised-max-keep-alive-count=" + std::to_string(revised_keep_alive_count));
+}
+
+void decode_delete_subscriptions_request_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    std::ostringstream ids;
+    for (int32_t i = 0; i < n; ++i) {
+        if (i > 0) ids << ",";
+        ids << c.u32le();
+    }
+    values.push_back("subscription-ids=[" + ids.str() + "]");
+}
+
+// Results(array<StatusCode>) + DiagnosticInfos(skip) -- the exact same response shape shared by
+// DeleteSubscriptions, SetPublishingMode, and DeleteMonitoredItems (ROADMAP item 146).
+void decode_status_code_array_response(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    int good = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t sc = c.u32le();
+        if ((sc & 0xC0000000u) == 0) ++good;
+    }
+    values.push_back("results=" + std::to_string(n) + " status code(s) (" + std::to_string(good) + " Good)");
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+void decode_set_publishing_mode_request_params(Cursor& c, std::vector<std::string>& values) {
+    bool publishing_enabled = c.u8() != 0;
+    int32_t n = read_array_count(c);
+    std::ostringstream ids;
+    for (int32_t i = 0; i < n; ++i) {
+        if (i > 0) ids << ",";
+        ids << c.u32le();
+    }
+    values.push_back(std::string("publishing-enabled=") + (publishing_enabled ? "true" : "false"));
+    values.push_back("subscription-ids=[" + ids.str() + "]");
+}
+
+void decode_create_monitored_items_request_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    uint32_t timestamps_to_return = c.u32le();
+    int32_t n = read_array_count(c);
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("timestamps-to-return=" + timestamps_to_return_name(timestamps_to_return));
+    values.push_back("items-to-create-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        ReadValueIdInfo item = read_value_id(c);
+        uint32_t mode = c.u32le();
+        std::string params = decode_monitoring_parameters(c);
+        values.push_back("items-to-create[" + std::to_string(i) + "]=" + read_value_id_display(item) +
+                          " mode=" + monitoring_mode_name(mode) + " parameters=" + params);
+    }
+}
+
+void decode_create_monitored_items_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("results-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t status = c.u32le();
+        uint32_t monitored_item_id = c.u32le();
+        double revised_sampling = bits_to_double(c.u64le());
+        uint32_t revised_queue_size = c.u32le();
+        OpcUaExtensionObjectInfo filter_result = read_extension_object(c);
+        values.push_back("results[" + std::to_string(i) + "]=status=" + status_code_name(status) +
+                          " monitored-item-id=" + std::to_string(monitored_item_id) +
+                          " revised-sampling-interval-ms=" + format_double(revised_sampling) +
+                          " revised-queue-size=" + std::to_string(revised_queue_size) +
+                          " filter-result=" + extension_object_display(filter_result));
+    }
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+void decode_modify_monitored_items_request_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    uint32_t timestamps_to_return = c.u32le();
+    int32_t n = read_array_count(c);
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("timestamps-to-return=" + timestamps_to_return_name(timestamps_to_return));
+    values.push_back("items-to-modify-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t monitored_item_id = c.u32le();
+        std::string params = decode_monitoring_parameters(c);
+        values.push_back("items-to-modify[" + std::to_string(i) + "]=monitored-item-id=" +
+                          std::to_string(monitored_item_id) + " parameters=" + params);
+    }
+}
+
+void decode_modify_monitored_items_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("results-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t status = c.u32le();
+        double revised_sampling = bits_to_double(c.u64le());
+        uint32_t revised_queue_size = c.u32le();
+        OpcUaExtensionObjectInfo filter_result = read_extension_object(c);
+        values.push_back("results[" + std::to_string(i) + "]=status=" + status_code_name(status) +
+                          " revised-sampling-interval-ms=" + format_double(revised_sampling) +
+                          " revised-queue-size=" + std::to_string(revised_queue_size) +
+                          " filter-result=" + extension_object_display(filter_result));
+    }
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+void decode_delete_monitored_items_request_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    int32_t n = read_array_count(c);
+    std::ostringstream ids;
+    for (int32_t i = 0; i < n; ++i) {
+        if (i > 0) ids << ",";
+        ids << c.u32le();
+    }
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("monitored-item-ids=[" + ids.str() + "]");
+}
+
+// NotificationMessage -- SequenceNumber(UInt32) + PublishTime(DateTime) +
+// NotificationData(array<ExtensionObject> dispatched to DataChangeNotification/
+// EventNotificationList/StatusChangeNotification). Shared by PublishResponse and
+// RepublishResponse (ROADMAP item 146 -- the exact same structure in both places).
+constexpr uint32_t kDataChangeNotificationTypeId = 811;
+constexpr uint32_t kEventNotificationListTypeId = 916;
+constexpr uint32_t kStatusChangeNotificationTypeId = 820;
+
+std::string decode_notification_message(Cursor& c) {
+    uint32_t sequence_number = c.u32le();
+    int64_t publish_time = static_cast<int64_t>(c.u64le());
+    int32_t n = read_array_count(c);
+    std::ostringstream data;
+    for (int32_t i = 0; i < n; ++i) {
+        OpcUaExtensionObjectInfo eo = read_extension_object(c);
+        if (i > 0) data << ", ";
+        if (eo.encoding != 0x01 || eo.body.empty()) {
+            data << extension_object_display(eo);
+            continue;
+        }
+        Cursor nc(eo.body);
+        bool is_ns0 = eo.type_id.ns == 0;
+        uint32_t id = eo.type_id.numeric_id;
+        if (is_ns0 && id == kDataChangeNotificationTypeId) {
+            int32_t n_items = read_array_count(nc);
+            std::ostringstream items;
+            for (int32_t j = 0; j < n_items; ++j) {
+                uint32_t client_handle = nc.u32le();
+                std::string value = format_data_value(nc, 0);
+                if (j > 0) items << ", ";
+                items << "{client-handle=" << client_handle << " value=" << value << "}";
+            }
+            int32_t n_diag = read_array_count(nc);
+            for (int32_t j = 0; j < n_diag; ++j) skip_diagnostic_info(nc);
+            data << "DataChangeNotification{" << items.str() << "}";
+        } else if (is_ns0 && id == kEventNotificationListTypeId) {
+            int32_t n_events = read_array_count(nc);
+            std::ostringstream events;
+            for (int32_t j = 0; j < n_events; ++j) {
+                uint32_t client_handle = nc.u32le();
+                int32_t n_fields = read_array_count(nc);
+                std::ostringstream fields;
+                for (int32_t k = 0; k < n_fields; ++k) {
+                    if (k > 0) fields << ", ";
+                    fields << format_variant(nc, 0);
+                }
+                if (j > 0) events << ", ";
+                events << "{client-handle=" << client_handle << " fields=[" << fields.str() << "]}";
+            }
+            data << "EventNotificationList{" << events.str() << "}";
+        } else if (is_ns0 && id == kStatusChangeNotificationTypeId) {
+            uint32_t status = nc.u32le();
+            skip_diagnostic_info(nc);
+            data << "StatusChangeNotification{status=" << status_code_name(status) << "}";
+        } else {
+            data << extension_object_display(eo);
+        }
+    }
+    return "{sequence-number=" + std::to_string(sequence_number) + " publish-time=" +
+           format_opcua_datetime(publish_time) + " notification-data=[" + data.str() + "]}";
+}
+
+void decode_publish_request_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    std::ostringstream acks;
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t subscription_id = c.u32le();
+        uint32_t sequence_number = c.u32le();
+        if (i > 0) acks << ", ";
+        acks << "{subscription-id=" << subscription_id << " sequence-number=" << sequence_number << "}";
+    }
+    values.push_back("subscription-acknowledgements=[" + acks.str() + "]");
+}
+
+void decode_publish_response_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    int32_t n_avail = read_array_count(c);
+    std::ostringstream avail;
+    for (int32_t i = 0; i < n_avail; ++i) {
+        if (i > 0) avail << ",";
+        avail << c.u32le();
+    }
+    bool more_notifications = c.u8() != 0;
+    std::string notification = decode_notification_message(c);
+    int32_t n = read_array_count(c);
+    int good = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t sc = c.u32le();
+        if ((sc & 0xC0000000u) == 0) ++good;
+    }
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("available-sequence-numbers=[" + avail.str() + "]");
+    values.push_back(std::string("more-notifications=") + (more_notifications ? "true" : "false"));
+    values.push_back("notification-message=" + notification);
+    values.push_back("ack-results=" + std::to_string(n) + " status code(s) (" + std::to_string(good) +
+                      " Good)");
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+void decode_republish_request_params(Cursor& c, std::vector<std::string>& values) {
+    uint32_t subscription_id = c.u32le();
+    uint32_t retransmit_sequence_number = c.u32le();
+    values.push_back("subscription-id=" + std::to_string(subscription_id));
+    values.push_back("retransmit-sequence-number=" + std::to_string(retransmit_sequence_number));
+}
+
+void decode_republish_response_params(Cursor& c, std::vector<std::string>& values) {
+    values.push_back("notification-message=" + decode_notification_message(c));
+}
+
+// ------------------------------------------------------------------------------------------
+// HistoryRead -- ROADMAP item 146, all 5 HistoryReadDetails sub-structures.
+
+constexpr uint32_t kReadRawModifiedDetailsTypeId = 649;
+constexpr uint32_t kReadEventDetailsTypeId = 646;
+constexpr uint32_t kReadProcessedDetailsTypeId = 652;
+constexpr uint32_t kReadAtTimeDetailsTypeId = 655;
+constexpr uint32_t kReadAnnotationDataDetailsTypeId = 23500;
+constexpr uint32_t kHistoryDataTypeId = 658;
+constexpr uint32_t kHistoryModifiedDataTypeId = 11227;
+constexpr uint32_t kHistoryEventTypeId = 661;
+
+std::string decode_history_read_details(Cursor& c) {
+    OpcUaExtensionObjectInfo eo = read_extension_object(c);
+    if (eo.encoding != 0x01 || eo.body.empty()) return extension_object_display(eo);
+    Cursor dc(eo.body);
+    bool is_ns0 = eo.type_id.ns == 0;
+    uint32_t id = eo.type_id.numeric_id;
+    if (is_ns0 && id == kReadRawModifiedDetailsTypeId) {
+        bool is_modified = dc.u8() != 0;
+        int64_t start = static_cast<int64_t>(dc.u64le());
+        int64_t end = static_cast<int64_t>(dc.u64le());
+        uint32_t num_values = dc.u32le();
+        bool return_bounds = dc.u8() != 0;
+        return "ReadRawModifiedDetails{is-read-modified=" + std::string(is_modified ? "true" : "false") +
+               " start-time=" + format_opcua_datetime(start) + " end-time=" + format_opcua_datetime(end) +
+               " num-values-per-node=" + std::to_string(num_values) + " return-bounds=" +
+               (return_bounds ? "true" : "false") + "}";
+    }
+    if (is_ns0 && id == kReadAtTimeDetailsTypeId) {
+        int32_t n = read_array_count(dc);
+        std::ostringstream times;
+        for (int32_t i = 0; i < n; ++i) {
+            if (i > 0) times << ", ";
+            times << format_opcua_datetime(static_cast<int64_t>(dc.u64le()));
+        }
+        bool use_simple_bounds = dc.u8() != 0;
+        return "ReadAtTimeDetails{req-times=[" + times.str() + "] use-simple-bounds=" +
+               (use_simple_bounds ? "true" : "false") + "}";
+    }
+    if (is_ns0 && id == kReadProcessedDetailsTypeId) {
+        int64_t start = static_cast<int64_t>(dc.u64le());
+        int64_t end = static_cast<int64_t>(dc.u64le());
+        double processing_interval = bits_to_double(dc.u64le());
+        int32_t n = read_array_count(dc);
+        std::ostringstream types;
+        for (int32_t i = 0; i < n; ++i) {
+            if (i > 0) types << ", ";
+            types << node_id_display(read_node_id(dc));
+        }
+        std::string config = decode_aggregate_configuration(dc);
+        return "ReadProcessedDetails{start-time=" + format_opcua_datetime(start) + " end-time=" +
+               format_opcua_datetime(end) + " processing-interval-ms=" + format_double(processing_interval) +
+               " aggregate-type=[" + types.str() + "] config=" + config + "}";
+    }
+    if (is_ns0 && id == kReadEventDetailsTypeId) {
+        uint32_t num_values = dc.u32le();
+        int64_t start = static_cast<int64_t>(dc.u64le());
+        int64_t end = static_cast<int64_t>(dc.u64le());
+        std::string filter = decode_event_filter(dc);
+        return "ReadEventDetails{num-values-per-node=" + std::to_string(num_values) + " start-time=" +
+               format_opcua_datetime(start) + " end-time=" + format_opcua_datetime(end) + " filter=" +
+               filter + "}";
+    }
+    if (is_ns0 && id == kReadAnnotationDataDetailsTypeId) {
+        int32_t n = read_array_count(dc);
+        std::ostringstream times;
+        for (int32_t i = 0; i < n; ++i) {
+            if (i > 0) times << ", ";
+            times << format_opcua_datetime(static_cast<int64_t>(dc.u64le()));
+        }
+        return "ReadAnnotationDataDetails{req-times=[" + times.str() + "]}";
+    }
+    return extension_object_display(eo);
+}
+
+// HistoryData/HistoryModifiedData/HistoryEvent dispatch -- shared by every HistoryReadResult.
+std::string decode_history_data(Cursor& c) {
+    OpcUaExtensionObjectInfo eo = read_extension_object(c);
+    if (eo.encoding != 0x01 || eo.body.empty()) return extension_object_display(eo);
+    Cursor dc(eo.body);
+    bool is_ns0 = eo.type_id.ns == 0;
+    uint32_t id = eo.type_id.numeric_id;
+    if (is_ns0 && id == kHistoryDataTypeId) {
+        int32_t n = read_array_count(dc);
+        std::ostringstream values_str;
+        for (int32_t i = 0; i < n; ++i) {
+            if (i > 0) values_str << ", ";
+            values_str << format_data_value(dc, 0);
+        }
+        return "HistoryData{values=[" + values_str.str() + "]}";
+    }
+    if (is_ns0 && id == kHistoryModifiedDataTypeId) {
+        int32_t n = read_array_count(dc);
+        std::vector<std::string> dvs;
+        dvs.reserve(static_cast<size_t>(std::max<int32_t>(n, 0)));
+        for (int32_t i = 0; i < n; ++i) dvs.push_back(format_data_value(dc, 0));
+        int32_t n_mod = read_array_count(dc);
+        std::ostringstream mods;
+        for (int32_t i = 0; i < n_mod; ++i) {
+            int64_t mod_time = static_cast<int64_t>(dc.u64le());
+            uint32_t update_type = dc.u32le();
+            auto user_name = read_string(dc);
+            if (i > 0) mods << ", ";
+            mods << "{time=" << format_opcua_datetime(mod_time) << " update-type="
+                 << history_update_type_name(update_type) << " user=" << user_name.value_or("") << "}";
+        }
+        std::ostringstream values_str;
+        for (size_t i = 0; i < dvs.size(); ++i) {
+            if (i > 0) values_str << ", ";
+            values_str << dvs[i];
+        }
+        return "HistoryModifiedData{values=[" + values_str.str() + "] modifications=[" + mods.str() + "]}";
+    }
+    if (is_ns0 && id == kHistoryEventTypeId) {
+        int32_t n = read_array_count(dc);
+        std::ostringstream events;
+        for (int32_t i = 0; i < n; ++i) {
+            int32_t n_fields = read_array_count(dc);
+            std::ostringstream fields;
+            for (int32_t j = 0; j < n_fields; ++j) {
+                if (j > 0) fields << ", ";
+                fields << format_variant(dc, 0);
+            }
+            if (i > 0) events << ", ";
+            events << "[" << fields.str() << "]";
+        }
+        return "HistoryEvent{events=[" + events.str() + "]}";
+    }
+    return extension_object_display(eo);
+}
+
+void decode_history_read_request_params(Cursor& c, std::vector<std::string>& values) {
+    std::string details = decode_history_read_details(c);
+    uint32_t timestamps_to_return = c.u32le();
+    bool release_continuation_points = c.u8() != 0;
+    int32_t n = read_array_count(c);
+    values.push_back("history-read-details=" + details);
+    values.push_back("timestamps-to-return=" + timestamps_to_return_name(timestamps_to_return));
+    values.push_back(std::string("release-continuation-points=") +
+                      (release_continuation_points ? "true" : "false"));
+    values.push_back("nodes-to-read-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        OpcUaNodeIdInfo node = read_node_id(c);
+        auto index_range = read_string(c);
+        read_qualified_name_display(c);  // DataEncoding -- consumed, not surfaced
+        OpcUaByteString continuation = read_bytestring(c);
+        std::string entry = "nodes-to-read[" + std::to_string(i) + "]=" + node_id_display(node);
+        if (index_range.has_value() && !index_range->empty()) entry += " range=" + *index_range;
+        entry += " continuation=" + (continuation.present && continuation.length > 0
+                                          ? "<" + std::to_string(continuation.length) + " byte(s)>"
+                                          : "<none>");
+        values.push_back(entry);
+    }
+}
+
+void decode_history_read_response_params(Cursor& c, std::vector<std::string>& values) {
+    int32_t n = read_array_count(c);
+    values.push_back("results-count=" + std::to_string(n));
+    for (int32_t i = 0; i < n; ++i) {
+        uint32_t status = c.u32le();
+        OpcUaByteString continuation = read_bytestring(c);
+        std::string history_data = decode_history_data(c);
+        values.push_back("results[" + std::to_string(i) + "]=status=" + status_code_name(status) +
+                          " continuation=" +
+                          (continuation.present && continuation.length > 0
+                               ? "<" + std::to_string(continuation.length) + " byte(s)>"
+                               : "<none>") +
+                          " history-data=" + history_data);
+    }
+    int32_t n_diag = read_array_count(c);
+    for (int32_t i = 0; i < n_diag; ++i) skip_diagnostic_info(c);
+}
+
+// ------------------------------------------------------------------------------------------
 // Service dispatch table -- see opcua.hpp's "Service identification" section for Tier 1 vs.
 // Tier 2. Every numeric id below is this service's own "_Encoding_DefaultBinary" NodeId,
 // cross-checked against the OPC Foundation's own published NodeIds.csv (see this file's own
@@ -1042,20 +1998,19 @@ constexpr ServiceInfo kServices[] = {
     {676, "WriteResponse", true, true},
     {712, "CallRequest", false, true},
     {715, "CallResponse", true, true},
-    // Tier 2 -- see opcua.hpp: Browse and the subscription/MonitoredItem-management services don't
-    // actually carry a Variant/DataValue anywhere in their own bodies (see the "Read/Write/Call"
-    // comment above decode_read_request_params in this file), so promoting them is a separate,
-    // unrelated decode effort from the one Read/Write/Call above needed; HistoryRead does carry
-    // DataValue/Variant but its own HistoryReadDetails ExtensionObject dispatch (Raw/Processed/
-    // AtTime/Annotation/Modified -- five different sub-structures) is enough additional scope this
-    // first pass leaves it for a later round too -- only RequestHeader/ResponseHeader is decoded
-    // for all of these.
+    // Browse, the whole subscriptions group (9 pairs), and HistoryRead (all 5 HistoryReadDetails
+    // sub-structures) all moved to Tier 1 in ROADMAP item 146 (docs/DEVELOPMENT.md) -- Jurgen asked
+    // for all three explicitly, and the decode functions above (decode_browse_request_params,
+    // decode_create_subscription_request_params and its 8 sibling pairs, decode_history_read_*)
+    // implement them in full. Only 6 Tier-2 pairs remain: Cancel, AddNodes, BrowseNext,
+    // TranslateBrowsePathsToNodeIds, RegisterNodes, UnregisterNodes -- none of these were part of
+    // this round's scope, so only RequestHeader/ResponseHeader is decoded for them.
     {479, "CancelRequest", false, false},
     {482, "CancelResponse", true, false},
     {488, "AddNodesRequest", false, false},
     {491, "AddNodesResponse", true, false},
-    {527, "BrowseRequest", false, false},
-    {530, "BrowseResponse", true, false},
+    {527, "BrowseRequest", false, true},
+    {530, "BrowseResponse", true, true},
     {533, "BrowseNextRequest", false, false},
     {536, "BrowseNextResponse", true, false},
     {554, "TranslateBrowsePathsToNodeIdsRequest", false, false},
@@ -1064,26 +2019,26 @@ constexpr ServiceInfo kServices[] = {
     {563, "RegisterNodesResponse", true, false},
     {566, "UnregisterNodesRequest", false, false},
     {569, "UnregisterNodesResponse", true, false},
-    {664, "HistoryReadRequest", false, false},
-    {667, "HistoryReadResponse", true, false},
-    {751, "CreateMonitoredItemsRequest", false, false},
-    {754, "CreateMonitoredItemsResponse", true, false},
-    {763, "ModifyMonitoredItemsRequest", false, false},
-    {766, "ModifyMonitoredItemsResponse", true, false},
-    {781, "DeleteMonitoredItemsRequest", false, false},
-    {784, "DeleteMonitoredItemsResponse", true, false},
-    {787, "CreateSubscriptionRequest", false, false},
-    {790, "CreateSubscriptionResponse", true, false},
-    {793, "ModifySubscriptionRequest", false, false},
-    {796, "ModifySubscriptionResponse", true, false},
-    {799, "SetPublishingModeRequest", false, false},
-    {802, "SetPublishingModeResponse", true, false},
-    {826, "PublishRequest", false, false},
-    {829, "PublishResponse", true, false},
-    {832, "RepublishRequest", false, false},
-    {835, "RepublishResponse", true, false},
-    {847, "DeleteSubscriptionsRequest", false, false},
-    {850, "DeleteSubscriptionsResponse", true, false},
+    {664, "HistoryReadRequest", false, true},
+    {667, "HistoryReadResponse", true, true},
+    {751, "CreateMonitoredItemsRequest", false, true},
+    {754, "CreateMonitoredItemsResponse", true, true},
+    {763, "ModifyMonitoredItemsRequest", false, true},
+    {766, "ModifyMonitoredItemsResponse", true, true},
+    {781, "DeleteMonitoredItemsRequest", false, true},
+    {784, "DeleteMonitoredItemsResponse", true, true},
+    {787, "CreateSubscriptionRequest", false, true},
+    {790, "CreateSubscriptionResponse", true, true},
+    {793, "ModifySubscriptionRequest", false, true},
+    {796, "ModifySubscriptionResponse", true, true},
+    {799, "SetPublishingModeRequest", false, true},
+    {802, "SetPublishingModeResponse", true, true},
+    {826, "PublishRequest", false, true},
+    {829, "PublishResponse", true, true},
+    {832, "RepublishRequest", false, true},
+    {835, "RepublishResponse", true, true},
+    {847, "DeleteSubscriptionsRequest", false, true},
+    {850, "DeleteSubscriptionsResponse", true, true},
 };
 
 const ServiceInfo* lookup_service(uint32_t id) {
@@ -1116,7 +2071,87 @@ void call_tier1_decoder(const std::string& name, Cursor& c, std::vector<std::str
     else if (name == "WriteResponse") decode_write_response_params(c, values);
     else if (name == "CallRequest") decode_call_request_params(c, values, msg);
     else if (name == "CallResponse") decode_call_response_params(c, values);
+    else if (name == "BrowseRequest") decode_browse_request_params(c, values, msg);
+    else if (name == "BrowseResponse") decode_browse_response_params(c, values);
+    else if (name == "CreateSubscriptionRequest") decode_create_subscription_request_params(c, values);
+    else if (name == "CreateSubscriptionResponse") decode_create_subscription_response_params(c, values);
+    else if (name == "ModifySubscriptionRequest") decode_modify_subscription_request_params(c, values);
+    else if (name == "ModifySubscriptionResponse") decode_modify_subscription_response_params(c, values);
+    else if (name == "DeleteSubscriptionsRequest") decode_delete_subscriptions_request_params(c, values);
+    else if (name == "DeleteSubscriptionsResponse") decode_status_code_array_response(c, values);
+    else if (name == "SetPublishingModeRequest") decode_set_publishing_mode_request_params(c, values);
+    else if (name == "SetPublishingModeResponse") decode_status_code_array_response(c, values);
+    else if (name == "CreateMonitoredItemsRequest") decode_create_monitored_items_request_params(c, values);
+    else if (name == "CreateMonitoredItemsResponse") decode_create_monitored_items_response_params(c, values);
+    else if (name == "ModifyMonitoredItemsRequest") decode_modify_monitored_items_request_params(c, values);
+    else if (name == "ModifyMonitoredItemsResponse") decode_modify_monitored_items_response_params(c, values);
+    else if (name == "DeleteMonitoredItemsRequest") decode_delete_monitored_items_request_params(c, values);
+    else if (name == "DeleteMonitoredItemsResponse") decode_status_code_array_response(c, values);
+    else if (name == "PublishRequest") decode_publish_request_params(c, values);
+    else if (name == "PublishResponse") decode_publish_response_params(c, values);
+    else if (name == "RepublishRequest") decode_republish_request_params(c, values);
+    else if (name == "RepublishResponse") decode_republish_response_params(c, values);
+    else if (name == "HistoryReadRequest") decode_history_read_request_params(c, values);
+    else if (name == "HistoryReadResponse") decode_history_read_response_params(c, values);
 }
+
+// Factored out of try_parse_opcua_message's own 'F'-chunk-only inner try/catch block (ROADMAP item
+// 146, docs/DEVELOPMENT.md) so it can be called either on a single complete chunk's own tail (the
+// common, unchunked case -- see try_parse_opcua_message below) or on a full buffer reassembled
+// from several SecureConversation chunks (see OpcUaDecoder::decode's own finalize_chunk). `region`
+// is this message's own service-layer bytes (TypeId + RequestHeader/ResponseHeader + params) --
+// exactly what used to be `bc.rest()` right after the sequence header in the pre-item-146 version
+// of this function. A failure anywhere in here is caught locally (not propagated) so a
+// service-body decode failure still leaves whatever header-level fields `msg` already carries
+// (SecureChannelId/security header/sequence header) intact -- see opcua.hpp's "Opportunistic
+// MSG/OPN/CLO body decode" section.
+void decode_service_body(ByteSpan region, bool redact, OpcUaMessage& msg) {
+    try {
+        Cursor bc(region);
+        OpcUaNodeIdInfo type_id = read_node_id(bc);
+        msg.service_namespace = type_id.ns;
+        msg.service_type_id = type_id.numeric_id;
+        const ServiceInfo* svc =
+            (type_id.ns == 0 && type_id.encoding <= 0x02) ? lookup_service(type_id.numeric_id) : nullptr;
+        if (!svc) {
+            msg.service_recognized = false;
+            ByteSpan rest = bc.rest();
+            msg.body_shown_as_hex = !rest.empty();
+            msg.body_hex = to_hex(rest);
+            msg.body_length = rest.size();
+        } else {
+            msg.service_recognized = true;
+            msg.service_name = svc->name;
+            msg.has_header = true;
+            msg.header = svc->is_response ? read_response_header(bc, msg.values)
+                                           : read_request_header(bc, msg.values);
+            if (svc->full_decode) {
+                msg.service_body_decoded = true;
+                call_tier1_decoder(msg.service_name, bc, msg.values, msg.notes, redact, msg);
+                if (bc.remaining() > 0) {
+                    msg.notes.push_back(std::to_string(bc.remaining()) +
+                                         " trailing byte(s) after this service's own "
+                                         "decoded fields (ignored)");
+                }
+            } else {
+                msg.service_body_decoded = false;
+                ByteSpan rest = bc.rest();
+                msg.body_shown_as_hex = !rest.empty();
+                msg.body_hex = to_hex(rest);
+                msg.body_length = rest.size();
+            }
+        }
+    } catch (const ParseError&) {
+        msg.service_recognized = false;
+        msg.service_body_decoded = false;
+        msg.has_header = false;
+        msg.values.clear();
+        msg.body_shown_as_hex = true;
+        msg.body_hex = to_hex(region);
+        msg.body_length = region.size();
+    }
+}
+
 
 // ------------------------------------------------------------------------------------------
 // UA-TCP common header identification.
@@ -1168,6 +2203,130 @@ std::string build_summary(const OpcUaMessage& msg) {
     return s.str();
 }
 
+
+// ROADMAP item 146 (docs/DEVELOPMENT.md): cross-chunk/cross-packet SecureConversation chunk
+// reassembly -- see opcua.hpp's "Chunking" section and OpcUaReassemblyState's own comment for the
+// state shape and why FlowStateKeying::DirectionalFlow is the right key (same reasoning as
+// Dnp3ReassemblyState -- see Dnp3Decoder::process_frame, dnp3.cpp, the pattern this follows).
+// Called by OpcUaDecoder::decode on every chunk found in one TCP payload (the first chunk and
+// every later same-payload-coalesced one alike), so reassembly behaves identically whether a
+// logical message's chunks land in one TCP payload or several. For the overwhelmingly common
+// unchunked case (chunk_type == 'F' with no reassembly already in progress) this is a no-op:
+// `msg` already carries try_parse_opcua_message's own complete decode, untouched. In every other
+// case this mutates `msg` in place -- adding a note describing what happened, and, when a final
+// 'F' chunk completes a reassembly, replacing msg's service-decode-related fields with the result
+// of decoding the full reassembled buffer instead of just this chunk's own tail.
+void finalize_chunk(OpcUaMessage& msg, DecodeContext& ctx, bool redact) {
+    if (!msg.has_secure_channel) return;  // HEL/ACK/ERR/RHE -- no SecureConversation chunking
+
+    OpcUaReassemblyState& state = ctx.flow_state<OpcUaReassemblyState>(FlowStateKeying::DirectionalFlow);
+
+    if (!state.in_progress) {
+        if (msg.chunk_type == 'F') return;  // common case -- already fully decoded, nothing to do
+        if (msg.chunk_type == 'A') return;  // an abort with nothing in progress -- nothing to abandon
+        // chunk_type == 'C': begin a new reassembly.
+        state = OpcUaReassemblyState{};
+        state.in_progress = true;
+        state.message_type = msg.message_type;
+        state.secure_channel_id = msg.secure_channel_id;
+        state.is_asymmetric = msg.is_asymmetric;
+        state.token_id = msg.token_id;
+        state.buffered_body.assign(msg.chunk_service_region.data(),
+                                    msg.chunk_service_region.data() + msg.chunk_service_region.size());
+        state.chunk_count = 1;
+        msg.notes.push_back(
+            "beginning an OPC UA message split across multiple SecureConversation chunks -- " +
+            std::to_string(state.buffered_body.size()) +
+            " byte(s) buffered so far on this TCP flow; the service body will be decoded once a "
+            "final ('F') chunk completes it");
+        return;
+    }
+
+    // A reassembly is already in progress -- this chunk must match the four identifying fields
+    // the first ('C') chunk set to be accepted as its continuation.
+    bool matches = state.message_type == msg.message_type &&
+                   state.secure_channel_id == msg.secure_channel_id &&
+                   state.is_asymmetric == msg.is_asymmetric &&
+                   (state.is_asymmetric || state.token_id == msg.token_id);
+    if (!matches) {
+        msg.notes.push_back(
+            "an OPC UA chunk for a different message arrived on this TCP flow while a previous "
+            "multi-chunk reassembly was still in progress (" +
+            std::to_string(state.buffered_body.size()) + " byte(s) buffered across " +
+            std::to_string(state.chunk_count) +
+            " chunk(s)) -- the earlier, incomplete message is abandoned");
+        state = OpcUaReassemblyState{};
+        finalize_chunk(msg, ctx, redact);  // re-run this same chunk with no reassembly in progress
+        return;
+    }
+
+    // Safety caps against a pathological/malformed capture stalling a reassembly open forever --
+    // same caps DNP3's own reassembly already uses (CLI-configurable via
+    // --max-reassembly-bytes/--max-reassembly-segments; 0/unset keeps these literal defaults).
+    const size_t kMaxBufferedBytes = resource_limits().max_reassembly_bytes.value_or(65536);
+    const size_t kMaxChunksPerMessage = resource_limits().max_reassembly_segments.value_or(500);
+
+    state.buffered_body.insert(state.buffered_body.end(), msg.chunk_service_region.data(),
+                                msg.chunk_service_region.data() + msg.chunk_service_region.size());
+    ++state.chunk_count;
+
+    if (state.buffered_body.size() > kMaxBufferedBytes || state.chunk_count > kMaxChunksPerMessage) {
+        msg.notes.push_back("OPC UA chunk reassembly on this TCP flow exceeded its safety cap (" +
+                             std::to_string(state.buffered_body.size()) + " byte(s) across " +
+                             std::to_string(state.chunk_count) +
+                             " chunk(s)) -- abandoning it; service body not decoded");
+        state = OpcUaReassemblyState{};
+        return;
+    }
+
+    if (msg.chunk_type == 'C') {
+        msg.notes.push_back("continuing an OPC UA multi-chunk reassembly on this TCP flow: " +
+                             std::to_string(state.buffered_body.size()) +
+                             " byte(s) buffered across " + std::to_string(state.chunk_count) +
+                             " chunk(s) so far, still waiting for a final ('F') chunk");
+        return;
+    }
+
+    if (msg.chunk_type == 'A') {
+        msg.notes.push_back(
+            "an OPC UA 'A' (abort) chunk ended a multi-chunk reassembly on this TCP flow (" +
+            std::to_string(state.buffered_body.size()) + " byte(s) buffered across " +
+            std::to_string(state.chunk_count) +
+            " chunk(s)) -- the sender gave up sending this message; service body not decoded");
+        state = OpcUaReassemblyState{};
+        return;
+    }
+
+    // msg.chunk_type == 'F': reassembly complete. Decode the service body from the full
+    // reassembled buffer instead of just this chunk's own tail, keeping this 'F' chunk's own
+    // already-correct header-level fields (SecureChannelId/security header/sequence header) as-is.
+    size_t total_bytes = state.buffered_body.size();
+    size_t total_chunks = state.chunk_count;
+    std::vector<uint8_t> reassembled = std::move(state.buffered_body);
+    state = OpcUaReassemblyState{};
+
+    msg.service_recognized = false;
+    msg.service_name.clear();
+    msg.service_namespace = 0;
+    msg.service_type_id = 0;
+    msg.service_body_decoded = false;
+    msg.has_header = false;
+    msg.header = OpcUaServiceHeader{};
+    msg.values.clear();
+    msg.node_ids.clear();
+    msg.body_shown_as_hex = false;
+    msg.body_hex.clear();
+    msg.body_length = 0;
+
+    ByteSpan region(reassembled.data(), reassembled.size());
+    decode_service_body(region, redact, msg);
+
+    msg.notes.push_back("message reassembled from " + std::to_string(total_chunks) +
+                         " OPC UA chunk(s) across this TCP flow, " + std::to_string(total_bytes) +
+                         " byte(s) of service-layer data total");
+    msg.summary = build_summary(msg);
+}
+
 }  // namespace
 
 std::optional<size_t> opcua_declared_length(ByteSpan payload) {
@@ -1217,9 +2376,14 @@ std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload, bool redac
     msg.message_size = declared_size;
     msg.wire_length = std::min(static_cast<size_t>(declared_size), payload.size());
     if (msg.chunk_type != 'F') {
+        // ROADMAP item 146 (docs/DEVELOPMENT.md): this function decodes only this one chunk's own
+        // header; OpcUaDecoder::decode is what actually reassembles a message split across
+        // multiple chunks (via finalize_chunk, below) and adds its own note describing what
+        // happened to the reassembly -- see opcua.hpp's "Chunking" section. A caller that invokes
+        // try_parse_opcua_message directly (e.g. the fuzz harness) gets no reassembly at all, just
+        // this one chunk decoded on its own.
         msg.notes.push_back(std::string("chunk type '") + msg.chunk_type +
-                             "' -- this decoder does not reassemble a message split across "
-                             "multiple OPC UA chunks, see opcua.hpp's \"Chunking\" section");
+                             "' -- see opcua.hpp's \"Chunking\" section");
     }
 
     size_t available = payload.size();
@@ -1268,62 +2432,18 @@ std::optional<OpcUaMessage> try_parse_opcua_message(ByteSpan payload, bool redac
             msg.sequence_number = bc.u32le();
             msg.request_id = bc.u32le();
 
+            // ROADMAP item 146 (docs/DEVELOPMENT.md): captured for every OPN/CLO/MSG chunk,
+            // regardless of chunk type, BEFORE deciding whether to decode or hex-dump the body --
+            // see OpcUaMessage::chunk_service_region's own comment (opcua.hpp) for why only
+            // OpcUaDecoder::decode ever needs to read this past the current call.
+            msg.chunk_service_region = bc.rest();
+
             if (msg.chunk_type != 'F') {
-                ByteSpan rest = bc.rest();
                 msg.body_shown_as_hex = true;
-                msg.body_hex = to_hex(rest);
-                msg.body_length = rest.size();
+                msg.body_hex = to_hex(msg.chunk_service_region);
+                msg.body_length = msg.chunk_service_region.size();
             } else {
-                // See opcua.hpp's "Opportunistic MSG/OPN/CLO body decode" section: a failure
-                // anywhere in this inner block is caught here (not by the outer catch below) so a
-                // service-body decode failure still leaves the already-decoded SecureChannelId/
-                // security header/sequence header above intact in the returned message.
-                size_t service_start = bc.position();
-                try {
-                    OpcUaNodeIdInfo type_id = read_node_id(bc);
-                    msg.service_namespace = type_id.ns;
-                    msg.service_type_id = type_id.numeric_id;
-                    const ServiceInfo* svc =
-                        (type_id.ns == 0 && type_id.encoding <= 0x02) ? lookup_service(type_id.numeric_id)
-                                                                       : nullptr;
-                    if (!svc) {
-                        msg.service_recognized = false;
-                        ByteSpan rest = bc.rest();
-                        msg.body_shown_as_hex = !rest.empty();
-                        msg.body_hex = to_hex(rest);
-                        msg.body_length = rest.size();
-                    } else {
-                        msg.service_recognized = true;
-                        msg.service_name = svc->name;
-                        msg.has_header = true;
-                        msg.header = svc->is_response ? read_response_header(bc, msg.values)
-                                                       : read_request_header(bc, msg.values);
-                        if (svc->full_decode) {
-                            msg.service_body_decoded = true;
-                            call_tier1_decoder(msg.service_name, bc, msg.values, msg.notes, redact, msg);
-                            if (bc.remaining() > 0) {
-                                msg.notes.push_back(std::to_string(bc.remaining()) +
-                                                     " trailing byte(s) after this service's own "
-                                                     "decoded fields (ignored)");
-                            }
-                        } else {
-                            msg.service_body_decoded = false;
-                            ByteSpan rest = bc.rest();
-                            msg.body_shown_as_hex = !rest.empty();
-                            msg.body_hex = to_hex(rest);
-                            msg.body_length = rest.size();
-                        }
-                    }
-                } catch (const ParseError&) {
-                    msg.service_recognized = false;
-                    msg.service_body_decoded = false;
-                    msg.has_header = false;
-                    msg.values.clear();
-                    ByteSpan rest = whole_body.from(service_start);
-                    msg.body_shown_as_hex = true;
-                    msg.body_hex = to_hex(rest);
-                    msg.body_length = rest.size();
-                }
+                decode_service_body(msg.chunk_service_region, redact, msg);
             }
         }
     } catch (const ParseError&) {
@@ -1360,6 +2480,10 @@ std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeConte
     if (!msg) {
         return std::nullopt;
     }
+    // ROADMAP item 146 (docs/DEVELOPMENT.md): reassemble this chunk against whatever this TCP
+    // flow's own OpcUaReassemblyState already has buffered, before this message's fields are
+    // copied into `result` below -- see finalize_chunk's own comment for the full state machine.
+    finalize_chunk(*msg, ctx, ctx.redact_secrets);
 
     OpcUaResult result;
     result.summary = msg->summary;
@@ -1375,6 +2499,7 @@ std::optional<ProtocolResult> OpcUaDecoder::decode(ByteSpan payload, DecodeConte
         ByteSpan rest = payload.from(offset);
         auto next = try_parse_opcua_message(rest, ctx.redact_secrets);
         if (!next) break;  // remaining bytes aren't another OPC UA message -- stop, don't guess
+        finalize_chunk(*next, ctx, ctx.redact_secrets);
         ++message_count;
         std::string note = "additional OPC UA message " + std::to_string(message_count) +
                             " found in the same TCP payload at byte offset " + std::to_string(offset) +

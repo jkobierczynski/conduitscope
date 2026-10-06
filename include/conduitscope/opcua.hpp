@@ -183,23 +183,19 @@
 //
 // StatusCode decode: the top 2 bits (0xC0000000) are the severity -- 00=Good(0x00000000),
 // 01=Uncertain(0x40000000), 10=Bad(0x80000000), 11 unused/reserved -- always decodable regardless
-// of whether the specific value is one this file names (cross-checked against the OPC
-// Foundation's own published StatusCode.csv, which enumerates ~700 named codes; this decoder's own
-// table below is deliberately a "first pass" -- the handful most relevant to an OT security
-// audit's own concerns (auth/certificate/session/timeout failures) rather than an attempt at all
-// ~700):
-//   Good(0x00000000) Uncertain(0x40000000)
-//   BadUnexpectedError(0x80010000)          BadTimeout(0x800A0000)
-//   BadServiceUnsupported(0x800B0000)       BadCertificateInvalid(0x80120000)
-//   BadSecurityChecksFailed(0x80130000)     BadUserAccessDenied(0x801F0000)
-//   BadIdentityTokenInvalid(0x80200000)     BadIdentityTokenRejected(0x80210000)
-//   BadSecureChannelIdInvalid(0x80220000)   BadSessionIdInvalid(0x80250000)
-//   BadSessionClosed(0x80260000)            BadNodeIdInvalid(0x80330000)
-//   BadNodeIdUnknown(0x80340000)            BadNotReadable(0x803A0000)
-//   BadNotWritable(0x803B0000)              BadRequestTypeInvalid(0x80530000)
-//   BadSecurityPolicyRejected(0x80550000)   BadTypeMismatch(0x80740000)
-// Any other 32-bit value is rendered as its decoded severity word plus the raw hex value, e.g.
-// "Bad (0x80af0000)" -- never guessed at.
+// of whether the specific value is one this file names. The named table (opcua.cpp's
+// status_code_name) is cross-checked directly against the OPC Foundation's own published
+// StatusCode.csv (github.com/OPCFoundation/UA-Nodeset) -- which, on inspection, turned out to
+// enumerate only 273 named codes total, not the ~700 this file's own earlier research estimated
+// (ROADMAP item 146, docs/DEVELOPMENT.md, documents that discrepancy directly). This decoder's own
+// table names 181 of those 273 -- every code tied to a service this decoder actually
+// decodes-or-dispatches-on (certificate/session/identity/SecureChannel/UA-TCP-layer codes;
+// Read/Write/Browse/Subscription/MonitoredItem/Filter codes; HistoryRead/aggregate/data-quality/
+// device-sensor codes; and generic protocol infra codes), excluding only the 92 tied to service
+// groups this decoder doesn't implement at all (Alarms&Conditions, AddNodes/node-management,
+// GDS/device-provisioning/licensing, PubSub) or to narrow combinatorial/low-level-stream-API
+// variants of limited audit value. Any 32-bit value this table doesn't name is rendered as its
+// decoded severity word plus the raw hex value, e.g. "Bad (0x80af0000)" -- never guessed at.
 //
 // ---------------------------------------------------------------------------------------------
 // Service identification: every OPC UA service request/response, and ServiceFault, begins with
@@ -214,10 +210,13 @@
 // decoded): the UA Connection Protocol handshake (Hello/Acknowledge/Error/ReverseHello, covered
 // above, which have no TypeId/RequestHeader of their own) plus, at the service layer,
 // OpenSecureChannel, CloseSecureChannel, GetEndpoints, FindServers, CreateSession,
-// ActivateSession, CloseSession, ServiceFault, and -- now that Variant/DataValue value decoding
-// (below) exists to give their own service-specific fields somewhere to go -- Read, Write, and
-// Call. This is itself a deliberate first-pass scope decision, not an oversight: the
-// lifecycle+discovery services were (a) universally present in every real OPC UA capture
+// ActivateSession, CloseSession, ServiceFault, Read, Write, and Call (promoted together once
+// Variant/DataValue value decoding existed to give their own service-specific fields somewhere to
+// go -- see below) and, as of ROADMAP item 146 (docs/DEVELOPMENT.md), Browse and the entire
+// subscription/MonitoredItem-management group (CreateSubscription, ModifySubscription,
+// DeleteSubscriptions, SetPublishingMode, CreateMonitoredItems, ModifyMonitoredItems,
+// DeleteMonitoredItems, Publish, Republish) and HistoryRead. The original lifecycle+discovery
+// group was promoted first because it is (a) universally present in every real OPC UA capture
 // regardless of what the client/server actually do with the connection afterward, (b)
 // individually simple enough (no Variant/DataValue encoding anywhere in any of them) to decode
 // with full confidence in this file's own "verify every field against a primary or
@@ -227,36 +226,35 @@
 // (EndpointDescription's own SecurityMode/SecurityPolicyUri per endpoint -- an OPC UA analog of
 // this codebase's existing BACnet I-Am / EtherNet/IP ListIdentity / HART-IP Read-Unique-Identifier
 // "device fingerprinting" framing), and -- deliberately -- the UserIdentityToken carried in every
-// ActivateSession request (see "Identity token decode" below). Read/Write/Call are promoted
-// alongside them for a different, equally deliberate reason: they are the three OPC UA services
-// whose entire reason for existing IS carrying a Variant or DataValue -- ReadResponse's own
-// Results, WriteRequest's own NodesToWrite, and CallRequest/CallResponse's own Input/Output
-// Arguments are, respectively, an array of DataValue, an array of DataValue, and arrays of
-// Variant -- so once the value-decoding machinery existed at all, leaving these three at Tier 2
-// would have meant showing exactly the fields an OT-security audit of live process values most
-// needs as raw hex. Browse and the subscription/MonitoredItem-management services are
-// DELIBERATELY still Tier 2 even though value decoding now exists: Browse's own
-// BrowseDescription/ReferenceDescription deal in NodeId/BrowseDirection/ReferenceTypeId, and
-// MonitoredItem creation's own MonitoringFilter is an ExtensionObject -- neither carries a
-// Variant/DataValue anywhere in its own body, so promoting them would be a separate, unrelated
-// decode effort, not a natural extension of this one (see ROADMAP in docs/MANUAL.md). HistoryRead
-// DOES carry DataValue/Variant in its own HistoryReadResult, but its own HistoryReadDetails
-// ExtensionObject dispatches across five different sub-structures (ReadRawModifiedDetails/
-// ReadAtTimeDetails/ReadProcessedDetails/ReadEventDetails/ReadAnnotationDataDetails) -- enough
-// additional scope of its own that this first pass leaves it at Tier 2 too.
+// ActivateSession request (see "Identity token decode" below). Read/Write/Call were promoted
+// alongside them for a different, equally deliberate reason: they are three OPC UA services whose
+// entire reason for existing IS carrying a Variant or DataValue -- ReadResponse's own Results,
+// WriteRequest's own NodesToWrite, and CallRequest/CallResponse's own Input/Output Arguments are,
+// respectively, an array of DataValue, an array of DataValue, and arrays of Variant. Browse, the
+// subscription/MonitoredItem group, and HistoryRead stayed at Tier 2 for a few releases after that
+// even though the same value-decoding machinery could already reach them -- Jurgen asked for them
+// by name (docs/DEVELOPMENT.md ROADMAP item 146) and they are now fully decoded too: Browse's own
+// BrowseDescription/ReferenceDescription (NodeId/BrowseDirection/ReferenceTypeId/NodeClass),
+// MonitoredItem creation's own MonitoringFilter (a DataChangeFilter/EventFilter/AggregateFilter
+// ExtensionObject), and HistoryRead's own five-way HistoryReadDetails dispatch
+// (ReadRawModifiedDetails/ReadAtTimeDetails/ReadProcessedDetails/ReadEventDetails/
+// ReadAnnotationDataDetails) are all decoded now -- see opcua.cpp's own
+// decode_monitoring_filter/decode_history_read_details for the dispatch, and ROADMAP item 146 for
+// the one piece deliberately left out even within that dispatch: EventFilter's own ContentFilter
+// WhereClause is shown only as element count + operator name, not its own operand recursion (a
+// separate, deeper rabbit hole -- see "Deliberately NOT implemented" below).
 //
 // Tier 2 ("header only" -- RequestHeader/ResponseHeader is decoded exactly as in Tier 1, giving at
 // minimum a request handle and, for a response, the ServiceResult StatusCode -- but every
-// service-specific field after the header is shown only as raw hex, not decoded): Browse,
-// BrowseNext, TranslateBrowsePathsToNodeIds, CreateSubscription, ModifySubscription,
-// DeleteSubscriptions, CreateMonitoredItems, ModifyMonitoredItems, DeleteMonitoredItems,
-// SetPublishingMode, Publish, Republish, Cancel, RegisterNodes, UnregisterNodes, AddNodes,
-// HistoryRead -- see the Tier 1 paragraph above for why each of these specifically stays here even
-// though Variant/DataValue value decoding now exists. Even without their own bodies decoded, this
-// tier is still genuinely useful: the service NAME itself (what kind of operation this is), the
+// service-specific field after the header is shown only as raw hex, not decoded): BrowseNext,
+// TranslateBrowsePathsToNodeIds, Cancel, RegisterNodes, UnregisterNodes, AddNodes -- the six
+// remaining pairs after ROADMAP item 146's promotion. BrowseNext/TranslateBrowsePathsToNodeIds
+// specifically stayed here even though they share some of Browse's own machinery (Jurgen's own
+// scope choice for item 146 was "Browse only"). Even without their own bodies decoded, this tier
+// is still genuinely useful: the service NAME itself (what kind of operation this is), the
 // request handle, and -- for a response -- whether the overall call succeeded (ServiceResult) are
-// all visible, which is often enough to answer "is this conduit doing OPC UA browsing/
-// subscriptions at all, and are they succeeding" without needing the actual values.
+// all visible, which is often enough to answer "is this conduit doing OPC UA node-management at
+// all, and is it succeeding" without needing the actual values.
 //
 // Variant/DataValue value decoding: OPC 10000-6 5.2.2.16/5.2.2.17 define two self-describing,
 // recursive value containers used throughout the OPC UA data model -- Variant (any one of 25
@@ -323,32 +321,55 @@
 // encrypted password -- is still a legitimate account-enumeration finding.
 //
 // ---------------------------------------------------------------------------------------------
-// Chunking: a single logical OPC UA Message-layer request/response CAN be split across multiple
-// MSG chunks (ChunkType 'C' for every chunk but the last, 'F' for the last) when it exceeds the
-// negotiated SendBufferSize/MaxMessageSize -- the OPC UA analog of this codebase's own COTP EOT-
-// bit reassembly for S7comm, or DNP3's multi-frame application-fragment reassembly. This first-
-// pass release does NOT implement that cross-chunk reassembly: only a single, complete 'F'-chunk
-// message has its service body decoded (Tier 1) or even attempted (Tier 2/unrecognized); a 'C'
-// (intermediate) or 'A' (abort) chunk is fully decoded at the UA-TCP/SecureConversation HEADER
-// level (MessageType, ChunkType, SecureChannelId, security header, sequence header -- everything
-// that does NOT require knowing the reassembled message boundary) but its own body is always shown
-// as raw hex, regardless of what service TypeId a fully-reassembled version of it might carry --
-// see LIMITATIONS in docs/MANUAL.md. In this decoder's own experience building this feature's test
-// fixtures, a chunked message is the exception rather than the rule for the session/discovery/
-// lifecycle services this file's own Tier 1 targets (their own bodies are all small, fixed, or
-// short-array-bounded) -- chunking matters most for the very services (bulk Browse/Read results,
-// large Publish notifications) this first pass already leaves at Tier 2 raw-hex depth, so this
-// scope decision costs relatively little of this release's own practical coverage.
+// Chunking: a single logical OPC UA SecureConversation message (OPN/CLO/MSG alike) CAN be split
+// across multiple chunks (ChunkType 'C' for every chunk but the last, 'F' for the last, or 'A' if
+// the sender aborts mid-message) when its own encoded size exceeds the negotiated
+// SendBufferSize/MaxMessageSize -- the OPC UA analog of this codebase's own COTP EOT-bit
+// reassembly for S7comm, or DNP3's multi-frame application-fragment reassembly (ROADMAP item 146,
+// docs/DEVELOPMENT.md, closes this gap; see Dnp3ReassemblyState/Dnp3Decoder::process_frame in
+// dnp3.hpp/dnp3.cpp for the pattern this follows). OpcUaDecoder now buffers each chunk's own
+// post-sequence-header bytes per directional TCP flow (OpcUaReassemblyState below, reached via
+// DecodeContext::flow_state<OpcUaReassemblyState>(FlowStateKeying::DirectionalFlow) -- directional
+// because, like COTP/DNP3, nothing stops both directions of one TCP session from having an
+// in-progress reassembly at once) until a chunk with ChunkType 'F' completes it, then decodes the
+// service body from the full reassembled buffer instead of just that last chunk's own tail. Every
+// chunk, 'C'/'A'/'F' alike, still has its own UA-TCP/SecureConversation HEADER fully decoded
+// immediately (MessageType, ChunkType, SecureChannelId, security header, sequence header -- none
+// of that requires knowing the reassembled message's boundary); only the SERVICE BODY waits for
+// reassembly to complete. An 'A' (abort) chunk ends an in-progress reassembly without ever
+// producing a decoded service body (the sender gave up sending it); a 'C'/'F' chunk whose
+// MessageType/SecureChannelId/TokenId don't match the reassembly already in progress on that flow
+// abandons the earlier, incomplete one (with a note) rather than silently concatenating bytes from
+// two different messages. Known limitation: unlike DNP3's transport-layer FIR bit, OPC UA's own
+// chunk header carries no "this is genuinely the first chunk" flag -- so a capture that starts
+// mid-message (missing the true first 'C' chunk) has its first-seen continuation chunk treated as
+// if it were a first chunk, concatenating a fragment that is itself missing its own leading bytes.
+// This is a structural property of the wire format, not a shortcut this decoder took, and is no
+// worse than any other protocol's own mid-stream-start reassembly gap already documented elsewhere
+// in this codebase. Safety caps (--max-reassembly-bytes/--max-reassembly-segments, the same flags
+// DNP3/COTP reassembly already honor -- see resource_limits.hpp) bound how much any one flow's
+// in-progress reassembly can buffer before it is abandoned. Validation posture: the one real OPC
+// UA capture this project has (tests/real_captures/opcua/) never exercises SecureConversation-
+// layer chunking at all (its own large messages are split at the TCP stream level only, already
+// handled by opcua_declared_length's pre-existing reassembly) -- so, like several other first-pass
+// gaps this codebase has closed with grammar-plus-synthetic-fixture validation alone (see e.g.
+// MMS's own Session-layer extended-length form, ROADMAP item 145), this feature's own correctness
+// rests on a hand-built synthetic fixture, documented honestly as such rather than blurred with
+// real-capture-confirmed coverage.
 //
 // Deliberately NOT implemented: stateful channel/session tracking (correlating a MSG message's own
 // TokenId back to the OpenSecureChannel exchange that negotiated it, or a Request's
 // AuthenticationToken back to the CreateSession response that issued it) -- this decoder is, like
-// every other protocol in this codebase, a stateless-per-message decoder with TCP-stream-level
-// reassembly only (see "Chunking" above), not a full conversation-tracking OPC UA stack;
-// Browse/subscription/MonitoredItem-management and HistoryRead body decoding (see the Tier 1/Tier
-// 2 paragraphs above -- Variant/DataValue value decoding itself IS implemented; these specific
-// services simply don't need it, or need additional scope of their own); multi-level
-// DiagnosticInfo's own optional
+// every other protocol in this codebase, a stateless-per-message decoder with TCP-stream-level and
+// now SecureConversation-chunk-level reassembly only (see "Chunking" above), not a full
+// conversation-tracking OPC UA stack; EventFilter's own ContentFilter WhereClause operand
+// recursion (ContentFilterElement's own FilterOperands array is one of Element/Attribute/
+// SimpleAttribute/Literal Operand, each potentially nesting further ContentFilterElement
+// references -- shown only as element count + FilterOperator name, the same "decode the common
+// case, degrade honestly" posture MMS's own AlternateAccess recursion takes, see ROADMAP item 146
+// in docs/DEVELOPMENT.md); BrowseNext/TranslateBrowsePathsToNodeIds/Cancel/RegisterNodes/
+// UnregisterNodes/AddNodes body decoding (the six service pairs still at Tier 2 after item 146 --
+// see the Tier 1/Tier 2 paragraphs above); multi-level DiagnosticInfo's own optional
 // SymbolicId/NamespaceUri/LocalizedText/Locale/AdditionalInfo/InnerStatusCode/InnerDiagnosticInfo
 // fields are structurally skipped (the EncodingMask byte and, when set, each flagged field are all
 // correctly consumed so byte alignment for whatever follows in the same message stays correct --
@@ -482,6 +503,21 @@ struct OpcUaMessage {
     // own role for those protocols' own coalesced-messages handling).
     size_t wire_length = 0;
 
+    // ROADMAP item 146 (docs/DEVELOPMENT.md): the raw bytes immediately following this chunk's
+    // own Sequence header -- i.e. where a complete (unchunked) message's own service TypeId +
+    // RequestHeader/ResponseHeader + params begins, or where a continuation ('C'/'A') chunk's own
+    // raw continuation bytes are. Populated for every OPN/CLO/MSG chunk (has_secure_channel),
+    // regardless of chunk type, by try_parse_opcua_message right after it reads the sequence
+    // header -- BEFORE it decides whether to decode or hex-dump the body. Aliases the `payload`
+    // span the caller passed into try_parse_opcua_message, so it is valid only for as long as that
+    // span itself is -- i.e. only for the remainder of the same call stack. OpcUaDecoder::decode is
+    // the only reader that needs it past the per-chunk parse (to buffer it into
+    // OpcUaReassemblyState::buffered_body across chunks -- see "Chunking" above), and it still has
+    // `payload` in scope whenever it reads this field, so nothing here ever dangles. Empty
+    // (default-constructed ByteSpan) for HEL/ACK/ERR/RHE, which have no SecureConversation headers
+    // and no chunking of their own.
+    ByteSpan chunk_service_region;
+
     std::string summary;
     std::vector<std::string> notes;
 };
@@ -519,11 +555,30 @@ struct OpcUaResult {
     OpcUaMessage first;
 };
 
+// ROADMAP item 146 (docs/DEVELOPMENT.md): per-directional-TCP-flow SecureConversation chunk
+// reassembly state -- see "Chunking" in this file's own header comment, and
+// Dnp3ReassemblyState (dnp3.hpp) for the pattern this follows (same reasoning for
+// FlowStateKeying::DirectionalFlow: nothing stops both directions of one TCP session from having
+// an in-progress reassembly at once). `message_type`/`secure_channel_id`/`is_asymmetric`/
+// `token_id` are the identifying fields a later chunk must match to be accepted as this
+// reassembly's own continuation (set from the chunk that began it); a mismatch abandons this state
+// (with a note) rather than concatenating bytes from two different messages.
+class OpcUaReassemblyState : public DecoderFlowState {
+public:
+    bool in_progress = false;
+    std::string message_type;        // e.g. "Message", "OpenSecureChannel" -- must match
+    uint32_t secure_channel_id = 0;   // must match
+    bool is_asymmetric = false;      // true only for OpenSecureChannel
+    uint32_t token_id = 0;           // symmetric only (CloseSecureChannel/Message) -- must match
+    std::vector<uint8_t> buffered_body;  // concatenated chunk_service_region bytes so far
+    size_t chunk_count = 0;
+};
+
 // id() == "opcua", gate_kind() == TcpPortIndependent. Wraps try_parse_opcua_message plus the
 // same-TCP-payload multi-chunk-coalescing loop that used to live directly in decoder.cpp's
-// `if (want_opcua)` call site -- OPC UA is purely stateless (no fragment reassembly of its own;
-// SecureConversation chunking is handled entirely within try_parse_opcua_message/wire_length), so
-// unlike Dnp3Decoder/CotpDecoder there is no per-flow reassembly state here at all.
+// `if (want_opcua)` call site, and -- since ROADMAP item 146 -- the cross-chunk/cross-packet
+// SecureConversation reassembly described in "Chunking" above, via
+// ctx.flow_state<OpcUaReassemblyState>(FlowStateKeying::DirectionalFlow).
 class OpcUaDecoder : public ProtocolDecoder {
 public:
     std::string_view id() const override { return "opcua"; }

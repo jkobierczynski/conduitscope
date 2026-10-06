@@ -7432,28 +7432,36 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   the hand-built `tests/sample_hartip.pcap`, cross-checked against
   HCF_SPEC-307 and Wireshark's `packet-hart_ip.c` source rather than an
   independent real capture.
-- **OPC UA's Browse/subscription/MonitoredItem-management/HistoryRead
-  services stay Tier 2** -- these are named, and have RequestHeader/
-  ResponseHeader decoded, but their own service-specific bodies are shown
-  only as raw hex. Unlike the previous limitation here, this is no longer a
-  Variant/DataValue gap: that self-describing value encoding IS now fully
-  implemented (see docs/PROTOCOL_COVERAGE.md's "Variant/DataValue value decoding"
-  section), and Read/Write/Call were promoted to Tier 1 specifically because
-  they're the services whose entire reason for existing is carrying one.
-  Browse and the subscription/MonitoredItem-management services simply
-  don't carry a Variant/DataValue anywhere in their own bodies at all (a
-  separate, unrelated decode effort); HistoryRead does, but its own
-  HistoryReadDetails ExtensionObject dispatches across five different
-  sub-structures, additional scope of its own this first pass leaves for
-  later (see docs/DEVELOPMENT.md's ROADMAP). For these services, only that a Browse/Subscribe/
-  etc. happened, its request handle, and (for a response) whether it
-  succeeded are visible.
-- **OPC UA chunk reassembly is not implemented** -- a logical message split
-  across multiple `'C'`/`'F'` OPC UA chunks (distinct from ordinary TCP-
-  segment-level reassembly, which IS implemented -- see docs/PROTOCOL_COVERAGE.md's
-  "Chunking" subsection) has its UA-TCP/SecureConversation header fully
-  decoded per chunk, but only a single, complete `'F'` chunk gets its
-  service body decoded; a `'C'`/`'A'` chunk's own body is always raw hex.
+- **OPC UA's Cancel/AddNodes/BrowseNext/TranslateBrowsePathsToNodeIds/
+  RegisterNodes/UnregisterNodes services stay Tier 2** -- these are named,
+  and have RequestHeader/ResponseHeader decoded, but their own
+  service-specific bodies are shown only as raw hex. Browse, the entire
+  subscription/MonitoredItem-management group, and HistoryRead were all
+  promoted to Tier 1 (ROADMAP item 146, docs/DEVELOPMENT.md); these six
+  remaining pairs weren't asked for by name and stayed where they were.
+  BrowseNext/TranslateBrowsePathsToNodeIds specifically stay here even
+  though they share some of Browse's own machinery. For these six, only
+  that the operation happened, its request handle, and (for a response)
+  whether it succeeded are visible. Separately, within the now-Tier-1
+  MonitoredItem/HistoryRead filter decoding, EventFilter's own
+  ContentFilter WhereClause is shown only as element count + each
+  element's own FilterOperator name, not its own operand recursion -- see
+  docs/PROTOCOL_COVERAGE.md's "Deliberately not implemented" subsection.
+- **OPC UA chunk reassembly is now implemented** (ROADMAP item 146,
+  docs/DEVELOPMENT.md) -- a logical message split across multiple
+  `'C'`/`'F'` OPC UA chunks (distinct from ordinary TCP-segment-level
+  reassembly, which was already implemented -- see
+  docs/PROTOCOL_COVERAGE.md's "Chunking" subsection) is buffered per
+  directional TCP flow and its service body decoded once a final `'F'`
+  chunk completes it, the same `DecoderFlowState` pattern DNP3/COTP
+  reassembly already use. Known gap: OPC UA's own chunk header carries no
+  DNP3-FIR-bit equivalent, so a capture starting mid-message has its
+  first-seen continuation chunk treated as a first chunk -- a structural
+  property of the wire format, not a shortcut taken here. This feature's
+  own correctness rests on a hand-built synthetic fixture (a true
+  cross-packet 'C'+'F' split plus a reassembly-abandoned-on-mismatch
+  case); the one real OPC UA capture this project has never exercises
+  SecureConversation-layer chunking at all.
 - **OPC UA has no stateful channel/session tracking** -- a Message chunk's
   own TokenId is never correlated back to the OpenSecureChannel exchange
   that negotiated it, nor a Request's AuthenticationToken back to the
@@ -7465,27 +7473,36 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   OpenSecureChannel exchange that negotiated it is itself always decoded in
   full -- see "Security posture is visible even when the body is not" in
   docs/PROTOCOL_COVERAGE.md).
-- **OPC UA's StatusCode table is a deliberate first pass**, the same scoping
-  precedent as HART-IP's Response Code table above -- roughly 20 named
-  values (auth/certificate/session/timeout failures, the subset most
-  relevant to an OT security audit) out of the OPC Foundation's own
-  ~700-entry `StatusCode.csv`. Every other value still decodes its
-  severity (Good/Uncertain/Bad) correctly from the top 2 bits, shown
-  alongside the raw hex value, never guessed at -- this decoder's own real
-  capture (see `tests/real_captures/opcua/ATTRIBUTION.md`) exercises this
-  exact fallback, twice.
+- **OPC UA's StatusCode table now names 181 of the OPC Foundation's own 273
+  total codes** (ROADMAP item 146, docs/DEVELOPMENT.md widened it from a
+  ~20-entry first pass) -- every code tied to a service this decoder
+  actually decodes-or-dispatches-on, excluding only the 92 tied to service
+  groups it doesn't implement at all (Alarms&Conditions, AddNodes/
+  node-management, GDS/device-provisioning/licensing, PubSub) or to narrow
+  combinatorial/low-level-stream-API variants. (The real total, 273, is
+  itself far smaller than the ~700 this item's own scoping question
+  originally estimated -- documented honestly in that ROADMAP entry.)
+  Every other value still decodes its severity (Good/Uncertain/Bad)
+  correctly from the top 2 bits, shown alongside the raw hex value, never
+  guessed at -- this decoder's own real capture (see
+  `tests/real_captures/opcua/ATTRIBUTION.md`) exercises two StatusCodes
+  that are now correctly NAMED by the widened table
+  (`BadInternalError`/`BadDecodingError`), a genuine real-world
+  confirmation of the new entries.
 - **OPC UA's real-capture validation is narrow.** The one real capture
   found (`tests/real_captures/opcua/ATTRIBUTION.md`) is genuine OPC UA
   traffic from an independent stack implementation, and it does exercise 9
-  of the ~21 Tier 1 request/response entries plus genuine multi-segment TCP
-  reassembly --
-  but it never exercises FindServers, CloseSession, CloseSecureChannel, any
-  Tier 2 service, a non-Anonymous identity token (so the UserName/Password
-  cleartext-credential "SECURITY FINDING" logic is validated only against
-  this decoder's own synthetic fixture, not real bytes), a non-`'F'` chunk,
-  or a structurally-invalid NodeId -- see docs/PROTOCOL_COVERAGE.md's OPC UA
+  of this decoder's own (now much larger, after item 146's promotion) Tier
+  1 roster plus genuine multi-segment TCP reassembly -- but it never
+  exercises FindServers, CloseSession, CloseSecureChannel, any Tier 2
+  service, any of item 146's own newly-promoted Browse/subscription/
+  HistoryRead services, a non-Anonymous identity token (so the
+  UserName/Password cleartext-credential "SECURITY FINDING" logic is
+  validated only against this decoder's own synthetic fixture, not real
+  bytes), SecureConversation-layer chunk reassembly, a non-`'F'` chunk, or
+  a structurally-invalid NodeId -- see docs/PROTOCOL_COVERAGE.md's OPC UA
   Validation subsection for the complete, honest scope. Its own CallRequest
-  (now Tier 1) turned out to be genuinely malformed in both sessions --
+  (Tier 1) turned out to be genuinely malformed in both sessions --
   Achilles Satellite fuzz-test payloads, not well-formed traffic -- so this
   capture still does not validate a well-formed Read/Write/Call exchange
   against real bytes; only this decoder's own synthetic fixtures do that.

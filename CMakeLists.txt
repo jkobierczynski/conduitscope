@@ -4357,10 +4357,14 @@ add_test(NAME opcua_reverse_hello_decoded
 set_tests_properties(opcua_reverse_hello_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "192.168.1.10:4840 \\(opcua\\) -> 192.168.1.50:53100  \\[opcua\\]  ReverseHello server-uri=urn:conduitscope:sample-plc endpoint-url=opc.tcp://192.168.1.10:4840/UA/PLC")
 
-add_test(NAME opcua_intermediate_chunk_not_reassembled_noted
+add_test(NAME opcua_lone_intermediate_chunk_buffers_noted
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
-set_tests_properties(opcua_intermediate_chunk_not_reassembled_noted PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"opcua_chunk_type\": \"C\",.*\"opcua_secure_channel_id\": 424242,.*\"opcua_token_id\": 7,.*\"opcua_body_shown_as_hex\": true,.*\"opcua_body_hex\": \"01 02 03 04 05 06 07 08\",.*\"notes\": \\[\"chunk type 'C' -- this decoder does not reassemble a message split across multiple OPC UA chunks")
+set_tests_properties(opcua_lone_intermediate_chunk_buffers_noted PROPERTIES
+  # ROADMAP item 146 (docs/DEVELOPMENT.md): this 'C' chunk is on its own TCP flow with no 'F' chunk
+  # ever arriving to complete it, so the per-chunk fields try_parse_opcua_message already produced
+  # (this chunk's own raw hex body) stay as-is -- only finalize_chunk's own note, describing that a
+  # reassembly began and is buffering, is added.
+  PASS_REGULAR_EXPRESSION "\"opcua_chunk_type\": \"C\",.*\"opcua_secure_channel_id\": 424242,.*\"opcua_token_id\": 7,.*\"opcua_body_shown_as_hex\": true,.*\"opcua_body_hex\": \"01 02 03 04 05 06 07 08\",.*\"notes\": \\[\"chunk type 'C' -- see opcua.hpp.*\"beginning an OPC UA message split across multiple SecureConversation chunks -- 8 byte\\(s\\) buffered so far on this TCP flow; the service body will be decoded once a final \\('F'\\) chunk completes it\"")
 
 add_test(NAME opcua_invalid_nodeid_shape_falls_back_to_hex_preserving_channel_fields
   COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
@@ -4396,7 +4400,77 @@ set_tests_properties(opcua_protocol_filter_excludes_other_protocols PROPERTIES
 add_test(NAME opcua_stats_counted
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
 set_tests_properties(opcua_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +33[^\n]*\n[^\n]*\nprotocols:\n *opcua +32\n *tcp +1.*\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +1\n *Hello +3\n *Message +23\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *CallRequest +1\n *CallResponse +1\n")
+  # ROADMAP item 146 (docs/DEVELOPMENT.md): counts updated for the Browse/subscriptions-group/
+  # HistoryRead/chunk-reassembly/widened-StatusCode fixtures appended to the end of
+  # build_opcua_sample -- see tools/make_sample_pcap.py's own packet-by-packet comments (34 onward)
+  # for exactly what each added packet exercises.
+  PASS_REGULAR_EXPRESSION "packets: +70[^\n]*\n[^\n]*\nprotocols:\n *opcua +69\n *tcp +1.*\nopcua message types:\n *Acknowledge +1\n *CloseSecureChannel +1\n *Error +2\n *Hello +3\n *Message +59\n *OpenSecureChannel +2\n *ReverseHello +1\nopcua services:\n *ActivateSessionRequest +2\n *ActivateSessionResponse +2\n *BrowseRequest +1\n *BrowseResponse +1\n *CallRequest +1\n *CallResponse +1\n")
+
+# --------------------------------------------------------------------------
+# ROADMAP item 146 (docs/DEVELOPMENT.md): Browse/subscriptions-group/HistoryRead promoted to
+# Tier 1, chunk reassembly, and the widened (181-entry) StatusCode table. See
+# tools/make_sample_pcap.py's own build_opcua_sample comments (packets 34 onward) for exactly what
+# each fixture below exercises -- grammar-plus-synthetic-fixture validation only (the one real OPC
+# UA capture this project has never exercises any of this, see ATTRIBUTION.md).
+# --------------------------------------------------------------------------
+
+add_test(NAME opcua_browse_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_browse_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"BrowseRequest\",.*\"opcua_values\": \\[.*\"nodes-to-browse\\[0\\]=ns=2\;i=3000 direction=Forward reference-type=ns=0\;i=0 include-subtypes=true node-class-mask=0x0 result-mask=0x3f\"\\],.*\"opcua_service_name\": \"BrowseResponse\",.*\"results\\[0\\]=status=Good continuation=<none> references=\\[\\{target=ns=2\;i=3001 browse-name=ns=2\;Temperature display-name=Temperature \\[en\\] node-class=Variable reference-type=ns=0\;i=40 is-forward=true type-definition=ns=0\;i=63\\}\\]\"")
+
+add_test(NAME opcua_create_monitored_items_all_filter_kinds_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_create_monitored_items_all_filter_kinds_decoded PROPERTIES
+  # One MonitoredItemCreateRequest each for DataChangeFilter, EventFilter, and AggregateFilter --
+  # the whole subscriptions group was promoted together (Jurgen's own "whole group" scope).
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"CreateMonitoredItemsRequest\",.*filter=DataChangeFilter\\{trigger=StatusValueTimestamp deadband-type=Absolute deadband-value=0.500000\\}.*filter=EventFilter\\{select=\\[\\{type=ns=0\;i=2041 path=\\[ns=0\;Message\\] attribute=Value\\}\\] where=0 element\\(s\\)\\}.*filter=AggregateFilter\\{start-time=2023-11-14T23:53:20.000Z aggregate-type=ns=0\;i=2341 processing-interval-ms=60000.000000 config=\\{use-server-defaults=true, treat-uncertain-as-bad=true, percent-data-bad=0, percent-data-good=100, use-sloped-extrapolation=false\\}\\}")
+
+add_test(NAME opcua_publish_response_all_notification_kinds_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_publish_response_all_notification_kinds_decoded PROPERTIES
+  # A single PublishResponse's own NotificationMessage carrying all 3 NotificationData dispatch
+  # variants in one array: DataChangeNotification/EventNotificationList/StatusChangeNotification.
+  PASS_REGULAR_EXPRESSION "\"opcua_service_name\": \"PublishResponse\",.*notification-message=\\{sequence-number=1 publish-time=2023-11-14T23:53:20.000Z notification-data=\\[DataChangeNotification\\{\\{client-handle=1 value=\\{value=\\(Int32\\) 55, status=Good\\}\\}\\}, EventNotificationList\\{\\{client-handle=2 fields=\\[\\(String\\[1\\]\\) AlarmActive\\]\\}\\}, StatusChangeNotification\\{status=BadSubscriptionIdInvalid\\}\\]\\}")
+
+add_test(NAME opcua_history_read_raw_and_modified_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_history_read_raw_and_modified_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"history-read-details=ReadRawModifiedDetails\\{is-read-modified=false start-time=2023-11-14T22:53:20.000Z end-time=2023-11-14T23:53:20.000Z num-values-per-node=100 return-bounds=true\\}\".*results\\[0\\]=status=Good continuation=<none> history-data=HistoryData\\{values=\\[\\{value=\\(Int32\\) 42, status=Good, source-timestamp=2023-11-14T23:53:20.000Z\\}\\]\\}\".*\"history-read-details=ReadRawModifiedDetails\\{is-read-modified=true start-time=2023-11-14T22:53:20.000Z end-time=2023-11-14T23:53:20.000Z num-values-per-node=100 return-bounds=false\\}\".*results\\[0\\]=status=Good continuation=<none> history-data=HistoryModifiedData\\{values=\\[\\{value=\\(Int32\\) 43, status=Good, source-timestamp=2023-11-14T23:53:20.000Z\\}\\] modifications=\\[\\{time=2023-11-14T23:53:20.000Z update-type=Replace user=operator1\\}\\]\\}\"")
+
+add_test(NAME opcua_history_read_at_time_and_processed_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_history_read_at_time_and_processed_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"history-read-details=ReadAtTimeDetails\\{req-times=\\[2023-11-14T23:23:20.000Z, 2023-11-14T23:53:20.000Z\\] use-simple-bounds=false\\}\".*\"history-read-details=ReadProcessedDetails\\{start-time=2023-11-14T22:53:20.000Z end-time=2023-11-14T23:53:20.000Z processing-interval-ms=60000.000000 aggregate-type=\\[ns=0\;i=2341\\] config=\\{use-server-defaults=true, treat-uncertain-as-bad=true, percent-data-bad=0, percent-data-good=100, use-sloped-extrapolation=false\\}\\}\".*results\\[0\\]=status=Good continuation=<none> history-data=HistoryData\\{values=\\[\\{value=\\(Float\\) 45.500000, status=Good\\}\\]\\}\"")
+
+add_test(NAME opcua_history_read_event_and_annotation_decoded
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_history_read_event_and_annotation_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"history-read-details=ReadEventDetails\\{num-values-per-node=100 start-time=2023-11-14T22:53:20.000Z end-time=2023-11-14T23:53:20.000Z filter=\\{select=\\[\\{type=ns=0\;i=2041 path=\\[ns=0\;Message\\] attribute=Value\\}\\] where=0 element\\(s\\)\\}\\}\".*results\\[0\\]=status=Good continuation=<none> history-data=HistoryEvent\\{events=\\[\\[\\(String\\[1\\]\\) High temperature alarm\\]\\]\\}\".*\"history-read-details=ReadAnnotationDataDetails\\{req-times=\\[2023-11-14T23:23:20.000Z, 2023-11-14T23:53:20.000Z\\]\\}\"")
+
+add_test(NAME opcua_chunk_reassembly_completes_across_packets
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_chunk_reassembly_completes_across_packets PROPERTIES
+  # A ReadRequest's own service body split into a 'C' chunk and an 'F' chunk sent as two SEPARATE
+  # TCP packets (true cross-packet reassembly, not just same-payload coalescing) -- the second
+  # chunk's own fields show the FULLY DECODED ReadRequest, not raw hex, plus a note describing the
+  # reassembly.
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Message channel=700002 token=3 ReadRequest\",.*\"opcua_service_name\": \"ReadRequest\",.*\"nodes-to-read\\[0\\]=ns=2\;i=1001 attribute=Value\"\\],.*\"notes\": \\[\"message reassembled from 2 OPC UA chunk\\(s\\) across this TCP flow, 70 byte\\(s\\) of service-layer data total\"\\]")
+
+add_test(NAME opcua_chunk_reassembly_abandoned_on_mismatch
+  COMMAND conduitscope decode --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
+set_tests_properties(opcua_chunk_reassembly_abandoned_on_mismatch PROPERTIES
+  # A 'C' chunk begins a reassembly, then a DIFFERENT message's 'F' chunk (different
+  # SecureChannelId) arrives on the same flow before any continuation -- the first is abandoned
+  # (noted) and the second decodes normally on its own.
+  PASS_REGULAR_EXPRESSION "\"summary\": \"Message channel=800002 token=6 ReadRequest\",.*\"opcua_service_name\": \"ReadRequest\",.*\"notes\": \\[\"an OPC UA chunk for a different message arrived on this TCP flow while a previous multi-chunk reassembly was still in progress \\(4 byte\\(s\\) buffered across 1 chunk\\(s\\)\\) -- the earlier, incomplete message is abandoned\"\\]")
+
+add_test(NAME opcua_widened_statuscode_table_names_new_entry
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap" --format text)
+set_tests_properties(opcua_widened_statuscode_table_names_new_entry PROPERTIES
+  # BadTooManyMonitoredItems (0x80DB0000) is in the new 181-entry status_code_name table but was
+  # NOT in the old 20-entry one -- proves the table actually widened, not just grew in a comment.
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Error error=BadTooManyMonitoredItems reason=Too many monitored items")
 
 # --------------------------------------------------------------------------
 # Real-world OPC UA capture -- see tests/real_captures/opcua/ATTRIBUTION.md for provenance: two
@@ -4472,12 +4546,18 @@ set_tests_properties(real_opcua_call_request_second_session_body_rejected_as_mal
 add_test(NAME real_opcua_malformed_call_request_gets_error_not_response_first_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_malformed_call_request_gets_error_not_response_first_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6495 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)[^\n]*\n.*\\[opcua\\]  Error error=Bad \\(0x80020000\\) reason=")
+  # ROADMAP item 146 (docs/DEVELOPMENT.md): 0x80020000 is now a named entry (BadInternalError) in
+  # the widened 181-entry status_code_name table, where the old 20-entry table fell back to raw
+  # severity+hex -- a real-world confirmation that the widened table actually gets exercised, not
+  # just a synthetic-fixture claim.
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6495 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)[^\n]*\n.*\\[opcua\\]  Error error=BadInternalError reason=")
 
 add_test(NAME real_opcua_malformed_call_request_gets_error_not_response_second_session
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
 set_tests_properties(real_opcua_malformed_call_request_gets_error_not_response_second_session PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6496 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)[^\n]*\n.*\\[opcua\\]  Error error=Bad \\(0x80070000\\) reason=")
+  # Same widened-table effect as the first session above -- 0x80070000 is now named
+  # (BadDecodingError).
+  PASS_REGULAR_EXPRESSION "\\[opcua\\]  Message channel=6496 token=1 \\(service type-id 712, ns=0 -- not in this decoder's dispatch table\\)[^\n]*\n.*\\[opcua\\]  Error error=BadDecodingError reason=")
 
 add_test(NAME real_opcua_security_policy_none_both_sessions
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/opcua/opc-ua-ap-method-wireshark-freeze.pcap" --format text)
@@ -10736,8 +10816,9 @@ add_test(NAME inventory_opcua_no_identity_fields_omitted_for_client_json
   COMMAND conduitscope inventory --format json --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap")
 set_tests_properties(inventory_opcua_no_identity_fields_omitted_for_client_json PROPERTIES
   # Same fix as inventory_enip_no_identity_fields_omitted_for_client_json just above -- see that
-  # test's own comment.
-  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-15 00:13:24.000000Z\",\n *\"inferred_role\": \"Unknown\"\n *\\}")
+  # test's own comment. Timestamp updated for ROADMAP item 146's own fixtures appended to the end
+  # of build_opcua_sample, which push this client's own last-seen time later.
+  PASS_REGULAR_EXPRESSION "\"ip\": \"192\\.168\\.1\\.50\",.*\"last_seen_text\": \"2023-11-15 00:16:44.000000Z\",\n *\"inferred_role\": \"Unknown\"\n *\\}")
 
 # ---------------------------------------------------------------------------------------------
 # Grok gap #2 phase 6: InventoryAsset::inferred_role, a passive, low-confidence, purely
@@ -16070,20 +16151,25 @@ set_tests_properties(baseline_check_bacnet_empty_baseline_finds_new_conduit PROP
 add_test(NAME baseline_learn_opcua_produces_expected_operations
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && cat '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_learn.json'")
 set_tests_properties(baseline_learn_opcua_produces_expected_operations PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"protocol\": \"opcua\",\n *\"server_port\": 4840,.*\"operation_key\": \"ReadRequest/ns=2\;i=1001\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest/ns=2\;i=1002\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"CallRequest/object=ns=2\;i=2000 method=ns=2\;i=2001\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest/ns=2\;i=1003\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]"
+  # ROADMAP item 146 (docs/DEVELOPMENT.md): ReadRequest/ns=2;i=1001's own packet_count is now 2,
+  # not 1 -- the cross-packet chunk-reassembly fixture (tools/make_sample_pcap.py, packets 66-67)
+  # reuses that same NodeId for its own reassembled ReadRequest, on the same client/server conduit.
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"opcua\",\n *\"server_port\": 4840,.*\"operation_key\": \"ReadRequest/ns=2\;i=1001\",\n *\"packet_count\": 2,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest/ns=2\;i=1002\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"CallRequest/object=ns=2\;i=2000 method=ns=2\;i=2001\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\].*\"operation_key\": \"WriteRequest/ns=2\;i=1003\",\n *\"packet_count\": 1,\n *\"has_target_range\": false,\n *\"observed_ranges\": \\[\\]"
   FAIL_REGULAR_EXPRESSION "\"operation_key\": \"WriteRequest\"|\"operation_key\": \"ReadRequest\"|\"operation_key\": \"CallRequest\"")
 
 add_test(NAME baseline_check_opcua_unmodified_zero_findings
   COMMAND bash -c "rm -f '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' && '$<TARGET_FILE:conduitscope>' baseline learn --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_clean.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap'")
 set_tests_properties(baseline_check_opcua_unmodified_zero_findings PROPERTIES
-  # 11 distinct operations, not 10 -- the two WriteRequest packets now key separately (see this
-  # section's own comment above), one more distinct (conduit, operation_key) pair than before.
-  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 11 distinct operation\\(s\\) observed, 11 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
+  # 23 distinct operations, not 11 -- ROADMAP item 146's own Browse/subscriptions-group/
+  # HistoryRead/chunk-reassembly fixtures (appended to the end of build_opcua_sample) add 12 more
+  # distinct (conduit, operation_key) pairs on top of the pre-existing 11 (see this section's own
+  # comment above for why the two WriteRequest packets key separately).
+  PASS_REGULAR_EXPRESSION "Result: CLEAN\n\n1 conduit\\(s\\) observed, 23 distinct operation\\(s\\) observed, 23 matched the baseline, 0 did not\n\nFINDINGS \\(0\\):\n *\\(none\\)")
 
 add_test(NAME baseline_check_opcua_empty_baseline_finds_new_conduit
   COMMAND bash -c "printf '{\"schema_version\": 1, \"conduits\": []}' > '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_empty.json' && '$<TARGET_FILE:conduitscope>' baseline check --baseline-file '${CMAKE_CURRENT_BINARY_DIR}/baseline_opcua_empty.json' '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_opcua.pcap'")
 set_tests_properties(baseline_check_opcua_empty_baseline_finds_new_conduit PROPERTIES
-  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(11 finding\\(s\\)\\).*\\[6\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"ReadRequest/ns=2\;i=1001\".*\\[7\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2\;i=1002\".*\\[8\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"CallRequest/object=ns=2\;i=2000 method=ns=2\;i=2001\".*\\[9\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2\;i=1003\""
+  PASS_REGULAR_EXPRESSION "Result: ANOMALIES FOUND \\(23 finding\\(s\\)\\).*\\[6\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"ReadRequest/ns=2\;i=1001\".*\\[7\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2\;i=1002\".*\\[8\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"CallRequest/object=ns=2\;i=2000 method=ns=2\;i=2001\".*\\[9\\] new-conduit  192\\.168\\.1\\.50 -> 192\\.168\\.1\\.10:4840  opcua  operation=\"WriteRequest/ns=2\;i=1003\""
   FAIL_REGULAR_EXPRESSION "new-operation|new-target-range")
 
 # The NEW behavior's own dedicated positive case: `learn` from the fixture, then `check` a SECOND

@@ -19220,6 +19220,146 @@ it done as its own patch.
     zero further fixes needed. Delivered as a zip of touched/new files via `SendUserFile`, per
     this project's own no-git-commit convention.
 
+146. **OPC UA: logical-message-level chunk reassembly, a StatusCode table widened from 20 to 181
+    entries, and Browse/the full subscription group/HistoryRead promoted to Tier 1.** Jurgen
+    asked to work the OPC UA entry on the Protocol-depth backlog: "logical-message-level chunk
+    reassembly, a StatusCode table wider than about 20 entries, and promoting Browse,
+    subscriptions and HistoryRead to Tier 1" -- three distinct, already-documented gaps
+    (opcua.hpp's own "Chunking"/"StatusCode decode"/"Service identification" sections,
+    docs/PROTOCOL_COVERAGE.md's OPC UA writeup). Sourcing matched this decoder's own established
+    standard (see opcua.hpp's file header "Sourcing" paragraph): a sparse `git clone` of
+    `github.com/OPCFoundation/UA-Nodeset` (read-only, grammar sourcing only, nothing vendored) gave
+    the authoritative `Schema/StatusCode.csv` and confirmed every new structure's own NodeIds.csv
+    identifiers (all already correct in `kServices`, since that table already named every one of
+    these services at Tier 2), and a second clone of `github.com/FreeOpcUa/python-opcua` (already
+    this file's established cross-check source) gave the exact field order/type for every new
+    structure. Jurgen confirmed scope via `AskUserQuestion` before work began: the StatusCode table
+    at "~150 curated entries" (not the full table, not a smaller ~50-entry bump); the subscriptions
+    group as "the whole group (9 pairs)" rather than a subset; HistoryRead at "all 5
+    sub-structures"; Browse scope as "Browse only" (BrowseNext/TranslateBrowsePathsToNodeIds stay
+    at Tier 2 even though they share some of Browse's own machinery). Research surfaced one
+    honest discrepancy, called out directly rather than quietly absorbed: the OPC Foundation's own
+    `StatusCode.csv` turned out to enumerate only 273 named codes total, not the ~700 this
+    decoder's earlier research had estimated when the scoping question was framed -- so "~150
+    curated" landed, after excluding the 92 codes tied to service groups this decoder doesn't
+    implement at all (Alarms&Conditions, AddNodes/node-management, GDS/device-provisioning/
+    licensing, PubSub) or to narrow combinatorial/low-level-stream-API variants, at **181**
+    entries, not an arbitrary round number near 150.
+
+    **Design.** Chunk reassembly follows the DNP3/COTP precedent exactly
+    (`Dnp3ReassemblyState`/`Dnp3Decoder::process_frame` in dnp3.hpp/dnp3.cpp): a new
+    `OpcUaReassemblyState : public DecoderFlowState`, reached via
+    `ctx.flow_state<OpcUaReassemblyState>(FlowStateKeying::DirectionalFlow)`, buffers each chunk's
+    own post-sequence-header bytes (`OpcUaMessage::chunk_service_region`, a new field aliasing the
+    caller's own `payload` span) per directional TCP flow until a 'F' (final) chunk completes it,
+    then decodes the service body from the full reassembled buffer instead of just that last
+    chunk's own tail. The pre-existing per-chunk service-body decode logic was extracted into a new
+    free function, `decode_service_body`, so the single-chunk case (still the overwhelming common
+    case) and the new reassembled-buffer case share one code path. A mismatch between an
+    in-progress reassembly's own MessageType/SecureChannelId/TokenId and a later chunk abandons the
+    earlier one (with a note) rather than silently concatenating bytes from two different messages;
+    an 'A' (abort) chunk ends a reassembly without ever producing a decoded body; the existing
+    `--max-reassembly-bytes`/`--max-reassembly-segments` caps (already honored by DNP3/COTP
+    reassembly) bound how much any one flow can buffer, so no new CLI flag was needed. Documented
+    limitation: unlike DNP3's transport-layer FIR bit, OPC UA's own chunk header carries no
+    "this is genuinely the first chunk" flag, so a capture starting mid-message has its
+    first-seen continuation chunk treated as a first chunk -- a structural property of the wire
+    format, not a shortcut taken here. The StatusCode table keeps its existing style exactly (a
+    static array of `{uint32_t, const char*}` pairs, linear-scanned, falling back to
+    severity+hex for anything unnamed), just widened from 20 to 181 entries. Browse promotion
+    decodes `ViewDescription`/`BrowseDescription` (request) and `BrowseResult`/
+    `ReferenceDescription` (response), with new `browse_direction_name`/`node_class_name` lookup
+    tables. The subscription group (CreateSubscription, ModifySubscription, DeleteSubscriptions,
+    SetPublishingMode, CreateMonitoredItems, ModifyMonitoredItems, DeleteMonitoredItems, Publish,
+    Republish) shares two new building blocks: `decode_monitoring_filter` (dispatches a
+    MonitoringFilter ExtensionObject to DataChangeFilter, EventFilter -- SelectClauses fully
+    decoded, WhereClause's own ContentFilter shown only as element count + FilterOperator name,
+    its own operand recursion deliberately left out, see below -- or AggregateFilter) and
+    `decode_monitoring_parameters`; Publish/Republish share a new `decode_notification_message`
+    dispatching NotificationData to DataChangeNotification/EventNotificationList/
+    StatusChangeNotification. HistoryRead promotion decodes the full five-way HistoryReadDetails
+    dispatch (ReadRawModifiedDetails, ReadAtTimeDetails, ReadProcessedDetails -- sharing a new
+    `decode_aggregate_configuration` helper with AggregateFilter above -- ReadEventDetails --
+    sharing the same EventFilter decode as the subscription group -- ReadAnnotationDataDetails)
+    and the matching HistoryData/HistoryModifiedData/HistoryEvent response dispatch.
+
+    **What was done.**
+    - `include/conduitscope/opcua.hpp`: new `OpcUaMessage::chunk_service_region` field and
+      `OpcUaReassemblyState` class; file header's "Chunking"/"StatusCode decode"/"Service
+      identification" sections rewritten to describe the new behavior directly (not "~20, first
+      pass"); "Deliberately NOT implemented" section gained ContentFilter's own operand recursion
+      and the remaining six Tier 2 pairs.
+    - `src/opcua.cpp`: `decode_service_body` extracted from `try_parse_opcua_message`'s existing
+      dispatch block; new `finalize_chunk` function implementing the begin/continue/complete/
+      abandon-on-mismatch/passthrough-on-abort state machine, wired into `OpcUaDecoder::decode` for
+      every chunk (first and same-payload-coalesced alike); the `status_code_name` table replaced
+      with the real, CSV-sourced 181-entry table (one fabrication near-miss self-caught and fixed
+      during this round: an initial hand-typed replacement was discarded in favor of the actually-
+      sourced data before it reached any test); `kServices`' `full_decode` flipped to `true` for
+      all 22 newly-promoted entries; `decode_read_value_id` factored out and reused by
+      MonitoredItem decoding; `decode_monitoring_filter`/`decode_monitoring_parameters`/
+      `decode_aggregate_configuration`/`decode_event_filter`/`decode_notification_message`/
+      `decode_history_read_details`/`decode_history_data` and one decode function pair per
+      newly-promoted service (11 pairs).
+    - `tools/make_sample_pcap.py`: ~30 new byte-builder helpers (BrowseDescription/
+      ReferenceDescription/ViewDescription, MonitoringParameters/the three filter kinds,
+      MonitoredItemCreate/ModifyRequest/Result, the three NotificationData kinds, all five
+      HistoryReadDetails kinds, HistoryData/HistoryModifiedData/HistoryEvent); 37 new packets
+      appended to `build_opcua_sample()` (Browse, all 9 subscription-group pairs, 6 HistoryRead
+      pairs covering all 5 detail types, a true cross-packet 'C'+'F' chunk split sent as two
+      separate pcap records proving real reassembly rather than same-payload coalescing, a
+      reassembly-abandoned-on-mismatch fixture, and a standalone Error fixture using a StatusCode
+      value only the widened table names). `tests/sample_opcua.pcap` regenerated: 33 -> 70 packets.
+    - `CMakeLists.txt`: 9 new CTest entries (one per newly-promoted service group plus the two
+      chunk-reassembly cases and the widened-StatusCode fixture), each confirmed against real
+      decoded JSON/text output before its regex was written; one pre-existing test renamed and its
+      expectation updated (`opcua_lone_intermediate_chunk_buffers_noted`, now describing the real
+      buffering behavior instead of "not reassembled"); `opcua_stats_counted`'s packet/service
+      counts updated for the new fixture.
+
+    **Left open, documented honestly rather than silently dropped.** EventFilter's own
+    ContentFilter WhereClause -- shown only as element count + each element's own FilterOperator
+    name, not its own operand recursion (ContentFilterElement's own FilterOperands array nesting
+    further Element/Attribute/SimpleAttribute/Literal Operand references) -- the same "decode the
+    common case, degrade honestly" posture MMS's own AlternateAccess recursion took in item 145.
+    BrowseNext, TranslateBrowsePathsToNodeIds, Cancel, RegisterNodes, UnregisterNodes, and AddNodes
+    stay at Tier 2 (6 remaining pairs), per Jurgen's own "Browse only" scope choice.
+
+    **Docs.** `docs/PROTOCOL_COVERAGE.md`'s OPC UA section: the Tier 1/Tier 2 listing rewritten to
+    move Browse/the 9 subscription pairs/HistoryRead into Tier 1 (6 pairs remain Tier 2); the
+    chunking/StatusCode-breadth prose rewritten to match opcua.hpp's own updated sections, including
+    the 273-vs-~700 discrepancy. `docs/USER_GUIDE.md`: the OPC UA chunking/StatusCode-breadth/
+    Tier-2-breadth LIMITATIONS bullets replaced with narrower ones (ContentFilter operand
+    recursion, the remaining 6 Tier 2 pairs). `docs/MANUAL.md` was NOT touched, per Jurgen's
+    standing instruction.
+
+    **Verification.** Every new fixture was hand-checked against real decoded JSON/text output
+    (`conduitscope decode --format json`) before its CTest regex was written, including the two
+    chunk-reassembly cases and the widened-StatusCode fixture. Running the FULL default-build
+    CTest suite (not just OPC-UA-filtered tests) surfaced 9 legitimate, pre-existing-test ripple
+    effects from the new fixtures -- all fixed by querying real output first, never guessed:
+    `real_opcua_malformed_call_request_gets_error_not_response_first_session`/`second_session`
+    (the StatusCode values on this project's one real OPC UA capture, 0x80020000/0x80070000, are
+    now correctly named `BadInternalError`/`BadDecodingError` by the widened table -- a genuine
+    real-world confirmation of the new entries, not a test artifact), `inventory_opcua_no_identity_
+    fields_omitted_for_client_json` (a timestamp shift from the new later packets),
+    `baseline_learn_opcua_produces_expected_operations` and `baseline_check_opcua_unmodified_zero_
+    findings`/`baseline_check_opcua_empty_baseline_finds_new_conduit` (operation/finding counts
+    changed from 11 to 23 distinct operations, reflecting all the newly-promoted service types).
+    Full default-build CTest suite: 2537/2537 passing, zero regressions (up from item 145's 2528 --
+    +9 net new, matching the 9 new CTest entries above). Clang ASan/UBSan `build-fuzz`, including
+    `fuzz_opcua_corpus_regression`: 2615/2615 passing (up from 2606).
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2519/2519 passing (up from 2510).
+    MinGW cross-compile `build-mingw`: builds clean (build-only, no live-capture-dependent tests
+    run there). Validation posture, stated honestly: the one real OPC UA capture this project has
+    never exercises SecureConversation-layer chunking, nor any of the 11 newly-promoted service
+    pairs beyond the two StatusCode values named above -- so, like several other first-pass gaps
+    this codebase has closed before (e.g. MMS's own Session-extended-length form, item 145), all
+    three sub-goals rest on grammar-plus-synthetic-fixture validation, not real-capture
+    confirmation, with that one StatusCode-naming exception called out above as a genuine
+    real-world hit. Delivered as a zip of touched/new files via `SendUserFile`, per this project's
+    own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
