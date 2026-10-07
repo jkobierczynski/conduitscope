@@ -11,7 +11,7 @@
 <div class="layout">
   <aside class="sidebar">
     <a class="brand" href="index.html">conduitscope</a>
-    <span class="brand-sub">extended manual &middot; v0.3.2</span>
+    <span class="brand-sub">extended manual &middot; v0.3.4</span>
     <nav>
 <div class="nav-group-title">Start here</div><ul>
 <li><a  href="index.html">Overview</a></li>
@@ -75,7 +75,7 @@
 <span class="ln-cmd"><span class="prompt-mark">$</span>ctest --test-dir build --output-on-failure</span>
 
 <span class="ln-cmd"><span class="prompt-mark">$</span>build/conduitscope version</span>
-<span class="ln-out">conduitscope 0.3.2  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]</span>
+<span class="ln-out">conduitscope 0.3.4  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]</span>
 </code></pre></div>
 </div>
 <div class="os-panel" data-os="windows">
@@ -90,7 +90,7 @@
 <span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>cmake --build build --config Release</span>
 
 <span class="ln-cmd"><span class="prompt-mark">PS&gt;</span>build\Release\conduitscope.exe version</span>
-<span class="ln-out">conduitscope 0.3.2  [MSVC 19.4x, Windows, Release build, live capture: libpcap/Npcap]</span>
+<span class="ln-out">conduitscope 0.3.4  [MSVC 19.4x, Windows, Release build, live capture: libpcap/Npcap]</span>
 </code></pre></div><div class="term-wrap">
 <div class="term-label"><span class="chip fmt">bash (MSYS2)</span>Windows -- MinGW-w64, from an MSYS2/MinGW shell</div>
 <pre class="term"><code>
@@ -131,7 +131,7 @@ deployment that will only ever read offline files -- skip the detection step ent
 <span class="ln-cmd"><span class="prompt-mark">$</span>cmake -S . -B build_nolive -DCMAKE_BUILD_TYPE=Release -DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF</span>
 <span class="ln-cmd"><span class="prompt-mark">$</span>cmake --build build_nolive -j</span>
 <span class="ln-cmd"><span class="prompt-mark">$</span>build_nolive/conduitscope version</span>
-<span class="ln-out">conduitscope 0.3.2  [GNU 13.3.0, Linux, Release build, live capture: not built]</span>
+<span class="ln-out">conduitscope 0.3.4  [GNU 13.3.0, Linux, Release build, live capture: not built]</span>
 
 <span class="ln-cmd"><span class="prompt-mark">$</span>build_nolive/conduitscope decode -i eth0</span>
 <span class="ln-out">error: this build was compiled without live capture support (-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF or libpcap/Npcap not found)</span>

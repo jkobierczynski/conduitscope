@@ -2715,7 +2715,7 @@ tests/policies/compliant.yaml --sl-target SL2`, abbreviated):
 ```
 ConduitScope Evidence Pack
   generated: 2026-10-01 12:09:04.000000Z UTC
-  tool version: conduitscope 0.3.3  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
+  tool version: conduitscope 0.3.4  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
 
 SCOPE & HONESTY NOTE
   This report assembles already-validated conduitscope output (zone/conduit topology, policy
@@ -2762,7 +2762,7 @@ CAPTURE
   no engine hit a resource/complexity ceiling during this analysis
 
 7. INTEGRITY
-  tool version: conduitscope 0.3.3  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
+  tool version: conduitscope 0.3.4  [GNU 13.3.0, Linux, Release build, live capture: libpcap/Npcap]
   report generated: 2026-10-01 12:09:04.000000Z UTC
   capture file: tests/sample_modbus.pcap
     SHA-256: 20895004d0deacc4bf6b8342e45b094e8293dc77487ef6a2079ed7f69eb28b1d
@@ -6992,10 +6992,10 @@ Low(0-3) -> Notice(5).
 
 ```
 $ conduitscope policy validate --read capture.pcap --policy plant.yaml --format cef
-CEF:0|conduitscope|conduitscope-policy|0.3.3|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3
+CEF:0|conduitscope|conduitscope-policy|0.3.4|policy-violation|Zone/Conduit Policy Violation|8|src=192.168.1.50 dst=192.168.1.10 dpt=502 proto=modbus cat=policy-violation msg=a conduit exists between zone 'hmi_zone' and zone 'plc_zone', but none permits modbus traffic on port 502 cs1Label=Client Zone cs1=hmi_zone cs2Label=Server Zone cs2=plc_zone cnt=3
 
 $ conduitscope detect --read capture.pcap --format syslog
-<106>1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.3.3|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000
+<106>1 - - conduitscope - detect - CEF:0|conduitscope|conduitscope-detect|0.3.4|T0843|Program Download|9|src=192.168.1.60 dst=192.168.1.10 dpt=102 proto=s7comm cat=Firmware/Logic Change msg=S7comm block download (Request Download) -- a program/logic block is being written TO the CPU from an engineering station cs1Label=Evidence cs1=Confirmed cs2Label=Novelty cs2=N/A cnt=1 start=1700020000000 end=1700020000000
 ```
 
 ### Extension fields, by subcommand

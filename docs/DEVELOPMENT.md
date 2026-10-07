@@ -20043,6 +20043,65 @@ it done as its own patch.
     established build-only verification posture for this config from items 145-149. Delivered as a
     zip of touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
 
+151. **Version bump to v0.3.4.** Jurgen's own explicit statement: "It's all solved. Change to
+    version 0.3.4." ("It's all solved" refers to a separate, repo-side issue on Jurgen's end --
+    several small text fixture files, most recently `tests/s7plus_symbols_sample.txt` from item
+    148 and all four `tests/sample_tls_*_keylog.txt` files from item 150, were consistently
+    missing from Jurgen's own checkout despite being correctly present in every delivered zip;
+    the common thread across both incidents was the `.txt` extension specifically, not any
+    gitignore rule or secret-scanning content match, pointing at whatever tool on Jurgen's own
+    side turns a delivered zip into a patch/diff before applying it. Jurgen resolved this on his
+    own end; no change was needed in this codebase or its delivered files for that issue, and it
+    is recorded here only because it's the reason this version bump was requested now rather
+    than folded into whichever item ships next). Matching items 125 and 142's own precedent (the
+    v0.3.2 and v0.3.3 bumps), this is a pure version-and-docs synchronization pass with no
+    behavior change -- it folds in every fix from items 143-150 (IPv6 wired into `policy
+    validate`'s zone/conduit matching; the DNP3 data-link-address zone model; MMS's Tier 1/Tier 2
+    confirmed-service split retired; OPC UA chunk reassembly, a widened StatusCode table, and
+    Browse/subscriptions/HistoryRead promoted to Tier 1; S7comm-Plus above-COTP trailer-based
+    reassembly; S7comm-Plus symbolic item addressing; the MQTT/COTP opportunistic-dispatch
+    false-positive fix found via real 4SICS-capture validation; and TLS key-log/pcapng DSB
+    decryption for MQTTS/FOXS/WinRM-over-HTTPS) under the version number Jurgen has now asked
+    for.
+
+    **What was done.** `CMakeLists.txt`'s `project(conduitscope VERSION ...)` now reads `0.3.4`
+    (was `0.3.3`). Every place that quotes a live `conduitscope version`/`--version` output or an
+    export example containing that version string was updated to match: `docs/USER_GUIDE.md`'s
+    two `evidence` worked-example "tool version:" lines, and its CEF `policy`/`detect` example
+    lines. README.md's own "Status" line updated from "v0.3.3" to "v0.3.4", with its own test
+    count corrected in the same edit (2500 -> 2564, the actual current total -- stale since item
+    142's own bump, which landed before any of items 143-150's new tests existed). All twelve
+    `docs/manual/*.html` pages' sidebar "extended manual &middot; vX.Y.Z" tags and every
+    worked-example line quoting a live version string (`baseline.html`, `decode.html`,
+    `detect.html`, `evidence.html`, `index.html`, `info.html`, `inventory.html`,
+    `json-filtering.html`, `live-capture.html`, `merge.html`, `policy.html`, `setup.html`) bumped
+    from `0.3.3` to `0.3.4` -- re-confirmed this round, per item 142's own note that this is a
+    gap worth re-checking every time rather than assuming fixed once and forgotten.
+    `docs/DEVELOPMENT.md`'s own historical entries that quote a past `conduitscope 0.3.2`/`0.3.3`
+    output as a point-in-time record of what an earlier item's own verification actually ran
+    against (125's and 142's own writeups) were deliberately left as-is -- matching 125's and
+    142's own stated rule, they're historical fact about what version was running at the time,
+    not a live claim that needs to track the current one. `docs/MANUAL.md` was NOT touched, per
+    Jurgen's standing instruction.
+
+    **New tests.** None -- a version-string and doc-sync change, not new behavior or coverage.
+
+    **Docs.** `docs/USER_GUIDE.md`, `README.md`, and all twelve `docs/manual/*.html` pages updated
+    as above. No change to any `docs/reviews/*.md` file -- a version bump isn't a finding from
+    any of them.
+
+    **Verification.** `conduitscope version`/`--version` confirmed reporting `0.3.4` in every
+    config that builds a runnable binary. Default GCC `build`: full CTest suite, 2564/2564
+    passing (unchanged count -- no new test). Clang ASan/UBSan `build-fuzz`: 2642/2642 (unchanged,
+    including all 78 `*_corpus_regression` tests), confirmed reporting `0.3.4`.
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2546/2546 (unchanged), confirmed
+    reporting `0.3.4`. MinGW cross-compile `build-mingw`: rebuilt clean, build-only as usual
+    (`conduitscope.exe`/`crypto_selftest.exe` both); the version string is compiled in via the
+    same `version.hpp.in`/`CONDUITSCOPE_REPORTED_VERSION` path every other config uses, not
+    independently runnable here. A full clean-room extract-rebuild-test cycle (fresh copy
+    excluding build directories, configure, build, full CTest): 2564/2564, zero failures,
+    `conduitscope version` confirmed reporting `0.3.4`.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
