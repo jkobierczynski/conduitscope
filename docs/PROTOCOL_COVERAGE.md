@@ -812,12 +812,35 @@ longer does, now that all 78 confirmed services are fully field-decoded
   limitation (not a decoding uncertainty) is that a LID's or CRC's SYMBOLIC
   MEANING -- which tag name it refers to -- depends on TIA Portal's own
   compiled project database, which never appears on the wire; this decoder
-  renders the numbers faithfully but cannot resolve them to tag names, the
-  same "can't resolve an opaque identifier without out-of-band context"
-  limitation this codebase already accepts for DNP3/IEC 104 point indices or
-  OPC UA NodeIds. GetMultiVariables also has a second, distinct request
-  shape -- a "subscribed link" item-number list, rather than a full item
-  address list -- both decoded.
+  renders the numbers faithfully but cannot resolve them to tag names on its
+  own, the same "can't resolve an opaque identifier without out-of-band
+  context" limitation this codebase already accepts for DNP3/IEC 104 point
+  indices or OPC UA NodeIds. ROADMAP item 148 adds an OPT-IN resolution path
+  for this one case: `decode`/`inventory`'s `--s7plus-symbols FILE` flag
+  reads a simple hand-rolled text file (one line per entry: `<crc-hex>
+  <lid-chain> <name>`, `-` for an empty/bare lid-chain) and, on a match,
+  appends `" (name)"` next to the existing `SYM-CRC=.../LID=...` tag --
+  never a replacement, a miss adds nothing. This is strictly a lookup
+  against a table the OPERATOR supplies (their own correlation of a real
+  capture's observed CRC/LID values against the TIA Portal project that
+  produced them), never a computation this tool performs itself: the Symbol
+  CRC's full algorithm (beyond its published generating polynomial) is not
+  documented anywhere accessible, including in the reference Wireshark
+  plugin, which contains no forward-CRC-computation code at all -- so a
+  name's CRC can never be derived here, only matched. The lookup key is the
+  CRC plus the item address's own `extra_lids` chain specifically -- NOT
+  `base_area` (the field read immediately before that chain on the wire),
+  which the reference plugin's own source comment identifies as a second,
+  separate restatement of the memory area/region (a diagnostic magic value:
+  0xe98-ish for Merkers, 0x9f6-ish for DBs), not a struct/array member
+  selector, and which that plugin's own rendering already omits from the
+  human-readable address string for exactly that reason -- this decoder's
+  own `tag` rendering has always matched that omission. See
+  docs/DEVELOPMENT.md's ROADMAP item 148 for the full design record.
+  GetMultiVariables also has a second, distinct request shape -- a
+  "subscribed link" item-number list, rather than a full item address list
+  -- both decoded (object-ID-style addresses, including this shape, have no
+  symbolic-name concept at all and are never looked up in the table above).
 - **SetVariable (`0x04f2`) and DeleteObject (`0x04d4`)** -- simple enough (a
   bare object id, or an id plus one self-describing value) to fully decode
   both directions.

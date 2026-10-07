@@ -295,6 +295,7 @@ flag on `decode`; see `info` below.
 | `--hosts FILE` | *(none)* | Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+| `--s7plus-symbols FILE` | *(none)* | Resolve S7comm-Plus native symbolic item addresses (Symbol CRC + LID chain) to human-readable tag names in `--format json`'s `s7plus_items` (and anything that reuses it, e.g. `-V`/`-T fields -e s7plus_items`), from a simple hand-rolled text lookup table the operator supplies -- this tool cannot compute the CRC itself. Must exist. See docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. |
 | `--max-reassembly-bytes N` | `0` (leave every site at its own default) | Override every cross-segment payload-buffering byte cap at once: the general TCP reassembly path (default 16 MiB), DNP3 fragment reassembly (default 64 KiB), COTP TSDU reassembly (default 1 MiB), OPC UA's/FF-HSE's own declared-length plausibility ceiling (default 16 MiB each), and IPv4/IPv6 fragment reassembly's own per-datagram ceiling (default 65,535 bytes). See docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping. |
 | `--max-reassembly-segments N` | `0` (leave every site at its own default) | Override every cross-segment frame/segment-count cap at once: the general TCP reassembly path (default 20,000 segments), DNP3 fragment reassembly (default 500 frames), COTP TSDU reassembly (default 2,000 frames), and IPv4/IPv6 fragment reassembly's own per-datagram fragment-count ceiling (default 8,192 fragments). |
 | `--max-recursion-depth N` | `0` (leave every site at its own default) | Override every recursive-decode depth cap at once: MMS Data-value nesting (default 32), EtherNet/IP CIP Multiple_Service_Packet/Unconnected_Send nesting (default 4), MPLS label-stack depth (default 16), S7comm-Plus struct/item nesting (default 16), and GOOSE Data ASN.1 nesting (default 6). |
@@ -825,6 +826,7 @@ doesn't cover).
 | `--hosts FILE` | *(none)* | Same meaning as `decode --hosts`: Unix `/etc/hosts`-style file to resolve IP addresses from, for `--resolve`. Must exist. |
 | `--nn` | off (i.e. service-name resolution on by default) | Same meaning as `decode --nn`: disable service name (port -> name) resolution, applied to each edge's server port. |
 | `--services FILE` | *(none)* | Same meaning as `decode --services`: Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
+| `--s7plus-symbols FILE` | *(none)* | Same meaning as `decode --s7plus-symbols`: resolve S7comm-Plus native symbolic item addresses (Symbol CRC + LID chain) to human-readable tag names, here applied to each edge's own "top touched addresses" list (`text`/`json`'s `resolved_name` field) -- an externally-supplied lookup table, since this tool cannot compute the CRC itself. Must exist. See docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. |
 | `--max-inventory-assets N` | `200,000` | Cap the number of distinct IP addresses `AssetInventoryEngine` records as assets per capture. `0` = leave it at its own compiled default. Past this, further new assets observed in the capture are not recorded and the inventory is marked incomplete (see "Resource bounds and OBSERVATION INCOMPLETE" below). |
 | `--max-inventory-edges N` | `200,000` | Cap the number of distinct (client, server, protocol, port) edges `AssetInventoryEngine` records per capture -- independent of `--max-inventory-assets`, so an edge can be refused while its endpoints' own asset records are still tracked, or vice versa. `0` = leave it at its own compiled default. Past this, further new edges are not recorded and the inventory is marked incomplete. |
 | `--max-inventory-tcp-sessions N` | `50,000` | Cap the number of distinct TCP sessions `AssetInventoryEngine` tracks per capture for client/server direction inference. `0` = leave it at its own compiled default. Past this, further new sessions fall back to the known-port heuristic instead of SYN/SYN-ACK tracking for that one packet (the inventory content itself is unaffected -- only the direction-inference method for the affected packet), and the inventory is marked incomplete. |
@@ -7692,11 +7694,23 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   grammar-plus-synthetic-fixture validation, not a real-capture
   confirmation (see docs/PROTOCOL_COVERAGE.md's S7comm-Plus section).
 - **S7comm-Plus's native symbolic item addressing (CRC + LID chain) decodes
-  the numbers faithfully but cannot resolve what they mean.** A LID's or
-  CRC's symbolic meaning (which tag name it refers to) depends on TIA
-  Portal's own compiled project database, which never appears on the wire --
-  the same class of limitation this codebase already accepts for DNP3/IEC
-  104 point indices and OPC UA NodeIds.
+  the numbers faithfully; resolving what they mean needs an externally-
+  supplied table.** A LID's or CRC's symbolic meaning (which tag name it
+  refers to) depends on TIA Portal's own compiled project database, which
+  never appears on the wire -- the same class of limitation this codebase
+  already accepts for DNP3/IEC 104 point indices and OPC UA NodeIds. Unlike
+  those, this one gap has an opt-in resolution path: `decode`/`inventory`'s
+  `--s7plus-symbols FILE` flag reads a simple hand-rolled CRC+LID-chain ->
+  name text file (the operator's own correlation of a real capture's
+  observed addresses against the TIA Portal project that produced them --
+  this tool cannot generate that mapping itself) and annotates a matching
+  address with `" (name)"`, never replacing the raw CRC/LID value. This is
+  strictly a lookup, not a hash: the CRC's own algorithm isn't publicly
+  documented (not even in the reference Wireshark plugin, which contains no
+  forward-CRC-computation code at all), so a name's CRC can never be
+  computed from here -- only matched against a table the operator already
+  built. See docs/PROTOCOL_COVERAGE.md's S7comm-Plus section and
+  docs/DEVELOPMENT.md's ROADMAP item 148.
 - **S7comm-Plus does not decode an array of Struct values.** Delimiting N
   separate per-element nested member lists for that shape isn't something
   this implementation (or, seemingly, the reference Wireshark plugin itself)

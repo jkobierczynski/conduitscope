@@ -4157,7 +4157,7 @@ void write_s7comm_json_fields(std::ostream& out, const S7CommResult& sr) {
 // s7plus_item_errors, is applied HERE instead -- the same "defer the cap to render time" shape
 // write_mms_json_fields/write_s7comm_json_fields above already established for MMS's mms_values
 // and S7comm's s7comm_items.
-void write_s7comm_plus_json_fields(std::ostream& out, const S7CommPlusFrame& s7p) {
+void write_s7comm_plus_json_fields(std::ostream& out, const S7CommPlusFrame& s7p, const SymbolTable& symbols) {
     out << "    \"s7plus_pdu_type\": \"" << json_escape(s7p.pdu_type_name) << "\",\n";
     if (s7p.is_keepalive) {
         out << "    \"s7plus_keepalive_seq\": " << static_cast<unsigned>(s7p.keepalive_seq) << ",\n";
@@ -4185,7 +4185,21 @@ void write_s7comm_plus_json_fields(std::ostream& out, const S7CommPlusFrame& s7p
         out << "    \"s7plus_items\": [";
         for (size_t i = 0; i < s7p.item_addresses.size() && i < kMaxTags; ++i) {
             if (i != 0) out << ", ";
-            out << "\"" << json_escape(s7p.item_addresses[i].tag) << "\"";
+            const S7CommPlusItemAddress& addr = s7p.item_addresses[i];
+            std::string rendered = addr.tag;
+            // ROADMAP item 148 -- an annotation, never a replacement; a miss (no --s7plus-symbols,
+            // or no matching entry) adds nothing, same "+= ' (' + *resolved + ')'" convention
+            // Resolver's own MAC/IP/port annotations already use (resolver.cpp). Object-ID-style
+            // addresses (addr.crc_or_rid == 0) are never looked up -- no symbol-name concept to
+            // resolve, see symbol_table.hpp's own file header on scope.
+            if (!addr.is_object_id_style) {
+                // addr.base_area is deliberately excluded -- see symbol_table.hpp's own file
+                // header for why only extra_lids belongs in the key.
+                if (auto name = symbols.resolve(addr.crc_or_rid, addr.extra_lids)) {
+                    rendered += " (" + *name + ")";
+                }
+            }
+            out << "\"" << json_escape(rendered) << "\"";
         }
         out << "],\n";
     }
@@ -5284,7 +5298,7 @@ void JsonWriter::write_packet(const DecodedPacket& p) {
         write_mqtt_json_fields(out_, p.result->as<MqttResult>().first);
     }
     if (p.protocol == "s7comm-plus" && p.result) {
-        write_s7comm_plus_json_fields(out_, p.result->as<S7CommPlusFrame>());
+        write_s7comm_plus_json_fields(out_, p.result->as<S7CommPlusFrame>(), symbols_);
     }
     if (p.protocol == "ffhse" && p.result) {
         write_ffhse_json_fields(out_, p.result->as<FfhseResult>().first);
@@ -5666,7 +5680,7 @@ void FieldsWriter::write_packet(const DecodedPacket& packet) {
     // no use for and would otherwise have to explicitly reset; constructing one per packet is
     // cheap and sidesteps that state entirely.
     std::ostringstream capture;
-    JsonWriter one_shot(capture, resolver_, show_vlan_, time_format_, time_offset_, show_direction_);
+    JsonWriter one_shot(capture, resolver_, symbols_, show_vlan_, time_format_, time_offset_, show_direction_);
     one_shot.write_packet(packet);
     std::map<std::string, std::string> values = parse_flat_json_object(capture.str());
 
@@ -5792,7 +5806,7 @@ void DetailWriter::write_packet(const DecodedPacket& p) {
     // don't matter here since `values["time"]` is never consumed (this writer renders the Frame
     // layer's own timestamp straight from `p.timestamp` via `time_` above instead).
     std::ostringstream capture;
-    JsonWriter one_shot(capture, resolver_, show_vlan_, TimeFormat::Epoch, TimeOffset{}, show_direction_);
+    JsonWriter one_shot(capture, resolver_, symbols_, show_vlan_, TimeFormat::Epoch, TimeOffset{}, show_direction_);
     one_shot.write_packet(p);
     std::map<std::string, std::string> values = parse_flat_json_object(capture.str());
 

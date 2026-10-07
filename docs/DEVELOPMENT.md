@@ -19491,6 +19491,213 @@ it done as its own patch.
     Session-extended-length form, item 145) also had to accept. Delivered as a zip of touched/new
     files via `SendUserFile`, per this project's own no-git-commit convention.
 
+148. **S7comm-Plus symbolic item addressing: resolve Symbol CRC + LID chain to human-readable tag
+    names via an externally-supplied symbol table.** Jurgen's own opening framing: "S7 symbolic
+    addressing on real TIA traffic -- blocked on access to a real TIA Portal capture, not on
+    effort." Clarified before any design started (he asked directly, "You need access
+    permissions?"): the blocker is structural, not a file/device permissions gate at all -- the
+    Symbol CRC -> name mapping lives only inside TIA Portal's own compiled project database and is
+    never transmitted on the wire in any form, so no amount of additional capture access would
+    ever reveal it. Confirmed scope via `AskUserQuestion` before any code was written: (1) the
+    deliverable is resolving names via an externally-supplied symbol table, not merely re-
+    validating the existing CRC/LID decode against a hypothetical future real capture; (2) the
+    file format is simple hand-rolled text, not CSV; (3) the output scope is "decode + inventory/
+    evidence too," not decode-output-only.
+
+    A second finding, surfaced only by reading the reference Wireshark plugin's own source line by
+    line (the sole sourcing authority for this protocol, per s7commplus.hpp's own file header):
+    the Symbol CRC's generating polynomial is named in that plugin's own field metadata, but the
+    full algorithm (init value, reflection, XOR-out, the string-normalization convention TIA
+    applies before hashing) is not documented anywhere accessible, including in that same plugin,
+    which contains no forward-CRC-computation code at all. So computing "the CRC of symbol name X"
+    to confirm it against a capture is not currently buildable with any confidence -- only the
+    reverse direction (an externally-supplied CRC+LID-chain -> name table, looked up against a
+    capture's own already-decoded values) is. This is a lookup-table feature, not a hashing
+    feature, and says so plainly rather than overclaiming a "resolve any symbol name" capability
+    this tool cannot actually deliver.
+
+    A third finding, caught only by re-reading the reference plugin's own
+    `s7commp_decode_item_address` line by line rather than trusting this codebase's own prior
+    rendering as ground truth: `S7CommPlusItemAddress::base_area` (the field read immediately after
+    `lid_nesting_depth`, before the LID-chain loop) is the wire's own SECOND, separate restatement
+    of the memory area/region -- the reference plugin's own German source comment literally calls
+    it that ("Nochmal Angabe des Speicherbereichs... bei Merkern 0xe98, bei DBs 0x9f6"), a
+    diagnostic magic value, not a struct/array member selector -- and that same plugin's own
+    `proto_item_append_text` call never includes it in the human-readable address string for a
+    symbolic (CRC/LID) address either, exactly matching `decode_item_address`'s own existing `tag`
+    rendering in this codebase (s7commplus.cpp), which already omits it for the identical reason.
+    This was caught mid-implementation: an early draft of the new `SymbolTable::resolve` lookup key
+    included `base_area` ahead of `extra_lids`, built from a mistaken reading of "the LID chain
+    must be everything between `lid_nesting_depth` and the end of the item address" rather than
+    the plugin's own actual field-by-field semantics -- fixed by re-reading that one function in
+    the reference source before writing a single test fixture, not discovered via a failing test.
+
+    **Design.** Follows `resolver.hpp`'s own `Resolver` class as the direct, explicitly-chosen
+    architectural precedent (the Resolver that is already real-world-reusable IS the right model: a
+    raw wire value that only means something to a human once matched against an externally-
+    supplied, static table this tool has no way to derive on its own) -- same fail-fast-on-open-
+    failure/tolerant-on-malformed-line error-handling split, same render-time-only data flow (never
+    threaded into `ProtocolDecoder::decode()`/`DecodeContext` at all -- `protocol_decoder.hpp`'s
+    only existing non-flow-state CLI-config-threaded-into-decode() precedent, the scalar
+    `redact_secrets`, is the sole prior case, and it's a bool, not a lookup table, reinforcing that
+    this feature belongs at the output layer like Resolver, not inside decode), same "annotation,
+    never a replacement; a miss adds nothing" rendering convention (`+= " (" + *resolved + ")"`,
+    Resolver's own exact idiom, resolver.cpp).
+
+    New `SymbolTable` class (`include/conduitscope/symbol_table.hpp`/`src/symbol_table.cpp`):
+    `SymbolTableError` (fail-fast, file-open-failure only, mirroring `ResolverError` under its own
+    name); constructor takes a file path (empty = inactive, a harmless no-op exactly like an absent
+    `--hosts`); a hand-rolled line-based text parser (NOT CSV/JSON/YAML, per Jurgen's own explicit
+    choice), one entry per line: `<crc-hex> <lid-chain> <name>` -- `<crc-hex>` is
+    `S7CommPlusItemAddress::crc_or_rid` in hex (optional `0x` prefix, case-insensitive);
+    `<lid-chain>` is `S7CommPlusItemAddress::extra_lids` verbatim, dot-separated decimal, or the
+    literal `-` sentinel for an empty chain (a bare, non-nested address -- `lid_nesting_depth == 1`,
+    e.g. a Merker/flag read with no struct/array path at all -- see the third finding above for why
+    `base_area` is never part of this key); `<name>` is the rest of the line, trimmed, so a name may
+    contain internal whitespace. `#` comments, blank lines, and any malformed individual line (bad
+    hex, a non-numeric lid-chain segment, a missing name) are all silently skipped, never fatal --
+    the same tolerant-parsing posture `parse_hosts_file`/`parse_services_file` already establish;
+    a later line for the same `(crc, lid-chain)` pair overwrites an earlier one, matching
+    `parse_services_file`'s own last-line-wins override convention. `resolve(crc, lid_chain) ->
+    optional<string>` is scoped explicitly to the symbolic case only (never called for an
+    object-ID-style address, whose `crc_or_rid` is always 0 and has no symbol-name concept at all).
+    Deliberately given NO dedicated file-size cap the way `baseline.hpp`'s own
+    `kDefaultMaxBaselineFileBytes` guards a baseline store -- `Resolver`'s own `--hosts`/`--services`
+    files (the explicitly-chosen precedent) have no such cap either, and a symbol table is the same
+    shape of small, operator-authored reference file; adding a bespoke cap here would be new scope
+    beyond what the chosen precedent calls for.
+
+    New `--s7plus-symbols FILE` CLI flag (`->check(CLI::ExistingFile)`, same guard `--hosts`/
+    `--services` already use), on `decode` and `inventory` only -- NOT on `merge-inventory`, which
+    has no per-packet decode access to raw `S7CommPlusItemAddress` values at all (it only ever
+    merges already-finished `AssetInventoryReport` JSON exports), so there is no natural flag to
+    add there; its own `write_inventory_report_text/_json` call sites pass a permanently-inactive,
+    locally-constructed `SymbolTable("")` instead, a pure no-op identical to omitting the flag
+    anywhere else. Constructed once at CLI startup in `cli_main.cpp`'s `run_decode`/`run_inventory`,
+    immediately alongside each one's own pre-existing `Resolver` construction, with
+    `SymbolTableError` caught in the same `catch` chain as `ResolverError`.
+
+    Wiring into `decode`'s own output: the ONLY place an S7comm-Plus item address's `tag` is ever
+    rendered, anywhere in `output.cpp`, turned out to be `write_s7comm_plus_json_fields`'s own
+    `"s7plus_items"` array (confirmed by grep across the whole file before writing a single line of
+    wiring -- `TextWriter`/`CsvWriter` never itemize S7comm-Plus addresses at all, only
+    `summary`/`notes`). `JsonWriter` gained a `const SymbolTable&` member threaded through its
+    constructor, used at that one call site to append `" (" + *resolved + ")"` onto the existing tag
+    string exactly like Resolver's own annotations. `FieldsWriter` and `DetailWriter` both already
+    reuse a one-shot internal `JsonWriter` to avoid re-deriving ~65 protocols' worth of field logic
+    a second time (see their own existing header comments) -- threading the same `SymbolTable`
+    reference through to that internal `JsonWriter` means `-T fields -e s7plus_items` and `-V`
+    automatically pick up the resolved name too, confirmed by direct testing, with zero additional
+    protocol-specific code in either writer.
+
+    Wiring into `inventory`: `InventoryEdge::top_touched_addresses` (the existing "Phase 7 of Grok
+    gap #2" tag/point-touch summarization already covering five protocols) gains S7comm-Plus as a
+    sixth -- `asset_inventory.hpp`'s own comment calling S7comm-Plus one of the protocols that
+    "carries no per-point/per-tag addressing concept this codebase decodes at all today" had gone
+    stale by the time `S7CommPlusItemAddress::tag` existed, so this closes a real, if incidental,
+    gap, not just adding symbol-table support to an already-covered protocol. Every
+    `GetMultiVariables`/`SetMultiVariables` Job (request) item address's raw `tag` is tracked as the
+    dedup key, both symbolic and object-ID style, mirroring classic S7comm's own request-only
+    bullet immediately above it. Resolution stays render-time-only even here: `InventoryAddressTouch`
+    gained three new fields (`s7plus_symbolic`, `s7plus_crc`, `s7plus_lid_chain`) carried from
+    `AssetInventoryEngine::observe()`'s own per-packet accumulation (where the real, structured
+    `S7CommPlusItemAddress` is still in hand) through a small side-map
+    (`EdgeState::s7plus_symbolic_keys`, address string -> `(crc, lid_chain)`) into `finish()`'s own
+    final `top_touched_addresses` list -- deliberately NOT by re-parsing the already-formatted
+    `address` string back into components at render time, which would mean reverse-engineering
+    `decode_item_address`'s own rendered-string format, including its "Unknown area"/"Unknown
+    IQMCT area" fallback text that has no numeric form to recover at all. `write_inventory_report_
+    text`/`_json` both gained a `const SymbolTable&` parameter and append the resolved name the same
+    annotation-only way (`"resolved_name"` as a separate JSON field, never `null`, omitted entirely
+    on a miss -- the same convention every other resolver-style JSON annotation in that writer
+    already follows).
+
+    `evidence`'s own scope, investigated and found narrower than the "decode + inventory/evidence
+    too" answer implied: `evidence_report.cpp`'s own design is a DELIBERATE assembly of already-
+    existing report writers' OUTPUT, not a re-render of their underlying structures -- its own file
+    header says so directly ("does not reimplement zone/conduit/violation/finding rendering"). Its
+    inventory section embeds only `AssetInventoryReport`'s own zone/conduit/asset COUNTS and a
+    pre-rendered Mermaid diagram (`write_inventory_diagram_mermaid`'s output); it never embeds
+    `InventoryEdge::top_touched_addresses` at all, for ANY of the (now six) wired protocols, not
+    just S7comm-Plus. So there is no existing per-tag-touch surface in `evidence`'s own report to
+    extend -- nothing was wired there beyond what `inventory` itself already gained above, and this
+    is stated here rather than silently claimed as "covered," consistent with Jurgen's own stated
+    standard for this report ("Honesty about heuristics belongs in that report. Auditors punish
+    silent overclaim more than 'unknown.'" -- evidence_report.hpp's own file header, quoting him
+    directly). Widening `evidence`'s own report to surface per-tag-touch data for the first time,
+    across all six wired protocols, would be new scope of its own, not something this round's ask
+    implied.
+
+    **What was done.**
+    - `include/conduitscope/symbol_table.hpp`/`src/symbol_table.cpp`: new `SymbolTableError`/
+      `SymbolTable` (constructor, `resolve`, `active`), and the hand-rolled line parser (local
+      `strip_comment`/`trim` helpers, `parse_crc_hex`/`parse_lid_chain`/`parse_symbol_table_file`),
+      all as described above.
+    - `include/conduitscope/output.hpp`/`src/output.cpp`: `JsonWriter`/`FieldsWriter`/`DetailWriter`
+      each gained a `const SymbolTable&` constructor parameter/member; `write_s7comm_plus_json_
+      fields` gained a `const SymbolTable&` parameter and the one `"s7plus_items"` annotation site.
+    - `include/conduitscope/asset_inventory.hpp`/`src/asset_inventory.cpp`: `InventoryAddressTouch`
+      gained `s7plus_symbolic`/`s7plus_crc`/`s7plus_lid_chain`; `EdgeState` gained
+      `s7plus_symbolic_keys`; the s7comm-plus touched-address branch (new, sixth protocol) in
+      `observe()`'s per-packet accumulation; the side-map fold-in in the same function's edge-update
+      block; the carry-through in `finish()`; `write_inventory_report_text`/`_json` both gained a
+      `const SymbolTable&` parameter and the resolved-name annotation at their existing
+      `top_touched_addresses` render sites; `SymbolTable`/`Resolver` forward-declared the same way.
+    - `src/cli_main.cpp`: new `--s7plus-symbols` option on `decode_cmd`/`inventory_cmd`; `SymbolTable`
+      construction in `run_decode`/`run_inventory`, threaded to every writer/report-writer call
+      site each one makes; a permanently-inactive `SymbolTable("")` at `run_merge_inventory`'s two
+      call sites; `SymbolTableError` added to the existing `catch (const ResolverError&)` chain in
+      both `run_decode` and `run_inventory`.
+    - `tests/s7plus_symbols_sample.txt`: new fixture (mirrors `tests/hosts_sample.txt`'s own style)
+      naming two of `tests/sample_s7commplus.pcap`'s own real item addresses (a bare depth-1
+      Merker address via the `-` sentinel, and a one-LID DB address), leaving a third
+      (`SYM-CRC=deadbeef`) deliberately unlisted as a guaranteed miss, plus deliberately malformed
+      lines (bad hex, a missing lid-chain field, a non-numeric chain segment) and a same-key
+      override to exercise tolerant parsing and last-line-wins -- every line's actual effect
+      confirmed against the real built binary before being written into the file or a test regex.
+    - `CMakeLists.txt`: 10 new CTest entries covering off-by-default (no annotation at all, in both
+      `decode`/`inventory`), a resolved match and a guaranteed miss in `decode --format json`, the
+      same resolution flowing through `-V`/`--format fields` via their shared internal `JsonWriter`,
+      `inventory`'s own text and JSON resolution, tolerant parsing of the malformed fixture lines
+      (exit 0, no fatal error), and CLI11's existing `->check(CLI::ExistingFile)` rejecting a
+      nonexistent `--s7plus-symbols` path -- every regex confirmed against real decoded output
+      first, per this project's standing discipline.
+
+    **Left open, documented honestly rather than silently dropped.** Forward CRC computation (name
+    -> CRC) is not implemented and is not currently buildable at all -- see the second finding
+    above; this remains a lookup-table-only feature. Object-ID-style addressing (`crc_or_rid == 0`)
+    is out of scope, per Jurgen's own "S7 symbolic addressing" framing -- `SymbolTable::resolve` is
+    simply never called for one. `evidence`'s own report gained no new per-tag-touch surface at all
+    (for S7comm-Plus or any other protocol) -- see the scope finding above; widening it that way,
+    if ever wanted, is separate future work, not a gap in this round.
+
+    **Docs.** `docs/PROTOCOL_COVERAGE.md`'s S7comm-Plus section: the existing note that symbolic
+    item addressing "decodes the numbers faithfully but cannot resolve what they mean" updated to
+    describe the new opt-in `--s7plus-symbols` resolution path, while still stating plainly that the
+    CRC cannot be computed from a name directly -- this is an externally-supplied lookup, not a
+    hash. `docs/USER_GUIDE.md`: the matching S7comm-Plus LIMITATIONS bullet updated the same way,
+    and `--s7plus-symbols` added to the `decode`/`inventory` CLI options tables. `docs/MANUAL.md`
+    was NOT touched, per Jurgen's standing instruction.
+
+    **Verification.** Every new fixture (both the symbol-table file's own lines and every new CTest
+    regex) was confirmed against the real built binary's actual output before being finalized,
+    including the mid-implementation `base_area` key-composition bug caught by re-reading the
+    reference plugin's own source rather than by a failing test (see the third finding above). Full
+    default-build CTest suite: 2554/2554 passing, zero regressions (up from item 147's 2544 -- +10
+    net new, matching the 10 new CTest entries above). Clang ASan/UBSan `build-fuzz`: 2632/2632
+    passing (up from 2622; `fuzz_s7comm_plus_corpus_regression`/`fuzz_cotp_s7comm_corpus_
+    regression` run and passing separately, same methodology item 147 used, given the fuzz-labeled
+    corpus targets' own long runtime).
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2536/2536 passing (up from 2526).
+    MinGW cross-compile `build-mingw`: builds clean (build-only, no live-capture-dependent tests run
+    there). Validation posture, stated honestly: this feature has no real-capture validation
+    dimension at all in the usual sense -- it resolves names from a table the OPERATOR supplies, so
+    "does it work against real traffic" reduces to "does it correctly match a real capture's own
+    already-decoded CRC+LID values against table entries," which the synthetic fixture above
+    confirms directly against `tests/sample_s7commplus.pcap`'s own real decoded addresses (not
+    invented ones), the strongest validation this particular kind of feature admits. Delivered as a
+    zip of touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

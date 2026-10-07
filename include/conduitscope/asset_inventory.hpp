@@ -78,6 +78,10 @@ namespace conduitscope {
 // needed in this header.
 class Resolver;
 
+// Same reasoning as Resolver above -- only a `const SymbolTable&` reference is ever needed here
+// (write_inventory_report_text/_json, ROADMAP item 148).
+class SymbolTable;
+
 // The CIDR prefix length AssetInventoryEngine groups observed asset IPs by when the caller doesn't
 // override it (`inventory --zone-prefix`) -- /24 matches how most flat OT networks are actually
 // subnetted per segment in practice, the same assumption docs/MANUAL.md's ROADMAP item 17 itself
@@ -281,6 +285,22 @@ struct InventoryAsset {
 struct InventoryAddressTouch {
     std::string address;
     size_t count = 0;
+
+    // ROADMAP item 148: set only when `address` came from an s7comm-plus SYMBOLIC item address
+    // (S7CommPlusItemAddress::crc_or_rid != 0) -- never for an object-ID-style s7comm-plus address
+    // or any other protocol's address. write_inventory_report_text/_json use these three fields to
+    // call SymbolTable::resolve(s7plus_crc, s7plus_lid_chain) at RENDER time and append the
+    // resolved name next to `address` when there's a match -- exactly the annotation-not-
+    // replacement convention Resolver's own OUI/hostname/service-name lookups already use
+    // throughout this file. Carried here (rather than re-parsing `address`, which would mean
+    // reverse-engineering decode_item_address's own rendered-string format, including its
+    // "Unknown area"/"Unknown IQMCT area" fallback text that has no numeric form to recover at
+    // all) because AssetInventoryEngine's internal accumulation only ever stores already-formatted
+    // address strings -- see EdgeState::s7plus_symbolic_keys' own comment (asset_inventory.hpp)
+    // for exactly how these three fields survive from observe() through to here.
+    bool s7plus_symbolic = false;
+    uint32_t s7plus_crc = 0;
+    std::vector<uint32_t> s7plus_lid_chain;
 };
 
 struct InventoryEdge {
@@ -368,23 +388,42 @@ struct InventoryEdge {
     //     documented "PUBLISH only", mqtt.hpp). A topic is this protocol's own natural point-address
     //     equivalent -- the specific data channel a publisher/subscriber touches, the direct MQTT
     //     analog of a Modbus register or an S7 DB tag.
+    //   - s7comm-plus (added by ROADMAP item 148, after this phase's original five -- "carries no
+    //     per-point/per-tag addressing concept this codebase decodes at all today" was true when
+    //     this comment was first written but had gone stale by the time S7CommPlusItemAddress::tag
+    //     existed): S7CommPlusItemAddress::tag verbatim, for every item on a GetMultiVariables/
+    //     SetMultiVariables Job (request) whose tag is non-empty -- S7CommPlusFrame::item_addresses
+    //     is empty on the response side, the exact same "request only" shape s7comm's own bullet
+    //     above already has, see decode_request_getmultivar/decode_request_setmultivar
+    //     (s7commplus.cpp). Covers BOTH the symbolic case ("SYM-CRC=1a2b3c4d, LID=DB10.2.5") and the
+    //     object-ID case ("by IDs: RID=1234, ID=99, ID=5") verbatim, unlike s7comm's own
+    //     is_experimental prefixing -- there's no "experimental vs. established" distinction to flag
+    //     here, just two different addressing styles the wire itself distinguishes already (see
+    //     S7CommPlusItemAddress::is_object_id_style). When item 148's own --s7plus-symbols symbol
+    //     table is active and has a match, write_inventory_report_text/_json append the resolved
+    //     name next to the raw tag at RENDER time only (the same annotation-not-replacement
+    //     convention Resolver's own OUI/hostname/service-name annotations already use throughout
+    //     this file) -- the raw tag string above is always what's actually tracked and deduplicated
+    //     here, never the resolved name, so a report rendered with and without the symbol table
+    //     active counts and groups addresses identically, differing only in whether a name is shown
+    //     alongside each one.
     //
-    // Explicitly deferred, not attempted, for the other seven protocols (confirmed with Jurgen before
+    // Explicitly deferred, not attempted, for the other six protocols (confirmed with Jurgen before
     // implementing, since it changed this phase's scope from the plan's own original, more
     // conservative framing): OPC UA and MMS both address by a genuinely symbolic path (a NodeId; a
     // "domainId/itemId" object reference) that this codebase currently only ever stringifies into a
     // free-text notes/values entry (OpcUaMessage has no structured NodeId field of its own;
     // MmsFrame::values is "key=value" strings, not a structured domain/item field) -- promoting either
     // to a real structured field would be genuinely new decode-surface work, not reuse, so both stay
-    // out of scope for this phase. BACnet/HART-IP/FF-HSE/S7comm-Plus carry no per-point/per-tag
-    // addressing concept this codebase decodes at all today. See docs/USER_GUIDE.md's LIMITATIONS for
-    // this same list in user-facing form.
+    // out of scope for this phase. BACnet/HART-IP/FF-HSE carry no per-point/per-tag addressing
+    // concept this codebase decodes at all today. See docs/USER_GUIDE.md's LIMITATIONS for this same
+    // list in user-facing form.
     std::vector<InventoryAddressTouch> top_touched_addresses;
 
     // However many distinct addresses this edge actually had tracked (bounded by
     // kMaxTrackedAddressesPerEdge above -- see that constant's own comment for what happens past it),
     // even though only the top kMaxShownTouchedAddressesPerEdge are listed in
-    // top_touched_addresses above. 0 for every edge whose protocol isn't one of the five wired in
+    // top_touched_addresses above. 0 for every edge whose protocol isn't one of the six wired in
     // above (top_touched_addresses is then also empty).
     size_t touched_addresses_total_distinct = 0;
 
@@ -725,6 +764,16 @@ private:
         // already-present key keeps incrementing but no new key is added. finish() sorts/truncates
         // this into the final top_touched_addresses list; this map itself is never sorted.
         std::unordered_map<std::string, size_t> address_touch_counts;
+
+        // ROADMAP item 148: address string (exactly an address_touch_counts key) -> (crc,
+        // lid_chain), s7comm-plus SYMBOLIC addresses only -- see InventoryAddressTouch::
+        // s7plus_crc/s7plus_lid_chain's own comment for why render-time symbol-table resolution
+        // needs this instead of re-parsing the address string. Populated in observe() alongside
+        // address_touch_counts (never separately capped -- bounded by that map's own
+        // kMaxTrackedAddressesPerEdge admission cap, since a key is only ever added here when one
+        // is also added there); consulted in finish() when building the final
+        // top_touched_addresses list.
+        std::unordered_map<std::string, std::pair<uint32_t, std::vector<uint32_t>>> s7plus_symbolic_keys;
     };
 
     // TCP-session-level state, exactly mirroring PolicyEngine::FlowState's client/server-only
@@ -827,16 +876,22 @@ private:
 // matrix (edges), the inferred zones, and the inferred conduits, in that order. `capture_path` is
 // shown in the report header purely for context. `resolver` supplies the same OUI/hostname/
 // service-name annotations `decode` and `policy validate` already provide (see resolver.hpp) --
-// rendered inline, the same convention `write_policy_report_text` uses.
+// rendered inline, the same convention `write_policy_report_text` uses. `symbols` (ROADMAP item
+// 148): when active and a top_touched_addresses entry has s7plus_symbolic set, its resolved name
+// (SymbolTable::resolve(s7plus_crc, s7plus_lid_chain)) is appended next to that entry's address the
+// same way, exactly the "annotation, never a replacement; a miss adds nothing" posture `resolver`'s
+// own three lookups already follow.
 void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& report,
-                                  const std::string& capture_path, const Resolver& resolver);
+                                  const std::string& capture_path, const Resolver& resolver,
+                                  const SymbolTable& symbols);
 
-// Renders `report` as JSON to `out`, for scripting/automation. `resolver`: see
+// Renders `report` as JSON to `out`, for scripting/automation. `resolver`/`symbols`: see
 // write_inventory_report_text's own comment -- JSON format follows `write_policy_report_json`'s
 // convention of a separate named annotation field per lookup, omitted entirely (never `null`) on a
 // miss or a disabled lookup. See docs/MANUAL.md's `inventory` section for the exact schema.
 void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& report,
-                                  const std::string& capture_path, const Resolver& resolver);
+                                  const std::string& capture_path, const Resolver& resolver,
+                                  const SymbolTable& symbols);
 
 // Phase 8 of Grok gap #2 ("turn inventory into a real OT asset record" -- CSV/CMDB export, see
 // docs/design/asset-inventory-real-record.md). Renders `report.assets` (ONLY the asset list --

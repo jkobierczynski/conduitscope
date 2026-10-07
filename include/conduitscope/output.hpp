@@ -14,6 +14,7 @@
 #include "conduitscope/byteio.hpp"
 #include "conduitscope/decoder.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/symbol_table.hpp"
 #include "conduitscope/time_format.hpp"
 
 namespace conduitscope {
@@ -110,11 +111,19 @@ private:
 
 class JsonWriter : public OutputWriter {
 public:
-    explicit JsonWriter(std::ostream& out, const Resolver& resolver, bool show_vlan = true,
-                         TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
-                         bool show_direction = true)
-        : out_(out), resolver_(resolver), show_vlan_(show_vlan), time_(time_format, time_offset),
-          show_direction_(show_direction) {}
+    // symbols: ROADMAP item 148 -- S7comm-Plus symbolic item address (Symbol CRC + LID chain) name
+    // resolution, appended into "s7plus_items" entries the exact same annotation-only way
+    // `resolver`'s own OUI/hostname/service-name lookups already annotate their fields; see
+    // write_s7comm_plus_json_fields (output.cpp) and symbol_table.hpp's own file header. A
+    // reference, not a pointer/optional, matching `resolver`'s own convention -- an inactive
+    // (no --s7plus-symbols) SymbolTable is itself already a harmless no-op, so there's no "don't
+    // have one" state to represent here, same reasoning Resolver's own always-required reference
+    // already relies on.
+    explicit JsonWriter(std::ostream& out, const Resolver& resolver, const SymbolTable& symbols,
+                         bool show_vlan = true, TimeFormat time_format = TimeFormat::Epoch,
+                         TimeOffset time_offset = TimeOffset{}, bool show_direction = true)
+        : out_(out), resolver_(resolver), symbols_(symbols), show_vlan_(show_vlan),
+          time_(time_format, time_offset), show_direction_(show_direction) {}
     void begin() override;
     void write_packet(const DecodedPacket& packet) override;
     void end() override;
@@ -123,6 +132,7 @@ private:
     std::ostream& out_;
     bool wrote_any_ = false;
     const Resolver& resolver_;
+    const SymbolTable& symbols_;
     bool show_vlan_;
     TimeFormatter time_;
     bool show_direction_;
@@ -157,16 +167,22 @@ private:
 // has for a field absent from a given packet.
 class FieldsWriter : public OutputWriter {
 public:
-    explicit FieldsWriter(std::ostream& out, const Resolver& resolver, std::vector<std::string> fields,
-                           bool show_vlan = true, TimeFormat time_format = TimeFormat::Epoch,
-                           TimeOffset time_offset = TimeOffset{}, bool show_direction = true)
-        : out_(out), resolver_(resolver), fields_(std::move(fields)), show_vlan_(show_vlan),
-          time_format_(time_format), time_offset_(time_offset), show_direction_(show_direction) {}
+    // symbols: threaded straight through to the internal one-shot JsonWriter write_packet
+    // constructs (see its own comment, output.cpp) -- see JsonWriter's own constructor comment for
+    // what this is (ROADMAP item 148).
+    explicit FieldsWriter(std::ostream& out, const Resolver& resolver, const SymbolTable& symbols,
+                           std::vector<std::string> fields, bool show_vlan = true,
+                           TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
+                           bool show_direction = true)
+        : out_(out), resolver_(resolver), symbols_(symbols), fields_(std::move(fields)),
+          show_vlan_(show_vlan), time_format_(time_format), time_offset_(time_offset),
+          show_direction_(show_direction) {}
     void write_packet(const DecodedPacket& packet) override;
 
 private:
     std::ostream& out_;
     const Resolver& resolver_;
+    const SymbolTable& symbols_;
     std::vector<std::string> fields_;
     bool show_vlan_;
     TimeFormat time_format_;
@@ -198,10 +214,13 @@ private:
 // either way.
 class DetailWriter : public OutputWriter {
 public:
-    explicit DetailWriter(std::ostream& out, bool color, const Resolver& resolver, bool show_vlan = true,
-                           TimeFormat time_format = TimeFormat::Epoch, TimeOffset time_offset = TimeOffset{},
-                           bool show_direction = true)
-        : out_(out), color_(color), resolver_(resolver), show_vlan_(show_vlan),
+    // symbols: threaded straight through to the internal one-shot JsonWriter write_packet
+    // constructs (see its own comment, output.cpp) -- see JsonWriter's own constructor comment for
+    // what this is (ROADMAP item 148).
+    explicit DetailWriter(std::ostream& out, bool color, const Resolver& resolver, const SymbolTable& symbols,
+                           bool show_vlan = true, TimeFormat time_format = TimeFormat::Epoch,
+                           TimeOffset time_offset = TimeOffset{}, bool show_direction = true)
+        : out_(out), color_(color), resolver_(resolver), symbols_(symbols), show_vlan_(show_vlan),
           time_(time_format, time_offset), show_direction_(show_direction) {}
     void write_packet(const DecodedPacket& packet) override;
 
@@ -209,6 +228,7 @@ private:
     std::ostream& out_;
     bool color_;
     const Resolver& resolver_;
+    const SymbolTable& symbols_;
     bool show_vlan_;
     TimeFormatter time_;
     bool show_direction_;

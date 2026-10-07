@@ -23,6 +23,7 @@
 #include "conduitscope/notable_it_protocols.hpp"
 #include "conduitscope/portable_time.hpp"
 #include "conduitscope/resolver.hpp"
+#include "conduitscope/symbol_table.hpp"
 #include "conduitscope/resource_limits.hpp"
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/s7commplus.hpp"
@@ -717,6 +718,10 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
     // stays empty) -- same "no signal, don't fabricate one" posture as function_name's own
     // empty-string default above.
     std::vector<std::string> touched_addresses;
+    // ROADMAP item 148: address string -> (crc, lid_chain), populated alongside touched_addresses
+    // only in the s7comm-plus SYMBOLIC branch below -- see EdgeState::s7plus_symbolic_keys' own
+    // comment (asset_inventory.hpp) for why this side-map exists and how it's folded in below.
+    std::unordered_map<std::string, std::pair<uint32_t, std::vector<uint32_t>>> touched_addresses_s7plus_keys;
     if (protocol == "modbus" && dp.result) {
         const ModbusFrame& mb = dp.result->as<ModbusFrame>();
         if (mb.start_address.has_value()) {
@@ -747,6 +752,29 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         const CipMessage& cip = dp.result->as<EnipResult>().first.cip;
         if (cip.path.is_symbolic && !cip.path.summary.empty()) {
             touched_addresses.push_back(sanitize_touch_address(cip.path.summary));
+        }
+    } else if (protocol == "s7comm-plus" && dp.result) {
+        // GetMultiVariables/SetMultiVariables Job (request) only -- S7CommPlusFrame::item_addresses
+        // is empty on the response side, the exact same "request only" shape the s7comm branch
+        // above already has -- see decode_request_getmultivar/decode_request_setmultivar
+        // (s7commplus.cpp). The raw S7CommPlusItemAddress::tag is the dedup key tracked here, both
+        // for the symbolic case and the object-ID case -- any --s7plus-symbols name resolution
+        // (ROADMAP item 148) is a render-time-only annotation added by write_inventory_report_
+        // text/_json, never folded into this key; see InventoryEdge::top_touched_addresses' own
+        // comment (asset_inventory.hpp) for the full design. For the symbolic case specifically
+        // (never the object-ID case, which has no symbol-name concept at all), also remember this
+        // address string's own (crc, lid_chain) pair so that render-time resolution doesn't need to
+        // re-parse the tag string -- see touched_addresses_s7plus_keys' own comment above.
+        for (const auto& item : dp.result->as<S7CommPlusFrame>().item_addresses) {
+            if (item.tag.empty()) continue;
+            touched_addresses.push_back(item.tag);
+            if (!item.is_object_id_style) {
+                // item.base_area is deliberately excluded -- it's the wire's own separate
+                // restatement of the memory area/region, not part of the LID path; see
+                // symbol_table.hpp's own file header for why only extra_lids belongs in the key.
+                touched_addresses_s7plus_keys.emplace(
+                    item.tag, std::make_pair(item.crc_or_rid, item.extra_lids));
+            }
         }
     } else if (protocol == "mqtt" && dp.result) {
         const MqttMessage& mq = dp.result->as<MqttResult>().first;
@@ -894,6 +922,16 @@ void AssetInventoryEngine::observe(const DecodedPacket& dp) {
         } else if (eit->second.address_touch_counts.size() < kMaxTrackedAddressesPerEdge) {
             eit->second.address_touch_counts.emplace(addr, 1);
         }
+        // ROADMAP item 148 -- carry this address' own (crc, lid_chain) along too, when it has one
+        // (s7comm-plus symbolic addresses only; see touched_addresses_s7plus_keys' own comment
+        // above). Only ever needs inserting once per distinct address: the pair is a deterministic
+        // function of the address string within one run, so a later packet re-touching the same
+        // address would just insert the identical pair again -- try_emplace skips that redundant
+        // work rather than skipping it incorrectly.
+        auto skit = touched_addresses_s7plus_keys.find(addr);
+        if (skit != touched_addresses_s7plus_keys.end()) {
+            eit->second.s7plus_symbolic_keys.try_emplace(addr, skit->second);
+        }
     }
     if (!eit->second.has_timestamp) {
         eit->second.has_timestamp = true;
@@ -1038,7 +1076,19 @@ AssetInventoryReport AssetInventoryEngine::finish() const {
         ie.top_touched_addresses.reserve(
             std::min(es.address_touch_counts.size(), kMaxShownTouchedAddressesPerEdge));
         for (const auto& [addr, count] : es.address_touch_counts) {
-            ie.top_touched_addresses.push_back(InventoryAddressTouch{addr, count});
+            InventoryAddressTouch touch;
+            touch.address = addr;
+            touch.count = count;
+            // ROADMAP item 148 -- carry this address' own (crc, lid_chain) through when it has one
+            // (s7comm-plus symbolic addresses only); see InventoryAddressTouch::s7plus_crc/
+            // s7plus_lid_chain's own comment for how write_inventory_report_text/_json use these.
+            auto skit = es.s7plus_symbolic_keys.find(addr);
+            if (skit != es.s7plus_symbolic_keys.end()) {
+                touch.s7plus_symbolic = true;
+                touch.s7plus_crc = skit->second.first;
+                touch.s7plus_lid_chain = skit->second.second;
+            }
+            ie.top_touched_addresses.push_back(std::move(touch));
         }
         std::sort(ie.top_touched_addresses.begin(), ie.top_touched_addresses.end(),
                   [](const InventoryAddressTouch& a, const InventoryAddressTouch& b) {
@@ -1220,7 +1270,8 @@ void write_notable_protocols_text(std::ostream& out, const AssetInventoryReport&
 }  // namespace
 
 void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& report,
-                                  const std::string& capture_path, const Resolver& resolver) {
+                                  const std::string& capture_path, const Resolver& resolver,
+                                  const SymbolTable& symbols) {
     out << "OT asset inventory\n";
     out << "  capture: " << capture_path << "\n";
     out << "  scope:   Modbus, DNP3, S7comm, EtherNet/IP, BACnet/IP, IEC 104, HART-IP (TCP only),\n";
@@ -1338,7 +1389,15 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
             }
             out << ":\n";
             for (const auto& t : e.top_touched_addresses) {
-                out << "        " << t.address << "  (" << t.count << " touch(es))\n";
+                out << "        " << t.address;
+                // ROADMAP item 148 -- an annotation, never a replacement; a miss adds nothing, the
+                // same posture `resolver`'s own OUI/hostname/service-name lookups already follow.
+                if (t.s7plus_symbolic) {
+                    if (auto name = symbols.resolve(t.s7plus_crc, t.s7plus_lid_chain)) {
+                        out << " (" << *name << ")";
+                    }
+                }
+                out << "  (" << t.count << " touch(es))\n";
             }
         }
     }
@@ -1373,7 +1432,8 @@ void write_inventory_report_text(std::ostream& out, const AssetInventoryReport& 
 }
 
 void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& report,
-                                  const std::string& capture_path, const Resolver& resolver) {
+                                  const std::string& capture_path, const Resolver& resolver,
+                                  const SymbolTable& symbols) {
     out << "{\n";
     out << "  \"capture\": \"" << json_escape(capture_path) << "\",\n";
     out << "  \"total_packets\": " << report.total_packets << ",\n";
@@ -1498,8 +1558,17 @@ void write_inventory_report_json(std::ostream& out, const AssetInventoryReport& 
         out << "      \"top_touched_addresses\": [";
         for (size_t j = 0; j < e.top_touched_addresses.size(); ++j) {
             if (j) out << ", ";
-            out << "{\"address\": \"" << json_escape(e.top_touched_addresses[j].address) << "\", \"count\": "
-                << e.top_touched_addresses[j].count << "}";
+            const InventoryAddressTouch& t = e.top_touched_addresses[j];
+            out << "{\"address\": \"" << json_escape(t.address) << "\", \"count\": " << t.count;
+            // ROADMAP item 148 -- a separate named field, omitted entirely (never null) on a miss
+            // or an inactive table, same convention every other resolver-style annotation in this
+            // writer already follows (see e.g. "server_port_service" above).
+            if (t.s7plus_symbolic) {
+                if (auto name = symbols.resolve(t.s7plus_crc, t.s7plus_lid_chain)) {
+                    out << ", \"resolved_name\": \"" << json_escape(*name) << "\"";
+                }
+            }
+            out << "}";
         }
         out << "],\n";
         out << "      \"touched_addresses_total_distinct\": " << e.touched_addresses_total_distinct << ",\n";

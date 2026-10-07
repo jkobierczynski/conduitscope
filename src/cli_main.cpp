@@ -1323,7 +1323,8 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool strict, bool quiet,
                 bool no_color, bool force_color,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
-                bool service_names_enabled, const std::string& services_path, bool show_vlan,
+                bool service_names_enabled, const std::string& services_path,
+                const std::string& symbol_table_path, bool show_vlan,
                 const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag, bool show_direction, bool show_mac,
                 const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump,
@@ -1535,6 +1536,10 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         if (!quiet) {
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
+        // ROADMAP item 148 -- same fail-fast posture as Resolver just above (SymbolTableError is
+        // caught alongside ResolverError below); an empty symbol_table_path is a harmless no-op,
+        // see SymbolTable::active()'s own comment.
+        SymbolTable symbol_table(symbol_table_path);
 
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
                                                    duration_seconds, max_packets);
@@ -1549,22 +1554,22 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
 
         std::unique_ptr<OutputWriter> writer;
         if (format == "json") {
-            writer = std::make_unique<JsonWriter>(*out, resolver, show_vlan, *parsed_time_format,
+            writer = std::make_unique<JsonWriter>(*out, resolver, symbol_table, show_vlan, *parsed_time_format,
                                                     *parsed_time_offset, show_direction);
         } else if (format == "csv") {
             writer = std::make_unique<CsvWriter>(*out, resolver, show_vlan, *parsed_time_format,
                                                    *parsed_time_offset, show_direction);
         } else if (format == "fields") {
-            writer = std::make_unique<FieldsWriter>(*out, resolver, fields, show_vlan, *parsed_time_format,
-                                                      *parsed_time_offset, show_direction);
+            writer = std::make_unique<FieldsWriter>(*out, resolver, symbol_table, fields, show_vlan,
+                                                      *parsed_time_format, *parsed_time_offset, show_direction);
         } else if (format == "zeek") {
             writer = std::make_unique<ZeekWriter>(*out);
         } else if (details) {
             // -V/--details: only meaningful for the default text output -- see its own help text
             // ("ignored under --format json/csv/fields/zeek"), the same posture -x/--hex already
             // has, so this branch only exists inside the `format` "else" (text) case.
-            writer = std::make_unique<DetailWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
-                                                      *parsed_time_offset, show_direction);
+            writer = std::make_unique<DetailWriter>(*out, color, resolver, symbol_table, show_vlan,
+                                                      *parsed_time_format, *parsed_time_offset, show_direction);
         } else {
             writer = std::make_unique<TextWriter>(*out, color, resolver, show_vlan, *parsed_time_format,
                                                     *parsed_time_offset, show_direction, show_mac, verbose);
@@ -1778,6 +1783,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
             if (drop_reason) diag << "warning: " << *drop_reason << "\n";
         }
     } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const SymbolTableError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const ParseError& e) {
@@ -2073,7 +2081,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                    const std::string& conduits_csv_path, const ResourceLimitCliVars& limit_vars,
                    const AssetInventoryEngineLimits& engine_limits, bool oui_enabled, bool resolve_hostnames,
                    const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
-                   std::ostream& diag) {
+                   const std::string& symbol_table_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -2093,6 +2101,9 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         if (!quiet) {
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
+        // ROADMAP item 148 -- same fail-fast posture as Resolver just above (SymbolTableError is
+        // caught alongside ResolverError below).
+        SymbolTable symbol_table(symbol_table_path);
 
         DecodeOptions options;
         options.strict = strict;
@@ -2126,7 +2137,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
             report.observation_truncated = true;
         }
         if (format == "json") {
-            write_inventory_report_json(*out, report, capture_label, resolver);
+            write_inventory_report_json(*out, report, capture_label, resolver, symbol_table);
         } else if (format == "csv") {
             // Phase 8 of Grok gap #2 -- see write_inventory_report_csv's own doc comment
             // (asset_inventory.hpp) for why this is deliberately asset-only, not the full
@@ -2138,7 +2149,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
             // asset-only.
             write_inventory_stix_json(*out, report, capture_label, resolver);
         } else {
-            write_inventory_report_text(*out, report, capture_label, resolver);
+            write_inventory_report_text(*out, report, capture_label, resolver, symbol_table);
         }
 
         if (!diagram_path.empty()) {
@@ -2217,6 +2228,9 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         if (report.observation_truncated) return kExitObservationIncomplete;
         return 0;
     } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const SymbolTableError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const ParseError& e) {
@@ -3033,12 +3047,17 @@ int run_merge_inventory(const std::vector<std::string>& inputs, const std::strin
         }
         label << ")";
 
+        // merge-inventory has no --s7plus-symbols of its own (ROADMAP item 148 scoped this to
+        // `decode`/`inventory` only, per Jurgen's own ask) -- an always-inactive SymbolTable here
+        // is a no-op exactly like omitting the flag anywhere else, see SymbolTable::active()'s own
+        // comment.
+        SymbolTable no_symbol_table("");
         if (format == "json") {
-            write_inventory_report_json(*out, merged, label.str(), resolver);
+            write_inventory_report_json(*out, merged, label.str(), resolver, no_symbol_table);
         } else if (format == "csv") {
             write_inventory_report_csv(*out, merged, resolver);
         } else {
-            write_inventory_report_text(*out, merged, label.str(), resolver);
+            write_inventory_report_text(*out, merged, label.str(), resolver, no_symbol_table);
         }
         return 0;
     } catch (const InventoryMergeError& e) {
@@ -3287,6 +3306,7 @@ int main(int argc, char** argv) {
     bool decode_detect_highlight = true;
     std::string decode_time_format = "r", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
+    std::string decode_symbol_table_file;  // --s7plus-symbols, ROADMAP item 148
     std::vector<std::string> decode_fields;
     std::string decode_write;
     bool decode_hex = false;
@@ -3776,6 +3796,17 @@ int main(int argc, char** argv) {
                       "Unix /etc/services-style file to supplement/override the built-in "
                       "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
+    decode_cmd
+        ->add_option("--s7plus-symbols", decode_symbol_table_file,
+                      "Resolve S7comm-Plus native symbolic item addresses (Symbol CRC + LID chain) "
+                      "to human-readable tag names, from an externally-supplied lookup table -- "
+                      "this tool has no way to compute the CRC itself (TIA Portal's own hash "
+                      "algorithm isn't publicly documented), see symbol_table.hpp's own file "
+                      "header for the full explanation and the simple hand-rolled text file format "
+                      "this flag expects. Off by default; a miss (no matching entry, or no file "
+                      "given) leaves the raw CRC+LID-chain address exactly as decoded, never an "
+                      "'(unknown)' placeholder")->group("Name resolution")
+        ->check(CLI::ExistingFile);
 
     // --- info -------------------------------------------------------------
     auto* info_cmd = app.add_subcommand(
@@ -3966,6 +3997,7 @@ int main(int argc, char** argv) {
     std::string inventory_conduits_csv;
     bool inventory_mac_vendor = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
+    std::string inventory_symbol_table_file;  // --s7plus-symbols, ROADMAP item 148
     ResourceLimitCliVars inventory_limit_vars;
     size_t inventory_max_assets = 0, inventory_max_edges = 0, inventory_max_tcp_sessions = 0,
            inventory_max_notable_protocols = 0;
@@ -4071,6 +4103,14 @@ int main(int argc, char** argv) {
         ->add_option("--services", inventory_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
                       "port->service-name table")->group("Name resolution")
+        ->check(CLI::ExistingFile);
+    inventory_cmd
+        ->add_option("--s7plus-symbols", inventory_symbol_table_file,
+                      "Resolve S7comm-Plus native symbolic item addresses (Symbol CRC + LID chain) "
+                      "to human-readable tag names in the 'top touched addresses' list, from an "
+                      "externally-supplied lookup table -- this tool cannot compute the CRC itself, "
+                      "see symbol_table.hpp's own file header for why; same hand-rolled text file "
+                      "format as decode's own --s7plus-symbols")->group("Name resolution")
         ->check(CLI::ExistingFile);
 
     // --- detect ------------------------------------------------------------------
@@ -4818,7 +4858,7 @@ int main(int argc, char** argv) {
                            decode_max_packets, decode_range, decode_limit_vars, decode_strict,
                            quiet,
                            no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
-                           decode_service_names, decode_services_file, decode_show_vlan,
+                           decode_service_names, decode_services_file, decode_symbol_table_file, decode_show_vlan,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac, decode_fields, decode_write, decode_hex,
                            decode_verbose, decode_details, decode_redact, decode_detect_highlight,
@@ -4859,7 +4899,7 @@ int main(int argc, char** argv) {
                                                                inventory_max_tcp_sessions,
                                                                inventory_max_notable_protocols),
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
-                              inventory_services_file, *diag);
+                              inventory_services_file, inventory_symbol_table_file, *diag);
     }
     if (detect_cmd->parsed()) {
         return run_detect(detect_input, detect_interface, detect_filter, detect_duration, detect_snaplen,

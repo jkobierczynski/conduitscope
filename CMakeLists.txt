@@ -141,6 +141,7 @@ add_library(conduitscope_core STATIC
   src/display_filter_parser.cpp
   src/display_filter_fields.cpp
   src/resolver.cpp
+  src/symbol_table.cpp
   src/time_format.cpp
   src/packet_range.cpp
   src/output.cpp
@@ -6068,6 +6069,97 @@ add_test(NAME s7commplus_unexpected_port_noted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format text --verbose)
 set_tests_properties(s7commplus_unexpected_port_noted PROPERTIES
   PASS_REGULAR_EXPRESSION "seen on TCP port 50303->50304, which is not a configured/standard COTP/S7comm port \\(102\\)")
+
+# ---------------------------------------------------------------------------------------------
+# ROADMAP item 148: S7comm-Plus native symbolic item address (Symbol CRC + LID chain) name
+# resolution via an externally-supplied lookup table (symbol_table.hpp/symbol_table.cpp,
+# --s7plus-symbols). tests/s7plus_symbols_sample.txt (see its own file header) is the shared
+# fixture: it names tests/sample_s7commplus.pcap's own SYM-CRC=ea2db0d9 (LID=M, a bare depth-1
+# address -- "-" chain) and SYM-CRC=a9bc66e6 (LID=DB5.10, a one-LID chain -- "10"), leaves
+# SYM-CRC=deadbeef (also LID=M) deliberately unlisted as a guaranteed miss, and exercises its own
+# tolerant-parsing/last-line-wins rules. All verified against the real built binary's own output
+# before being written here, per this project's standing discipline.
+# ---------------------------------------------------------------------------------------------
+
+set(S7PLUS_SYMBOLS "${CMAKE_CURRENT_SOURCE_DIR}/tests/s7plus_symbols_sample.txt")
+
+# Off by default: the raw tag renders exactly as before, no "(name)" annotation at all.
+add_test(NAME s7plus_symbols_off_by_default_no_annotation
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7plus_symbols_off_by_default_no_annotation PROPERTIES
+  PASS_REGULAR_EXPRESSION "SYM-CRC=ea2db0d9, LID=M\""
+  FAIL_REGULAR_EXPRESSION "Motor1_Running")
+
+# decode --format json: both a bare depth-1 ("-" chain) and a one-LID-chain address resolve;
+# object-ID-style addresses (never looked up at all) and an unlisted CRC (deadbeef) stay bare.
+add_test(NAME s7plus_symbols_decode_json_resolves_matches
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json
+          --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_decode_json_resolves_matches PROPERTIES
+  PASS_REGULAR_EXPRESSION "SYM-CRC=ea2db0d9, LID=M \\(Motor1_Running_Overridden\\).*SYM-CRC=a9bc66e6, LID=DB5.10 \\(Line2_Speed_Setpoint\\)")
+
+# The guaranteed miss (deadbeef, present in the capture, absent from the table) never gets a
+# "(name)" suffix -- an annotation, never a replacement; a miss adds nothing.
+add_test(NAME s7plus_symbols_decode_json_miss_stays_unannotated
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json
+          --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_decode_json_miss_stays_unannotated PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"SYM-CRC=deadbeef, LID=M\""
+  FAIL_REGULAR_EXPRESSION "SYM-CRC=deadbeef, LID=M \\(")
+
+# -V/--details and --format fields both reuse JsonWriter internally (see output.cpp) -- confirms
+# the resolved name flows through both, not just --format json directly.
+add_test(NAME s7plus_symbols_details_flag_resolves
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" -V
+          --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_details_flag_resolves PROPERTIES
+  PASS_REGULAR_EXPRESSION "s7plus_items: SYM-CRC=ea2db0d9, LID=M \\(Motor1_Running_Overridden\\)")
+
+add_test(NAME s7plus_symbols_fields_format_resolves
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format fields
+          -e s7plus_items --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_fields_format_resolves PROPERTIES
+  PASS_REGULAR_EXPRESSION "SYM-CRC=ea2db0d9, LID=M \\(Motor1_Running_Overridden\\)")
+
+# `inventory` (text and json): ROADMAP item 148's own "inventory too" scope -- the resolved name
+# is appended next to the SAME top_touched_addresses entry decode's own tag would resolve,
+# confirming the render-time-only annotation flows into asset_inventory.cpp's own writers too.
+add_test(NAME s7plus_symbols_inventory_text_resolves
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap"
+          --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_inventory_text_resolves PROPERTIES
+  PASS_REGULAR_EXPRESSION "SYM-CRC=ea2db0d9, LID=M \\(Motor1_Running_Overridden\\)  \\([0-9]+ touch\\(es\\)\\)"
+  FAIL_REGULAR_EXPRESSION "SYM-CRC=deadbeef, LID=M \\(")
+
+add_test(NAME s7plus_symbols_inventory_json_resolves
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json
+          --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_inventory_json_resolves PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"address\": \"SYM-CRC=a9bc66e6, LID=DB5.10\", \"count\": [0-9]+, \"resolved_name\": \"Line2_Speed_Setpoint\"")
+
+# Off by default in inventory too -- no resolved_name field at all appears anywhere.
+add_test(NAME s7plus_symbols_inventory_json_off_by_default
+  COMMAND conduitscope inventory --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
+set_tests_properties(s7plus_symbols_inventory_json_off_by_default PROPERTIES
+  FAIL_REGULAR_EXPRESSION "resolved_name")
+
+# Tolerant parsing: a bad-hex CRC, a line missing its lid-chain field entirely, and a chain with a
+# non-numeric segment are all silently skipped, never a fatal error -- the run still completes and
+# still resolves the valid, well-formed lines in the same file (exercised above already; this test
+# only confirms exit 0 / no "error:" line for the whole file, including its malformed lines).
+add_test(NAME s7plus_symbols_malformed_lines_tolerated_not_fatal
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json
+          --s7plus-symbols "${S7PLUS_SYMBOLS}")
+set_tests_properties(s7plus_symbols_malformed_lines_tolerated_not_fatal PROPERTIES
+  FAIL_REGULAR_EXPRESSION "^error:")
+
+# An unopenable --s7plus-symbols path is caught by CLI11's ->check(CLI::ExistingFile) before this
+# tool ever runs -- same posture --hosts/--services already have.
+add_test(NAME s7plus_symbols_nonexistent_file_rejected_by_cli11
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap"
+          --s7plus-symbols "${CMAKE_CURRENT_SOURCE_DIR}/tests/does_not_exist_s7plus_symbols.txt")
+set_tests_properties(s7plus_symbols_nonexistent_file_rejected_by_cli11 PROPERTIES
+  PASS_REGULAR_EXPRESSION "File does not exist")
 
 add_test(NAME s7commplus_does_not_crash
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_s7commplus.pcap" --format json)
