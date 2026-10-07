@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -81,6 +82,7 @@
 #include "conduitscope/stp.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
+#include "conduitscope/tls_keylog.hpp"
 #include "conduitscope/tls_sni.hpp"
 #include "conduitscope/tunnel_vpn.hpp"
 #include "conduitscope/twincat.hpp"
@@ -713,6 +715,25 @@ struct DecodeOptions {
     // re-installs it via a ScopedResourceLimits guard for the duration of each call -- see both
     // comments below and resource_limits.hpp's own header comment.
     ResourceLimits limits;
+
+    // TLS decryption via an externally-supplied key log (--tls-keylog FILE and/or pcapng-embedded
+    // Decryption Secrets Blocks -- see tls_keylog.hpp/tls_decrypt.hpp for the full design). nullptr
+    // (the default) means decryption is off entirely -- every TLS-wrapped call site in decoder.cpp
+    // (MQTTS/8883, FOXS/4911, WinRM-over-HTTPS/5986) falls straight to today's existing detection-
+    // only ClientHello/SNI tagging, with zero behavior change versus this feature's absence, the
+    // same cost-free-when-unused posture extra_*_ports/resource_limits already have.
+    //
+    // A shared_ptr, not a plain TlsKeyLog value, DELIBERATELY: unlike every other field on this
+    // struct (parsed once at CLI startup, then read-only for the whole run -- see this struct's own
+    // "set once, read anywhere" fields above), a TlsKeyLog can keep growing mid-run, fed by newly-
+    // discovered pcapng Decryption Secrets Blocks as cli_main.cpp's own packet loop reads them (see
+    // PcapReader::take_pending_decryption_secrets, pcap_reader.hpp). Decoder::decode() is const and
+    // only ever calls TlsKeyLog::find on this (read-only), so a shared_ptr lets cli_main.cpp mutate
+    // the SAME underlying TlsKeyLog that an already-constructed Decoder is holding a copy of this
+    // struct for -- a plain by-value field would silently freeze each Decoder's own view of the key
+    // log at whatever entries existed the moment that Decoder was constructed, missing any secret
+    // a DSB later in the same capture reveals.
+    std::shared_ptr<TlsKeyLog> tls_key_log;
 
     // Attack-detection addition (see attack_detect.hpp's own file header for the full design):
     // the per-destination packet count that trips a SYN/ACK/TCP/ICMP/UDP flood note. A

@@ -1610,30 +1610,42 @@ Retained-message tracking, Will Message delivery correlation, and QoS 2 exactly-
 tracking across packets (this decoder is, like every protocol in this codebase, a stateless-per-
 message decoder with TCP-stream-level reassembly only -- it decodes each PUBREC/PUBREL/PUBCOMP on
 its own, it does not track which QoS 2 flow they belong to); MQTT-SN (the UDP-based MQTT variant for
-constrained devices -- an entirely different wire format, out of scope); TLS decryption (as with
-every protocol here, this decoder reads whatever bytes are on the wire -- it doesn't strip TLS, but
-see "Port 8883 / MQTTS" below for the one piece of TLS-wrapped-session metadata it does surface);
-and Sparkplug B's own STATE topic JSON payload is shown as raw text (`mqtt_sparkplug_state_text`),
-not further parsed as JSON.
+constrained devices -- an entirely different wire format, out of scope); and Sparkplug B's own STATE
+topic JSON payload is shown as raw text (`mqtt_sparkplug_state_text`), not further parsed as JSON.
+TLS decryption is implemented, but only when a key is actually supplied -- see "Port 8883 / MQTTS"
+below.
 
 #### Port 8883 / MQTTS
 
 A small, low-risk addition to this codebase's existing generic TLS-ClientHello recognition call
 site -- the same one that already labels port 443 `"https"`, ports 636/3269 `"ldaps"`, and port
 4911 `"foxs"` -- extended to also recognize port 8883 and label it `"mqtts"` (`MQTTS/TLS
-ClientHello`). This is detection only: MQTTS's own payload is TLS-encrypted, exactly as opaque to
-a passive capture as HTTPS/LDAPS/FOXS-over-TLS already are elsewhere in this codebase, and the
-real, cleartext `MqttDecoder` never runs against this port at all. This closes part of a gap
-Grok's own product-strategy review named directly -- "encrypted OPC UA/BACnet-SC/MQTTS: [at
-least] session metadata" -- without pretending to decode encrypted MQTT: the ClientHello's own SNI
-(RFC 6066) still names the broker hostname in plaintext even under TLS 1.3, so a capture now shows
-"an encrypted MQTT-shaped conduit exists here, to broker X" instead of a bare, unlabeled `https`-
-looking TLS flow on a nonstandard port (or nothing at all outside the standard HTTPS/LDAPS/FOXS
-ports this call site already knew about). `--protocol mqtt` forces this detection port-
-independently, the same exception every other `GateKind::TcpPort`-adjacent TLS detection in this
-codebase already has; there is no `--extra-mqtt-tls-ports` widening of its own, the same "small
-detection addition, not a new fully-general feature" scope FOXS's own port 4911 addition
-establishes.
+ClientHello`). Absent a usable key, this is detection only: MQTTS's own payload is TLS-encrypted,
+exactly as opaque to a passive capture as HTTPS/LDAPS/FOXS-over-TLS already are elsewhere in this
+codebase. This closes part of a gap Grok's own product-strategy review named directly --
+"encrypted OPC UA/BACnet-SC/MQTTS: [at least] session metadata" -- without pretending to decode
+encrypted MQTT absent a key: the ClientHello's own SNI (RFC 6066) still names the broker hostname
+in plaintext even under TLS 1.3, so a capture now shows "an encrypted MQTT-shaped conduit exists
+here, to broker X" instead of a bare, unlabeled `https`-looking TLS flow on a nonstandard port (or
+nothing at all outside the standard HTTPS/LDAPS/FOXS ports this call site already knew about).
+`--protocol mqtt` forces this detection port-independently, the same exception every other
+`GateKind::TcpPort`-adjacent TLS detection in this codebase already has; there is no
+`--extra-mqtt-tls-ports` widening of its own, the same "small detection addition, not a new
+fully-general feature" scope FOXS's own port 4911 addition establishes.
+
+**ROADMAP item 150 (docs/DEVELOPMENT.md): MQTTS decryption via
+`--tls-keylog`/pcapng Decryption Secrets Blocks.** When a `--tls-keylog` file (NSS Key Log Format,
+RFC 9850) or a pcapng-embedded Decryption Secrets Block supplies the right secret for a session's
+own `ClientHello.random`, this decoder decrypts TLS 1.2 (RFC 5288/5289 GCM suites only) and TLS 1.3
+(the three standard AEAD suites) MQTTS sessions and feeds the recovered plaintext straight into the
+SAME cleartext `MqttDecoder` port 1883 already uses -- CONNECT's own cleartext-credential decode,
+every PUBLISH/Sparkplug B field, all of it fires identically for a decrypted TLS session as it does
+for a cleartext one. Each decrypted packet carries a `"decrypted from MQTTS (TLS, port 8883) via
+--tls-keylog/pcapng DSB"` note so this is never silently indistinguishable from a cleartext decode
+in the output. CBC (TLS 1.2) and CCM (TLS 1.3) cipher suites, and any session captured
+mid-handshake (no `ClientHello` ever seen), stay out of scope and produce an explained, permanent
+give-up rather than a guess -- see `tls_decrypt.hpp`'s own file header and ROADMAP item 150's own
+write-up for the full scope. Without a key, MQTTS stays exactly as opaque as before this round.
 
 #### Validation
 
@@ -8823,7 +8835,7 @@ BEFORE the `CMakeLists.txt` `drsuapi_*` test family reading it was
 written. See `include/conduitscope/drsuapi.hpp`'s own file header for the
 full writeup, including the scope caveat in its most prominent form.
 
-### WinRM (WS-Management, MS-WSMV; TCP port 5985) -- phase 4 of the same follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI done, WinRM this section, DCOM done too, see its own section below)
+### WinRM (WS-Management, MS-WSMV; TCP port 5985, cleartext; TCP port 5986, WinRM-over-HTTPS, decrypted when a `--tls-keylog`/pcapng-DSB key is available, detection only otherwise) -- phase 4 of the same follow-on Windows RPC batch (SAMR/LSARPC/SRVSVC/WKSSVC/DRSUAPI done, WinRM this section, DCOM done too, see its own section below)
 
 WinRM is the plain SOAP-over-HTTP/1.1 transport `Invoke-Command`/`winrs`/
 `Enter-PSSession`, and most pentest tooling (evil-winrm's own
@@ -9033,11 +9045,41 @@ message-level encryption (`Content-Type: multipart/encrypted`, negotiated
 when the transport auth is NTLM/Kerberos/CredSSP without TLS) -- the
 outer HTTP layer (method/status/headers/auth scheme) is still reported,
 but `has_envelope` is simply false and no SOAP field is ever populated.
-Any TLS-wrapped session at all (port 5986) -- out of scope for the same
-reason RDP's/HTTPS's own post-handshake traffic is elsewhere in this
-codebase. Full CIM/WMI query decode over DCOM -- see the DCOM section
-below for why that stayed out of scope even in its own later phase (real
-CIM/WMI query visibility lives here, in this WinRM section, instead).
+Full CIM/WMI query decode over DCOM -- see the DCOM section below for why
+that stayed out of scope even in its own later phase (real CIM/WMI query
+visibility lives here, in this WinRM section, instead).
+
+#### Port 5986 (WinRM-over-HTTPS) and ROADMAP item 150's own decryption support
+
+A TLS-wrapped session on port 5986 (`WINRM_TLS_PORT`) is, absent a usable
+key, detection only -- the same generic TLS-ClientHello recognition call
+site that labels FOXS/MQTTS also labels this `"winrms"`
+(`WinRM-over-HTTPS/TLS ClientHello`), with no `!alpn_confirms_http`
+requirement (unlike FOXS/MQTTS): an ALPN-confirmed `http/1.1` ClientHello
+on this port is still worth naming specifically rather than falling
+through to the generic `"https"` tag, since WinRM-over-HTTPS genuinely is
+ordinary HTTPS at the ALPN layer.
+
+**ROADMAP item 150 (docs/DEVELOPMENT.md): WinRM-over-HTTPS decryption via
+`--tls-keylog`/pcapng Decryption Secrets Blocks.** When a `--tls-keylog`
+file (NSS Key Log Format, RFC 9850) or a pcapng-embedded Decryption
+Secrets Block supplies the right secret for a session's own
+`ClientHello.random`, this decoder decrypts TLS 1.2 (RFC 5288/5289 GCM
+suites only) and TLS 1.3 (the three standard AEAD suites) WinRM-over-
+HTTPS sessions and feeds the recovered plaintext straight into the SAME
+cleartext WinRM SOAP/HTTP decode port 5985 already uses -- the "remote
+shell opened" note and every other field documented above fires
+identically for a decrypted TLS session as it does for a cleartext one.
+Each decrypted packet carries a `"decrypted from WinRM-over-HTTPS (TLS,
+port 5986) via --tls-keylog/pcapng DSB"` note so this is never silently
+indistinguishable from a cleartext decode in the output. CBC (TLS 1.2)
+and CCM (TLS 1.3) cipher suites, and any session captured mid-handshake
+(no `ClientHello` ever seen), stay out of scope and produce an explained,
+permanent give-up rather than a guess -- see `tls_decrypt.hpp`'s own
+file header and ROADMAP item 150's own write-up for the full scope.
+Without a key, port 5986 stays exactly as opaque as before this round --
+the same reason RDP's/HTTPS's own post-handshake traffic, absent a key,
+is elsewhere in this codebase.
 
 #### JSON output fields
 
@@ -12427,7 +12469,7 @@ regressions in both, zero-warning clean rebuilds in both. See
 `include/conduitscope/powerlink.hpp`'s own file header for the full
 field-by-field writeup.
 
-### Tridium Niagara Fox -- TCP port 1911 (cleartext), TCP port 4911 (FOXS, TLS-wrapped, detection only)
+### Tridium Niagara Fox -- TCP port 1911 (cleartext), TCP port 4911 (FOXS, TLS-wrapped; decrypted when a `--tls-keylog`/pcapng-DSB key is available, detection only otherwise)
 
 Fox is Tridium's (a Honeywell subsidiary) native station-to-station/
 workbench-to-station protocol for Niagara, one of the most widely
@@ -12587,12 +12629,31 @@ sync bytes, or any other fixed-binary-magic gate in this codebase).
 codebase's existing generic TLS-ClientHello recognition call site --
 the same one that already labels port 443 `"https"` and ports 636/3269
 `"ldaps"` -- extended to also recognize port 4911 and label it
-`"foxs"` (`FOXS/TLS ClientHello`). This is detection only: FOXS's own
-payload is TLS-encrypted, exactly as opaque to a passive capture as
-HTTPS/LDAPS-over-TLS already are elsewhere in this codebase, and the
-real, cleartext Fox decoder never runs against this port at all -- the
-same honest-scoping posture this codebase already takes for other
-TLS-wrapped-but-undecoded ports (e.g. WinRM's own port 5986).
+`"foxs"` (`FOXS/TLS ClientHello`). Absent a usable key, this is
+detection only: FOXS's own payload is TLS-encrypted, exactly as opaque
+to a passive capture as HTTPS/LDAPS-over-TLS already are elsewhere in
+this codebase.
+
+**ROADMAP item 150 (docs/DEVELOPMENT.md): FOXS decryption via
+`--tls-keylog`/pcapng Decryption Secrets Blocks.** When a `--tls-keylog`
+file (NSS Key Log Format, RFC 9850) or a pcapng-embedded Decryption
+Secrets Block supplies the right secret for a given session's own
+`ClientHello.random`, this decoder decrypts TLS 1.2 (RFC 5288/5289 GCM
+suites only) and TLS 1.3 (the three standard AEAD suites) FOXS sessions
+and feeds the recovered plaintext straight into the SAME cleartext Fox
+decoder port 1911 already uses -- the unauthenticated-hello finding
+above fires identically for a decrypted TLS session as it does for a
+cleartext one. Each decrypted packet carries a `"decrypted from FOXS
+(TLS, port 4911) via --tls-keylog/pcapng DSB"` note so this is never
+silently indistinguishable from a cleartext decode in the output. CBC
+(TLS 1.2) and CCM (TLS 1.3) cipher suites, and any session captured
+mid-handshake (no `ClientHello` ever seen), stay out of scope and
+produce an explained, permanent give-up rather than a guess -- see
+`tls_decrypt.hpp`'s own file header and ROADMAP item 150's own write-up
+for the full scope. Without a key, FOXS stays exactly as opaque as
+before this round -- the real, cleartext Fox decoder never runs against
+ciphertext it cannot decrypt, the same honest-scoping posture this
+codebase already takes for other TLS-wrapped ports.
 
 #### Explicitly out of scope
 

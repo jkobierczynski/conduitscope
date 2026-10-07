@@ -40,6 +40,7 @@
 #include "conduitscope/s7comm.hpp"
 #include "conduitscope/sv.hpp"
 #include "conduitscope/tcp.hpp"
+#include "conduitscope/tls_decrypt.hpp"
 #include "conduitscope/udp.hpp"
 #include "conduitscope/vrrp.hpp"
 #include "conduitscope/zigbee.hpp"
@@ -130,6 +131,44 @@ std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std:
     std::string ea = format_flow_endpoint(ip_a, port_a);
     std::string eb = format_flow_endpoint(ip_b, port_b);
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
+}
+
+// Attempts TLS decryption for one TLS-wrapped protocol's reassembled TCP payload (MQTTS/8883,
+// FOXS/4911, WinRM-over-HTTPS/5986 -- see tls_decrypt.hpp's own file header comment for the full
+// design, and ROADMAP item 150, docs/DEVELOPMENT.md). Shared by all three real-decode call sites
+// below so the "no key log configured / still buffering / gave up" tagging can never drift between
+// them. `key_log` is `options_.tls_key_log.get()` -- nullptr when --tls-keylog/DSB decryption was
+// never configured for this run at all, the overwhelmingly common case this function is cheap for
+// (one null check, nothing else).
+//
+// On success, returns the decrypted plaintext for the caller to feed into the matching cleartext
+// decoder (MqttDecoder/FoxDecoder/WinRmTcpDecoder) exactly as it already does for the unencrypted
+// port -- the caller is responsible for tagging out.protocol/out.summary/out.result from THAT
+// decode, the same as every existing cleartext call site already does for itself. On any other
+// outcome -- decryption isn't configured/built, this call only advanced the session's own internal
+// state (still buffering a handshake, or this was alert/ChangeCipherSpec traffic), or this session
+// already gave up -- this function tags `out` itself so the caller can simply `return out;`
+// unchanged, and returns nullopt.
+std::optional<std::vector<uint8_t>> try_tls_wrapped_decode(ByteSpan tcp_payload, bool from_client,
+                                                            DecodeContext& ctx, const TlsKeyLog* key_log,
+                                                            const char* protocol_tag, const char* display_name,
+                                                            uint16_t tls_port, DecodedPacket& out) {
+    if (!key_log || !key_log->active() || !tls_decrypt_build_supported()) return std::nullopt;
+
+    TlsSessionState& state = ctx.flow_state<TlsSessionState>();
+    auto plaintext = tls_try_decrypt(tcp_payload, from_client, state, *key_log, out.notes);
+    if (plaintext) return plaintext;
+
+    out.protocol = protocol_tag;
+    std::ostringstream s;
+    s << display_name << " over TLS (port " << tls_port << ")";
+    if (state.gave_up) {
+        s << " -- decryption unavailable for this session (see notes)";
+    } else {
+        s << " -- TLS session in progress, no application data decrypted from it yet";
+    }
+    out.summary = s.str();
+    return std::nullopt;
 }
 
 }  // namespace
@@ -3267,10 +3306,34 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 bool mqtts_port_match = port_in(tcp.src_port, MQTT_TLS_PORT, {}) ||
                                          port_in(tcp.dst_port, MQTT_TLS_PORT, {});
 
+                // --tls-keylog/DSB decryption's own "capture this session's ClientHello" step --
+                // see tls_decrypt.hpp's file header comment and try_tls_wrapped_decode's own
+                // comment above. A ClientHello alone never reveals application data (ServerHello
+                // and the keys it unlocks haven't been seen yet), so this is purely a side effect:
+                // feed tls_try_decrypt this packet's own bytes so TlsSessionState::client_random is
+                // recorded, then fall through unchanged to this block's own existing detection-only
+                // tagging below -- which still runs, since --tls-keylog being configured doesn't
+                // change what THIS packet (just a ClientHello) can be tagged as. Every later packet
+                // on this same TCP session reaches try_tls_wrapped_decode instead, at the real
+                // Fox/MQTT/WinRM decode call sites further down, where decryption actually happens.
+                auto capture_tls_client_hello = [&](uint16_t tls_port) {
+                    if (!options_.tls_key_log || !options_.tls_key_log->active() ||
+                        !tls_decrypt_build_supported()) {
+                        return;
+                    }
+                    DecodeContext tls_ctx;
+                    tls_ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+                    tls_ctx.flow_states = &registry_flow_state_;
+                    bool from_client = tcp.dst_port == tls_port;
+                    tls_try_decrypt(tcp.payload, from_client, tls_ctx.flow_state<TlsSessionState>(),
+                                     *options_.tls_key_log, out.notes);
+                };
+
                 if (want_fox_early && !alpn_confirms_http &&
                     (!require_fox_tls_port || foxs_port_match) &&
                     !(want_lateral_movement_early && https_port_match) &&
                     !(want_enterprise_trust_early && ldaps_port_match)) {
+                    if (foxs_port_match) capture_tls_client_hello(FOX_TLS_PORT);
                     out.protocol = "foxs";
                     std::ostringstream s;
                     s << "FOXS/TLS ClientHello (Tridium Niagara Fox over TLS, port 4911)";
@@ -3289,6 +3352,7 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     !(want_lateral_movement_early && https_port_match) &&
                     !(want_enterprise_trust_early && ldaps_port_match) &&
                     !(want_fox_early && foxs_port_match)) {
+                    if (mqtts_port_match) capture_tls_client_hello(MQTT_TLS_PORT);
                     out.protocol = "mqtts";
                     std::ostringstream s;
                     s << "MQTTS/TLS ClientHello (MQTT over TLS, port 8883)";
@@ -3299,6 +3363,36 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                                          "but this decoder cannot see inside it (TLS-encrypted); any "
                                          "other TLS-wrapped protocol sharing this port would look "
                                          "identical at this layer");
+                    return out;
+                }
+
+                // WinRM-over-HTTPS (port 5986) is layered into this SAME ClientHello call site --
+                // see winrm.hpp's own "WINRM_TLS_PORT" comment, the FOXS/MQTTS-mirroring shape
+                // immediately above. Detection-only absent a key-log entry for this session: a
+                // ClientHello on this port says nothing a generic HTTPS ClientHello wouldn't, since
+                // ALPN "http/1.1" on port 5986 is just as plausible for genuine WinRM-over-HTTPS as
+                // for anything else -- so, unlike FOXS/MQTTS above, this check does NOT require
+                // !alpn_confirms_http (an ALPN-confirmed WinRM-over-HTTPS ClientHello is still worth
+                // naming specifically rather than falling through to the generic "https" tag below).
+                bool require_winrm_tls_port = options_.protocol_filter == ProtocolFilter::Auto;
+                bool winrms_port_match = port_in(tcp.src_port, WINRM_TLS_PORT, {}) ||
+                                          port_in(tcp.dst_port, WINRM_TLS_PORT, {});
+                bool want_winrm_tls_early = options_.protocol_filter == ProtocolFilter::Auto ||
+                                            options_.protocol_filter == ProtocolFilter::WinRmOnly;
+                if (want_winrm_tls_early && (!require_winrm_tls_port || winrms_port_match) &&
+                    !(want_lateral_movement_early && https_port_match) &&
+                    !(want_enterprise_trust_early && ldaps_port_match)) {
+                    if (winrms_port_match) capture_tls_client_hello(WINRM_TLS_PORT);
+                    out.protocol = "winrms";
+                    std::ostringstream s;
+                    s << "WinRM-over-HTTPS/TLS ClientHello (port 5986)";
+                    if (!hello->sni.empty()) s << " (SNI: " << hello->sni << ")";
+                    out.summary = s.str();
+                    out.notes.push_back("TLS ClientHello on a standard/configured WinRM-over-HTTPS "
+                                         "port (5986) -- this decoder cannot see inside it (TLS-"
+                                         "encrypted) without a --tls-keylog/DSB entry for this "
+                                         "session; any other TLS-wrapped protocol sharing this port "
+                                         "would look identical at this layer");
                     return out;
                 }
 
@@ -3847,6 +3941,40 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // recognition specifically on WinRM's own port, without silently swallowing ordinary HTTP
         // traffic on every other port -- see winrm.hpp's own "COLLISION SURVEY" section); an
         // explicit `--protocol winrm` still tries it port-independently.
+        // WinRM-over-HTTPS (port 5986) -- the same decrypt-then-feed-to-the-cleartext-decoder shape
+        // FOXS/MQTTS get (see that first comment, above the Fox cleartext check, for the full
+        // design). Tried before the cleartext WINRM_PORT (5985) check below, since the two ports
+        // never overlap.
+        bool candidate_port_is_winrms = port_in(tcp.src_port, WINRM_TLS_PORT, {}) ||
+                                         port_in(tcp.dst_port, WINRM_TLS_PORT, {});
+        if (want_winrm && candidate_port_is_winrms) {
+            DecodeContext tls_ctx;
+            tls_ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            tls_ctx.flow_states = &registry_flow_state_;
+            bool from_client = tcp.dst_port == WINRM_TLS_PORT;
+            if (auto plaintext = try_tls_wrapped_decode(effective_payload, from_client, tls_ctx,
+                                                         options_.tls_key_log.get(), "winrms", "WinRM",
+                                                         WINRM_TLS_PORT, out)) {
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "winrm";
+                ctx.flow_states = &registry_flow_state_;
+                ctx.redact_secrets = options_.redact_secrets;
+                ByteSpan plaintext_span(plaintext->data(), plaintext->size());
+                if (auto result = winrm_tcp_decoder().decode(plaintext_span, ctx)) {
+                    const WinRmMessage& wm = result->as<WinRmMessage>();
+                    out.protocol = "winrm";
+                    out.summary = wm.summary;
+                    for (const auto& n : wm.notes) out.notes.push_back(n);
+                    out.result = *result;
+                    out.notes.push_back("decrypted from WinRM-over-HTTPS (TLS, port 5986) via "
+                                         "--tls-keylog/pcapng DSB");
+                }
+                return out;
+            }
+            if (out.protocol == "winrms") return out;  // try_tls_wrapped_decode already tagged it.
+        }
+
         bool require_winrm_port = options_.protocol_filter == ProtocolFilter::Auto;
         bool candidate_port_is_winrm = port_in(tcp.src_port, WINRM_PORT, options_.extra_winrm_ports) ||
                                         port_in(tcp.dst_port, WINRM_PORT, options_.extra_winrm_ports);
@@ -4041,6 +4169,43 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         // AMQP/DICOM established -- out.result carries the whole FoxResult, JsonWriter renders
         // from it (output.cpp's write_fox_json_fields), TextWriter/CsvWriter from out.summary/
         // out.notes generically.
+        // FOXS (Fox-over-TLS, port 4911) -- tried BEFORE the cleartext check below, since its own
+        // port (4911) never overlaps FOX_PORT (1911): a --tls-keylog/DSB entry for this session
+        // lets this codebase decrypt it and hand the revealed plaintext to the SAME FoxDecoder
+        // cleartext would use, rather than only ever tagging it opaque (see this file's own early
+        // ClientHello-detection block above, and tls_decrypt.hpp's file header comment, for the
+        // full design). Absent a usable key (the common case: tls_key_log unset, or this specific
+        // session has no matching entry), try_tls_wrapped_decode tags `out` itself and this falls
+        // through unchanged to the cleartext FOX_PORT check -- which never matches port 4911
+        // anyway, so this costs one extra `if` on every Fox-port-independent packet otherwise.
+        bool candidate_port_is_foxs = port_in(tcp.src_port, FOX_TLS_PORT, {}) ||
+                                       port_in(tcp.dst_port, FOX_TLS_PORT, {});
+        if (want_fox && candidate_port_is_foxs) {
+            DecodeContext tls_ctx;
+            tls_ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            tls_ctx.flow_states = &registry_flow_state_;
+            bool from_client = tcp.dst_port == FOX_TLS_PORT;
+            if (auto plaintext = try_tls_wrapped_decode(effective_payload, from_client, tls_ctx,
+                                                         options_.tls_key_log.get(), "foxs", "Fox",
+                                                         FOX_TLS_PORT, out)) {
+                DecodeContext ctx;
+                ctx.packet_index = index;
+                ctx.protocol_id = "fox";
+                ctx.flow_states = &registry_flow_state_;
+                ByteSpan plaintext_span(plaintext->data(), plaintext->size());
+                if (auto result = fox_tcp_decoder().decode(plaintext_span, ctx)) {
+                    const FoxResult& fr = result->as<FoxResult>();
+                    out.protocol = "fox";
+                    out.summary = fr.summary;
+                    for (const auto& n : fr.notes) out.notes.push_back(n);
+                    out.result = *result;
+                    out.notes.push_back("decrypted from FOXS (TLS, port 4911) via --tls-keylog/pcapng DSB");
+                }
+                return out;
+            }
+            if (out.protocol == "foxs") return out;  // try_tls_wrapped_decode already tagged it.
+        }
+
         bool require_fox_port = options_.protocol_filter == ProtocolFilter::Auto;
         bool candidate_port_is_fox = port_in(tcp.src_port, FOX_PORT, options_.extra_fox_ports) ||
                                       port_in(tcp.dst_port, FOX_PORT, options_.extra_fox_ports);
@@ -4421,6 +4586,44 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
              port_in(tcp.src_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports) ||
              port_in(tcp.dst_port, LDAP_GC_PORT, options_.extra_enterprise_trust_ports)) &&
             looks_like_ldap_ber(effective_payload);
+        // MQTTS (MQTT-over-TLS, port 8883) -- the same decrypt-then-feed-to-the-cleartext-decoder
+        // shape FOXS/WinRM-over-HTTPS get (see the comment above the Fox cleartext check for the
+        // full design). Tried before the cleartext MQTT_PORT (1883) check below, since the two
+        // ports never overlap; deliberately NOT gated on effective_payload_is_ftp_control/
+        // effective_payload_is_ldap the way the cleartext check below is -- those are collisions
+        // against MQTT's own weak structural gate running directly against ciphertext bytes, which
+        // is irrelevant here (this block only ever runs MqttDecoder against DECRYPTED plaintext).
+        bool candidate_port_is_mqtts = port_in(tcp.src_port, MQTT_TLS_PORT, {}) ||
+                                        port_in(tcp.dst_port, MQTT_TLS_PORT, {});
+        if (want_mqtt && candidate_port_is_mqtts) {
+            DecodeContext tls_ctx;
+            tls_ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            tls_ctx.flow_states = &registry_flow_state_;
+            bool from_client = tcp.dst_port == MQTT_TLS_PORT;
+            if (auto plaintext = try_tls_wrapped_decode(effective_payload, from_client, tls_ctx,
+                                                         options_.tls_key_log.get(), "mqtts", "MQTT",
+                                                         MQTT_TLS_PORT, out)) {
+                std::string mqtts_session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+                DecodeContext ctx;
+                ctx.session_key = mqtts_session_key;
+                ctx.packet_index = index;
+                ctx.protocol_id = "mqtt";
+                ctx.flow_states = &registry_flow_state_;
+                ctx.redact_secrets = options_.redact_secrets;
+                ByteSpan plaintext_span(plaintext->data(), plaintext->size());
+                if (auto mqtt_result = mqtt_decoder().decode(plaintext_span, ctx)) {
+                    const MqttResult& mr = mqtt_result->as<MqttResult>();
+                    out.protocol = "mqtt";
+                    out.summary = mr.summary;
+                    for (const auto& n : mr.notes) out.notes.push_back(n);
+                    out.result = *mqtt_result;
+                    out.notes.push_back("decrypted from MQTTS (TLS, port 8883) via --tls-keylog/pcapng DSB");
+                }
+                return out;
+            }
+            if (out.protocol == "mqtts") return out;  // try_tls_wrapped_decode already tagged it.
+        }
+
         if (want_mqtt && !effective_payload_is_ftp_control && !effective_payload_is_ldap) {
             // Migration batch 2: the session-version-hint lookup/learning and the same-payload
             // multi-message coalescing loop that used to live directly in this call site are now

@@ -296,6 +296,7 @@ flag on `decode`; see `info` below.
 | `--nn` | off (i.e. service-name resolution on by default) | Disable service name (port -> name) resolution, from the built-in table and `--services` alike. Named after the `nc`/`nmap`/`tcpdump`-family `-n`/`-nn` "don't resolve names" convention. See OUTPUT FORMATS' "Name resolution" subsection below. |
 | `--services FILE` | *(none)* | Unix `/etc/services`-style file to supplement/override the built-in port->service-name table. Must exist. |
 | `--s7plus-symbols FILE` | *(none)* | Resolve S7comm-Plus native symbolic item addresses (Symbol CRC + LID chain) to human-readable tag names in `--format json`'s `s7plus_items` (and anything that reuses it, e.g. `-V`/`-T fields -e s7plus_items`), from a simple hand-rolled text lookup table the operator supplies -- this tool cannot compute the CRC itself. Must exist. See docs/PROTOCOL_COVERAGE.md's S7comm-Plus section. |
+| `--tls-keylog FILE` | *(none)* | Decrypt MQTTS (port 8883)/FOXS (port 4911)/WinRM-over-HTTPS (port 5986) sessions using an NSS Key Log Format file (the same file a browser or TLS library writes when the `SSLKEYLOGFILE` environment variable is set -- RFC 9850), in addition to any pcapng Decryption Secrets Blocks already embedded in the capture itself. Must exist. TLS 1.2 (RFC 5288/5289 GCM suites only) and TLS 1.3 (its three standard AEAD suites) are both supported; see the "TLS decryption" subsection below and docs/PROTOCOL_COVERAGE.md's MQTT/Fox/WinRM sections for the exact scope. A session with no matching key stays exactly as opaque as it always was -- this flag only ever reveals traffic a key for it was actually supplied for. Also accepted by `policy validate`, `inventory`, `detect`, `baseline learn`, `baseline check`, and `evidence`, with the identical meaning. |
 | `--max-reassembly-bytes N` | `0` (leave every site at its own default) | Override every cross-segment payload-buffering byte cap at once: the general TCP reassembly path (default 16 MiB), DNP3 fragment reassembly (default 64 KiB), COTP TSDU reassembly (default 1 MiB), OPC UA's/FF-HSE's own declared-length plausibility ceiling (default 16 MiB each), and IPv4/IPv6 fragment reassembly's own per-datagram ceiling (default 65,535 bytes). See docs/DEVELOPMENT.md item 7 for the full constant-by-constant mapping. |
 | `--max-reassembly-segments N` | `0` (leave every site at its own default) | Override every cross-segment frame/segment-count cap at once: the general TCP reassembly path (default 20,000 segments), DNP3 fragment reassembly (default 500 frames), COTP TSDU reassembly (default 2,000 frames), and IPv4/IPv6 fragment reassembly's own per-datagram fragment-count ceiling (default 8,192 fragments). |
 | `--max-recursion-depth N` | `0` (leave every site at its own default) | Override every recursive-decode depth cap at once: MMS Data-value nesting (default 32), EtherNet/IP CIP Multiple_Service_Packet/Unconnected_Send nesting (default 4), MPLS label-stack depth (default 16), S7comm-Plus struct/item nesting (default 16), and GOOSE Data ASN.1 nesting (default 6). |
@@ -312,6 +313,48 @@ adversarial or malformed capture, never a capture's total size. `policy validate
 names, same defaults, same underlying option-registration code) even though
 their own OPTIONS tables below don't all spell out every one individually --
 see each subcommand's own `--help` output for its authoritative list.
+
+### TLS decryption (`--tls-keylog`, ROADMAP item 150)
+
+MQTTS (TCP port 8883), FOXS (TCP port 4911, Tridium Niagara Fox over TLS), and
+WinRM-over-HTTPS (TCP port 5986) are, absent a key, detection only: this tool
+recognizes and labels the ClientHello (`mqtts`/`foxs`/`winrms`, with the SNI
+hostname if present) but cannot see one byte of what follows it -- TLS is
+TLS, and this tool doesn't perform a man-in-the-middle interception of its
+own. `--tls-keylog FILE` changes that when the right key material is
+available: it decrypts a session and feeds the recovered plaintext straight
+into the SAME cleartext decoder the unencrypted port already uses (`decode
+--read capture.pcapng --tls-keylog keys.txt`), so every finding/note/field
+that decoder already produces for cleartext traffic -- MQTT's CONNECT
+credential decode, WinRM's "remote shell opened" note, Fox's unauthenticated-
+hello finding -- fires identically for a decrypted session. Every decrypted
+packet carries an explicit `"decrypted from <protocol> (TLS, port <N>) via
+--tls-keylog/pcapng DSB"` note, so a decrypted result is never silently
+indistinguishable from a cleartext one in the output.
+
+Two independent sources of key material are supported, and can be used
+together: `--tls-keylog FILE` points at an NSS Key Log Format file (RFC
+9850) -- the same `SSLKEYLOGFILE` a browser or most TLS libraries write when
+that environment variable is set at the client, which an operator captures
+alongside the pcap specifically to enable this. Separately, and without any
+CLI flag at all, a pcapng Decryption Secrets Block (the same thing Wireshark
+writes into a `.pcapng` file when `SSLKEYLOGFILE` was set during a `dumpcap`/
+`tshark`-driven capture) already embedded in the capture file is parsed and
+used automatically -- `--tls-keylog` is not required to benefit from a
+capture that already carries its own secrets.
+
+Scope: TLS 1.2 (RFC 5288/5289 GCM cipher suites only) and TLS 1.3 (its three
+standard AEAD cipher suites) are supported. TLS 1.2 CBC suites, TLS 1.3's two
+CCM-based AEAD suites, a session whose true first ClientHello wasn't captured
+(there is then no `ClientHello.random` to match a key-log line against), and
+post-handshake `KeyUpdate` (key rotation mid-session) all produce an explicit,
+permanent give-up for that session -- named in the notes -- rather than a
+guess or a crash. OPC UA's own Sign/Encrypt security mode is a completely
+separate, non-TLS, OPC-UA-specific message-level security layer and is
+entirely unaddressed by `--tls-keylog` -- an encrypted OPC UA session stays
+exactly as opaque as it always was. See docs/PROTOCOL_COVERAGE.md's MQTT,
+Fox, and WinRM sections, and `include/conduitscope/tls_decrypt.hpp`'s own
+file header, for the full design and scope.
 
 ### Display filters (`-Y`)
 
@@ -7037,12 +7080,32 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
 - **A handful of rare/obsolete pcapng block types are skipped, not decoded.**
   Specifically the obsolete "Packet Block" (superseded by the Enhanced Packet
   Block industry-wide in the mid-2000s), Interface Statistics Blocks, Name
-  Resolution Blocks, Decryption Secrets Blocks, and any custom/vendor block
-  type. No packets are lost from a file written by any mainstream capture
-  tool (dumpcap, Wireshark, tshark all use the Enhanced Packet Block); this
-  only matters for a file from an unusual/legacy writer, and even then only
-  means `conduitscope info`'s packet count would read lower than an external
-  tool's for that specific file. See "pcap vs. pcapng" above.
+  Resolution Blocks, and any custom/vendor block type. No packets are lost
+  from a file written by any mainstream capture tool (dumpcap, Wireshark,
+  tshark all use the Enhanced Packet Block); this only matters for a file
+  from an unusual/legacy writer, and even then only means `conduitscope
+  info`'s packet count would read lower than an external tool's for that
+  specific file. See "pcap vs. pcapng" above. Decryption Secrets Blocks are
+  no longer in this skipped list as of ROADMAP item 150 (docs/DEVELOPMENT.md)
+  -- a TLS-typed one is now parsed and fed into the same key material
+  `--tls-keylog` supplies; see the "TLS decryption" subsection below.
+- **`--tls-keylog`/pcapng-DSB TLS decryption (MQTTS/FOXS/WinRM-over-HTTPS)
+  covers TLS 1.2 RFC 5288/5289 GCM suites and TLS 1.3's three standard AEAD
+  suites only.** TLS 1.2 CBC suites and TLS 1.3's two CCM-based AEAD suites
+  are out of scope and produce an explained, permanent give-up for that
+  session (the notes name the negotiated cipher suite) rather than a guess.
+  Post-handshake `KeyUpdate` (RFC 8446 §4.6.3) is likewise a permanent
+  give-up for that session's remaining traffic -- key rotation is not
+  followed. A session whose true first `ClientHello` wasn't captured (the
+  capture starts mid-session) can never be decrypted even with the right
+  key-log entry, since there is no `ClientHello.random` to match a key-log
+  line against -- a structural limitation of the key-log/DSB mechanism
+  itself. OPC UA's own Sign/Encrypt security mode is a completely separate,
+  non-TLS, OPC-UA-specific message-level security layer and is entirely
+  unaddressed by this feature -- an encrypted OPC UA session stays as
+  opaque as before regardless of `--tls-keylog`. See
+  docs/PROTOCOL_COVERAGE.md's MQTT/Fox/WinRM sections and
+  `tls_decrypt.hpp`'s own file header for the full scope.
 - **`decode -T zeek`'s conn.log export covers TCP/UDP only, and leaves
   seven of Zeek's own 21 `Conn::Info` fields unset.** ICMP and every other
   non-TCP/UDP IP protocol produce no row at all (no ready substitute for

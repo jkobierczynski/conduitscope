@@ -19869,6 +19869,180 @@ it done as its own patch.
     fix is precisely scoped rather than masking unrelated decode problems. Delivered as a zip of
     touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
 
+150. **TLS key-log / pcapng Decryption Secrets Block support for MQTTS/FOXS/WinRM-over-HTTPS.**
+    Jurgen's own framing: "pcapng Decryption Secrets Blocks are skipped. OPC UA, MQTT, Niagara Fox
+    (FOXS), and WinRM are increasingly encrypted. Without key-log / secrets-block handling, modern
+    'secure' OT sessions are opaque to both inventory and baseline." Before this round, every TLS-
+    wrapped session on these three protocols' own TLS ports was detection-only: `decoder.cpp`
+    could recognize a ClientHello as "most likely FOXS/MQTTS/WinRM-over-HTTPS" (SNI/ALPN
+    permitting) but could never see one byte of what followed it, and every pcapng Decryption
+    Secrets Block (DSB) a capture tool like Wireshark already knows how to write was silently
+    skipped by `pcap_reader.cpp`'s own block-type switch. Jurgen confirmed scope via
+    `AskUserQuestion` before any code was written: OpenSSL as a new dependency (not mbedTLS, not
+    extending the hand-rolled `aes128.hpp`/`hkdf.hpp` quartet -- item 139/patch295 finding F7
+    already forbids that); MQTTS (8883)/WinRM-over-HTTPS (5986)/FOXS (4911), with OPC UA's own
+    Sign/Encrypt security mode (a separate, non-TLS, OPC-UA-specific security layer) explicitly
+    deferred to its own future item, not designed or implemented here; both a new `--tls-keylog
+    FILE` option (NSS Key Log Format / `SSLKEYLOGFILE`, RFC 9850) and parsing pcapng-embedded DSBs;
+    and both TLS 1.2 (RFC 5288/5289 GCM suites only -- CBC out of scope) and TLS 1.3 (the three
+    standard AEAD suites -- the two CCM variants out of scope).
+
+    **Design.** Two new files carry essentially all of the new logic. `tls_keylog.hpp`/`.cpp`
+    parse NSS Key Log Format lines (`CLIENT_RANDOM`/`CLIENT_HANDSHAKE_TRAFFIC_SECRET`/
+    `SERVER_HANDSHAKE_TRAFFIC_SECRET`/`CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0`, plus
+    recognizing-but-not-storing the ECH/exporter/early-traffic labels this decoder has no use for)
+    into a `TlsKeyLog` keyed by the 32-byte `ClientHello.random` every label line carries, fed from
+    either source (`--tls-keylog` file content, or DSB bytes drained mid-run) through the exact
+    same `ingest()` entry point so neither source is treated as more authoritative than the other.
+    `tls_decrypt.hpp`/`.cpp` hold the actual per-session state machine and crypto: `TlsSessionState`
+    (a `DecoderFlowState`, session-keyed like `FlowStateKeying::Session` rather than per-direction,
+    since `client_random`/`server_random`/negotiated cipher suite are properties of the SESSION, not
+    either direction alone) tracks hello-random capture, TLS 1.2-vs-1.3 detection (the
+    `supported_versions` extension), key derivation (RFC 5246 §6.3's `PRF(master_secret, "key
+    expansion", server_random+client_random)` for TLS 1.2; RFC 8446 §7.1's
+    `HKDF-Expand-Label`/`Derive-Secret` for TLS 1.3), per-direction AEAD state (write key/IV,
+    sequence number, and -- TLS 1.3 only -- a `TlsEpoch` that flips from Handshake to Application
+    the moment that direction's own decrypted stream reveals ITS OWN Finished message, per RFC 8446
+    §5.1/§5.3: every post-ServerHello record carries outer ContentType `application_data`
+    regardless of whether it's still encrypted handshake or genuine app data, so only decrypting
+    reveals which), and a HelloRetryRequest check (RFC 8446 §4.1.3's fixed 32-byte ServerHello.random
+    constant) so a real HRR round-trip doesn't get mistaken for garbage or a second, unrelated
+    session. All AEAD work (AES-128/256-GCM, ChaCha20-Poly1305) and HKDF/HMAC-PRF work goes through
+    OpenSSL's EVP API, per the confirmed crypto-approach decision -- no new hand-rolled primitive
+    anywhere in this feature. A session with no matching key-log entry, an unsupported cipher suite
+    (TLS 1.2 CBC, TLS 1.3 CCM, or anything this build's own two lookup tables don't name), a
+    ServerHello observed with no prior ClientHello in the same capture (a capture starting
+    mid-session), or a post-handshake KeyUpdate (RFC 8446 §4.6.3 -- key rotation this round
+    deliberately doesn't follow) all produce a permanent, explained give-up for that session rather
+    than a crash, a silent wrong answer, or a retry loop.
+
+    `pcap_reader.hpp`/`.cpp` gained DSB parsing (block type `0x0000000A`; `SECRETS_TYPE_TLS =
+    0x544c534b`, "TLSK", the only secrets type this round acts on) and a new
+    `take_pending_decryption_secrets()` accessor mirroring the shape `PacketSource` already needed
+    to expose for live-capture statistics -- a malformed/truncated DSB is skipped, never thrown, the
+    same tolerant posture every other pcapng block type here already takes. `decoder.hpp` gained
+    `DecodeOptions::tls_key_log` as a `std::shared_ptr<TlsKeyLog>` rather than a plain value --
+    deliberate: `cli_main.cpp` mutates the SAME shared object between `decode()` calls as new DSBs
+    are discovered mid-read, while `Decoder::decode()` itself only ever reads from it (a `const`
+    reference internally). `decoder.cpp` gained one shared `try_tls_wrapped_decode()` helper (so the
+    "no key configured / still buffering / gave up" tagging logic can never drift between the three
+    call sites) and three new real-decode blocks -- one each for Fox/WinRM/MQTT -- each placed
+    immediately before its cleartext port's own existing real-decode block (the TLS and cleartext
+    ports never overlap, so this costs one extra `if` per opportunistically-tried packet and nothing
+    else); on success, the decrypted plaintext is fed straight into the SAME `FoxDecoder`/
+    `WinRmTcpDecoder`/`MqttDecoder` the cleartext ports already use, so every existing finding/
+    note/field those decoders produce (the Fox unauthenticated-hello finding, WinRM's "remote shell
+    opened" note, MQTT's own CONNECT/PUBLISH decode) now fires identically for a decrypted TLS
+    session. A new `capture_tls_client_hello` side-effect-only call, layered into the existing
+    detection-only ClientHello block, captures each session's own `client_random` the moment its
+    ClientHello is seen (a lone ClientHello alone never yields plaintext -- ServerHello and the keys
+    it unlocks haven't arrived yet -- so this purely advances `TlsSessionState`, then falls through
+    unchanged to that block's existing "FOXS/MQTTS/WinRM-over-HTTPS ClientHello" detection-only
+    tagging). `cli_main.cpp` threads a `--tls-keylog FILE` option and a shared `TlsKeyLog` instance
+    through every subcommand that reads packets (`decode`/`policy validate`/`inventory`/`detect`/
+    `baseline learn`/`baseline check`/`evidence`), draining newly-discovered DSBs into it once per
+    packet via a new `drain_tls_decryption_secrets<Source>()` template (templated, not a plain
+    overload, because `PacketSource` and `PcapReader` -- `baseline learn`/`check` and `evidence`
+    read files directly, with no `PacketSource` wrapper -- share the identical
+    `take_pending_decryption_secrets()` method shape but no common base class to write a single
+    signature against). `evidence`'s own four independent per-engine decode passes over the same
+    capture share one `TlsKeyLog` (a DSB discovered in an earlier pass is already available to a
+    later one; re-ingesting the same DSB bytes more than once is harmless, since `ingest()` is
+    idempotent per `client_random`). `fox.hpp`/`mqtt.hpp` already named `FOX_TLS_PORT`/
+    `MQTT_TLS_PORT` from their own earlier detection-only work; `winrm.hpp` gained the matching
+    `WINRM_TLS_PORT = 5986` constant this round (previously documented as "deliberately out of
+    scope").
+
+    **What was done.** New: `include/conduitscope/tls_keylog.hpp`, `src/tls_keylog.cpp`,
+    `include/conduitscope/tls_decrypt.hpp`, `src/tls_decrypt.cpp`. Modified: `pcap_reader.hpp`/
+    `.cpp` (DSB parsing), `decoder.hpp` (`DecodeOptions::tls_key_log`), `decoder.cpp`
+    (`try_tls_wrapped_decode`, `capture_tls_client_hello`, the three new real-decode blocks),
+    `winrm.hpp` (`WINRM_TLS_PORT`), `cli_main.cpp` (`--tls-keylog` on all seven packet-reading
+    subcommands, `drain_tls_decryption_secrets<Source>()`, a new `TlsKeyLogError` catch clause
+    alongside each subcommand's existing ones), `CMakeLists.txt` (new `src/tls_keylog.cpp`/
+    `src/tls_decrypt.cpp` sources; a new `CONDUITSCOPE_ENABLE_TLS_DECRYPT` option, default `ON`,
+    mirroring `CONDUITSCOPE_ENABLE_LIVE_CAPTURE`'s own `find_package`-then-degrade-gracefully
+    shape exactly -- `CONDUITSCOPE_HAVE_OPENSSL` compiled in and `OpenSSL::Crypto` linked when
+    found, a stub `tls_try_decrypt()` that gives up with a clear "compiled without OpenSSL" reason
+    otherwise; 10 new CTest entries), `tools/make_sample_pcap.py` (a new `pcapng_dsb()` block
+    builder, for any future fixture that wants one). New, deliberately separate from
+    `make_sample_pcap.py`: `tools/gen_tls_decrypt_fixtures.py`, which generates the 5 new test
+    fixtures below -- see its own file header for why it depends on the `cryptography` package
+    rather than keeping `make_sample_pcap.py`'s stdlib-only promise (producing ciphertext this
+    engine can actually decrypt means real AES-GCM/ChaCha20-Poly1305 under real HKDF/PRF-derived
+    keys; hand-rolling an AEAD cipher in pure Python purely to dodge a test-only dependency would
+    be exactly the kind of "reinvent a primitive instead of reusing a trusted one" mistake this
+    round's own OpenSSL-over-hand-rolled-crypto decision already rejected).
+
+    **Test fixtures (all real TLS sessions -- genuine HKDF/PRF-derived keys, genuine AEAD
+    ciphertext, not an approximation of one).** `tests/sample_tls_mqtts.pcap` (+
+    `sample_tls_mqtts_keylog.txt`): TLS 1.3, `TLS_AES_128_GCM_SHA256`, a real MQTT v3.1.1
+    CONNECT/CONNACK as the decrypted app data. `tests/sample_tls_winrms.pcap` (+
+    `sample_tls_winrms_keylog.txt`): TLS 1.2, `TLS_RSA_WITH_AES_256_GCM_SHA384`, a real
+    WS-Management Create request/response (the "remote shell opened" finding) as the app data.
+    `tests/sample_tls_foxs.pcap` (+ `sample_tls_foxs_keylog.txt`): TLS 1.3,
+    `TLS_CHACHA20_POLY1305_SHA256`, a real Fox `hello` request/reply as the app data.
+    `tests/sample_tls_dsb.pcapng`: a second, independent MQTTS session (its own fresh
+    `client_random`/keys) with its secrets embedded as an in-capture pcapng DSB instead of an
+    external keylog file -- decodes correctly with NO `--tls-keylog` flag at all.
+    `tests/sample_tls_unsupported_cipher.pcap` (+ its own keylog): a TLS 1.2 session negotiating a
+    CBC suite (`0xC013`) WITH a matching keylog entry present, proving the give-up reason genuinely
+    names the unsupported cipher suite rather than merely "no matching key" (the much simpler,
+    much more easily accidentally satisfied condition every other fixture's own `--tls-keylog`-
+    omitted case exercises instead).
+
+    **Left open, documented honestly rather than silently dropped.** OPC UA's own Sign/Encrypt
+    security mode is NOT TLS at all -- a separate, OPC-UA-specific message-level security layer --
+    and remains completely unaddressed by this round, exactly as scoped going in; it needs its own
+    future item, not a bolt-on here. TLS 1.2 CBC suites and TLS 1.3's two CCM-based AEAD suites stay
+    unsupported, per the confirmed scope (CBC in particular because this decoder has no MAC-then-
+    decrypt/padding-oracle-hardened implementation to reuse or justify building for a test/analysis
+    tool). Post-handshake `KeyUpdate` (RFC 8446 §4.6.3) is a permanent give-up for that session's
+    remaining traffic, not followed -- real-world OT-protocol sessions over TLS are generally short-
+    lived request/response exchanges, not the long-lived connections key rotation exists for, so this
+    is judged low-impact, but it is a real, documented gap. A capture that begins mid-session (the
+    true first ClientHello was never captured) can never be decrypted even with the right key-log
+    entry, since there is no `client_random` to match against -- a structural limitation of the
+    key-log/DSB mechanism itself, not something this implementation could work around. No real-world
+    capture exercises any of this feature (none of this project's existing real-capture fixtures
+    carry a `--tls-keylog`-equivalent artifact) -- every test here is synthetic-but-cryptographically-
+    real, not independently-sourced validation.
+
+    **Docs.** `docs/PROTOCOL_COVERAGE.md`'s MQTT, Fox, and WinRM sections each gained a paragraph
+    describing the new TLS-decryption capability, its scope, and a pointer to this item.
+    `docs/USER_GUIDE.md` gained the `--tls-keylog` option under a new "TLS decryption" heading and a
+    LIMITATIONS note (CBC/CCM suites, OPC UA Sign/Encrypt, KeyUpdate, mid-session-start captures).
+    `docs/MANUAL.md` was NOT touched, per Jurgen's standing instruction.
+
+    **Verification.** `tls_keylog.cpp`/`tls_decrypt.cpp` were each independently standalone-compiled
+    (`g++ -std=c++17 -Wall -Wextra`, with and without `-DCONDUITSCOPE_HAVE_OPENSSL`) before being
+    wired into the real build, zero warnings either way. `tls_decrypt.cpp`'s own correctness was
+    verified against FOUR independent Python (`cryptography` library)-generated test harnesses
+    before any CTest fixture existed: a full TLS 1.3 AES-128-GCM handshake end to end (including the
+    epoch-transition notes); TLS 1.2 AES-128-GCM and AES-256-GCM; TLS 1.3 ChaCha20-Poly1305; and an
+    edge-case harness (no matching key-log entry, a HelloRetryRequest round-trip, and the
+    unsupported-cipher-suite give-up reason specifically, which the first version of that last case
+    got wrong by constructing an empty keylog -- masking the cipher-suite check behind the simpler
+    "no matching entry" one -- caught and fixed by re-reading the harness's own output critically
+    before trusting it). The 10 new CTest entries listed above then proved the SAME capability
+    through the real `decoder.cpp`/`cli_main.cpp` pipeline end to end (ClientHello detection,
+    key-log/DSB-driven decryption, TLS 1.3 epoch transition, and the decrypted plaintext actually
+    reaching `MqttDecoder`/`WinRmTcpDecoder`/`FoxDecoder` and producing their own existing
+    findings/notes), not just `tls_decrypt.cpp`'s own standalone unit-level correctness a second
+    time. Every new/changed CTest regex was confirmed against the real rebuilt binary's actual
+    output before being finalized. Full default-build CTest suite: 2564/2564 passing (2554 + 10 new),
+    zero regressions. Clang ASan/UBSan `build-fuzz`: 2642/2642 passing (2632 + 10 new, 301.62s real
+    time). `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2546/2546 passing (2536 + 10
+    new) -- confirming this feature is fully independent of live-capture support, as its own CMake
+    option block implies. MinGW cross-compile `build-mingw`: builds clean with
+    `CONDUITSCOPE_HAVE_OPENSSL` undefined (no MinGW-targeted OpenSSL package exists in this sandbox,
+    confirmed during scoping) -- the stub `tls_try_decrypt()` path compiles and links correctly, so
+    a Windows build of this tool degrades to "TLS decryption unavailable, explained clearly at
+    runtime" rather than failing to build at all; test EXECUTION remains environmentally impossible
+    in this Linux sandbox (Windows `.exe` binaries can't run here), matching this project's
+    established build-only verification posture for this config from items 145-149. Delivered as a
+    zip of touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

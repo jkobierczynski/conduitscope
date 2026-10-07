@@ -67,6 +67,7 @@
 #include "conduitscope/resolver.hpp"
 #include "conduitscope/rotating_pcap_writer.hpp"
 #include "conduitscope/time_format.hpp"
+#include "conduitscope/tls_keylog.hpp"
 #include "conduitscope/version.hpp"
 
 namespace {
@@ -443,6 +444,14 @@ public:
     // anything on it except stop() from a signal handler.
     LiveCapture* live_ptr() const { return capture_.get(); }
 
+    // ROADMAP item 150 -- forwards PcapReader::take_pending_decryption_secrets (pcap_reader.hpp)
+    // for an offline source; always empty for a live one (DSBs are an offline pcapng-only concept
+    // -- a live interface has no pcapng file to embed one in). See drain_tls_decryption_secrets
+    // below, the one thing that ever calls this.
+    std::vector<PendingDecryptionSecret> take_pending_decryption_secrets() {
+        return reader_ ? reader_->take_pending_decryption_secrets() : std::vector<PendingDecryptionSecret>{};
+    }
+
 private:
     std::unique_ptr<PcapReader> reader_;
     size_t file_position_ = 0;
@@ -452,6 +461,26 @@ private:
     std::unique_ptr<BpfFilter> file_filter_;
     std::optional<PacketRangeSpec> range_filter_;
 };
+
+// ROADMAP item 150 -- drains whatever pcapng Decryption Secrets Blocks `source` has seen since the
+// last drain (see PendingDecryptionSecret, pcap_reader.hpp) and merges every TLS-typed one into
+// `key_log`. Shared by every subcommand's own packet loop below that accepts --tls-keylog, so the
+// exact "which secrets_type do we act on" decision (kPcapngSecretsTypeTls -- any other type, e.g. a
+// future WireGuard/Zigbee one, is left for a caller that cares about it to add) can never drift
+// between them. A template, not an overload set, because PacketSource and PcapReader (baseline
+// learn/check and evidence read files directly, with no PacketSource wrapper -- see those
+// functions) share the identical take_pending_decryption_secrets() method shape but no common base
+// class to write a single non-template signature against. Cheap to call unconditionally on every
+// iteration of every loop it's added to: the overwhelmingly common case (no DSBs in this capture)
+// costs one empty-vector move.
+template <typename Source>
+void drain_tls_decryption_secrets(Source& source, TlsKeyLog& key_log) {
+    for (const PendingDecryptionSecret& secret : source.take_pending_decryption_secrets()) {
+        if (secret.secrets_type == kPcapngSecretsTypeTls) {
+            key_log.ingest(std::string(secret.data.begin(), secret.data.end()));
+        }
+    }
+}
 
 std::atomic<LiveCapture*> g_active_capture{nullptr};
 // Whether the run currently under a SigintGuard has ANSI color output enabled -- set by
@@ -1325,6 +1354,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
                 bool service_names_enabled, const std::string& services_path,
                 const std::string& symbol_table_path, bool show_vlan,
+                const std::string& tls_keylog_path,
                 const std::string& time_format, const std::string& time_offset,
                 std::ostream& diag, bool show_direction, bool show_mac,
                 const std::vector<std::string>& fields, const std::string& write_path, bool hex_dump,
@@ -1540,6 +1570,16 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         // caught alongside ResolverError below); an empty symbol_table_path is a harmless no-op,
         // see SymbolTable::active()'s own comment.
         SymbolTable symbol_table(symbol_table_path);
+        // ROADMAP item 150 -- a deliberately broader precedent than SymbolTable/Resolver just
+        // above: this shared_ptr is handed into `options` below (read by Decoder::decode() itself,
+        // not just output rendering -- see DecodeOptions::tls_key_log's own comment, decoder.hpp)
+        // AND kept mutable here, growing across the packet loop below as pcapng Decryption Secrets
+        // Blocks are discovered (see drain_tls_decryption_secrets's own comment, above
+        // PacketSource). An empty tls_keylog_path is a harmless no-op -- TlsKeyLog::active()'s own
+        // comment -- the same posture symbol_table_path/hosts_path/services_path already have.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
+        options.tls_key_log = tls_key_log;
 
         PacketSource source = open_packet_source(input, interface_name, snaplen, promiscuous, filter,
                                                    duration_seconds, max_packets);
@@ -1630,6 +1670,7 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
                 // Wireshark's own display-filter numbering), rather than renumbering from 1 within
                 // just the matches; see PacketSource::next()'s own comment.
                 size_t index = source.index();
+                drain_tls_decryption_secrets(source, *tls_key_log);
                 // -w/--write passthrough stays PRE-filter, deliberately: it is raw capture
                 // passthrough governed by -f/--filter only (see that flag's own doc text above),
                 // not by -Y/--display-filter -- a decode-fidelity-dependent, later-stage concept.
@@ -1788,6 +1829,9 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
     } catch (const SymbolTableError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
+    } catch (const TlsKeyLogError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     } catch (const ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -1939,7 +1983,8 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
                          bool strict, bool strict_it_protocols, bool summarize_unclassified, bool quiet,
                          const ResourceLimitCliVars& limit_vars, const PolicyEngineLimits& engine_limits,
                          bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
-                         bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
+                         bool service_names_enabled, const std::string& services_path,
+                         const std::string& tls_keylog_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -1982,6 +2027,11 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        // ROADMAP item 150 -- see run_decode's own matching comment (above its own identical
+        // construction) for the full rationale.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
+        options.tls_key_log = tls_key_log;
         // No --max-packets equivalent for policy validate (matching its existing offline-file
         // CLI surface, which never had one either): a live run here relies on --duration and/or
         // Ctrl+C to stop, same as `decode -i` does when --max-packets is left at its default of 0.
@@ -1997,6 +2047,7 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
             // See run_decode's own comment on source.index() -- same "preserve the file position,
             // don't renumber from 1" fix applies here.
             index = source.index();
+            drain_tls_decryption_secrets(source, *tls_key_log);
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
@@ -2056,6 +2107,9 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
     } catch (const ResolverError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
+    } catch (const TlsKeyLogError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     } catch (const ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -2081,7 +2135,8 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
                    const std::string& conduits_csv_path, const ResourceLimitCliVars& limit_vars,
                    const AssetInventoryEngineLimits& engine_limits, bool oui_enabled, bool resolve_hostnames,
                    const std::string& hosts_path, bool service_names_enabled, const std::string& services_path,
-                   const std::string& symbol_table_path, std::ostream& diag) {
+                   const std::string& symbol_table_path, const std::string& tls_keylog_path,
+                   std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -2104,10 +2159,14 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         // ROADMAP item 148 -- same fail-fast posture as Resolver just above (SymbolTableError is
         // caught alongside ResolverError below).
         SymbolTable symbol_table(symbol_table_path);
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
 
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        options.tls_key_log = tls_key_log;
         // Same "no --max-packets" posture as run_policy_validate -- see its own comment.
         PacketSource source =
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
@@ -2121,6 +2180,7 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
             // See run_decode's own comment on source.index() -- same "preserve the file position,
             // don't renumber from 1" fix applies here.
             index = source.index();
+            drain_tls_decryption_secrets(source, *tls_key_log);
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
@@ -2233,6 +2293,9 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
     } catch (const SymbolTableError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
+    } catch (const TlsKeyLogError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     } catch (const ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -2261,7 +2324,8 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
                 const std::string& baseline_path, size_t max_baseline_file_bytes,
                 const ResourceLimitCliVars& limit_vars, const DetectEngineLimits& engine_limits,
                 bool oui_enabled, bool resolve_hostnames, const std::string& hosts_path,
-                bool service_names_enabled, const std::string& services_path, std::ostream& diag) {
+                bool service_names_enabled, const std::string& services_path,
+                const std::string& tls_keylog_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -2290,9 +2354,14 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
 
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
+
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        options.tls_key_log = tls_key_log;
         PacketSource source =
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
         SigintGuard sigint_guard(source.live_ptr());
@@ -2303,6 +2372,7 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
         size_t index = 0, warnings = 0;
         while (!g_stop_requested.load(std::memory_order_acquire) && source.next(pkt)) {
             index = source.index();
+            drain_tls_decryption_secrets(source, *tls_key_log);
             DecodedPacket dp = decoder.decode(pkt, source.linktype(), index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
@@ -2349,6 +2419,9 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
         if (report.observation_truncated) return kExitObservationIncomplete;
         return 0;
     } catch (const ResolverError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const TlsKeyLogError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const PolicyError& e) {
@@ -2402,13 +2475,23 @@ constexpr int kExitBaselineIncomplete = 5;
 // which a live interface can't offer the same "already looked at this" assurance for.
 int run_baseline_learn(const std::vector<std::string>& inputs, const std::string& baseline_file, bool strict,
                         bool quiet, const ResourceLimitCliVars& limit_vars, size_t max_baseline_file_bytes,
-                        const BaselineEngineLimits& engine_limits, std::ostream& diag) {
+                        const BaselineEngineLimits& engine_limits, const std::string& tls_keylog_path,
+                        std::ostream& diag) {
     try {
         BaselineStore store = load_baseline_store(baseline_file, max_baseline_file_bytes);
+
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. A
+        // single TlsKeyLog shared across every input file in this `learn` run: file-sourced
+        // entries load once, and DSB-discovered secrets from one capture can never collide with
+        // another capture's own 32-byte client_random, so reusing it across files is safe and
+        // avoids re-parsing --tls-keylog once per input.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
 
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        options.tls_key_log = tls_key_log;
 
         size_t total_conduits_touched = 0;
         for (const std::string& input : inputs) {
@@ -2420,6 +2503,7 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
             size_t index = 0, warnings = 0;
             while (reader.next(pkt)) {
                 ++index;
+                drain_tls_decryption_secrets(reader, *tls_key_log);
                 DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
                 if (dp.protocol == "parse-error") {
                     ++warnings;
@@ -2481,6 +2565,9 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
     } catch (const BaselineStoreError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
+    } catch (const TlsKeyLogError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     } catch (const ParseError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -2509,7 +2596,7 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
                         const std::string& format, bool strict, bool symbolic_addresses,
                         const std::string& policy_path, bool quiet, const ResourceLimitCliVars& limit_vars,
                         size_t max_baseline_file_bytes, const BaselineEngineLimits& engine_limits,
-                        std::ostream& diag) {
+                        const std::string& tls_keylog_path, std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -2531,9 +2618,14 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
             policy = parse_policy_file(policy_path);
         }
 
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
+
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        options.tls_key_log = tls_key_log;
         PcapReader reader(input);
         Decoder decoder(options);
         BaselineEngine engine(engine_limits);
@@ -2542,6 +2634,7 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         size_t index = 0, warnings = 0;
         while (reader.next(pkt)) {
             ++index;
+            drain_tls_decryption_secrets(reader, *tls_key_log);
             DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
             if (dp.protocol == "parse-error") {
                 ++warnings;
@@ -2589,6 +2682,9 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
     } catch (const BaselineStoreError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
+    } catch (const TlsKeyLogError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
     } catch (const PolicyError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -2624,7 +2720,8 @@ int run_evidence(const std::string& input, const std::string& policy_path,
                   const std::string& output, const std::string& format, bool strict, bool quiet,
                   uint8_t zone_prefix_len, bool oui_enabled, bool resolve_hostnames,
                   const std::string& hosts_path, bool service_names_enabled,
-                  const std::string& services_path, std::ostream& diag) {
+                  const std::string& services_path, const std::string& tls_keylog_path,
+                  std::ostream& diag) {
     std::ofstream file_out;
     std::ostream* out = &std::cout;
     if (!output.empty()) {
@@ -2685,8 +2782,16 @@ int run_evidence(const std::string& input, const std::string& policy_path,
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
 
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. One
+        // TlsKeyLog shared across all four passes below: they all decode the same capture bytes,
+        // so a DSB discovered in an earlier pass is already available to a later one (harmless if
+        // re-ingested too -- TlsKeyLog::ingest just re-parses the same lines).
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
+
         DecodeOptions options;
         options.strict = strict;
+        options.tls_key_log = tls_key_log;
         // Deliberately the compiled-in default resource limits for every engine below, not exposed
         // as CLI overrides here -- see evidence_report.hpp's own header comment: keeping this
         // command's own CLI surface small, on top of four already-large per-engine surfaces, is a
@@ -2707,6 +2812,7 @@ int run_evidence(const std::string& input, const std::string& policy_path,
             double prev_ts = 0.0;
             while (reader.next(pkt)) {
                 ++index;
+                drain_tls_decryption_secrets(reader, *tls_key_log);
                 DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
                 if (dp.protocol == "parse-error") {
                     ++parse_error_packets;
@@ -2739,6 +2845,7 @@ int run_evidence(const std::string& input, const std::string& policy_path,
             size_t index = 0;
             while (reader.next(pkt)) {
                 ++index;
+                drain_tls_decryption_secrets(reader, *tls_key_log);
                 DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
                 engine.observe(dp);
             }
@@ -2755,6 +2862,7 @@ int run_evidence(const std::string& input, const std::string& policy_path,
             size_t index = 0;
             while (reader.next(pkt)) {
                 ++index;
+                drain_tls_decryption_secrets(reader, *tls_key_log);
                 DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
                 engine.observe(dp);
             }
@@ -2772,6 +2880,7 @@ int run_evidence(const std::string& input, const std::string& policy_path,
             size_t index = 0;
             while (reader.next(pkt)) {
                 ++index;
+                drain_tls_decryption_secrets(reader, *tls_key_log);
                 DecodedPacket dp = decoder.decode(pkt, reader.info().linktype, index);
                 engine.observe(dp);
             }
@@ -2837,6 +2946,9 @@ int run_evidence(const std::string& input, const std::string& policy_path,
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const BaselineStoreError& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    } catch (const TlsKeyLogError& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
     } catch (const ResolverError& e) {
@@ -3307,6 +3419,7 @@ int main(int argc, char** argv) {
     std::string decode_time_format = "r", decode_time_offset = "utc";
     std::string decode_hosts_file, decode_services_file;
     std::string decode_symbol_table_file;  // --s7plus-symbols, ROADMAP item 148
+    std::string decode_tls_keylog_file;    // --tls-keylog, ROADMAP item 150
     std::vector<std::string> decode_fields;
     std::string decode_write;
     bool decode_hex = false;
@@ -3807,6 +3920,18 @@ int main(int argc, char** argv) {
                       "given) leaves the raw CRC+LID-chain address exactly as decoded, never an "
                       "'(unknown)' placeholder")->group("Name resolution")
         ->check(CLI::ExistingFile);
+    decode_cmd
+        ->add_option("--tls-keylog", decode_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file (the same SSLKEYLOGFILE a browser/TLS library writes "
+                      "when SSLKEYLOGFILE is set -- RFC 9850), in addition to any pcapng Decryption "
+                      "Secrets Blocks already embedded in the capture itself. TLS 1.2 (RFC 5288/5289 "
+                      "GCM suites only) and TLS 1.3 are both supported; see tls_decrypt.hpp/"
+                      "docs/USER_GUIDE.md for the exact scope and limitations. A session with no "
+                      "matching key stays exactly as opaque as it always was -- this flag only ever "
+                      "reveals traffic a key for it was actually supplied for")
+        ->group("TLS decryption")
+        ->check(CLI::ExistingFile);
 
     // --- info -------------------------------------------------------------
     auto* info_cmd = app.add_subcommand(
@@ -3878,6 +4003,7 @@ int main(int argc, char** argv) {
     bool policy_summarize_unclassified = false;
     bool policy_mac_vendor = false, policy_resolve = false, policy_service_names = true;
     std::string policy_hosts_file, policy_services_file;
+    std::string policy_tls_keylog_file;  // --tls-keylog, ROADMAP item 150
     ResourceLimitCliVars policy_limit_vars;
     size_t policy_max_tcp_flows = 0, policy_max_udp_flows = 0, policy_max_ethernet_flows = 0,
            policy_max_notable_protocols = 0, policy_max_dnp3_link_flows = 0;
@@ -3974,6 +4100,14 @@ int main(int argc, char** argv) {
                       "Unix /etc/services-style file to supplement/override the built-in "
                       "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
+    policy_validate_cmd
+        ->add_option("--tls-keylog", policy_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file, in addition to any pcapng Decryption Secrets Blocks "
+                      "already embedded in the capture itself -- see decode's own --tls-keylog help "
+                      "text for the exact scope and limitations")
+        ->group("TLS decryption")
+        ->check(CLI::ExistingFile);
 
     // --- inventory ------------------------------------------------------------
     auto* inventory_cmd = app.add_subcommand(
@@ -3998,6 +4132,7 @@ int main(int argc, char** argv) {
     bool inventory_mac_vendor = false, inventory_resolve = false, inventory_service_names = true;
     std::string inventory_hosts_file, inventory_services_file;
     std::string inventory_symbol_table_file;  // --s7plus-symbols, ROADMAP item 148
+    std::string inventory_tls_keylog_file;    // --tls-keylog, ROADMAP item 150
     ResourceLimitCliVars inventory_limit_vars;
     size_t inventory_max_assets = 0, inventory_max_edges = 0, inventory_max_tcp_sessions = 0,
            inventory_max_notable_protocols = 0;
@@ -4112,6 +4247,14 @@ int main(int argc, char** argv) {
                       "see symbol_table.hpp's own file header for why; same hand-rolled text file "
                       "format as decode's own --s7plus-symbols")->group("Name resolution")
         ->check(CLI::ExistingFile);
+    inventory_cmd
+        ->add_option("--tls-keylog", inventory_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file, in addition to any pcapng Decryption Secrets Blocks "
+                      "already embedded in the capture itself -- see decode's own --tls-keylog help "
+                      "text for the exact scope and limitations")
+        ->group("TLS decryption")
+        ->check(CLI::ExistingFile);
 
     // --- detect ------------------------------------------------------------------
     // Grok gap #4 ("Detection that OT IR teams recognize") -- see detect_engine.hpp's own file
@@ -4134,6 +4277,7 @@ int main(int argc, char** argv) {
     size_t detect_max_baseline_file_bytes = kDefaultMaxBaselineFileBytes;
     bool detect_mac_vendor = false, detect_resolve = false, detect_service_names = true;
     std::string detect_hosts_file, detect_services_file;
+    std::string detect_tls_keylog_file;  // --tls-keylog, ROADMAP item 150
     ResourceLimitCliVars detect_limit_vars;
     size_t detect_max_findings = 0, detect_max_tracked_keys_per_map = 0, detect_max_originators_per_server = 0;
 
@@ -4219,6 +4363,14 @@ int main(int argc, char** argv) {
                       "Unix /etc/services-style file to supplement/override the built-in "
                       "port->service-name table")->group("Name resolution")
         ->check(CLI::ExistingFile);
+    detect_cmd
+        ->add_option("--tls-keylog", detect_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file, in addition to any pcapng Decryption Secrets Blocks "
+                      "already embedded in the capture itself -- see decode's own --tls-keylog help "
+                      "text for the exact scope and limitations")
+        ->group("TLS decryption")
+        ->check(CLI::ExistingFile);
 
     // --- baseline learn / baseline check ---------------------------------------
     // ICS communication-baseline analysis at the protocol-operation level (roadmap item 41,
@@ -4242,6 +4394,7 @@ int main(int argc, char** argv) {
     std::string baseline_learn_file;
     std::vector<std::string> baseline_learn_inputs;
     bool baseline_learn_strict = false;
+    std::string baseline_learn_tls_keylog_file;  // --tls-keylog, ROADMAP item 150
     ResourceLimitCliVars baseline_learn_limit_vars;
     size_t baseline_learn_max_file_bytes = 0;
     size_t baseline_learn_max_tcp_sessions = 0, baseline_learn_max_conduits = 0,
@@ -4270,6 +4423,15 @@ int main(int argc, char** argv) {
         ->check(CLI::ExistingFile);
     baseline_learn_cmd->add_flag("--strict", baseline_learn_strict,
                                   "Abort on the first malformed packet instead of warning and continuing")->group("Display options");
+    baseline_learn_cmd
+        ->add_option("--tls-keylog", baseline_learn_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file, in addition to any pcapng Decryption Secrets Blocks "
+                      "already embedded in each capture -- see decode's own --tls-keylog help text "
+                      "for the exact scope and limitations. Shared across every -r/--read input "
+                      "given to this run")
+        ->group("TLS decryption")
+        ->check(CLI::ExistingFile);
     add_resource_limit_options(baseline_learn_cmd, baseline_learn_limit_vars);
 
     auto* baseline_check_cmd = baseline_cmd->add_subcommand(
@@ -4281,6 +4443,7 @@ int main(int argc, char** argv) {
     std::string baseline_check_format = "text";
     bool baseline_check_strict = false;
     bool baseline_check_symbolic_addresses = false;
+    std::string baseline_check_tls_keylog_file;  // --tls-keylog, ROADMAP item 150
     ResourceLimitCliVars baseline_check_limit_vars;
     size_t baseline_check_max_file_bytes = 0;
     size_t baseline_check_max_tcp_sessions = 0, baseline_check_max_conduits = 0,
@@ -4339,6 +4502,14 @@ int main(int argc, char** argv) {
                       "without this flag completely unchanged -- zones are resolved fresh from the policy "
                       "file at check time only, never persisted into the baseline file itself, so swapping "
                       "in an updated policy later needs no re-learn")->group("Policy & baseline inputs (optional)")
+        ->check(CLI::ExistingFile);
+    baseline_check_cmd
+        ->add_option("--tls-keylog", baseline_check_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file, in addition to any pcapng Decryption Secrets Blocks "
+                      "already embedded in the capture itself -- see decode's own --tls-keylog help "
+                      "text for the exact scope and limitations")
+        ->group("TLS decryption")
         ->check(CLI::ExistingFile);
     add_resource_limit_options(baseline_check_cmd, baseline_check_limit_vars);
 
@@ -4580,6 +4751,7 @@ int main(int argc, char** argv) {
     int evidence_zone_prefix = static_cast<int>(kDefaultInventoryZonePrefixLen);
     bool evidence_mac_vendor = false, evidence_resolve = false, evidence_service_names = true;
     std::string evidence_hosts_file, evidence_services_file;
+    std::string evidence_tls_keylog_file;  // --tls-keylog, ROADMAP item 150
     evidence_cmd->add_option("-r,--read", evidence_input, "Input capture file (classic pcap or pcapng, auto-detected)")
         ->group("Input/output")
         ->required()
@@ -4652,6 +4824,14 @@ int main(int argc, char** argv) {
         ->add_option("--services", evidence_services_file,
                       "Unix /etc/services-style file to supplement/override the built-in "
                       "port->service-name table")->group("Name resolution")
+        ->check(CLI::ExistingFile);
+    evidence_cmd
+        ->add_option("--tls-keylog", evidence_tls_keylog_file,
+                      "Decrypt MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986) sessions using an "
+                      "NSS Key Log Format file, in addition to any pcapng Decryption Secrets Blocks "
+                      "already embedded in the capture itself -- see decode's own --tls-keylog help "
+                      "text for the exact scope and limitations")
+        ->group("TLS decryption")
         ->check(CLI::ExistingFile);
 
     // --- version ------------------------------------------------------------
@@ -4859,6 +5039,7 @@ int main(int argc, char** argv) {
                            quiet,
                            no_color, force_color, decode_mac_vendor, decode_resolve, decode_hosts_file,
                            decode_service_names, decode_services_file, decode_symbol_table_file, decode_show_vlan,
+                           decode_tls_keylog_file,
                            decode_time_format, decode_time_offset, *diag, decode_show_direction,
                            decode_show_mac, decode_fields, decode_write, decode_hex,
                            decode_verbose, decode_details, decode_redact, decode_detect_highlight,
@@ -4881,7 +5062,7 @@ int main(int argc, char** argv) {
                                                                   policy_max_notable_protocols,
                                                                   policy_max_dnp3_link_flows),
                                     policy_mac_vendor, policy_resolve, policy_hosts_file,
-                                    policy_service_names, policy_services_file, *diag);
+                                    policy_service_names, policy_services_file, policy_tls_keylog_file, *diag);
     }
     if (policy_cmd->parsed()) {
         std::cerr << "error: 'policy' needs a subcommand (currently only 'validate' exists)\n";
@@ -4899,7 +5080,7 @@ int main(int argc, char** argv) {
                                                                inventory_max_tcp_sessions,
                                                                inventory_max_notable_protocols),
                               inventory_mac_vendor, inventory_resolve, inventory_hosts_file, inventory_service_names,
-                              inventory_services_file, inventory_symbol_table_file, *diag);
+                              inventory_services_file, inventory_symbol_table_file, inventory_tls_keylog_file, *diag);
     }
     if (detect_cmd->parsed()) {
         return run_detect(detect_input, detect_interface, detect_filter, detect_duration, detect_snaplen,
@@ -4909,7 +5090,7 @@ int main(int argc, char** argv) {
                            resolve_detect_engine_limits(detect_max_findings, detect_max_tracked_keys_per_map,
                                                          detect_max_originators_per_server),
                            detect_mac_vendor, detect_resolve, detect_hosts_file, detect_service_names,
-                           detect_services_file, *diag);
+                           detect_services_file, detect_tls_keylog_file, *diag);
     }
     if (baseline_learn_cmd->parsed()) {
         return run_baseline_learn(baseline_learn_inputs, baseline_learn_file, baseline_learn_strict, quiet,
@@ -4920,7 +5101,7 @@ int main(int argc, char** argv) {
                                                                     baseline_learn_max_conduits,
                                                                     baseline_learn_max_operations_per_conduit,
                                                                     baseline_learn_max_ranges_per_operation),
-                                   *diag);
+                                   baseline_learn_tls_keylog_file, *diag);
     }
     if (baseline_check_cmd->parsed()) {
         return run_baseline_check(baseline_check_input, baseline_check_file, baseline_check_output,
@@ -4932,7 +5113,7 @@ int main(int argc, char** argv) {
                                                                     baseline_check_max_conduits,
                                                                     baseline_check_max_operations_per_conduit,
                                                                     baseline_check_max_ranges_per_operation),
-                                   *diag);
+                                   baseline_check_tls_keylog_file, *diag);
     }
     if (baseline_cmd->parsed()) {
         std::cerr << "error: 'baseline' needs a subcommand ('learn' or 'check')\n";
@@ -4962,7 +5143,7 @@ int main(int argc, char** argv) {
                              evidence_cip_monitoring_window, evidence_sign_key, evidence_output, evidence_format,
                              evidence_strict, quiet, static_cast<uint8_t>(evidence_zone_prefix), evidence_mac_vendor,
                              evidence_resolve, evidence_hosts_file, evidence_service_names, evidence_services_file,
-                             *diag);
+                             evidence_tls_keylog_file, *diag);
     }
     std::cout << "conduitscope " << version_string() << "\n";
     return 0;

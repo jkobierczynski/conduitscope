@@ -143,9 +143,15 @@
 //     HTTP layer (method/status/headers/auth scheme), but the "body" in that case is an encrypted
 //     MIME multipart wrapper, not raw SOAP XML, so has_envelope is simply false and no SOAP field is
 //     ever populated for it.
-//   - Any TLS-wrapped session at all (port 5986) -- out of scope for the same reason RDP/HTTPS's own
-//     post-handshake traffic is elsewhere in this codebase; this file only ever sees plaintext HTTP
-//     on port 5985.
+//   - A TLS-wrapped session on port 5986 (WinRM-over-HTTPS, WINRM_TLS_PORT below), absent a
+//     --tls-keylog/DSB-sourced key for it -- this file itself only ever parses plaintext HTTP; when
+//     no key is available, decoder.cpp's own WinRM-over-HTTPS call site falls back to the same
+//     detection-only ClientHello/SNI tagging every other TLS-wrapped protocol gets, for the same
+//     reason RDP/HTTPS's own opaque post-handshake traffic is. WHEN a key-log entry IS available
+//     (tls_decrypt.hpp/tls_keylog.hpp), decoder.cpp decrypts that session's own TLS records first
+//     and hands the revealed plaintext to THIS SAME try_parse_winrm_http/WinRmTcpDecoder -- nothing
+//     in this file changes to support that; it never knows or cares whether its input bytes arrived
+//     over 5985 in the clear or were decrypted from 5986.
 //
 // ---------------------------------------------------------------------------------------------
 // CURATED ATTACK/MONITORING NOTES (see winrm.cpp for the exact heuristics)
@@ -192,9 +198,17 @@
 
 namespace conduitscope {
 
-// TCP port 5985 -- IANA-registered "wsman", the plaintext WinRM listener. Port 5986 (TLS-wrapped)
-// is deliberately out of scope -- see this file's header comment.
+// TCP port 5985 -- IANA-registered "wsman", the plaintext WinRM listener.
 constexpr uint16_t WINRM_PORT = 5985;
+
+// TCP port 5986 -- IANA-registered "wsmans", WinRM-over-HTTPS. Detection-only (no --tls-keylog/DSB
+// key available for the session) by default, the same FOX_TLS_PORT/MQTT_TLS_PORT-mirroring shape
+// those two files' own "PORT nnnn / FOXS"/"PORT nnnn / MQTTS" sections already establish -- see
+// this file's own header comment above and decoder.cpp's own WinRM-over-HTTPS call site. No
+// --extra-winrm-tls-port widening, for the identical reason FOX_TLS_PORT/MQTT_TLS_PORT don't have
+// one either: a single, fixed, IANA-registered port is a stronger signal than inviting an
+// arbitrary port to be trusted as "this must be WinRM-over-TLS."
+constexpr uint16_t WINRM_TLS_PORT = 5986;
 
 struct WinRmMessage {
     bool is_response = false;

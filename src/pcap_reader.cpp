@@ -59,6 +59,12 @@ uint16_t read_u16(const std::array<uint8_t, 2>& b, bool little_endian) {
 //   - Simple Packet Block (0x00000003): a minimal packet record with no interface ID or
 //     timestamp -- always implicitly interface 0, per spec. Rare in practice (only a
 //     handful of minimal/embedded writers use it) but cheap to support.
+//   - Decryption Secrets Block (0x0000000A, draft-ietf-opsawg-pcapng section 4.7): carries no
+//     packet data, but IS meaningful to a caller that wants to decrypt the packets this same
+//     capture carries (see tls_decrypt.hpp's own feature) -- stored verbatim via
+//     PendingDecryptionSecret (pcap_reader.hpp) and handed to callers via
+//     take_pending_decryption_secrets(), rather than being skipped like every other block type
+//     this reader doesn't otherwise special-case.
 //
 // Deliberately NOT supported, and skipped like any other unrecognized block type (per the
 // spec's own forward-compatibility rule: an unknown Block Type must be skipped using Block
@@ -68,15 +74,17 @@ uint16_t read_u16(const std::array<uint8_t, 2>& b, bool little_endian) {
 //     is encountered, its packets are silently skipped rather than decoded. `conduitscope
 ///    info` will show a packet count lower than an external tool's if this happens -- see
 //     docs/MANUAL.md's LIMITATIONS section.
-//   - Interface Statistics Blocks, Name Resolution Blocks, Decryption Secrets Blocks,
-//     custom/experimental blocks, and anything else with a Block Type this reader doesn't
-//     special-case above: none of these carry packet data, so skipping them costs nothing.
+//   - Interface Statistics Blocks, Name Resolution Blocks, custom/experimental blocks, and
+//     anything else with a Block Type this reader doesn't special-case above: none of these
+//     carry packet data (or, for Decryption Secrets Blocks before this feature, anything this
+//     reader's callers acted on), so skipping them costs nothing.
 // -----------------------------------------------------------------------------------------
 
 constexpr uint32_t kShbBlockType = 0x0A0D0D0Au;
 constexpr uint32_t kIdbBlockType = 0x00000001u;
 constexpr uint32_t kSpbBlockType = 0x00000003u;
 constexpr uint32_t kEpbBlockType = 0x00000006u;
+constexpr uint32_t kDsbBlockType = 0x0000000Au;
 constexpr uint32_t kByteOrderMagic = 0x1A2B3C4Du;
 
 // Every pcapng block is at least Block Type(4) + Block Total Length(4) + Block Total
@@ -517,14 +525,45 @@ bool PcapReader::next_pcapng(PcapPacket& out) {
                 info_.nanosecond_ts = false;
                 return true;
             }
+            case kDsbBlockType: {
+                // draft-ietf-opsawg-pcapng section 4.7: Secrets Type(4) + Secrets Length(4) +
+                // Secrets Data(padded to a 4-byte boundary) + Options(variable, ignored -- nothing
+                // this codebase needs lives in a DSB's own options today). Malformed/truncated
+                // DSBs are tolerated the same forgiving way handle_idb_block's own if_tsresol
+                // parsing is (this block carries no packet data, so there's nothing to lose by
+                // skipping a block this reader can't make sense of, rather than aborting the
+                // whole read over it) -- NOT the same posture as an Enhanced/Simple Packet Block's
+                // own truncation, which genuinely is fatal (real packet data would otherwise be
+                // silently dropped).
+                if (body.size() >= 8) {
+                    uint32_t secrets_type = read_u32({body[0], body[1], body[2], body[3]}, pcapng_little_endian_);
+                    uint32_t secrets_length = read_u32({body[4], body[5], body[6], body[7]}, pcapng_little_endian_);
+                    if (secrets_length <= body.size() - 8) {
+                        PendingDecryptionSecret secret;
+                        secret.secrets_type = secrets_type;
+                        secret.data.assign(body.begin() + 8, body.begin() + 8 + secrets_length);
+                        pending_decryption_secrets_.push_back(std::move(secret));
+                    }
+                }
+                continue;
+            }
             default:
                 // Unrecognized/unsupported block type -- skip it. Covers the obsolete Packet
-                // Block (0x2), Interface Statistics Blocks, Name Resolution Blocks,
-                // Decryption Secrets Blocks, and any custom/future block type. See the
-                // PCAPNG SECTIONS, BLOCKS, AND WHAT THIS READER SUPPORTS note above.
+                // Block (0x2), Interface Statistics Blocks, Name Resolution Blocks, and any
+                // custom/future block type. See the PCAPNG SECTIONS, BLOCKS, AND WHAT THIS
+                // READER SUPPORTS note above.
                 continue;
         }
     }
+}
+
+std::vector<PendingDecryptionSecret> PcapReader::take_pending_decryption_secrets() {
+    // Classic pcap files never populate pending_decryption_secrets_ at all (DSBs are a pcapng-only
+    // block type) -- this returns an empty vector for them unconditionally, the same as it would
+    // for a pcapng file that simply hasn't seen one since the last drain.
+    std::vector<PendingDecryptionSecret> out = std::move(pending_decryption_secrets_);
+    pending_decryption_secrets_.clear();
+    return out;
 }
 
 bool PcapReader::next(PcapPacket& out) {

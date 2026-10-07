@@ -62,6 +62,30 @@ struct PcapFileInfo {
     bool nanosecond_ts = false;  // 0xa1b23c4d / 0x4d3cb2a1 magic variant
 };
 
+// pcapng Decryption Secrets Block (Block Type 0x0000000A, draft-ietf-opsawg-pcapng section 4.7):
+// one embedded "here are secrets a later analysis tool can use" blob, written by the SAME capture
+// tool that wrote the packets (e.g. a browser or TLS library configured to log its own keys, with
+// Wireshark/dumpcap/tshark embedding them into the capture file as it's written) rather than
+// derived from the packets themselves. This reader stores every one it sees verbatim --
+// `secrets_type` + `secrets_data` only, any trailing options discarded -- rather than
+// interpreting it: interpretation is protocol-specific (the one secrets_type this codebase acts
+// on, kPcapngSecretsTypeTls, is SSLKEYLOGFILE-format text -- see tls_keylog.hpp's own
+// TlsKeyLog::ingest) and belongs to the caller, not this generic capture-format reader.
+struct PendingDecryptionSecret {
+    uint32_t secrets_type = 0;
+    std::vector<uint8_t> data;
+};
+
+// Secrets Type "TLS Key Log" (the literal ASCII bytes "TLSK", read big-endian as one uint32 --
+// Wireshark's own wsutil/secrets-types.h names this SECRETS_TYPE_TLS) -- a Decryption Secrets
+// Block of this type's own `data` is SSLKEYLOGFILE/RFC 9850-format text, the exact same shape a
+// --tls-keylog FILE on disk already is. The only secrets_type this codebase currently consumes;
+// any other value (e.g. Wireshark's own SECRETS_TYPE_WIREGUARD, SECRETS_TYPE_ZIGBEE_NWK_KEY,
+// SECRETS_TYPE_OPCUA) is still stored and returned by take_pending_decryption_secrets() like any
+// other, for a caller to recognize or ignore -- this reader itself doesn't gate on secrets_type at
+// the parse level, only this constant's own consumer (cli_main.cpp) does.
+constexpr uint32_t kPcapngSecretsTypeTls = 0x544c534bu;
+
 struct PcapPacket {
     uint32_t ts_sec = 0;
     uint32_t ts_frac = 0;  // microseconds, or nanoseconds if info().nanosecond_ts
@@ -102,6 +126,16 @@ public:
     bool next(PcapPacket& out);
 
     const std::string& path() const { return path_; }
+
+    // Drains and returns every Decryption Secrets Block (see PendingDecryptionSecret above) seen
+    // by next() calls SINCE THE LAST call to this method (or since construction, for the first
+    // call) -- callers that care about embedded secrets (cli_main.cpp's --tls-keylog handling)
+    // call this once per next() call, right after it, and merge whatever comes back into their own
+    // TlsKeyLog; a caller that never calls this simply never sees these blocks at all (they're
+    // otherwise invisible -- next() itself only ever returns real packets, exactly as before this
+    // feature existed). Returns an empty vector on the (overwhelmingly common) case of no DSBs
+    // since the last drain, which costs nothing beyond one empty-vector move.
+    std::vector<PendingDecryptionSecret> take_pending_decryption_secrets();
 
 private:
     // Per-interface state accumulated from pcapng Interface Description Blocks. Interface
@@ -159,6 +193,9 @@ private:
     bool is_pcapng_ = false;
     bool pcapng_little_endian_ = true;
     std::vector<PcapNgInterface> pcapng_interfaces_;
+    // Accumulates across next_pcapng() calls until take_pending_decryption_secrets() drains it --
+    // see that method's own comment above for why this isn't drained automatically by next().
+    std::vector<PendingDecryptionSecret> pending_decryption_secrets_;
 };
 
 }  // namespace conduitscope

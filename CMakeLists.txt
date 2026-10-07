@@ -86,6 +86,8 @@ add_library(conduitscope_core STATIC
   src/dns.cpp
   src/nbns.cpp
   src/tls_sni.cpp
+  src/tls_keylog.cpp
+  src/tls_decrypt.cpp
   src/rip.cpp
   src/rmcp.cpp
   src/icmp.cpp
@@ -248,6 +250,40 @@ if(CONDUITSCOPE_ENABLE_LIVE_CAPTURE)
   endif()
 else()
   message(STATUS "conduitscope: live capture DISABLED (CONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF)")
+endif()
+
+# --------------------------------------------------------------------------------------------
+# Optional TLS decryption support (OpenSSL's libcrypto) -- ROADMAP item 150, docs/DEVELOPMENT.md.
+# Mirrors CONDUITSCOPE_ENABLE_LIVE_CAPTURE immediately above exactly: an optional dependency this
+# project otherwise has none of (see README.md's "Why offline pcap files" section, and
+# tls_decrypt.hpp's own file header comment for why OpenSSL specifically, rather than extending
+# this codebase's existing hand-rolled QUIC-only crypto quartet -- ROADMAP item 139/patch295
+# finding F7). When OpenSSL isn't found (or this option is turned off), conduitscope_core still
+# builds exactly as it always has -- tls_decrypt.cpp's own stub implementation (see its own
+# #else branch) makes --tls-keylog/DSB-sourced decryption of MQTTS/FOXS/WinRM-over-HTTPS report
+# "unavailable" instead of not existing at all, and every OTHER feature (detection-only ClientHello/
+# SNI tagging for those three ports, and everything else in this codebase) is completely
+# unaffected either way.
+option(CONDUITSCOPE_ENABLE_TLS_DECRYPT
+  "Search for OpenSSL and build --tls-keylog/pcapng-DSB TLS decryption support if found"
+  ON)
+
+set(CONDUITSCOPE_HAVE_OPENSSL FALSE)
+if(CONDUITSCOPE_ENABLE_TLS_DECRYPT)
+  find_package(OpenSSL QUIET)
+  if(OpenSSL_FOUND)
+    set(CONDUITSCOPE_HAVE_OPENSSL TRUE)
+    target_compile_definitions(conduitscope_core PUBLIC CONDUITSCOPE_HAVE_OPENSSL=1)
+    target_link_libraries(conduitscope_core PUBLIC OpenSSL::Crypto)
+    message(STATUS "conduitscope: TLS decryption ENABLED (found OpenSSL ${OPENSSL_VERSION})")
+  else()
+    message(STATUS "conduitscope: TLS decryption DISABLED (OpenSSL not found -- --tls-keylog/"
+                    "pcapng-DSB decryption of MQTTS/FOXS/WinRM-over-HTTPS will report this "
+                    "clearly at runtime; everything else, including this capture file reader's "
+                    "own DSB parsing, is unaffected)")
+  endif()
+else()
+  message(STATUS "conduitscope: TLS decryption DISABLED (CONDUITSCOPE_ENABLE_TLS_DECRYPT=OFF)")
 endif()
 
 # CLI11 is vendored as a single header under third_party/ specifically so this
@@ -5428,6 +5464,101 @@ add_test(NAME real_mqtt_redhat61_corrupt_file_json_output_still_well_formed
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/real_captures/mqtt/mqtt_packets_RedHat61_tcpdump.pcap" --format json)
 set_tests_properties(real_mqtt_redhat61_corrupt_file_json_output_still_well_formed PROPERTIES
   PASS_REGULAR_EXPRESSION "\\]")
+
+# --------------------------------------------------------------------------
+# TLS decryption (ROADMAP item 150, docs/DEVELOPMENT.md) -- --tls-keylog / pcapng Decryption
+# Secrets Blocks for MQTTS (8883)/FOXS (4911)/WinRM-over-HTTPS (5986). Every fixture below is a
+# REAL TLS 1.2/1.3 session (genuine HKDF/PRF-derived keys, genuine AES-GCM/ChaCha20-Poly1305
+# ciphertext -- not a hand-rolled approximation), generated independently of conduitscope's own
+# tls_decrypt.cpp by tools/gen_tls_decrypt_fixtures.py (see that script's own file header for why
+# it depends on the `cryptography` package rather than make_sample_pcap.py's stdlib-only
+# promise). These exercise the real decoder.cpp/cli_main.cpp pipeline end to end -- ClientHello
+# detection, key-log/DSB-driven decryption, epoch transition, and feeding the decrypted plaintext
+# into the existing cleartext MqttDecoder/WinRmTcpDecoder/FoxDecoder -- not just tls_decrypt.cpp's
+# own standalone unit-level correctness (already verified independently during development; see
+# that ROADMAP item's own verification notes).
+# --------------------------------------------------------------------------
+
+# MQTTS, TLS 1.3, TLS_AES_128_GCM_SHA256 -- the ClientHello is detection-only (no key seen yet),
+# the next three packets advance the handshake/epoch-transition machinery silently, and the real
+# MQTT CONNECT/CONNACK app data decrypts and feeds straight into MqttDecoder.
+add_test(NAME tls_decrypt_mqtts_full_session_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts_keylog.txt" --format text)
+set_tests_properties(tls_decrypt_mqtts_full_session_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtts\\]  MQTTS/TLS ClientHello \\(MQTT over TLS, port 8883\\)[^\n]*\n.*\\[mqtts\\]  MQTT over TLS \\(port 8883\\) -- TLS session in progress[^\n]*\n.*\\[mqtts\\]  MQTT over TLS \\(port 8883\\) -- TLS session in progress[^\n]*\n.*\\[mqtts\\]  MQTT over TLS \\(port 8883\\) -- TLS session in progress[^\n]*\n.*\\[mqtt\\]  CONNECT \\(MQTT 3.1.1\\)[^\n]*\n.*\\[mqtt\\]  CONNACK \\(MQTT 3.1.1\\)")
+
+add_test(NAME tls_decrypt_mqtts_key_log_and_epoch_notes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts_keylog.txt" --format json)
+set_tests_properties(tls_decrypt_mqtts_key_log_and_epoch_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"TLS session decrypted via key log \\(TLS 1.3, TLS_AES_128_GCM_SHA256\\)\"\\].*\"notes\": \\[\"server direction of this TLS 1.3 session switched from handshake to application traffic keys\"\\].*\"notes\": \\[\"client direction of this TLS 1.3 session switched from handshake to application traffic keys\"\\]")
+
+add_test(NAME tls_decrypt_mqtts_connect_decoded_with_decrypted_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts_keylog.txt" --format json)
+set_tests_properties(tls_decrypt_mqtts_connect_decoded_with_decrypted_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"CONNECT \\(MQTT 3.1.1\\)\",.*\"mqtt_values\": \\[\"ProtocolName=\\\\\"MQTT\\\\\"\", \"ProtocolLevel=4 \\(3.1.1\\)\", \"CleanSession=true\", \"WillFlag=false\", \"UsernameFlag=false\", \"PasswordFlag=false\", \"KeepAlive=60s\", \"ClientId=\\\\\"plc1-hmi-tls\\\\\"\"\\],.*\"notes\": \\[\"decrypted from MQTTS \\(TLS, port 8883\\) via --tls-keylog/pcapng DSB\"\\]")
+
+# Absent --tls-keylog entirely, the exact same capture must stay fully opaque: the ClientHello is
+# still detection-tagged (no key is needed to recognize a cleartext ClientHello record), but every
+# later ciphertext-only packet falls all the way through to the generic "tcp" fallback -- nothing
+# distinguishes it from any other opaque encrypted TCP stream absent a key.
+add_test(NAME tls_decrypt_mqtts_without_keylog_stays_opaque
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_mqtts.pcap" --format text)
+set_tests_properties(tls_decrypt_mqtts_without_keylog_stays_opaque PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtts\\]  MQTTS/TLS ClientHello[^\n]*\n.*\\[tcp\\]  TCP payload of [0-9]+ byte\\(s\\) on port 8883->52000"
+  FAIL_REGULAR_EXPRESSION "\\[mqtt\\]  CONNECT")
+
+# WinRM-over-HTTPS, TLS 1.2, TLS_RSA_WITH_AES_256_GCM_SHA384 -- a real WS-Management Create
+# request/response (the flagship "remote shell opened" finding) decrypts and feeds into
+# WinRmTcpDecoder exactly as the cleartext port-5985 case already does.
+add_test(NAME tls_decrypt_winrms_full_session_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_winrms.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_winrms_keylog.txt" --format text)
+set_tests_properties(tls_decrypt_winrms_full_session_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[winrms\\]  WinRM-over-HTTPS/TLS ClientHello \\(port 5986\\)[^\n]*\n.*\\[winrm\\]  POST /wsman -- WS-Man Create[^\n]*\n.*\\[winrm\\]  HTTP/1.1 200 OK -- WS-Man CreateResponse")
+
+add_test(NAME tls_decrypt_winrms_shell_opened_and_decrypted_notes
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_winrms.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_winrms_keylog.txt" --format json)
+set_tests_properties(tls_decrypt_winrms_shell_opened_and_decrypted_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"TLS session decrypted via key log \\(TLS 1.2, TLS_RSA_WITH_AES_256_GCM_SHA384\\)\"\\].*\"summary\": \"HTTP/1.1 200 OK -- WS-Man CreateResponse\",.*\"notes\": \\[\"remote shell opened \\(ShellId A1B2C3D4-0001-0002-0003-000400050006\\)\", \"decrypted from WinRM-over-HTTPS \\(TLS, port 5986\\) via --tls-keylog/pcapng DSB\"\\]")
+
+# FOXS, TLS 1.3, TLS_CHACHA20_POLY1305_SHA256 -- a real Fox `hello` request/reply (the flagship
+# unauthenticated-hello finding) decrypts and feeds into FoxDecoder exactly as the cleartext
+# port-1911 case already does.
+add_test(NAME tls_decrypt_foxs_full_session_text
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_foxs.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_foxs_keylog.txt" --format text)
+set_tests_properties(tls_decrypt_foxs_full_session_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[foxs\\]  FOXS/TLS ClientHello \\(Tridium Niagara Fox over TLS, port 4911\\)[^\n]*\n.*\\[fox\\]  Fox hello request: hostName=\"ENGINEER-LAPTOP-TLS\"[^\n]*\n.*\\[fox\\]  Fox hello reply: hostName=\"NIAGARA-STATION-TLS\"")
+
+add_test(NAME tls_decrypt_foxs_chacha20_key_log_and_decrypted_note
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_foxs.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_foxs_keylog.txt" --format json)
+set_tests_properties(tls_decrypt_foxs_chacha20_key_log_and_decrypted_note PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"TLS session decrypted via key log \\(TLS 1.3, TLS_CHACHA20_POLY1305_SHA256\\)\"\\].*\"summary\": \"Fox hello request: hostName=\\\\\"ENGINEER-LAPTOP-TLS\\\\\".*\"decrypted from FOXS \\(TLS, port 4911\\) via --tls-keylog/pcapng DSB\"")
+
+# A second, independent MQTTS session whose secrets are embedded as a pcapng Decryption Secrets
+# Block INSIDE the capture itself -- decoded with NO --tls-keylog flag at all, proving the
+# PcapReader::take_pending_decryption_secrets()/drain_tls_decryption_secrets() DSB-ingestion path
+# end to end, not just pcap_reader.cpp's own parsing-in-isolation unit coverage.
+add_test(NAME tls_decrypt_dsb_sourced_secrets_no_keylog_flag
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_dsb.pcapng" --format text)
+set_tests_properties(tls_decrypt_dsb_sourced_secrets_no_keylog_flag PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[mqtts\\]  MQTTS/TLS ClientHello[^\n]*\n.*\\[mqtt\\]  CONNECT \\(MQTT 3.1.1\\)[^\n]*\n.*\\[mqtt\\]  CONNACK \\(MQTT 3.1.1\\)")
+
+# A TLS 1.2 session negotiating a CBC suite (0xC013) this build deliberately never decrypts (RFC
+# 5288/5289 GCM suites only), WITH a matching keylog entry present -- the give-up reason must
+# genuinely cite the unsupported cipher suite, not merely "no matching key" (the much simpler and
+# much more easily-accidentally-satisfied condition every other graceful-fallback case above
+# exercises instead).
+add_test(NAME tls_decrypt_unsupported_cipher_suite_graceful_fallback
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_unsupported_cipher.pcap"
+    --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_unsupported_cipher_keylog.txt" --format json)
+set_tests_properties(tls_decrypt_unsupported_cipher_suite_graceful_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"summary\": \"MQTT over TLS \\(port 8883\\) -- decryption unavailable for this session \\(see notes\\)\",.*\"notes\": \\[\"TLS 1.2 session negotiated a cipher suite this build does not decrypt \\(0xc013\\) -- only the RFC 5288/5289 GCM suites are supported\"\\]")
 
 
 # --------------------------------------------------------------------------

@@ -87,6 +87,18 @@ def pcapng_spb(payload: bytes, orig_len=None) -> bytes:
     return pcapng_block(PCAPNG_SPB_TYPE, body)
 
 
+PCAPNG_DSB_TYPE = 0x0000000A
+PCAPNG_SECRETS_TYPE_TLS = 0x544C534B  # ASCII "TLSK" -- Wireshark's own SECRETS_TYPE_TLS.
+
+
+def pcapng_dsb(secrets_type: int, secrets_data: bytes) -> bytes:
+    """Decryption Secrets Block (draft-ietf-opsawg-pcapng section 4.7): Secrets Type, Secrets
+    Length, then Secrets Data padded to a 4-byte boundary by pcapng_block() itself -- no options
+    (this codebase's own reader discards any it finds, and no fixture here needs one)."""
+    body = struct.pack("<II", secrets_type, len(secrets_data)) + secrets_data
+    return pcapng_block(PCAPNG_DSB_TYPE, body)
+
+
 def pcap_global_header(linktype=LINKTYPE_ETHERNET, snaplen=262144):
     return struct.pack(
         "<IHHiIII",
