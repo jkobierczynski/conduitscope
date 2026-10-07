@@ -5116,7 +5116,7 @@ add_test(NAME mqtt_does_not_crash
 add_test(NAME mqtt_stats_counted
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(mqtt_stats_counted PROPERTIES
-  PASS_REGULAR_EXPRESSION "packets: +56[^\n]*\n[^\n]*\nprotocols:\n *mqtt +52\n *mqtts +1\n *tcp +3.*\nmqtt packet types:\n *AUTH +2\n *CONNACK +4\n *CONNECT +4\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
+  PASS_REGULAR_EXPRESSION "packets: +58[^\n]*\n[^\n]*\nprotocols:\n *mqtt +54\n *mqtts +1\n *tcp +3.*\nmqtt packet types:\n *AUTH +2\n *CONNACK +5\n *CONNECT +5\n *DISCONNECT +2\n *PINGREQ +3\n *PINGRESP +2\n *PUBACK +2\n *PUBCOMP +1\n *PUBLISH +14\n *PUBREC +1\n *PUBREL +1\n *SUBACK +4\n *SUBSCRIBE +4\n *UNSUBACK +4\n *UNSUBSCRIBE +4\nmqtt sparkplug b publishes: 8\nmqtt sparkplug b message types:\n *DBIRTH +1\n *DDATA +1\n *DDEATH +1\n *NBIRTH +1\n *NDATA +3\n *STATE +1")
 
 # Flow A: full MQTT 3.1.1 lifecycle, port 61000.
 add_test(NAME mqtt_v311_full_lifecycle_text
@@ -5332,7 +5332,7 @@ set_tests_properties(mqtt_unexpected_port_note PROPERTIES
 add_test(NAME mqtt_protocol_filter_only_decodes_mqtt
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap")
 set_tests_properties(mqtt_protocol_filter_only_decodes_mqtt PROPERTIES
-  PASS_REGULAR_EXPRESSION "protocols:\n *mqtt +52\n *mqtts +1\n *tcp +3")
+  PASS_REGULAR_EXPRESSION "protocols:\n *mqtt +54\n *mqtts +1\n *tcp +3")
 
 add_test(NAME mqtt_extra_port_option_accepted
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --mqtt-port 52000 --mqtt-port 52001 --format json)
@@ -5342,11 +5342,11 @@ set_tests_properties(mqtt_extra_port_option_accepted PROPERTIES
 # MQTTS (MQTT-over-TLS, port 8883) -- decoder.cpp's own generic TLS-ClientHello recognition call
 # site (the same one that already labels port 443 "https", 636/3269 "ldaps", and 4911 "foxs")
 # labels it "mqtts", detection only -- this decoder never sees inside the TLS-encrypted payload.
-# Packet #56, the last packet in sample_mqtt.pcap (see build_mqtt_sample's own Flow I).
+# Packet #58, the last packet in sample_mqtt.pcap (see build_mqtt_sample's own Flow I).
 add_test(NAME mqtts_tls_clienthello_port_8883_detected
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_mqtt.pcap" --format text -v)
 set_tests_properties(mqtts_tls_clienthello_port_8883_detected PROPERTIES
-  PASS_REGULAR_EXPRESSION "#56  [^\n]*\\[mqtts\\]  MQTTS/TLS ClientHello \\(MQTT over TLS, port 8883\\) \\(SNI: mqtt-broker.plant.example\\)")
+  PASS_REGULAR_EXPRESSION "#58  [^\n]*\\[mqtts\\]  MQTTS/TLS ClientHello \\(MQTT over TLS, port 8883\\) \\(SNI: mqtt-broker.plant.example\\)")
 
 # --protocol mqtt still tries MQTTS detection port-independently (the same exception FOXS's own
 # --protocol fox already has), and --protocol modbus (an unrelated filter) does NOT claim it at
@@ -13865,22 +13865,27 @@ set_tests_properties(winrm_401_response_auth_scheme_no_envelope PROPERTIES
   FAIL_REGULAR_EXPRESSION "\"winrm_http_status\": 401,[^}]*\"winrm_action\"")
 
 # Non-standard port (#19), default Auto mode: WinRmTcpDecoder's own port gate correctly declines
-# it -- proven by the absence of "[winrm]" for this specific flow. (What DOES claim it here is a
-# genuine, pre-existing, entirely unrelated collision -- MQTT's own port-independent structural
-# check reads this request's leading "PO" bytes as a plausible PUBREC fixed-header byte plus a
-# single-byte remaining-length; see build_winrm_sample()'s own docstring in tools/make_sample_pcap.py
-# for the full explanation. Not a WinRM regression, and not the collision winrm.hpp's own COLLISION
-# SURVEY section scopes -- that one is specifically against it_protocols.cpp's generic Tier-2
-# "http" fallback, which this packet never even reaches.)
+# it -- proven by the absence of "[winrm]" for this specific flow. (What DOES claim it here is
+# winrm.hpp's own documented, deliberate fallback -- it_protocols.cpp's generic Tier-2 "http"
+# recognition, a real `POST /wsman ...` HTTP/1.1 request honestly labeled "http" since nothing
+# port-gated claims it first; see winrm.hpp's own "COLLISION SURVEY" section, "ordinary HTTP
+# traffic on any other port still falls through to Tier 2's generic 'http' recognition exactly as
+# before". This used to instead hit a genuine, unrelated collision -- MQTT's own port-independent
+# structural check accepted this request's leading "PO" bytes as a plausible PUBREC fixed-header
+# byte plus a single-byte remaining-length -- fixed by the real-capture-driven tightening
+# documented at src/decoder.cpp's own MQTT call site (tests/real_captures/4sics/ATTRIBUTION.md):
+# off the standard MQTT port, a session now has to have already produced a structurally validated
+# CONNECT before any other, far weaker-gated MQTT packet type is trusted, and this flow never has
+# one. See build_winrm_sample()'s own docstring in tools/make_sample_pcap.py for the full account.)
 add_test(NAME winrm_nonstandard_port_not_recognized_in_auto_mode
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
 set_tests_properties(winrm_nonstandard_port_not_recognized_in_auto_mode PROPERTIES
   FAIL_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[winrm\\]")
 
-add_test(NAME winrm_nonstandard_port_claimed_by_unrelated_mqtt_collision_in_auto_mode
+add_test(NAME winrm_nonstandard_port_claimed_by_generic_http_fallback
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
-set_tests_properties(winrm_nonstandard_port_claimed_by_unrelated_mqtt_collision_in_auto_mode PROPERTIES
-  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[mqtt\\]")
+set_tests_properties(winrm_nonstandard_port_claimed_by_generic_http_fallback PROPERTIES
+  PASS_REGULAR_EXPRESSION "192\\.168\\.1\\.50:49570 -> 192\\.168\\.1\\.10:8585  \\[http\\]")
 
 # --winrm-port 8585 widens Auto-mode detection so WinRmTcpDecoder claims this flow ahead of MQTT
 # instead -- and, since the port is now in the configured/widened set, the "not a
@@ -13908,11 +13913,15 @@ set_tests_properties(winrm_protocol_filter_excludes_other_protocols PROPERTIES
 # otherwise claim every one of this fixture's port-5985 messages -- WinRmTcpDecoder is wired ahead
 # of it in decoder.cpp's TCP dispatch chain specifically so that never happens, the same
 # "prove the collision existed, then fix the dispatch order" method MELSEC-before-Modbus already
-# established (see melsec_tcp_request_not_misdetected_as_modbus below).
+# established (see melsec_tcp_request_not_misdetected_as_modbus below). Scoped to port 5985
+# specifically (not "no [http] anywhere in this output") because this fixture's own #19 flow (a
+# deliberately non-standard port, see winrm_nonstandard_port_claimed_by_generic_http_fallback just
+# above) is SUPPOSED to fall through to "http" in Auto mode -- that is winrm.hpp's own documented
+# fallback behavior, not a collision this decoder is meant to resolve.
 add_test(NAME winrm_command_not_misdetected_as_generic_http
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_winrm.pcap" --format text)
 set_tests_properties(winrm_command_not_misdetected_as_generic_http PROPERTIES
-  FAIL_REGULAR_EXPRESSION "\\[http\\]")
+  FAIL_REGULAR_EXPRESSION ":5985  \\[http\\]")
 
 # --stats action-count aggregation (WinRmMessage::wsa_action_name, requests only -- see
 # winrm_action_counts_'s own comment in output.hpp): Command/Create each appear twice (main flow

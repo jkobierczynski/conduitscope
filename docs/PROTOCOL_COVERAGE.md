@@ -434,6 +434,22 @@ registration-model `ProtocolDecoder` interface -- see `docs/DEVELOPMENT.md`'s "r
 decoder refactor" entry. Detection/decode logic and output are unchanged (still dual-writing into
 this same `DecodedPacket` struct); this is an internal dispatch/state-management change only.
 
+Real-capture validation against the 4SICS Geek Lounge captures (`tests/real_captures/4sics/
+ATTRIBUTION.md`, docs/DEVELOPMENT.md's ROADMAP item 149) found one genuine false-positive
+collision: `try_parse_tpkt_cotp`'s own entry gate (TPKT magic bytes `03 00` plus a declared length
+that merely fits inside the payload -- deliberately loose, so this check can run opportunistically,
+port-independent, the same "weaker signal, lower priority" ordering HART-IP/MQTT/FF-HSE already
+have) happened to pass on an ordinary HTTP response's binary (GIF) body, which coincidentally began
+with those exact bytes, before COTP's own internal length-indicator consistency check correctly
+rejected it as malformed. That rejection used to surface as a hard `ParseError`, which aborted the
+*entire* opportunistic TCP-dispatch cascade for that packet rather than letting the generic HTTP
+fallback have its turn -- fixed by catching that `ParseError` at the call site and demoting it to
+"no match" when NOT on the expected COTP/S7comm/MMS port (102, or a configured `--s7comm-port`),
+while the strict, throwing behavior is preserved exactly as before on that port (a malformed frame
+there is far more likely to be a genuinely broken S7 session than a coincidental collision). Day 1
+of that same real-capture validation -- pure, genuine S7comm/COTP traffic with no HTTP present at
+all -- is unaffected by this fix, confirmed byte-for-byte identical before and after.
+
 A COTP Data (DT) frame's own EOT (end-of-TSDU) bit is also tracked per TCP
 flow (`CotpDecoder::decode`, `cotp.cpp`): a single S7comm
 message that doesn't fit one negotiated PDU length gets chained across
@@ -1490,6 +1506,25 @@ identifier happened to read as a "plausible" HART-IP message type/id, absorbing 
 own reassembly buffering. Both are documented, fixed collisions between this decoder's own
 synthetic MQTT traffic and other, earlier-dispatched protocols' own gates -- not merely a warning
 that such collisions are theoretically possible.
+
+Real-capture validation against the 4SICS Geek Lounge captures (`tests/real_captures/4sics/
+ATTRIBUTION.md`, docs/DEVELOPMENT.md's ROADMAP item 149) found a far larger-impact instance of the
+same underlying weakness, this time against genuine real-world background traffic rather than this
+decoder's own synthetic fixture: off the standard MQTT port, this weak gate was badly
+over-triggering against ordinary IT noise -- Nmap-style service-fingerprinting probes and
+responses, an HTTP OPTIONS request, a TLS ClientHello, an SMB Negotiate, a SIP OPTIONS message, and
+an LDAP BER-encoded message all happened, purely by chance, to pass it. Quantified directly against
+this project's own `inventory` command: 52 of 84 (62%) and 135 of 229 (59%) of two of the three
+captures' own inventoried communication edges were this exact false positive -- a majority of each
+file's own machine-to-machine "communications." Fixed by additionally requiring, off the standard
+port only, that the exact same TCP session has already produced a structurally validated CONNECT
+(reusing `MqttFlowState::version_hint`, set only when the Protocol Name/Level check above already
+passed) before trusting any other, far more weakly-gated packet type on that session. On the
+standard port this extra check is skipped entirely, unchanged: a CONNECT genuinely outside a given
+capture's own time window (the capture simply starting mid-session) is common, and genuine MQTT
+traffic there shouldn't lose its recognition over it. After the fix, both affected captures show
+exactly zero `mqtt`-tagged packets -- there was no genuine MQTT traffic anywhere in that network at
+all, confirming every one of those matches was spurious.
 
 #### Version disambiguation
 

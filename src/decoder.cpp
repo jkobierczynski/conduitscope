@@ -4163,10 +4163,31 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             cotp_ctx.packet_index = index;
             cotp_ctx.protocol_id = "cotp";
             cotp_ctx.flow_states = &registry_flow_state_;
-            if (auto cotp_result = cotp_decoder().decode(effective_payload, cotp_ctx)) {
+            bool cotp_expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
+                                       port_in(tcp.dst_port, COTP_TCP_PORT, options_.extra_s7comm_ports);
+            std::optional<ProtocolResult> cotp_result;
+            try {
+                cotp_result = cotp_decoder().decode(effective_payload, cotp_ctx);
+            } catch (const ParseError&) {
+                if (cotp_expected_port) throw;
+                // Real-capture validation (4SICS Geek Lounge, tests/real_captures/4sics/
+                // ATTRIBUTION.md) found this opportunistic, port-independent TPKT/COTP entry gate
+                // (tpkt magic bytes 03 00 plus a declared length that merely fits inside the
+                // payload -- try_parse_tpkt_cotp's own comment) passing on ordinary, unrelated TCP
+                // payloads purely by byte-pattern coincidence: an HTTP response's binary (GIF) body
+                // happened to start 03 00 00 ff, which cleared the gate, before the COTP length
+                // indicator's own internal consistency check correctly rejected it. On the expected
+                // COTP/S7comm/MMS port (102), that same internal-consistency failure is still
+                // reported as a hard parse error exactly as before -- there, a malformed frame is
+                // far more likely to be a genuinely broken S7 session than a coincidental collision.
+                // Off that port, it almost certainly ISN'T COTP at all, so it's treated as "no
+                // match" instead, leaving the rest of this opportunistic dispatch cascade (down to
+                // the generic TCP/IT-protocol fallbacks) free to have its own turn at this packet.
+                cotp_result = std::nullopt;
+            }
+            if (cotp_result) {
                 const CotpDecodeResult& cr = cotp_result->as<CotpDecodeResult>();
-                bool expected_port = port_in(tcp.src_port, COTP_TCP_PORT, options_.extra_s7comm_ports) ||
-                                      port_in(tcp.dst_port, COTP_TCP_PORT, options_.extra_s7comm_ports);
+                bool expected_port = cotp_expected_port;
                 auto annotate_port = [&]() {
                     if (!expected_port) {
                         out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
@@ -4414,21 +4435,41 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
             ctx.protocol_id = "mqtt";
             ctx.flow_states = &registry_flow_state_;
             ctx.redact_secrets = options_.redact_secrets;
+            bool mqtt_expected_port = port_in(tcp.src_port, MQTT_PORT, options_.extra_mqtt_ports) ||
+                                       port_in(tcp.dst_port, MQTT_PORT, options_.extra_mqtt_ports);
             if (auto mqtt_result = mqtt_decoder().decode(effective_payload, ctx)) {
-                const MqttResult& mr = mqtt_result->as<MqttResult>();
-                out.protocol = "mqtt";
-                out.summary = mr.summary;
-                for (const auto& n : mr.notes) out.notes.push_back(n);
-                out.result = *mqtt_result;
+                // Real-capture validation (4SICS Geek Lounge, tests/real_captures/4sics/
+                // ATTRIBUTION.md) found MQTT's own "HONESTLY WEAK" gate (mqtt.hpp's file header --
+                // only 30/256 leading bytes excluded, no multi-byte magic the way OPC UA/HART-IP
+                // have) badly over-triggering off the standard port: Nmap-style service-
+                // fingerprinting probe/response traffic (HTTP OPTIONS, a TLS ClientHello, an SMB
+                // negotiate, a SIP OPTIONS, an LDAP BER blob, ...) repeatedly happened to pass the
+                // gate, tagging the majority of that capture's own inventory communications "mqtt".
+                // Off the standard port, this codebase now ALSO requires this exact TCP session to
+                // have already produced a structurally validated CONNECT -- MqttFlowState::
+                // version_hint, set only when the Protocol Name literally reads "MQTT"/"MQIsdp" with
+                // a valid Protocol Level byte (mqtt.hpp's own "near-OPC-UA-strength signal"
+                // paragraph) -- either this very packet or an earlier one on the same session --
+                // before trusting any other, far weaker-gated packet type. On the standard port this
+                // extra check is skipped entirely, exactly as before: a CONNECT genuinely outside
+                // this capture's own time window (the capture starting mid-session) is common and
+                // shouldn't cost real MQTT traffic its recognition there.
+                bool mqtt_session_confirmed =
+                    mqtt_expected_port || ctx.flow_state<MqttFlowState>().version_hint != 0;
+                if (mqtt_session_confirmed) {
+                    const MqttResult& mr = mqtt_result->as<MqttResult>();
+                    out.protocol = "mqtt";
+                    out.summary = mr.summary;
+                    for (const auto& n : mr.notes) out.notes.push_back(n);
+                    out.result = *mqtt_result;
 
-                bool expected_port = port_in(tcp.src_port, MQTT_PORT, options_.extra_mqtt_ports) ||
-                                      port_in(tcp.dst_port, MQTT_PORT, options_.extra_mqtt_ports);
-                if (!expected_port) {
-                    out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
-                                         std::to_string(tcp.dst_port) +
-                                         ", which is not a configured/standard MQTT port (1883)");
+                    if (!mqtt_expected_port) {
+                        out.notes.push_back("seen on TCP port " + std::to_string(tcp.src_port) + "->" +
+                                             std::to_string(tcp.dst_port) +
+                                             ", which is not a configured/standard MQTT port (1883)");
+                    }
+                    return out;
                 }
-                return out;
             }
         }
 

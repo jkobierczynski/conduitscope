@@ -10906,11 +10906,21 @@ def build_mqtt_sample():
     packets.append(eth_header(PLC_MAC, HMI_MAC, 0x0800) + ip_t)
 
     # ---------------------------------------------------------------------------------------------
-    # Flow H: PINGREQ/PINGRESP on a TCP session where NEITHER port is 1883 (or any --mqtt-port
-    # addition) -- exercises the "not a configured/standard MQTT port (1883)" note. Every other
-    # flow above uses port 1883 on one side, so without this flow that note path goes untested.
+    # Flow H: CONNECT/CONNACK then PINGREQ/PINGRESP on a TCP session where NEITHER port is 1883 (or
+    # any --mqtt-port addition) -- exercises the "not a configured/standard MQTT port (1883)" note.
+    # Every other flow above uses port 1883 on one side, so without this flow that note path goes
+    # untested. The CONNECT is required here (not just the bare PINGREQ/PINGRESP this flow used to
+    # open with) because of the real-capture false-positive this codebase's own opportunistic,
+    # port-independent MQTT dispatch produced (4SICS Geek Lounge, tests/real_captures/4sics/
+    # ATTRIBUTION.md): off the standard port, decoder.cpp now requires this exact TCP session to
+    # have already produced a structurally validated CONNECT before trusting any other, far more
+    # weakly-gated packet type -- seeing bare PINGREQ/PINGRESP with no session context at all is
+    # now deliberately NOT enough, on or off this flow's own non-standard ports.
     # ---------------------------------------------------------------------------------------------
     h = make_flow(52000, dport=52001)
+    h_connect = mqtt_str("MQTT") + bytes([4]) + bytes([0x02]) + struct.pack(">H", 30) + mqtt_str("scanner-test-h")
+    h(True, mqtt_packet(1, 0, h_connect))
+    h(False, mqtt_packet(2, 0, bytes([0x00, 0x00])))
     h(True, mqtt_packet(12, 0))
     h(False, mqtt_packet(13, 0))
 
@@ -17429,12 +17439,19 @@ def build_winrm_sample():
     non-SOAP (text/html) body -- response-side auth-scheme coverage with no envelope at all, since
     is_soap_xml is false; (19) the same Create request shape as (1)'s, but on a non-standard TCP
     port (8585) -- in Auto mode WinRmTcpDecoder's own port gate correctly declines it (proven by
-    the ABSENCE of "[winrm]" -- what actually claims it in that mode is a genuine, pre-existing,
-    entirely unrelated collision: MQTT's own port-independent structural check reads this request's
-    leading "PO" bytes as a plausible PUBREC fixed header + remaining-length, the same way any
-    POST-starting TCP payload on a port none of this codebase's other port-gated decoders claim
-    first can; not a WinRM regression, and not this phase's collision to fix -- see winrm.hpp's own
-    "COLLISION SURVEY" section, which only scopes the *generic-HTTP* collision). --winrm-port 8585
+    the ABSENCE of "[winrm]"), and what actually claims it in that mode is winrm.hpp's own
+    documented, deliberate fallback: Tier 2's generic "http" recognition (a real `POST /wsman ...`
+    HTTP/1.1 request, honestly labeled "http" since nothing port-gated claims it first -- see
+    winrm.hpp's own "COLLISION SURVEY" section, "ordinary HTTP traffic on any other port still
+    falls through to Tier 2's generic 'http' recognition exactly as before"). This used to instead
+    hit a genuine, unrelated collision -- MQTT's own port-independent structural check accepted
+    this request's leading "PO" bytes as a plausible PUBREC fixed header + remaining-length, the
+    same way any POST-starting TCP payload on a port none of this codebase's other port-gated
+    decoders claim first used to be able to -- fixed by the same real-capture-driven tightening
+    documented in src/decoder.cpp's own MQTT call site (tests/real_captures/4sics/ATTRIBUTION.md):
+    off the standard MQTT port, a session now has to have already produced a structurally validated
+    CONNECT before any other, far weaker-gated MQTT packet type is trusted, and this flow never has
+    one. --winrm-port 8585
     widens Auto-mode detection so WinRmTcpDecoder claims it ahead of MQTT instead; --protocol winrm
     claims it port-independently too, and additionally adds the "not a configured/standard WinRM
     port" note (since the port still isn't 5985 nor in that particular invocation's widened set);

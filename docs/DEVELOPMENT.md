@@ -3202,6 +3202,18 @@ captures) -- every other item's correctness claims currently rest on
 synthetic fixtures and a handful of found real captures, never a live
 production-like capture end to end.
 
+**Update: item 1 is now partially advanced, not closed.** Item 149 brought
+in the 4SICS Geek Lounge captures (`tests/real_captures/4sics/
+ATTRIBUTION.md`) -- a real, physically-TAP'd conference lab network, not a
+production OT network, but the first capture in this project's own test
+suite noisy enough to stress-test the opportunistic, port-independent
+dispatch design against real IT background traffic. It found and fixed two
+genuine false-positive bugs (a COTP/HTTP collision; a much larger MQTT
+collision against Nmap-style scan traffic, misclassifying a majority of
+two of the three captures' own inventoried communication edges) that no
+synthetic fixture had ever exercised. A real production-network capture
+remains the open part of this item.
+
 **Update: the UDP `policy validate` gap named below is now fully closed.**
 This paragraph originally named widening `policy validate` to evaluate UDP
 flows at all as the single most-repeated "still open" call-out in this
@@ -19697,6 +19709,165 @@ it done as its own patch.
     confirms directly against `tests/sample_s7commplus.pcap`'s own real decoded addresses (not
     invented ones), the strongest validation this particular kind of feature admits. Delivered as a
     zip of touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
+
+149. **Real-network validation (ROADMAP item 1) against the 4SICS Geek Lounge captures finds and
+    fixes two genuine opportunistic-dispatch false-positive bugs in COTP and MQTT.** Jurgen asked
+    for a real, mirrored-switch-port-style OT network capture to validate against, as item 1 has
+    long called for; none of this project's existing real-capture fixtures are large or noisy
+    enough to stand in for one (each is either a small, protocol-pure test vector or a narrowly-
+    scoped attack sample -- see `tests/real_captures/4sics/ATTRIBUTION.md`'s own "Why these
+    specific fixtures" section). Research surfaced Netresec's hosted 4SICS/CS3STHLM Geek Lounge
+    captures -- a real, physically-TAP'd conference lab network from October 2015, with real PLC
+    hardware (a DirectLogic 205, a Siemens SIMATIC S7-1200, a Beckhoff CX1010) generating genuine
+    S7comm/COTP traffic, plus three days of heavy, continuous IT-noise and active scanning/
+    fingerprinting traffic from conference attendees -- explicitly a lab network, not a production
+    OT network, but the first capture in this project's own test suite with the kind of real
+    background noise an opportunistic, port-independent dispatch design actually needs to be
+    stress-tested against. Jurgen confirmed "yes, start with those" before any download began. This
+    sandbox's own egress proxy could not reach `share.netresec.com` directly (the same category of
+    restriction `tests/real_captures/iec104/ATTRIBUTION.md`'s Industroyer2 entry already
+    documents); the three files (25.7 MB/246,137 packets day 1, 140 MB/1,253,100 packets day 2,
+    209 MB/2,274,747 packets day 3) were instead downloaded through Jurgen's own linked desktop
+    browser and staged into this sandbox from there -- see `tests/real_captures/4sics/
+    ATTRIBUTION.md` for full provenance, sizes, hashes, and the honest "lab network, not production"
+    caveat.
+
+    Running `inventory` against all three files (this project's own established first move against
+    any new real capture) surfaced two real, previously-undetected false-positive bugs -- not
+    theoretical ones, actually misclassifying this capture's own real traffic -- that no synthetic
+    fixture had ever exercised, because both require byte sequences the decoders' own author never
+    thought to construct. Jurgen asked to scope and fix both: "(a) scope and fix the MQTT/COTP
+    opportunistic-dispatch false-positive now."
+
+    **Finding 1: a COTP/HTTP collision.** `try_parse_tpkt_cotp`'s own entry gate (`cotp.cpp`) is
+    deliberately loose -- TPKT magic bytes `03 00` plus a declared length that merely fits inside
+    the payload, by design, so it can run opportunistically, port-independently, ahead of the
+    generic TCP/HTTP fallback (the same "weaker signal, lower priority" ordering this codebase
+    already documents for HART-IP/MQTT/FF-HSE). In day 3's own capture, one ordinary HTTP response's
+    binary (GIF) body happened to begin with the exact bytes `03 00 00 ff`, clearing that loose gate
+    by sheer coincidence. COTP's own *internal* length-indicator consistency check then correctly
+    rejected it as malformed -- but that rejection was a hard `ParseError`, and `decode()`'s entire
+    per-packet TCP-dispatch cascade is wrapped in a single function-wide `try`/`catch` block: a
+    `ParseError` thrown anywhere inside it, even deep inside one opportunistically-tried decoder,
+    aborts the cascade for that packet entirely and reports it as `protocol: "parse-error"`, denying
+    every other decoder -- including the generic HTTP fallback that should have claimed this packet
+    -- any chance to run at all.
+
+    **Finding 2, much larger in real-world impact: an MQTT/background-traffic collision.** MQTT's
+    own structural detection gate is already documented, in this codebase's own words, as "honestly
+    the weakest" (`mqtt.hpp`'s file header) -- only 30 of 256 possible leading bytes excluded, no
+    multi-byte magic the way OPC UA/HART-IP have, dispatched last of all precisely because of this
+    weakness. In day 2's and day 3's captures, that weak gate was badly over-triggering against
+    completely unrelated, ordinary background traffic: Nmap-style service-fingerprinting probes and
+    responses, an HTTP OPTIONS request, a TLS ClientHello, an SMB Negotiate, a SIP OPTIONS message,
+    and an LDAP BER-encoded message all happened, purely by chance, to pass MQTT's gate and get
+    tagged `mqtt`. Confirmed by direct byte-level inspection (tshark) of the actual colliding
+    flows, not inferred from counts alone. Quantified against this project's own `inventory`
+    command, before any fix: 52 of day 2's own 84 inventoried communication edges (62%) and 135 of
+    day 3's own 229 (59%) were this exact false positive -- a majority of each file's own
+    machine-to-machine "communications" in both cases. After the fix, both files show exactly zero
+    `mqtt`-tagged packets: there is no genuine MQTT traffic anywhere in this lab network at all,
+    confirming every single one of those matches was spurious.
+
+    **Design.** Both fixes are deliberately narrow and reuse existing infrastructure rather than
+    adding anything new, scoped to exactly what the real-capture evidence confirmed and no further
+    (the deeper S7comm/MMS/S7comm-Plus rider decoders inside COTP were left untouched -- no
+    collision evidence was found there, and speculatively hardening an already-correct path isn't
+    this round's job).
+
+    *COTP*: at the one call site in `decoder.cpp` that invokes `cotp_decoder().decode()`
+    opportunistically (port-independent), a `ParseError` is now caught locally. On the expected
+    COTP/S7comm/MMS port (102, or a configured `--s7comm-port`), it is still rethrown exactly as
+    before -- there, a malformed frame is far more likely to be a genuinely broken S7 session than a
+    coincidental collision, and this project's existing strict-on-the-expected-port posture (the
+    same RDP-vs-COTP precedent on port 3389) is preserved without exception. Off that port, the
+    `ParseError` is demoted to "no match" (`std::nullopt`) instead, leaving the rest of the
+    opportunistic dispatch cascade -- down to the generic TCP/HTTP fallback -- free to have its own
+    turn at the packet, exactly as it would have without COTP's gate ever having fired.
+
+    *MQTT*: off the standard MQTT port (1883, or a configured `--mqtt-port`), a successful MQTT
+    parse is no longer trusted on its own. It is accepted only once this exact TCP session has
+    *also* produced a structurally validated CONNECT -- reusing `MqttFlowState::version_hint`
+    (already set only when a CONNECT's Protocol Name field reads literally `"MQTT"` or `"MQIsdp"`
+    with a valid Protocol Level byte, this decoder's own existing "near-OPC-UA-strength signal," per
+    `mqtt.hpp`'s own comment) as the "this session is genuinely running MQTT" confirmation. On the
+    standard port, this extra check is skipped entirely, unchanged from before: a CONNECT genuinely
+    outside a given capture's own time window (the capture simply starting mid-session) is common
+    and real MQTT traffic there shouldn't lose its recognition over it. No new state was added for
+    this -- `MqttFlowState` already existed and already tracked exactly the right fact.
+
+    **What was done.**
+    - `src/decoder.cpp`: the COTP call site now wraps `cotp_decoder().decode()` in a local
+      `try`/`catch (const ParseError&)`, rethrowing on the expected port and demoting to
+      `std::nullopt` off it, with a comment explaining the HTTP/GIF collision this was found
+      against. The MQTT call site now additionally requires `ctx.flow_state<MqttFlowState>().
+      version_hint != 0` before trusting an off-port match, with a comment explaining the Nmap/
+      scan-traffic collision this was found against and the CONNECT-confirmation rationale.
+    - `tools/make_sample_pcap.py`: `build_mqtt_sample()`'s Flow H (the fixture's own dedicated
+      "both ports non-standard" test flow, previously a bare PINGREQ/PINGRESP pair with no CONNECT)
+      now opens with a real CONNECT/CONNACK pair before its PINGREQ/PINGRESP, so it keeps
+      exercising the "not a configured/standard MQTT port" annotation under the new, stricter
+      policy instead of losing MQTT recognition entirely; the sample-pcap generator's own
+      docstring was updated to match, alongside a corrected description of item #19's (WinRM-on-
+      port-8585) now-correct fallback-to-`http` behavior. All sample pcaps regenerated
+      deterministically (`python3 -I tools/make_sample_pcap.py`; confirmed via `git status
+      --short` that nothing else changed).
+    - `CMakeLists.txt`: `mqtt_stats_counted`/`mqtt_protocol_filter_only_decodes_mqtt`'s expected
+      packet/MQTT/CONNECT/CONNACK counts updated for Flow H's two new packets;
+      `winrm_nonstandard_port_claimed_by_unrelated_mqtt_collision_in_auto_mode` (which existed
+      specifically to PIN the old buggy mqtt-misclassification of an off-port WinRM request) was
+      renamed to `winrm_nonstandard_port_claimed_by_generic_http_fallback` and re-targeted at the
+      new, correct `[http]` classification, since the collision it used to pin is now fixed;
+      `winrm_command_not_misdetected_as_generic_http`'s own `FAIL_REGULAR_EXPRESSION` was narrowed
+      from a blanket `"\\[http\\]"` to the port-scoped `":5985  \\[http\\]"`, since the separately-
+      and-correctly-tested off-port WinRM flow is now SUPPOSED to fall through to generic `http`;
+      `mqtts_tls_clienthello_port_8883_detected`'s literal pcap packet-index regex was updated
+      (`#56` to `#58`) for the fixture's two new packets. Every regex was confirmed against the
+      real rebuilt binary's actual output before being finalized, per this project's own standing
+      discipline, never guessed from the byte-count delta alone.
+
+    **Left open, documented honestly rather than silently dropped.** The deeper S7comm/S7comm-Plus/
+    MMS rider decoders inside COTP were not touched -- no false-positive evidence was found against
+    them in these captures, and hardening an already-correct path speculatively isn't this round's
+    job. The FTP-vs-MQTT and LDAP-vs-MQTT port-based collision carve-outs already documented
+    elsewhere in this codebase (`decoder.cpp`'s own comments, `docs/PROTOCOL_COVERAGE.md`'s Tier
+    2/Tier 3 sections) are untouched and unaffected -- they live at a different call site (the
+    declared-length TCP-reassembly probe) from the one this round's MQTT fix changed (the final
+    decode/accept call site), and both continue to work exactly as before. These 4SICS captures
+    remain a real, physically-TAP'd conference LAB network, not a production OT network (see
+    `tests/real_captures/4sics/ATTRIBUTION.md`'s "What this capture actually is" section) -- item 1
+    is advanced, not closed, by this round; further real-network validation work (beyond this one
+    MQTT/COTP fix) remains open.
+
+    **Docs.** `docs/PROTOCOL_COVERAGE.md`'s S7comm/COTP section and MQTT section both gained a
+    paragraph describing their respective real-capture-found collision and fix, in the same style
+    already established there for the RDP-vs-COTP and FTP/LDAP-vs-MQTT collisions.
+    `docs/USER_GUIDE.md`'s existing MQTT LIMITATIONS bullet gained a sentence describing the new
+    off-port CONNECT-confirmation requirement. `tests/real_captures/4sics/ATTRIBUTION.md` is new,
+    covering provenance, sizes/hashes, what this capture is and isn't, and the exact false-positive
+    figures found. `docs/MANUAL.md` was NOT touched, per Jurgen's standing instruction.
+
+    **Verification.** Every new/changed CTest regex was confirmed against the real rebuilt binary's
+    actual output first. Full default-build CTest suite: 2554/2554 passing, zero regressions (same
+    total as item 148 -- this round renamed one test and fixed five others' expectations, adding no
+    net new CTest entries). Clang ASan/UBSan `build-fuzz`: 2632/2632 passing (507.44s total,
+    including the ~81 slow `fuzz_*_corpus_regression` entries).
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2536/2536 passing. MinGW cross-compile
+    `build-mingw`: builds clean; test execution there remains environmentally impossible in this
+    Linux sandbox (Windows `.exe` binaries can't execute here at all -- confirmed as a pre-existing,
+    unrelated limitation by running a single, totally unrelated test,
+    `crypto_primitives_self_test`, which fails identically with `MZ...: not found`, the classic
+    "tried to execute a Windows PE binary as a shell script" error -- matching this project's own
+    established "build-only" verification posture for this config from items 145-148). Beyond the
+    synthetic-fixture suite, the fix was verified directly against the real captures that
+    originally surfaced it: day 1 (pure genuine S7comm/COTP traffic, no HTTP or MQTT-gate-colliding
+    traffic at all) produces byte-for-byte identical `inventory` output before and after the fix;
+    day 2's and day 3's own false-positive `mqtt` edges dropped to exactly zero (from 52/84 and
+    135/229 respectively); day 3's own 5 genuinely unrelated `parse-error` packets (truncated/
+    malformed IP and TCP headers -- Ethernet-padding-trim edge cases and one impossibly-small TCP
+    data-offset field, nothing to do with COTP or MQTT) are completely unchanged, confirming this
+    fix is precisely scoped rather than masking unrelated decode problems. Delivered as a zip of
+    touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
 
 ### Protocols not covered at all
 

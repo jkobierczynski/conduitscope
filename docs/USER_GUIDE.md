@@ -8035,7 +8035,13 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   merely theoretical). CONNECT alone gets a materially stronger,
   version-specific check (its own Protocol Name field must read `"MQTT"` or
   `"MQIsdp"`); every other MQTT packet type relies on the one-byte fixed
-  header alone.
+  header alone. Real-capture validation (docs/DEVELOPMENT.md's ROADMAP item 149, against the 4SICS
+  Geek Lounge captures) found this weak gate badly over-triggering off the standard MQTT port
+  against genuine real-world IT background noise (Nmap-style scan traffic, an HTTP OPTIONS
+  request, a TLS ClientHello, and more), misclassifying a majority of two of those captures' own
+  inventoried communication edges -- so, off the standard port only, a successful MQTT parse is no
+  longer trusted on its own: the same TCP session must have already produced a structurally
+  validated CONNECT first. On the standard port nothing changed.
 - **MQTT's SUBACK version-disambiguation heuristic is the least reliable of
   the three ambiguous packet types** (SUBSCRIBE/SUBACK/UNSUBSCRIBE), used
   only when no CONNECT was ever seen on a session in this capture. SUBACK's
