@@ -1,0 +1,28 @@
+# Sample S7comm-Plus symbol table (ROADMAP item 148), used by CMakeLists.txt's
+# --s7plus-symbols test coverage (see symbol_table.hpp/symbol_table.cpp). The two CRC+LID-chain
+# pairs below match real item addresses decoder.cpp's own GetMultiVariables Job in
+# tests/sample_s7commplus.pcap already produces -- see tools/make_sample_pcap.py's
+# build_s7commplus_sample().
+#
+# Format: <crc-hex> <lid-chain> <name> -- <lid-chain> is "-" for a bare, non-nested address
+# (lid_nesting_depth == 1, e.g. a Merker/flag) or dot-separated decimal for a nested one (e.g.
+# "10" for a single further LID, "2.5" for two). '#' starts a comment, blank lines are skipped.
+# See symbol_table.cpp's parse_symbol_table_file for the exact tolerant-parsing rules (a
+# malformed line is silently skipped, not an error; a later line for the same (crc, lid-chain)
+# pair overwrites an earlier one).
+
+ea2db0d9   -    Motor1_Running
+a9bc66e6   10   Line2_Speed_Setpoint
+
+# deadbeef/LID=M is a deliberate miss -- tests use it as a guaranteed resolution miss (present in
+# the sample capture's own SetVariable request, but never listed here).
+
+# Malformed lines below are deliberately present to exercise tolerant parsing -- none of these
+# should ever produce a resolution:
+not_hex_at_all   -   Should_Never_Resolve
+ea2db0d9
+11111111   not.a.chain!   Should_Never_Resolve_Either
+
+# A duplicate of ea2db0d9/- below DOES override the entry above (last line wins) -- exercises
+# that rule explicitly.
+ea2db0d9   -    Motor1_Running_Overridden
