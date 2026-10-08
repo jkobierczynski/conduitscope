@@ -6,7 +6,23 @@
 #include <fstream>
 #include <sstream>
 
+#include "conduitscope/resource_limits.hpp"
+
 namespace conduitscope {
+
+// docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F1: see
+// tls_keylog_entries_refused()'s own comment (resource_limits.hpp) for why THIS constructor,
+// rather than Decoder's, is the right reset point.
+TlsKeyLog::TlsKeyLog() { reset_tls_keylog_entries_refused(); }
+
+// Rough, deliberately approximate per-entry accounting overhead folded into
+// max_tls_keylog_bytes' own budget, per the review's own "+ hash-table/container overhead
+// allowance" suggestion -- std::unordered_map's own node/bucket overhead plus
+// TlsKeyLogEntry's five std::vector<uint8_t> headers are comfortably under this on every
+// mainstream STL implementation; this is a conservative accounting constant, not a measured
+// figure, exactly like this file's own tolerant-parsing posture elsewhere (good enough to bound
+// accumulation, not a promise of exact memory usage).
+constexpr size_t kTlsKeyLogEntryOverheadBytes = 256;
 
 size_t TlsKeyLog::ClientRandomHash::operator()(const std::array<uint8_t, 32>& r) const noexcept {
     // FNV-1a over the 32 raw bytes -- this is a hash-table bucketing function, not a cryptographic
@@ -20,6 +36,24 @@ size_t TlsKeyLog::ClientRandomHash::operator()(const std::array<uint8_t, 32>& r)
         h *= 1099511628211ULL;
     }
     return h;
+}
+
+bool TlsKeyLog::tls_keylog_limit_admits(const std::array<uint8_t, 32>& client_random,
+                                         size_t bytes_to_store) {
+    const bool is_new_entry = entries_.find(client_random) == entries_.end();
+    if (is_new_entry &&
+        entries_.size() >= resource_limits().max_tls_keylog_entries.value_or(kDefaultMaxTlsKeyLogEntries)) {
+        note_tls_keylog_entry_refused();
+        return false;
+    }
+    const size_t overhead = is_new_entry ? kTlsKeyLogEntryOverheadBytes : 0;
+    const size_t prospective_bytes = total_secret_bytes_ + bytes_to_store + overhead;
+    if (prospective_bytes > resource_limits().max_tls_keylog_bytes.value_or(kDefaultMaxTlsKeyLogBytes)) {
+        note_tls_keylog_entry_refused();
+        return false;
+    }
+    total_secret_bytes_ = prospective_bytes;
+    return true;
 }
 
 namespace {
@@ -147,6 +181,13 @@ size_t TlsKeyLog::ingest(std::string_view text) {
             // RFC 9850 section 2: "the... master secret... 48 bytes". A different length here is
             // either a non-conforming writer or line corruption either way -- not trusted.
             if (secret_bytes->size() != 48) continue;
+            // patch315 security review finding F1: enforced AFTER every malformed-line check above
+            // (a line this parser would skip anyway costs nothing to reject the ordinary way) but
+            // BEFORE entries_[client_random] -- which, being operator[], would create a default
+            // entry even for a line this function is about to refuse -- see this file's own
+            // tls_keylog_limit_admits() for the shared check both this branch and the
+            // traffic-secret branch below use.
+            if (!tls_keylog_limit_admits(client_random, secret_bytes->size())) continue;
             entries_[client_random].master_secret = std::move(*secret_bytes);
             ++merged;
             continue;
@@ -154,6 +195,17 @@ size_t TlsKeyLog::ingest(std::string_view text) {
 
         auto label = parse_label(label_tok);
         if (!label) continue;  // Unrecognized label, or a recognized-but-unstored one (ECH_*).
+
+        // A recognized-but-unstored label (ECH_*/exporter secrets -- see parse_label's own
+        // comment) still costs zero bytes of actual secret material, but would otherwise still
+        // create an empty entries_[client_random] slot below -- accounted for as a zero-byte,
+        // new-entry-only admission so it still counts against max_tls_keylog_entries (a real map
+        // slot is still consumed) without inflating max_tls_keylog_bytes for data never stored.
+        const bool label_is_stored = *label == TlsKeyLogLabel::ClientHandshakeTrafficSecret ||
+                                      *label == TlsKeyLogLabel::ServerHandshakeTrafficSecret ||
+                                      *label == TlsKeyLogLabel::ClientTrafficSecret0 ||
+                                      *label == TlsKeyLogLabel::ServerTrafficSecret0;
+        if (!tls_keylog_limit_admits(client_random, label_is_stored ? secret_bytes->size() : 0)) continue;
 
         TlsKeyLogEntry& entry = entries_[client_random];
         switch (*label) {

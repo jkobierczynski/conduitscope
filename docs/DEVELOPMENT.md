@@ -20164,6 +20164,147 @@ it done as its own patch.
     and this fix's own "always explained, never silent" guarantee. `docs/MANUAL.md` was NOT
     touched, per Jurgen's standing instruction.
 
+153. **TLS key-log / pcapng DSB state is unbounded (docs/reviews/2026-10-chatgpt-security-review-
+    patch315.md finding F1, Medium severity).** Jurgen forwarded a ChatGPT-authored security review
+    of the codebase at commit `9f8753539e77edf2308d7c56f72604d8a6f34b4f`/v0.3.4 (patch315) and asked
+    for it to be added to `docs/reviews/` and for finding F1 specifically to be fixed (F2-F8 were
+    deliberately NOT addressed this round -- Jurgen asked for F1 only). The review's own words:
+    `TlsKeyLog` (item 150, `tls_keylog.hpp`/`.cpp`) accumulates one entry per distinct
+    `ClientHello.random` for the ENTIRE run, fed from both an operator's own `--tls-keylog` file AND
+    any number of pcapng Decryption Secrets Blocks a capture file carries -- with no ceiling on
+    either the number of distinct entries or the cumulative bytes of secret material stored, unlike
+    every other "many distinct X, no natural end" accumulation this codebase already bounds
+    (`max_active_flows`/`max_flow_state_entries`/`max_active_fragment_groups`, all added by earlier
+    review rounds for the identical shape of problem). A capture engineered to carry a very large
+    number of DSBs, each introducing a new, well-formed-but-never-used `client_random`, could grow
+    `TlsKeyLog::entries_` without bound purely from untrusted capture-file content -- no operator
+    file, no live traffic volume, needed to trigger it.
+
+    **The fix.** Two new `ResourceLimits` fields (`include/conduitscope/resource_limits.hpp`):
+    `max_tls_keylog_entries` (default 100,000, the same order of magnitude as
+    `kDefaultMaxFlowStateEntries`) caps the TOTAL distinct `client_random` entries `TlsKeyLog` will
+    ever hold; `max_tls_keylog_bytes` (default 64 MiB) is the review's own recommended companion
+    byte-based ceiling, closing the same concern from the other direction (a capture that keeps
+    re-sending DSBs refining the same small set of sessions, each carrying a full-size secret,
+    would otherwise never trip the entry-count ceiling at all). Both are plain refusals, never
+    evictions -- unlike `max_flow_state_entries`, there is no existing entry here whose eviction
+    would make semantic sense to displace in favor of a new one, so a line past either ceiling is
+    simply not admitted; the session it names stays exactly as opaque as if no key had ever been
+    supplied for it at all, the same property this flag's own absence always has. `TlsKeyLog` grew
+    a new private `tls_keylog_limit_admits(client_random, bytes_to_store)` gate
+    (`tls_keylog.cpp`), called in `ingest()` strictly BEFORE either of its two branches
+    (`CLIENT_RANDOM`'s `master_secret`, and the four TLS 1.3 traffic-secret labels) ever touches
+    `entries_[client_random]` -- `operator[]` itself default-constructs an entry on first use,
+    which would silently bypass the entry-count ceiling if checked only after. Two new CLI flags,
+    `--max-tls-keylog-entries`/`--max-tls-keylog-bytes`, follow this codebase's own established
+    "0 means leave this site at its own compiled default" convention for every `--max-*` flag,
+    wired into `decode`/`policy validate`/`inventory`/`detect`/`baseline learn`/`baseline check`
+    identically to every other resource-limit pair (`evidence` deliberately has no CLI
+    resource-limit surface at all, matching its own pre-existing, documented scoping choice for
+    every other `--max-*` flag).
+
+    A genuinely new wrinkle this fix had to work through, not present in `max_flow_state_entries`'s
+    own precedent: `resource_limits()` is `thread_local` state that, before this fix, was only ever
+    pushed by `Decoder`'s own constructor (`decoder.hpp`) -- but `TlsKeyLog::load_file()` for an
+    operator's own `--tls-keylog` file runs in every one of `cli_main.cpp`'s 6 wired subcommands
+    BEFORE their own `Decoder` is constructed, so the newly-added
+    `--max-tls-keylog-entries`/`--max-tls-keylog-bytes` CLI overrides would otherwise never actually
+    reach `tls_keylog_limit_admits()` for that file -- only DSBs discovered later, mid-decode, would
+    ever see them. Fixed by an explicit `set_resource_limits(options.limits)` call inserted
+    immediately before each subcommand's own `load_file()` call; for the 4 subcommands
+    (`inventory`/`detect`/`baseline learn`/`baseline check`) whose own `options.limits =
+    build_resource_limits(limit_vars)` happened AFTER `load_file()` in source order, that
+    construction was also reordered to precede it, so `options.limits` itself is fully populated
+    before anything reads it. `evidence`'s own `options.limits` is left permanently default-
+    constructed (deliberately, pre-existing, out of scope -- see "What was done" above), so its
+    `set_resource_limits()` call was added purely for consistency with the other 6 call sites, not
+    because any CLI override could otherwise reach it. Confirmed against the real
+    built binary that this was a genuine, previously-live bug, not a hypothetical: before the fix,
+    `--max-tls-keylog-entries 1 --tls-keylog <file-with-2-entries>` against `inventory`/`detect`
+    left BOTH entries admitted (the override never took effect on the file-load path at all).
+
+    A separate, narrower counter was needed alongside the existing `flow_state_evictions()`
+    precedent rather than reusing it: `tls_keylog_entries_refused()` (`resource_limits.hpp`/`.cpp`)
+    is reset by `TlsKeyLog`'s OWN constructor, not `Decoder`'s -- `TlsKeyLog`'s lifetime already
+    correctly spans the whole run (one instance shared across every input file in `baseline
+    learn`'s own per-file loop, and across `evidence`'s four independent decode passes), so
+    resetting it on every new `Decoder` construction the way `flow_state_evictions()` does would
+    under-count a ceiling meant to bound accumulation across the ENTIRE run, not any one
+    `Decoder::decode()` call -- precisely the accumulation this finding is about. A new
+    `append_tls_keylog_limit_reason()` free function (mirroring `append_flow_state_eviction_reason()`
+    exactly) folds a nonzero refused-line count into `AssetInventoryEngine`/`DetectEngine`/
+    `PolicyEngine::finish()` and `baseline learn`'s/`baseline check`'s own report-building code in
+    `cli_main.cpp` -- the same 5 call sites `append_flow_state_eviction_reason()` already has,
+    reusing the existing `ObservationIncompleteReason::ResourceLimit` category (this is a
+    refusal-to-track-something-new, the same shape every other `admit_tracked_key()`-style ceiling
+    refusal in this codebase already uses, not a `FlowStateEviction`-style destruction of
+    already-tracked state) rather than inventing a new enum value. `evidence`'s own baseline pass
+    (which, pre-existing and out of scope for this fix, also never folds in
+    `flow_state_evictions()`) was deliberately left as-is rather than expanding scope beyond
+    mirroring the 5 established call sites; its other three passes (inventory/detect/policy) pick
+    up the fold-in automatically, since they share the exact same engine `finish()` methods every
+    other subcommand uses.
+
+    **New tests.** 15 new CTest entries. Two new fixture files: `tests/sample_tls_keylog_many_
+    entries.txt` (5 distinct, deterministic, well-formed `CLIENT_RANDOM` lines -- a key-log file has
+    no packet/pcap structure for `tools/make_sample_pcap.py` to synthesize, so this was hand-
+    generated) proves the report-engine fold-in across `detect`/`inventory`/`policy validate`/
+    `baseline check`/`baseline learn` (exit codes, JSON/CEF/LEEF shapes, and the unset-default
+    no-mention case), confirmed against the real built binary that `--max-tls-keylog-entries 2`
+    against this 5-entry fixture refuses exactly 3 lines and `--max-tls-keylog-bytes 400` refuses
+    exactly 4 (not assumed from the accounting formula alone). `tests/sample_tls_keylog_many_
+    entries_then_mqtts.txt` (the same 5 throwaway entries followed by the REAL, already-decrypting
+    `tests/sample_tls_mqtts_keylog.txt` entry) proves the actual, security-relevant end-to-end
+    consequence against `tests/sample_tls_mqtts.pcap`: with the entry-count ceiling capped to
+    exactly 5 (no room for the real entry's own 6th distinct `client_random`), the capture decodes
+    byte-for-byte identically to `tls_decrypt_mqtts_without_keylog_stays_opaque`'s own fixture with
+    no `--tls-keylog` at all (same "no matching --tls-keylog/pcapng-DSB entry found" note, the
+    plaintext `CONNECT (MQTT 3.1.1)` never appearing); capped to 6, it decrypts exactly as
+    `tls_decrypt_mqtts_connect_decoded_with_decrypted_note`'s own fixture already proves -- the
+    exact boundary, both directions, confirmed against the real built binary. The byte-based
+    ceiling's own boundary needed two attempts to get right: a first guess at the byte math (based
+    on only the real entry's first traffic-secret line needing its own 256-byte one-time overhead)
+    put the boundary at 1808, but running it against the real binary showed `CONNECT` still never
+    appearing there -- the real entry's OTHER three traffic-secret lines (no overhead, since the
+    entry already exists, but still costing their own 32 secret bytes each) were being refused
+    individually once the running byte total passed 1808 partway through, leaving the entry
+    incomplete and the session still undecodable; the actual boundary, confirmed by re-deriving the
+    full 4-line cost and re-testing, is 1903 (refuses) / 1904 (admits, decrypts) -- left in this
+    item's own write-up as a caution against trusting an accounting formula without proving the
+    exact number against the real binary, exactly this project's own standing discipline.
+
+    **Left open.** F2-F8 from the same review, per Jurgen's own explicit scoping ("fix the F1
+    issue") -- not evaluated or fixed this round. `evidence`'s own baseline pass's pre-existing gap
+    (no `flow_state_evictions()`/`tls_keylog_entries_refused()` fold-in at all, unlike its other
+    three passes) was left as-is, matching this fix's "mirror the 5 established call sites, don't
+    expand scope" posture above.
+
+    **Docs.** `docs/USER_GUIDE.md` gained two new option rows (`--max-tls-keylog-entries`/
+    `--max-tls-keylog-bytes`) in `decode`'s own OPTIONS table, a widened `detect` resource-limit
+    summary row (eight flags -> ten), a new "...are a third, separate way a report can be marked
+    incomplete" paragraph in "Resource bounds and OBSERVATION INCOMPLETE" (mirroring the existing
+    flow-state-eviction paragraph), cross-references to it from `policy validate`'s and
+    `inventory`'s own "Resource bounds" subsections, an updated `resource_limit` token description
+    in the closed-enum-category paragraph, and updated exit-code-table entries (codes 5 and 6)
+    naming this finding alongside F4's own flow-state-eviction entry. `docs/PROTOCOL_COVERAGE.md`
+    was deliberately NOT touched -- this is a resource-limit/DoS-protection fix, the same category
+    `max_flow_state_entries`/`max_active_flows`/`max_active_fragment_groups` already are, none of
+    which appear in that file either; it documents protocol decode coverage/scope, not CLI
+    resource-limit flags. `docs/reviews/2026-10-chatgpt-security-review-patch315.md` added (see
+    below). `docs/MANUAL.md` was NOT touched, per Jurgen's standing instruction.
+
+    **Verification.** All 15 new CTest entries confirmed individually passing against the real
+    built binary before being finalized (several required correcting an initial hand-calculation
+    against the real binary's own output -- see "New tests" above). Full default-build CTest suite:
+    2579/2579 passing (2564 + 15 new), zero regressions. Clang ASan/UBSan `build-fuzz`: 2657/2657
+    passing (including all 78 `*_corpus_regression` tests), zero regressions. `-DCONDUITSCOPE_
+    ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2561/2561 passing, zero regressions. MinGW
+    cross-compile `build-mingw`: rebuilt clean, build-only as usual (this fix's own code is
+    entirely independent of `CONDUITSCOPE_ENABLE_TLS_DECRYPT`/OpenSSL -- `TlsKeyLog` itself, unlike
+    `tls_decrypt.cpp`'s actual decryption engine, has always compiled and been exercised on every
+    config regardless of OpenSSL availability, including this one). Delivered as a zip of
+    touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

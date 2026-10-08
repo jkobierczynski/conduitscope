@@ -138,7 +138,13 @@ struct TlsKeyLogEntry {
 // 32-byte ClientHello.random, no I/O after construction/ingestion.
 class TlsKeyLog {
 public:
-    TlsKeyLog() = default;
+    // Defined out-of-line (tls_keylog.cpp), not defaulted here: resets the global
+    // tls_keylog_entries_refused() counter (resource_limits.hpp) to 0 -- see that function's own
+    // comment for why THIS object's constructor, rather than Decoder's, is the right reset point
+    // for a ceiling meant to bound accumulation across a whole run (this object's own lifetime
+    // already spans exactly that), per docs/reviews/2026-10-chatgpt-security-review-patch315.md
+    // finding F1.
+    TlsKeyLog();
 
     // Reads `path` in full and calls ingest() on its contents. path must already exist and be
     // readable (CLI11's ->check(CLI::ExistingFile) enforces existence before this is ever called
@@ -185,6 +191,27 @@ private:
         size_t operator()(const std::array<uint8_t, 32>& r) const noexcept;
     };
     std::unordered_map<std::array<uint8_t, 32>, TlsKeyLogEntry, ClientRandomHash> entries_;
+
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F1: cumulative count of
+    // every secret byte ever admitted into entries_ (plus a flat per-new-entry overhead
+    // allowance -- see tls_keylog.cpp's own kTlsKeyLogEntryOverheadBytes), checked against
+    // --max-tls-keylog-bytes. Monotonically non-decreasing -- a later line that OVERWRITES an
+    // already-stored field's bytes still adds to this total rather than netting out the
+    // replaced bytes, deliberately conservative (this accounts for cumulative ingest() work
+    // already done, not current live memory footprint).
+    size_t total_secret_bytes_ = 0;
+
+    // Shared gate for both the CLIENT_RANDOM branch and the four-traffic-secret-label branch in
+    // ingest() (tls_keylog.cpp): decides whether a well-formed line's client_random/bytes may be
+    // admitted into entries_/total_secret_bytes_ without exceeding --max-tls-keylog-entries/
+    // --max-tls-keylog-bytes, calling note_tls_keylog_entry_refused() (resource_limits.hpp) and
+    // returning false the first time either ceiling would be exceeded. `bytes_to_store` is the
+    // number of secret bytes THIS line would actually add (0 for a recognized-but-unstored label
+    // such as an ECH_*/exporter secret, which still consumes one entries_ map slot on its first
+    // appearance but no TlsKeyLogEntry field). Called strictly BEFORE any entries_[client_random]
+    // access for this line -- operator[] itself creates a default entry on first use, which would
+    // silently bypass max_tls_keylog_entries if called before this check rather than after.
+    bool tls_keylog_limit_admits(const std::array<uint8_t, 32>& client_random, size_t bytes_to_store);
 };
 
 }  // namespace conduitscope

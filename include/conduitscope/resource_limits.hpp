@@ -159,6 +159,33 @@ struct ResourceLimits {
     // comment above -- see kDefaultMaxActiveFragmentGroups below for why its default is set two
     // orders of magnitude below kDefaultMaxActiveFlows.
     std::optional<size_t> max_active_fragment_groups;
+
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F1 ("TLS key-log / pcapng
+    // DSB state is unbounded", ROADMAP item 153): bounds the TOTAL number of distinct
+    // ClientHello.random entries TlsKeyLog (tls_keylog.hpp) will ever hold across a whole run --
+    // whether supplied via an operator's own --tls-keylog file or accumulated from any number of
+    // pcapng Decryption Secrets Blocks discovered while reading a capture (a capture can embed as
+    // many DSBs as it likes; every one is untrusted input, exactly like every other byte in the
+    // file). Checked only when a line's own client_random isn't already a tracked entry; a later
+    // line that updates an ALREADY-admitted entry's own secret field never counts against this --
+    // the same "checked only on the way to creating a brand-new entry" shape max_active_flows/
+    // max_flow_state_entries/max_active_fragment_groups already establish above. std::nullopt
+    // (the default) does NOT mean unbounded -- see kDefaultMaxTlsKeyLogEntries below, applied via
+    // `.value_or(...)` at TlsKeyLog::ingest()'s own enforcement site (tls_keylog.cpp), the same
+    // "nullopt still means a real ceiling" shape every field above already uses.
+    std::optional<size_t> max_tls_keylog_entries;
+
+    // Companion byte-based ceiling for the identical unbounded-growth concern, per the review's
+    // own recommendation to "make the accounting byte-based internally": bounds the cumulative
+    // number of raw secret bytes TlsKeyLog has EVER stored, across every entry and every one of
+    // CLIENT_RANDOM's master_secret plus the four TLS 1.3 traffic-secret labels -- including
+    // bytes stored for an ALREADY-admitted entry's own later line (unlike max_tls_keylog_entries
+    // above, this one is NOT skipped for an existing entry: a capture that keeps re-sending DSBs
+    // refining the same small set of client_random values, each one carrying its own full-size
+    // secret, would otherwise never trip the entry-count ceiling at all while still growing
+    // memory without bound). std::nullopt (the default) does NOT mean unbounded -- see
+    // kDefaultMaxTlsKeyLogBytes below.
+    std::optional<size_t> max_tls_keylog_bytes;
 };
 
 // Compiled-in defaults applied via .value_or() at max_active_flows's/max_flow_state_entries's/
@@ -182,6 +209,19 @@ inline constexpr size_t kDefaultMaxFlowStateEntries = 250000;
 // traffic (most ICS protocol PDUs are well under typical MTU), unlike distinct TCP flows, which are
 // common enough to justify kDefaultMaxActiveFlows's much larger ceiling.
 inline constexpr size_t kDefaultMaxActiveFragmentGroups = 5000;
+
+// max_tls_keylog_entries'/max_tls_keylog_bytes' own defaults (docs/reviews/2026-10-chatgpt-
+// security-review-patch315.md finding F1) -- applied via .value_or() at TlsKeyLog::ingest()'s own
+// enforcement site (tls_keylog.cpp). Generous enough that no legitimate deployment (a capture
+// with many thousands of distinct TLS sessions, each logged via --tls-keylog or a
+// capture-embedded DSB) should ever observe a refusal from the default alone: a real TLS secret
+// is at most 48 bytes (CLIENT_RANDOM's master_secret) and this codebase stores at most 5 fields
+// per entry (master_secret plus the four TLS 1.3 traffic-secret labels), so even
+// kDefaultMaxTlsKeyLogEntries entries each carrying every field at its maximum size totals well
+// under kDefaultMaxTlsKeyLogBytes -- while still bounding a capture deliberately engineered to
+// manufacture unlimited TLS secret material via an unbounded number of DSBs.
+inline constexpr size_t kDefaultMaxTlsKeyLogEntries = 100000;
+inline constexpr size_t kDefaultMaxTlsKeyLogBytes = 64 * 1024 * 1024;  // 64 MiB.
 
 // The true IPv4/IPv6 non-jumbogram datagram size ceiling (RFC 791/RFC 8200 -- a 13-bit
 // fragment-offset field, in 8-byte units, plus a fragment's own payload, cannot legitimately
@@ -383,5 +423,43 @@ void append_observation_incomplete_reason(std::vector<ObservationIncompleteReaso
 // duplicated at each of the four call sites, so the exact wording can never drift between engines.
 bool append_flow_state_eviction_reason(std::vector<std::string>& reasons,
                                         std::vector<ObservationIncompleteReason>& categories);
+
+// docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F1 (ROADMAP item 153): the
+// same "no object available at the enforcement/report-finishing call site" shape as
+// flow_state_evictions() above -- TlsKeyLog (tls_keylog.hpp) is owned by cli_main.cpp, never
+// threaded into AssetInventoryEngine/DetectEngine/PolicyEngine/BaselineEngine's own `finish()`
+// (every one of those is a `const` method taking no such parameter, by design -- see each one's
+// own call site), so this mirrors flow_state_evictions()' exact precedent rather than changing
+// four engines' signatures for one new ceiling. Counts how many otherwise-well-formed key-log/
+// DSB lines TlsKeyLog::ingest() has refused -- not a malformed line, which is already silently
+// skipped for an unrelated, pre-existing reason -- because admitting it would have exceeded
+// --max-tls-keylog-entries/--max-tls-keylog-bytes.
+//
+// Reset to 0 by TlsKeyLog's own constructor (tls_keylog.cpp), NOT by Decoder's constructor the
+// way flow_state_evictions() is: TlsKeyLog's own lifetime already correctly spans "the whole
+// run" (one instance, shared across every input file/Decoder instance in e.g. `baseline learn`'s
+// own per-file loop, and across `evidence`'s four independent decode passes -- see
+// tls_keylog.hpp's own header comment), so resetting on every new Decoder construction the way
+// flow_state_evictions() does would incorrectly under-count a ceiling meant to bound accumulation
+// across the ENTIRE run, not any one Decoder::decode() call -- exactly the "every unique
+// client_random remains in TlsKeyLog for the entire run" accumulation this finding itself warns
+// about.
+size_t tls_keylog_entries_refused();
+void note_tls_keylog_entry_refused();
+void reset_tls_keylog_entries_refused();
+
+// Shared by every one of AssetInventoryEngine::finish()/DetectEngine::finish()/
+// PolicyEngine::finish()/`baseline learn`'s and `baseline check`'s own report-building code
+// (cli_main.cpp), the identical set of call sites append_flow_state_eviction_reason() above
+// already has, right alongside it. Appends one human-readable reason line (naming
+// --max-tls-keylog-entries/--max-tls-keylog-bytes, the exact refused-line count, and the
+// correctness consequence) to `reasons`, and ObservationIncompleteReason::ResourceLimit (the
+// same category every other admit_tracked_key()-style ceiling refusal in this codebase already
+// uses -- this is a refusal-to-track-something-new, not a FlowStateEviction-style destruction of
+// already-tracked state) to `categories`, iff tls_keylog_entries_refused() is nonzero for the
+// currently-active run, returning whether it did -- callers OR this into their own
+// observation_truncated flag, the same contract append_flow_state_eviction_reason() already has.
+bool append_tls_keylog_limit_reason(std::vector<std::string>& reasons,
+                                     std::vector<ObservationIncompleteReason>& categories);
 
 }  // namespace conduitscope

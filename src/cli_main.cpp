@@ -786,6 +786,11 @@ struct ResourceLimitCliVars {
     // of TCP flows/protocol session state. See resource_limits.hpp's own comment on
     // max_active_fragment_groups.
     size_t max_active_fragment_groups = 0;
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F1 (ROADMAP item 153): same
+    // "0 = leave at its own default" sentinel as every field above, for TlsKeyLog's own two new
+    // ceilings (resource_limits.hpp's max_tls_keylog_entries/max_tls_keylog_bytes).
+    size_t max_tls_keylog_entries = 0;
+    size_t max_tls_keylog_bytes = 0;
 };
 
 void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
@@ -851,6 +856,26 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "contains -- an existing group's own state being updated never counts against this. "
            "0 (the default) applies the built-in default of 5,000")->group("Resource limits (advanced)")
         ->capture_default_str();
+    cmd->add_option(
+           "--max-tls-keylog-entries", vars.max_tls_keylog_entries,
+           "Cap the number of distinct TLS ClientHello.random entries the --tls-keylog/pcapng-DSB "
+           "decryption table (TlsKeyLog) will ever hold across this whole run, whether supplied "
+           "via --tls-keylog or accumulated from any number of capture-embedded Decryption "
+           "Secrets Blocks -- an already-admitted entry being refined by a later line never "
+           "counts against this. 0 (the default) applies the built-in default of 100,000; past "
+           "this, a session whose secret arrives after the ceiling is reached stays exactly as "
+           "opaque as if no key had ever been supplied for it (see docs/DEVELOPMENT.md's security "
+           "review write-up)")->group("Resource limits (advanced)")
+        ->capture_default_str();
+    cmd->add_option(
+           "--max-tls-keylog-bytes", vars.max_tls_keylog_bytes,
+           "Cap the cumulative number of raw TLS secret bytes (plus a per-entry accounting "
+           "overhead allowance) the --tls-keylog/pcapng-DSB decryption table will ever store "
+           "across this whole run -- the companion byte-based ceiling to --max-tls-keylog-entries "
+           "above, closing the same unbounded-growth concern from the other direction (a capture "
+           "that keeps refining the same small set of sessions rather than growing their count). "
+           "0 (the default) applies the built-in default of 64 MiB")->group("Resource limits (advanced)")
+        ->capture_default_str();
 }
 
 ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
@@ -863,6 +888,8 @@ ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
     if (vars.max_active_flows != 0) limits.max_active_flows = vars.max_active_flows;
     if (vars.max_flow_state_entries != 0) limits.max_flow_state_entries = vars.max_flow_state_entries;
     if (vars.max_active_fragment_groups != 0) limits.max_active_fragment_groups = vars.max_active_fragment_groups;
+    if (vars.max_tls_keylog_entries != 0) limits.max_tls_keylog_entries = vars.max_tls_keylog_entries;
+    if (vars.max_tls_keylog_bytes != 0) limits.max_tls_keylog_bytes = vars.max_tls_keylog_bytes;
     return limits;
 }
 
@@ -1578,6 +1605,16 @@ int run_decode(const std::string& input, const std::string& interface_name, cons
         // PacketSource). An empty tls_keylog_path is a harmless no-op -- TlsKeyLog::active()'s own
         // comment -- the same posture symbol_table_path/hosts_path/services_path already have.
         auto tls_key_log = std::make_shared<TlsKeyLog>();
+        // patch315 security review finding F1 fix: resource_limits() is thread_local and, before a
+        // Decoder exists, carries whatever a previous Decoder constructed on this same thread last
+        // left behind (or compiled-in defaults, on a thread's first use) -- never necessarily THIS
+        // run's own --max-tls-keylog-entries/--max-tls-keylog-bytes. TlsKeyLog::load_file() below
+        // enforces those caps (tls_keylog_limit_admits(), tls_keylog.cpp) as it parses, so this run's
+        // options.limits has to be pushed into the thread-local accessor before that call, not only
+        // by Decoder's own constructor further down (which would otherwise be the first to do so,
+        // too late for this file). set_resource_limits() is cheap and idempotent; Decoder's
+        // constructor calling it again right below is harmless.
+        set_resource_limits(options.limits);
         if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
         options.tls_key_log = tls_key_log;
 
@@ -2030,6 +2067,9 @@ int run_policy_validate(const std::string& input, const std::string& interface_n
         // ROADMAP item 150 -- see run_decode's own matching comment (above its own identical
         // construction) for the full rationale.
         auto tls_key_log = std::make_shared<TlsKeyLog>();
+        // patch315 security review finding F1 fix -- see run_decode's own matching comment just
+        // above its identical set_resource_limits() call for the full rationale.
+        set_resource_limits(options.limits);
         if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
         options.tls_key_log = tls_key_log;
         // No --max-packets equivalent for policy validate (matching its existing offline-file
@@ -2159,13 +2199,16 @@ int run_inventory(const std::string& input, const std::string& interface_name, c
         // ROADMAP item 148 -- same fail-fast posture as Resolver just above (SymbolTableError is
         // caught alongside ResolverError below).
         SymbolTable symbol_table(symbol_table_path);
-        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale.
-        auto tls_key_log = std::make_shared<TlsKeyLog>();
-        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
-
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. The
+        // patch315 F1 fix moved options.limits construction (just above) ahead of the TlsKeyLog
+        // creation/load_file() below -- see run_decode's own matching set_resource_limits() comment
+        // for why that ordering, plus the explicit set_resource_limits() call, both matter here.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        set_resource_limits(options.limits);
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
         options.tls_key_log = tls_key_log;
         // Same "no --max-packets" posture as run_policy_validate -- see its own comment.
         PacketSource source =
@@ -2354,13 +2397,16 @@ int run_detect(const std::string& input, const std::string& interface_name, cons
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
 
-        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale.
-        auto tls_key_log = std::make_shared<TlsKeyLog>();
-        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
-
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. The
+        // patch315 F1 fix moved options.limits construction (just above) ahead of the TlsKeyLog
+        // creation/load_file() below -- see run_decode's own matching set_resource_limits() comment
+        // for why that ordering, plus the explicit set_resource_limits() call, both matter here.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        set_resource_limits(options.limits);
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
         options.tls_key_log = tls_key_log;
         PacketSource source =
             open_packet_source(input, interface_name, snaplen, promiscuous, filter, duration_seconds, 0);
@@ -2480,17 +2526,19 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
     try {
         BaselineStore store = load_baseline_store(baseline_file, max_baseline_file_bytes);
 
+        DecodeOptions options;
+        options.strict = strict;
+        options.limits = build_resource_limits(limit_vars);
         // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. A
         // single TlsKeyLog shared across every input file in this `learn` run: file-sourced
         // entries load once, and DSB-discovered secrets from one capture can never collide with
         // another capture's own 32-byte client_random, so reusing it across files is safe and
-        // avoids re-parsing --tls-keylog once per input.
+        // avoids re-parsing --tls-keylog once per input. The patch315 F1 fix moved options.limits
+        // construction (just above) ahead of this load_file() call -- see run_decode's own matching
+        // set_resource_limits() comment for why that ordering, plus the explicit call, both matter.
         auto tls_key_log = std::make_shared<TlsKeyLog>();
+        set_resource_limits(options.limits);
         if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
-
-        DecodeOptions options;
-        options.strict = strict;
-        options.limits = build_resource_limits(limit_vars);
         options.tls_key_log = tls_key_log;
 
         size_t total_conduits_touched = 0;
@@ -2541,7 +2589,20 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
             std::vector<ObservationIncompleteReason> flow_state_eviction_categories;
             bool flow_state_evicted =
                 append_flow_state_eviction_reason(flow_state_eviction_reasons, flow_state_eviction_categories);
-            if (engine.truncated() || flow_state_evicted) {
+            // patch315 security review finding F1 fix: same throwaway-local-vector treatment as
+            // flow_state_eviction_reasons/categories just above, for the same reason -- see
+            // append_tls_keylog_limit_reason's own comment (resource_limits.hpp). The underlying
+            // counter is shared across every input file in this `learn` run (one TlsKeyLog, see
+            // this function's own comment above its construction), so a limit hit while loading
+            // --tls-keylog or draining an early file's own DSBs is repeated in every subsequent
+            // file's own warning block too -- intentional, since it remains true of the whole run
+            // for as long as it stays true, exactly like engine.truncated() being re-evaluated and
+            // re-printed per file above it.
+            std::vector<std::string> tls_keylog_limit_reasons;
+            std::vector<ObservationIncompleteReason> tls_keylog_limit_categories;
+            bool tls_keylog_limited =
+                append_tls_keylog_limit_reason(tls_keylog_limit_reasons, tls_keylog_limit_categories);
+            if (engine.truncated() || flow_state_evicted || tls_keylog_limited) {
                 diag << "warning: baseline observation of '" << input
                      << "' is INCOMPLETE -- the merged baseline may be missing some of this "
                         "capture's own conduits/operations/ranges:\n";
@@ -2549,6 +2610,9 @@ int run_baseline_learn(const std::vector<std::string>& inputs, const std::string
                     diag << "  - " << reason << "\n";
                 }
                 for (const std::string& reason : flow_state_eviction_reasons) {
+                    diag << "  - " << reason << "\n";
+                }
+                for (const std::string& reason : tls_keylog_limit_reasons) {
                     diag << "  - " << reason << "\n";
                 }
             }
@@ -2618,13 +2682,16 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
             policy = parse_policy_file(policy_path);
         }
 
-        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale.
-        auto tls_key_log = std::make_shared<TlsKeyLog>();
-        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
-
         DecodeOptions options;
         options.strict = strict;
         options.limits = build_resource_limits(limit_vars);
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. The
+        // patch315 F1 fix moved options.limits construction (just above) ahead of the TlsKeyLog
+        // creation/load_file() below -- see run_decode's own matching set_resource_limits() comment
+        // for why that ordering, plus the explicit set_resource_limits() call, both matter here.
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        set_resource_limits(options.limits);
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
         options.tls_key_log = tls_key_log;
         PcapReader reader(input);
         Decoder decoder(options);
@@ -2656,6 +2723,12 @@ int run_baseline_check(const std::string& input, const std::string& baseline_fil
         // builds its own report here rather than inside BaselineEngine itself (unlike Detect/
         // Policy/AssetInventory), so this fold-in lives here instead of baseline.cpp.
         if (append_flow_state_eviction_reason(report.truncation_reasons, report.observation_incomplete_reasons))
+            report.observation_truncated = true;
+        // patch315 security review finding F1 fix: fold in any TLS key-log/DSB entries refused for
+        // exceeding --max-tls-keylog-entries/--max-tls-keylog-bytes during this run -- see
+        // append_tls_keylog_limit_reason's own comment (resource_limits.hpp), mirroring the
+        // flow-state-eviction fold-in just above exactly.
+        if (append_tls_keylog_limit_reason(report.truncation_reasons, report.observation_incomplete_reasons))
             report.observation_truncated = true;
         if (format == "json") {
             write_baseline_check_report_json(*out, report, symbolic_addresses);
@@ -2782,21 +2855,27 @@ int run_evidence(const std::string& input, const std::string& policy_path,
             for (const auto& note : resolver_notes) diag << "note: " << note << "\n";
         }
 
-        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. One
-        // TlsKeyLog shared across all four passes below: they all decode the same capture bytes,
-        // so a DSB discovered in an earlier pass is already available to a later one (harmless if
-        // re-ingested too -- TlsKeyLog::ingest just re-parses the same lines).
-        auto tls_key_log = std::make_shared<TlsKeyLog>();
-        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
-
         DecodeOptions options;
         options.strict = strict;
-        options.tls_key_log = tls_key_log;
         // Deliberately the compiled-in default resource limits for every engine below, not exposed
         // as CLI overrides here -- see evidence_report.hpp's own header comment: keeping this
         // command's own CLI surface small, on top of four already-large per-engine surfaces, is a
         // deliberate v1 scoping choice, not an oversight. A capture large enough to need a raised
         // limit here can still be analyzed with the individual subcommands' own --max-* flags.
+        // options.limits is therefore left default-constructed (every field std::nullopt), which is
+        // exactly what the explicit set_resource_limits() call just below (patch315 F1 fix) pushes
+        // into the thread-local resource_limits() accessor ahead of TlsKeyLog::load_file() -- see
+        // run_decode's own matching comment for why that has to happen before load_file() runs,
+        // rather than relying solely on the first Decoder constructed in Pass 1 below to do it.
+        //
+        // ROADMAP item 150 -- see run_decode's own matching comment for the full rationale. One
+        // TlsKeyLog shared across all four passes below: they all decode the same capture bytes,
+        // so a DSB discovered in an earlier pass is already available to a later one (harmless if
+        // re-ingested too -- TlsKeyLog::ingest just re-parses the same lines).
+        auto tls_key_log = std::make_shared<TlsKeyLog>();
+        set_resource_limits(options.limits);
+        if (!tls_keylog_path.empty()) tls_key_log->load_file(tls_keylog_path);
+        options.tls_key_log = tls_key_log;
 
         // --- Pass 1: asset inventory -- always runs; gathers capture-wide timing too -------------
         size_t total_packets = 0, parse_error_packets = 0;

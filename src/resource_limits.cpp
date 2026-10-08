@@ -28,6 +28,15 @@ size_t& mutable_flow_state_eviction_count() {
     return count;
 }
 
+// patch315 security review finding F1: the same Meyers-singleton-style thread_local pattern as
+// mutable_flow_state_eviction_count() above, for the same reason -- see
+// tls_keylog_entries_refused()'s own comment (resource_limits.hpp) for why THIS counter is reset
+// by TlsKeyLog's own constructor rather than Decoder's.
+size_t& mutable_tls_keylog_entries_refused_count() {
+    static thread_local size_t count = 0;
+    return count;
+}
+
 }  // namespace
 
 const ResourceLimits& resource_limits() { return mutable_resource_limits(); }
@@ -124,6 +133,25 @@ bool append_flow_state_eviction_reason(std::vector<std::string>& reasons,
         "exactly like a brand-new one, so detection/baseline/policy results for affected sessions may be "
         "incomplete or misclassified");
     append_observation_incomplete_reason(categories, ObservationIncompleteReason::FlowStateEviction);
+    return true;
+}
+
+size_t tls_keylog_entries_refused() { return mutable_tls_keylog_entries_refused_count(); }
+
+void note_tls_keylog_entry_refused() { ++mutable_tls_keylog_entries_refused_count(); }
+
+void reset_tls_keylog_entries_refused() { mutable_tls_keylog_entries_refused_count() = 0; }
+
+bool append_tls_keylog_limit_reason(std::vector<std::string>& reasons,
+                                     std::vector<ObservationIncompleteReason>& categories) {
+    const size_t n = tls_keylog_entries_refused();
+    if (n == 0) return false;
+    reasons.push_back(
+        "TLS key-log/DSB entry limit reached -- " + std::to_string(n) + " well-formed key-log line" +
+        (n == 1 ? "" : "s") + " refused during this run (--max-tls-keylog-entries/--max-tls-keylog-bytes); "
+        "a TLS session whose secret arrived after this ceiling was reached stays exactly as opaque as if "
+        "no key had ever been supplied for it at all");
+    append_observation_incomplete_reason(categories, ObservationIncompleteReason::ResourceLimit);
     return true;
 }
 

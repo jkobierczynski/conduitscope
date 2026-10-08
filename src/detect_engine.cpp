@@ -1889,6 +1889,12 @@ DetectionReport DetectEngine::finish(const Policy* policy, const BaselineStore* 
     // visibility into otherwise.
     if (append_flow_state_eviction_reason(report.truncation_reasons, report.observation_incomplete_reasons))
         report.observation_truncated = true;
+    // patch315 security review finding F1 fix: fold in any TLS key-log/DSB entries refused for
+    // exceeding --max-tls-keylog-entries/--max-tls-keylog-bytes during this run -- see
+    // append_tls_keylog_limit_reason's own comment (resource_limits.hpp), mirroring the
+    // flow-state-eviction fold-in just above exactly.
+    if (append_tls_keylog_limit_reason(report.truncation_reasons, report.observation_incomplete_reasons))
+        report.observation_truncated = true;
 
     auto in_baseline = [&](const std::string& client_ip, const std::string& server_ip,
                             const std::string& protocol, uint16_t server_port) {
