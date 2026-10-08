@@ -20102,6 +20102,68 @@ it done as its own patch.
     excluding build directories, configure, build, full CTest): 2564/2564, zero failures,
     `conduitscope version` confirmed reporting `0.3.4`.
 
+152. **TLS decryption silently went opaque with no explanation on a build compiled without
+    OpenSSL, instead of the clear runtime message already promised.** Jurgen reported 9 of item
+    150's own new CTest entries failing on a real Debian machine (`tls_decrypt_mqtts_*`,
+    `tls_decrypt_winrms_*`, `tls_decrypt_foxs_*`, `tls_decrypt_dsb_sourced_secrets_no_keylog_flag`,
+    `tls_decrypt_unsupported_cipher_suite_graceful_fallback` -- every one of the 10 that actually
+    needs decryption to succeed; the lone passer, `tls_decrypt_mqtts_without_keylog_stays_opaque`,
+    is the one case where staying opaque IS correct). Every packet past the initial ClientHello
+    came back as plain `"protocol": "tcp"` with `"notes": []`, as if no TLS-aware decode logic
+    existed at all -- identical across sessions with a working key-log, the DSB-sourced case (no
+    `--tls-keylog` flag at all), and the deliberately-unsupported-cipher case, which should
+    produce its own explained give-up note. Diagnosed by having Jurgen `grep -c
+    try_tls_wrapped_decode`/`capture_tls_client_hello` in his own `src/decoder.cpp` (both present
+    with the exact same counts as this project's own copy, ruling out another dropped-file
+    incident like items 148/150's own `.txt` fixtures) and then having him re-run `cmake`, which
+    printed `conduitscope: TLS decryption DISABLED (OpenSSL not found ...)` -- his machine was
+    simply missing OpenSSL's development headers (`libssl-dev` on Debian), which he then
+    installed, resolving his own original failures. But reproducing that exact
+    `CONDUITSCOPE_HAVE_OPENSSL`-undefined condition here (`-DCONDUITSCOPE_ENABLE_TLS_DECRYPT=OFF`)
+    surfaced a genuine, separate bug his report had exposed for the first time: `decoder.cpp`'s
+    `try_tls_wrapped_decode` checked `!key_log || !key_log->active() ||
+    !tls_decrypt_build_supported()` as one combined early return with NO tagging of `out`
+    whatsoever -- silently indistinguishable from the ordinary "no key configured for this run"
+    case, and directly contradicting both the function's own file-header comment ("decryption
+    isn't configured/built ... this function tags `out` itself") and item 150's own CMake
+    configure-time message, which explicitly promises "`--tls-keylog`/pcapng-DSB decryption ...
+    will report this clearly at runtime." That promise was never actually exercised end to end --
+    the only other config compiled without OpenSSL, MinGW cross-compile `build-mingw`, produces a
+    Windows `.exe` this Linux sandbox has never been able to run, so item 150's own verification
+    could only confirm the stub path *compiles*, never what it actually prints at runtime. A real
+    Linux build missing OpenSSL (Jurgen's own, before he installed `libssl-dev`) was the first
+    thing to ever actually run that path.
+
+    **The fix.** `try_tls_wrapped_decode` now checks `!tls_decrypt_build_supported()` FIRST, on
+    its own, and when true, tags `out.protocol`/`out.summary` and appends a note naming the
+    protocol, that this build was compiled without OpenSSL, and the concrete fix ("install OpenSSL
+    development headers, e.g. `libssl-dev` on Debian/Ubuntu, and reconfigure/rebuild") --
+    unconditionally, even when `key_log` is itself null, so a permanently-decryption-incapable
+    build is never confused with the ordinary "no `--tls-keylog` supplied this run" case. The
+    `!key_log || !key_log->active()` check that follows is unchanged and stays silent, exactly
+    preserving `tls_decrypt_mqtts_without_keylog_stays_opaque`'s own already-tested behavior (a
+    build that CAN decrypt, simply wasn't asked to, correctly looks identical to before).
+
+    **Verification.** Reproduced Jurgen's exact failure locally with a fresh
+    `-DCONDUITSCOPE_ENABLE_TLS_DECRYPT=OFF` configure (confirmed via its own "TLS decryption
+    DISABLED" message, the same condition a missing-OpenSSL machine reaches on its own) and
+    confirmed every packet of `tests/sample_tls_winrms.pcap` now carries the new explanatory note
+    instead of silently reading as plain `tcp` -- that scratch config's own pre-existing 10
+    `tls_decrypt_*` CTest entries still fail there as expected (they assert genuine decrypted
+    output, which no build without OpenSSL can ever produce; it was never one of this project's
+    four standing build configs and was discarded after confirming the fix, not kept as a fifth
+    one). All four standing configs rebuilt and re-run with zero regressions: default GCC `build`
+    2564/2564, Clang ASan/UBSan `build-fuzz` 2642/2642, `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive` 2546/2546 (all three still built against OpenSSL, so `tls_decrypt_build_supported()`
+    stays true there and every one of item 150's original 10 CTest entries keeps passing exactly
+    as before -- this fix only changes behavior on a build that cannot decrypt at all), MinGW
+    cross-compile `build-mingw` rebuilt clean, build-only as usual.
+
+    **Docs.** `docs/USER_GUIDE.md` gained a new LIMITATIONS bullet naming
+    `CONDUITSCOPE_ENABLE_TLS_DECRYPT`, how to deliberately build without the OpenSSL dependency,
+    and this fix's own "always explained, never silent" guarantee. `docs/MANUAL.md` was NOT
+    touched, per Jurgen's standing instruction.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

@@ -7106,6 +7106,22 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   opaque as before regardless of `--tls-keylog`. See
   docs/PROTOCOL_COVERAGE.md's MQTT/Fox/WinRM sections and
   `tls_decrypt.hpp`'s own file header for the full scope.
+- **`--tls-keylog`/pcapng-DSB decryption needs this build compiled against
+  OpenSSL.** `cmake`'s own configure-time output names this explicitly
+  ("conduitscope: TLS decryption ENABLED/DISABLED (...)"); it's controlled
+  by the `CONDUITSCOPE_ENABLE_TLS_DECRYPT` option (default `ON`, which
+  still gracefully degrades to the disabled path if OpenSSL's development
+  headers/libraries -- e.g. `libssl-dev` on Debian/Ubuntu -- aren't found,
+  rather than failing the build). Pass `-DCONDUITSCOPE_ENABLE_TLS_DECRYPT=OFF`
+  to deliberately build without the OpenSSL dependency at all. Either way,
+  every packet on a TLS session this build cannot decrypt (MQTTS/FOXS/
+  WinRM-over-HTTPS) carries a note naming the OpenSSL gap specifically and
+  how to fix it -- never a silent, unexplained fallback to a plain `tcp`
+  classification (ROADMAP item 152, docs/DEVELOPMENT.md; an earlier gap,
+  found and fixed only once a real OpenSSL-less Linux build actually
+  exercised this path for the first time -- the MinGW cross-compile config
+  that degrades the same way can't run its own binary in this project's
+  Linux sandbox to have caught it sooner).
 - **`decode -T zeek`'s conn.log export covers TCP/UDP only, and leaves
   seven of Zeek's own 21 `Conn::Info` fields unset.** ICMP and every other
   non-TCP/UDP IP protocol produce no row at all (no ready substitute for

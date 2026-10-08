@@ -153,7 +153,30 @@ std::optional<std::vector<uint8_t>> try_tls_wrapped_decode(ByteSpan tcp_payload,
                                                             DecodeContext& ctx, const TlsKeyLog* key_log,
                                                             const char* protocol_tag, const char* display_name,
                                                             uint16_t tls_port, DecodedPacket& out) {
-    if (!key_log || !key_log->active() || !tls_decrypt_build_supported()) return std::nullopt;
+    // Distinct from "not configured for this run" (key_log null/inactive, the overwhelmingly
+    // common case, handled by the plain `return std::nullopt` below with no tag at all -- see
+    // tls_decrypt_mqtts_without_keylog_stays_opaque, which depends on that staying silent):
+    // a build with CONDUITSCOPE_HAVE_OPENSSL undefined can NEVER decrypt ANY session, on ANY
+    // run, no matter what --tls-keylog/DSB secrets are supplied -- a categorically different,
+    // permanent condition the CMake configure-time message already promises will "report this
+    // clearly at runtime". Checked first, and tags `out` unconditionally (even when key_log is
+    // itself null) so that promise is actually kept rather than silently falling through to a
+    // plain, unexplained "tcp" classification -- previously the case, caught only because a real
+    // OpenSSL-less Linux build (not just the environmentally-unrunnable MinGW one) exercised this
+    // path for the first time.
+    if (!tls_decrypt_build_supported()) {
+        out.protocol = protocol_tag;
+        std::ostringstream build_note;
+        build_note << display_name << " over TLS (port " << tls_port << ")";
+        out.summary = build_note.str();
+        out.notes.push_back(std::string(display_name) +
+                             " over TLS cannot be decrypted by this build -- compiled without "
+                             "OpenSSL (install OpenSSL development headers, e.g. libssl-dev on "
+                             "Debian/Ubuntu, and reconfigure/rebuild to enable --tls-keylog/"
+                             "pcapng-DSB decryption)");
+        return std::nullopt;
+    }
+    if (!key_log || !key_log->active()) return std::nullopt;
 
     TlsSessionState& state = ctx.flow_state<TlsSessionState>();
     auto plaintext = tls_try_decrypt(tcp_payload, from_client, state, *key_log, out.notes);
