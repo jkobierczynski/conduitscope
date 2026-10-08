@@ -343,18 +343,49 @@ argument validation, `--help`, etc. -- always pass without this, root or not.)
 
 ### Windows
 
-Either Visual Studio 2022 (MSVC) or MinGW-w64 work, via the same CMake project.
+Either Visual Studio 2022 (or newer; MSVC) or MinGW-w64 work, via the same CMake
+project.
+
 For live capture (`-i`), install the [Npcap SDK](https://npcap.com/#download) and
 either set it as the `NPCAP_SDK_DIR` environment variable or pass
 `-DNPCAP_SDK_DIR=<path>` to CMake; skip this entirely for a build without live
 capture.
 
+For `--tls-keylog`/pcapng-DSB TLS decryption (MQTTS/FOXS/WinRM-over-HTTPS -- see
+docs/USER_GUIDE.md's LIMITATIONS section), the build needs OpenSSL's development
+headers/libraries; skip this entirely for a build without TLS decryption (`-i`/live
+capture is unaffected either way). The easiest way to get a development OpenSSL on
+Windows is [vcpkg](https://github.com/microsoft/vcpkg):
+
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+C:\vcpkg\vcpkg install openssl:x64-windows
+```
+
+then point CMake at vcpkg's toolchain file below -- it wires up `find_package(OpenSSL)`
+automatically, no `OPENSSL_ROOT_DIR` needed. (A prebuilt installer works too: the
+full, non-"Light" [Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html)
+build, or `choco install openssl`; either installs to
+`C:\Program Files\OpenSSL-Win64` by default, in which case pass
+`-DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64"` to CMake instead of the
+toolchain file below.)
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+  -DNPCAP_SDK_DIR="<path-to-npcap-sdk>"
 cmake --build build --config Release
 ```
 
-or, from an MSYS2/MinGW shell:
+(Drop the `-DCMAKE_TOOLCHAIN_FILE`/`-DNPCAP_SDK_DIR` lines -- or
+`-DCONDUITSCOPE_ENABLE_TLS_DECRYPT=OFF` -- for a build without TLS decryption/live
+capture respectively; CMake's own configure-time output names which ones it found,
+e.g. `conduitscope: TLS decryption ENABLED (found OpenSSL ...)` /
+`conduitscope: live capture ENABLED (found ...)`, or DISABLED with the reason why.)
+
+or, from an MSYS2/MinGW shell (`pacman -S mingw-w64-x86_64-openssl` first, for TLS
+decryption support):
 
 ```sh
 cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
@@ -365,6 +396,13 @@ The binary is `build\Release\conduitscope.exe` (MSVC) or `build\conduitscope.exe
 (MinGW). Running a live capture (not just building with support for one) also
 needs the [Npcap runtime](https://npcap.com/#download) installed on the machine
 that runs it -- the SDK used at build time only supplies headers/import libraries.
+
+**If you change `-D` options (a toolchain file, `NPCAP_SDK_DIR`, etc.) after
+already configuring once,** delete the `build` directory first and reconfigure from
+scratch. CMake only picks up `-DCMAKE_TOOLCHAIN_FILE` on a build directory's first
+configure; passing it again against an already-configured directory is silently
+ignored (shown as a `CMake Warning (unused-cli): CMAKE_TOOLCHAIN_FILE` rather than
+an error) and the dependency search it was meant to enable won't actually run.
 
 ## Quick start
 
