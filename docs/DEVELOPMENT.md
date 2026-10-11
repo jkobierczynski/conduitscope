@@ -20305,6 +20305,80 @@ it done as its own patch.
     config regardless of OpenSSL availability, including this one). Delivered as a zip of
     touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
 
+154. **Vendor-specific PLC/DCS protocol gaps, surfaced while auditing Rockwell/Honeywell/ABB/
+    Schneider Electric/Yokogawa/Mitsubishi coverage.** Jurgen asked whether all six vendors' own
+    protocols are covered and, for whichever aren't, to add the implementable ones to this
+    ROADMAP. **This entry is scoping only -- nothing below is implemented yet.**
+
+    Already covered via standards those vendors also speak, not restated here: EtherNet/IP + CIP
+    I/O + DeviceNet (Rockwell), MELSEC/MC (SLMP) + CC-Link IE Field Network Basic (Mitsubishi),
+    Modbus/TCP + UMAS (Schneider Electric), IEC 61850 MMS/GOOSE/Sampled Values + IEC 60870-5-104 +
+    Modbus/TCP (ABB), FOUNDATION Fieldbus HSE + Modbus/TCP + OPC UA (Yokogawa), and Tridium Niagara
+    Fox (Honeywell, via its Tridium subsidiary).
+
+    Researched this round (vendor documentation, Wireshark's own dissector tree, and published
+    ICS-security literature -- the same sourcing discipline every other decoder in this codebase
+    already holds itself to):
+
+    - **ControlNet (Rockwell).** Confirmed still a hard wall, not a scope choice -- no public
+      specification exists anywhere, not even an unofficial one; Wireshark's own dissector tree
+      has never had a `packet-controlnet.c`. The only way to observe it is Rockwell's own
+      proprietary ControlNet Traffic Analyzer hardware. Matches this doc's own pre-existing "Why
+      not ControlNet too" note (docs/PROTOCOL_COVERAGE.md's DeviceNet section).
+    - **CC-Link IE Control/Field/TSN, and original (RS-485) CC-Link (Mitsubishi).** Confirmed
+      still out of scope for the same pre-existing reasons (no public UDP/IP wire documentation
+      for the three IE variants; original CC-Link is a non-Ethernet serial fieldbus with no pcap
+      link-layer encoding, the same structural wall as PROFIBUS DP/Modbus RTU). Only commercial
+      protocol-converter gateway hardware (e.g. Hilscher netTAP) exists, which re-encapsulates
+      rather than documents the wire format.
+    - **Honeywell's own DCS/PLC application protocols** (Experion/C300, ML-200, the "Honeywell PLC
+      protocol on TCP port 2002" people have asked Wireshark's own mailing list about, with no
+      answer). No public specification or dissector found. Stays blocked, same category as OPC
+      Classic.
+    - **Yokogawa Vnet/IP.** A real, named protocol -- unanimously adopted as IEC 61784-2-13 in
+      2008 -- not an undocumented proprietary one, so structurally different from the entries
+      above. But unlike FOUNDATION Fieldbus HSE (whose own paywalled spec this codebase already
+      cross-checks against Wireshark's vendor-authored `packet-ff.c`, see that section above), no
+      free cross-check source was found for Vnet/IP: no Wireshark dissector, no open-source
+      implementation. Yokogawa's own public technical report (yokogawa.com) describes only the
+      architecture (UDP/IP transport, ToS-based packet priority, a 100ms/1ms-timeslot macrocycle,
+      redundant-path diagnostics, public-key-secured control messages) -- not frame layouts, field
+      sizes, message-type codes, port numbers, or the diagnostic-packet format a decoder would
+      need. **Implementable only if the IEC standard itself is purchased, or a free cross-check
+      source turns up later** -- not ready to schedule.
+    - **ABB.** Unlike the other five vendors, ABB's own public "AC 800M Communication Protocols"
+      manual (library.e.abb.com, no paywall) names several ABB-proprietary protocols beyond the
+      already-covered standards: IAC (Inter Application Communication, UDP), MasterBus 300/AF 100
+      (Advant Fieldbus 100), COMLI, SattBus (including an explicitly-named "SattBus on TCP/IP"
+      variant, described in ABB's own doc as "open and implementable by any manufacturer"), MOD5-
+      to-MOD5, and DriveBus. Of these:
+      - **AF 100/MasterBus 300** has a real low-level protocol appendix in ABB's own public user
+        manual (Appendix B: Master/Slave Frames, Data Security, Process Data/Message Transfer,
+        station addressing 1-80) -- genuinely better-sourced than most items on this list -- but
+        it's an RS-485/RS-232 master/slave polling fieldbus, the same physical-capture wall as
+        PROFIBUS DP. Not implementable via pcap for that reason, regardless of documentation
+        quality.
+      - **COMLI** has an open-source cross-check: EMQX's Neuron industrial gateway (Apache-2.0,
+        `github.com/emqx/neuron`) ships a COMLI southbound driver. Worth a dedicated scoping pass
+        -- needs confirming whether Neuron's own implementation runs over TCP/IP (as a routable
+        capture this tool could ever see) or only bridges it from serial, and whether ABB's TCP/IP
+        carriage of COMLI is consistent enough across real deployments to decode reliably.
+      - **SattBus on TCP/IP** is explicitly named as its own IP-routable thing in ABB's own
+        documentation, described as open -- but no byte-level spec or implementation turned up
+        during this pass; needs its own research session before it can be scheduled.
+      - **IAC, MOD5-to-MOD5, DriveBus**: no public documentation found at all during this pass.
+        Stay unscoped.
+
+    **Recommendation, in rough order of "actually implementable soon":** COMLI and SattBus-on-
+    TCP/IP are the two live candidates worth a dedicated scoping pass (both have some public
+    trail -- an open-source driver for COMLI, ABB's own "open" characterization for SattBus);
+    Vnet/IP is implementable in principle but blocked on sourcing (paywalled standard, no free
+    cross-check) until that changes; ControlNet, the three CC-Link IE variants, original CC-Link,
+    Honeywell's own DCS protocols, AF 100, IAC, MOD5, and DriveBus all stay out of scope for
+    structural reasons (no public spec, or no Ethernet/IP-capturable wire format at all) unless
+    that changes. **Nothing in this item is scheduled against a version yet** -- Jurgen asked for
+    this to be recorded on the backlog, not implemented this round.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols
