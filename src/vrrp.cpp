@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"
 
 namespace conduitscope {
 
@@ -43,7 +44,7 @@ std::string strip_trailing_nul(ByteSpan span) {
 
 }  // namespace
 
-std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload) {
+std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload, bool is_ipv6) {
     if (ip_payload.size() < 8) {
         return std::nullopt;
     }
@@ -59,8 +60,16 @@ std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload) {
         return std::nullopt;
     }
 
+    // VRRPv2 (RFC 3768) predates IPv6 entirely and has no IPv6 form -- see this file's own header
+    // comment. A v2 payload always reads 4-byte addresses regardless of what the caller's outer-IP
+    // context says (an IPv6-outer VRRPv2 packet isn't a real protocol this decoder can speak to
+    // anyway; treating it as 4-byte-addressed is simply the only sensible reading of a VRRPv2 Count
+    // field either way).
+    bool addrs_are_ipv6 = is_ipv6 && version == 3;
+
     VrrpMessage msg;
     msg.version = version;
+    msg.is_ipv6 = addrs_are_ipv6;
     msg.type = type;
     msg.type_name = "Advertisement";
     msg.virtual_router_id = c.u8();
@@ -79,9 +88,17 @@ std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload) {
         msg.checksum = c.u16be();
     }
 
+    size_t address_size = addrs_are_ipv6 ? 16 : 4;
     size_t decoded = std::min(static_cast<size_t>(msg.address_count), kMaxAddresses);
-    for (size_t i = 0; i < decoded && c.remaining() >= 4; ++i) {
-        msg.ip_addresses.push_back(format_ipv4(c.u32be()));
+    for (size_t i = 0; i < decoded && c.remaining() >= address_size; ++i) {
+        if (addrs_are_ipv6) {
+            ByteSpan raw = c.bytes(16);
+            Ipv6Address addr{};
+            std::copy(raw.data(), raw.data() + 16, addr.begin());
+            msg.ip_addresses.push_back(format_ipv6(addr));
+        } else {
+            msg.ip_addresses.push_back(format_ipv4(c.u32be()));
+        }
     }
     if (static_cast<size_t>(msg.address_count) > kMaxAddresses) {
         msg.ip_addresses_truncated = true;
@@ -134,7 +151,7 @@ std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload) {
 }
 
 std::optional<ProtocolResult> VrrpDecoder::decode(ByteSpan payload, DecodeContext& ctx) const {
-    if (auto msg = try_parse_vrrp(payload)) {
+    if (auto msg = try_parse_vrrp(payload, ctx.is_ipv6)) {
         // --redact (on by default -- see DecodeOptions::redact_secrets's own comment, decoder.hpp)
         // masks VRRPv2's own cleartext Simple Text Password with a fixed placeholder in every
         // output format, rather than never decoding it at all -- the field's presence and length

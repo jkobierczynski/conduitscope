@@ -3,9 +3,11 @@
 
 #include "conduitscope/resource_limits.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"
 
 namespace conduitscope {
 
@@ -16,7 +18,24 @@ namespace {
 const size_t kMaxList = resource_limits().max_decoded_objects.value_or(50);
 
 constexpr uint8_t kAfIpv4 = 1;
+constexpr uint8_t kAfIpv6 = 2;  // ROADMAP item 154 (docs/DEVELOPMENT.md) -- see pim.hpp's own
+                                  // header comment on why only Encoding Type 0 (Native) is
+                                  // supported for either family
 constexpr uint8_t kEtNative = 0;
+
+// Reads the right-sized raw address (4 bytes for kAfIpv4, 16 for kAfIpv6) and formats it. Caller
+// has already checked `af` is one of the two and `c` has enough bytes remaining.
+std::string read_address(Cursor& c, uint8_t af) {
+    if (af == kAfIpv6) {
+        ByteSpan raw = c.bytes(16);
+        Ipv6Address addr{};
+        std::copy(raw.data(), raw.data() + 16, addr.begin());
+        return format_ipv6(addr);
+    }
+    return format_ipv4(c.u32be());
+}
+
+size_t address_size(uint8_t af) { return af == kAfIpv6 ? 16 : 4; }
 
 std::string pim_type_name(uint8_t type) {
     switch (type) {
@@ -38,38 +57,46 @@ std::string pim_type_name(uint8_t type) {
     }
 }
 
-// Encoded-Unicast address (RFC 7761 4.9.1): AF(1)+ET(1)+Addr(4, IPv4 only here) = 6 bytes.
-// Returns std::nullopt (having consumed only the AF/ET bytes) if this isn't an IPv4/Native
-// address -- see pim.hpp's own header comment on why that's a hard stop rather than a guess.
+// Encoded-Unicast address (RFC 7761 4.9.1): AF(1)+ET(1)+Addr(4 for IPv4, 16 for IPv6) = 6 or 18
+// bytes. Returns std::nullopt (having consumed only the AF/ET bytes) if this isn't IPv4 or IPv6
+// Native -- see pim.hpp's own header comment on why Encoding Type 1 (and any other Address Family)
+// is a hard stop rather than a guess.
 std::optional<std::string> decode_encoded_unicast(Cursor& c) {
     if (c.remaining() < 2) return std::nullopt;
     uint8_t af = c.u8();
     uint8_t et = c.u8();
-    if (af != kAfIpv4 || et != kEtNative || c.remaining() < 4) return std::nullopt;
-    return format_ipv4(c.u32be());
+    if ((af != kAfIpv4 && af != kAfIpv6) || et != kEtNative || c.remaining() < address_size(af)) {
+        return std::nullopt;
+    }
+    return read_address(c, af);
 }
 
-// Encoded-Group address: AF(1)+ET(1)+Reserved/Flags(1)+MaskLen(1)+Addr(4) = 8 bytes.
+// Encoded-Group address: AF(1)+ET(1)+Reserved/Flags(1)+MaskLen(1)+Addr(4 or 16) = 8 or 20 bytes.
 std::optional<std::string> decode_encoded_group(Cursor& c) {
     if (c.remaining() < 4) return std::nullopt;
     uint8_t af = c.u8();
     uint8_t et = c.u8();
     c.u8();  // reserved/flags -- not decoded (bidir-PIM's Z bit lives here; rare enough to skip)
     uint8_t mask_len = c.u8();
-    if (af != kAfIpv4 || et != kEtNative || c.remaining() < 4) return std::nullopt;
-    std::string addr = format_ipv4(c.u32be());
+    if ((af != kAfIpv4 && af != kAfIpv6) || et != kEtNative || c.remaining() < address_size(af)) {
+        return std::nullopt;
+    }
+    std::string addr = read_address(c, af);
     return addr + "/" + std::to_string(static_cast<unsigned>(mask_len));
 }
 
-// Encoded-Source address: AF(1)+ET(1)+Flags(1: bit2=S bit1=W bit0=R)+MaskLen(1)+Addr(4) = 8 bytes.
+// Encoded-Source address: AF(1)+ET(1)+Flags(1: bit2=S bit1=W bit0=R)+MaskLen(1)+Addr(4 or 16) = 8
+// or 20 bytes.
 std::optional<std::string> decode_encoded_source(Cursor& c) {
     if (c.remaining() < 4) return std::nullopt;
     uint8_t af = c.u8();
     uint8_t et = c.u8();
     uint8_t flags = c.u8();
     uint8_t mask_len = c.u8();
-    if (af != kAfIpv4 || et != kEtNative || c.remaining() < 4) return std::nullopt;
-    std::string addr = format_ipv4(c.u32be());
+    if ((af != kAfIpv4 && af != kAfIpv6) || et != kEtNative || c.remaining() < address_size(af)) {
+        return std::nullopt;
+    }
+    std::string addr = read_address(c, af);
     std::string out = addr + "/" + std::to_string(static_cast<unsigned>(mask_len));
     if (flags != 0) {
         std::string letters;

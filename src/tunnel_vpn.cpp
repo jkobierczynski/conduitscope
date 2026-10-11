@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "conduitscope/tunnel_vpn.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"
 #include "conduitscope/link_layer.hpp"
 
 namespace conduitscope {
@@ -153,8 +155,21 @@ std::optional<TunnelVpnIpProtoMatch> try_recognize_6in4(ByteSpan ip_payload) {
 
     TunnelVpnIpProtoMatch m;
     m.protocol = "6in4";
-    m.summary = "6in4 (IPv6-in-IPv4) tunnel (RFC 4213) -- inner IPv6 header present but not decoded "
-                "(this decoder has no IPv6 address parser, see tunnel_vpn.hpp's own header comment)";
+    std::ostringstream s;
+    s << "6in4 (IPv6-in-IPv4) tunnel (RFC 4213)";
+    // ROADMAP item 154 (docs/DEVELOPMENT.md): the inner IPv6 base header's Source/Destination
+    // Address fields sit at fixed offsets 8 and 24 (RFC 8200), exactly as IP-in-IP's own inner
+    // IPv4 addresses do above -- the same "read the two addresses directly rather than a full
+    // recursive parse" shortcut, now that ipv6.hpp's format_ipv6 exists to render them.
+    if (ip_payload.size() >= 40) {
+        Ipv6Address inner_src{};
+        Ipv6Address inner_dst{};
+        std::copy(ip_payload.data() + 8, ip_payload.data() + 24, inner_src.begin());
+        std::copy(ip_payload.data() + 24, ip_payload.data() + 40, inner_dst.begin());
+        s << ", inner " << format_ipv6(inner_src) << " -> " << format_ipv6(inner_dst);
+    }
+    s << " -- inner payload not decoded past its own header";
+    m.summary = s.str();
     return m;
 }
 

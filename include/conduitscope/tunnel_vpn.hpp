@@ -67,10 +67,9 @@
 //     protocol, inner payload) is read.
 //   - 6in4 (IP protocol 41, RFC 4213) is checked the same way as IP-in-IP -- IANA-exclusive protocol
 //     number plus a real structural signature, the payload's first nibble must be 6 (IPv6 version) --
-//     but its inner addresses are NOT surfaced, unlike IP-in-IP's: this codebase has no IPv6 address
-//     parser at all (see ipv4.hpp's file header comment on IPv6 being out of scope), and writing one
-//     solely to format two 128-bit addresses for this one case would be real scope creep for a
-//     name-only recognition tier -- see this file's LIMITATIONS cross-reference in docs/MANUAL.md.
+//     and, as of ROADMAP item 154 (docs/DEVELOPMENT.md), its inner addresses ARE surfaced too, the
+//     same "read the two fixed-offset addresses directly" shortcut IP-in-IP's own paragraph above
+//     already uses (now that ipv6.hpp's format_ipv6 exists to render them).
 //   - L2TPv3's direct-IP encapsulation (IP protocol 115, RFC 3931 section 4.1 -- an extension beyond
 //     ROADMAP item 18's literal text, which only names L2TP/L2TPv3's UDP 1701 form; the same
 //     "genuinely reachable but unnamed by the ROADMAP text" addition Tier 1's Zoom STUN ports
@@ -158,10 +157,15 @@
 //     file's TCP dispatch is ever reached, making a separate SSTP branch dead code regardless -- the
 //     same reasoning that also rules out any generic TCP-side "tls-tunnel" catch-all (redundant with
 //     HTTPS's own port-only fallback for the identical reason).
-//   - 4in6 and DS-Lite/MAP-E (all IPv6-outer encapsulations) are not reachable at all in this
-//     codebase: decoder.cpp only ever parses an IPv4 outer header (see link_layer.hpp's own
-//     ETHERTYPE_IPV6 handling, which names IPv6 frames but never parses them) -- there is no call site
-//     these could ever be dispatched from.
+//   - 4in6 and DS-Lite/MAP-E (all IPv6-outer encapsulations) are not separately named or fixture-
+//     tested, though decoder.cpp has parsed IPv6 outer headers since ROADMAP item 24 and shares this
+//     file's IP-protocol-keyed recognizers (try_recognize_tunnel_vpn_ip_proto) across both outer
+//     families (see the IPv6 sample's own ESP packet, which already proves this same dispatch is
+//     reachable from an IPv6 outer header) -- a plain 4in6 packet (outer IPv6, Next Header == 4) would
+//     therefore already match try_recognize_ip_in_ip exactly as written above, and surface its own
+//     inner IPv4 addresses the same way. DS-Lite/MAP-E specifically layer more than bare 4in6 (DS-Lite
+//     adds a shared NAT44 hop; MAP-E encodes port ranges into the IPv6 address itself) and aren't
+//     distinguishable from plain 4in6 by this file's own per-packet view regardless.
 //   - MPLS's own L2VPN/VPLS/pseudowire use case is not a separate protocol value: an MPLS-encapsulated
 //     pseudowire is wire-format-identical to plain MPLS-encapsulated IP (the same label-stack framing;
 //     the payload's shape past the Bottom-of-Stack label is what differs, controlled entirely by

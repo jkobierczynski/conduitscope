@@ -207,6 +207,20 @@ struct DecodeContext {
     Ipv6Address ipv6_src_addr{};
     Ipv6Address ipv6_dst_addr{};
 
+    // ROADMAP item 154 (docs/DEVELOPMENT.md): whether the OUTER IP packet carrying this payload was
+    // IPv6 rather than IPv4. VRRP's own decoder (vrrp.hpp) is the only user -- unlike OSPFv3 (whose
+    // Version byte, 3 vs. OSPFv2's 2, is self-describing, see ospf.hpp's own file header) or
+    // HSRPv2's Group State TLV (which carries its own explicit IP Version field, see hsrp.hpp),
+    // VRRPv3's own wire format (RFC 5798) is IDENTICAL for IPv4 and IPv6 except for the size of each
+    // entry in its virtual-IP-address list (4 bytes vs. 16) -- nothing in the VRRP message itself
+    // says which. decoder.cpp's own decode_ip_payload already has this as a local `ip_version`
+    // parameter (4 or 6) at every IP-protocol-keyed dispatch site; this field is simply that same
+    // information threaded one level further, the same narrow, single-purpose-extension shape
+    // ip_src_addr/ipv6_src_addr above already established. Defaults to false (IPv4) -- every
+    // decoder that never reads it is unaffected, and VRRP's own decode_ip_payload call site is the
+    // only place that ever sets it to true.
+    bool is_ipv6 = false;
+
     // Whether this decode() call should mask a cleartext secret (a plaintext authentication field,
     // a password) with a fixed placeholder rather than including its literal value -- see
     // DecodeOptions::redact_secrets's own comment (decoder.hpp) for the full rationale and

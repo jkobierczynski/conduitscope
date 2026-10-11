@@ -5653,8 +5653,15 @@ Authentication Data field, meaningful only for AuthType `1` (Simple Text
 Password -- decoded as cleartext); AuthType `2` (IP Authentication Header,
 already deprecated by RFC 3768 itself) and AuthType `254` (a non-standard
 Cisco MD5 extension seen in the wild) are named but not decoded further.
-This decoder does not handle VRRP-for-IPv6 (16-byte addresses, a different
-multicast group, and this project has no IPv6 address formatting anywhere).
+VRRPv3's own wire format never distinguishes IP version on the wire (RFC
+5798 relies entirely on the address list's own byte count, 4 vs. 16 bytes
+per entry) -- so VRRPv3-for-IPv6 is decoded by threading the outer IP
+packet's own version down into the decoder (`DecodeContext::is_ipv6`, set
+by `decoder.cpp`'s dispatch from the `ip_version` it already tracks) and
+rendering each entry as a 16-byte address via `ipv6.hpp`'s RFC
+5952-canonical `format_ipv6` when that flag is set (ROADMAP item 154/155,
+docs/DEVELOPMENT.md). VRRPv2 ignores the flag unconditionally -- no
+VRRPv2-over-IPv6 exists (RFC 3768 predates IPv6 VRRP entirely).
 
 **Security context:** any host on the segment that can send a
 higher-priority Advertisement (or a Priority-0 "I'm stepping down") can
@@ -5686,9 +5693,10 @@ with their raw Value bytes, not decoded further. A Group State TLV declares
 a 40-byte length regardless of address family: for IPv6 that exactly
 accounts for all 40 bytes (24 + a 16-byte address), but for IPv4 it only
 accounts for 28 of the 40, leaving 12 reserved/padding bytes this decoder
-does not interpret; an IPv6 Group State's own Virtual IP Address is left
-undecoded (noted, not guessed at) since this project has no IPv6 address
-formatting anywhere.
+does not interpret. Unlike VRRP, the TLV's own IP Version field
+self-describes which size to expect, so no outer-packet context is
+needed; an IPv6 Group State's own Virtual IP Address is fully decoded via
+`ipv6.hpp`'s `format_ipv6` (ROADMAP item 154/155, docs/DEVELOPMENT.md).
 
 This decoder tries the HSRPv1 fixed shape first (exact length 20, Version
 byte `0`, a valid OpCode/State) and falls back to parsing the payload as a
@@ -5818,14 +5826,19 @@ recognized by Type value and named, but their bodies are not decoded
 further.
 
 PIM's three "Encoded Address" formats (Unicast, Group, Source -- RFC 7761
-§4.9) each begin with an Address Family byte and an Encoding Type byte; only
-Address Family `1` (IPv4, matching this project's IPv4-only posture
-everywhere else) and Encoding Type `0` (the plain "native" encoding) are
-supported. Encoding Type `1` (Native encoding with a trailing Join Attribute
-TLV chain, used only for a handful of BIDIR-PIM/MoFRR extensions) and
-Address Family `2` (IPv6) both stop decoding at that point in the message --
-whatever was already decoded is still returned, with a note -- rather than
-guessing at a length.
+§4.9) each begin with an Address Family byte and an Encoding Type byte;
+Address Family `1` (IPv4) and `2` (IPv6, ROADMAP item 154/155,
+docs/DEVELOPMENT.md) are both supported, each only with Encoding Type `0`
+(the plain "native" encoding) -- the Address Family byte self-describes
+which address size follows, so no outer-packet context is needed, the
+same posture as HSRPv2's Group State TLV. Encoding Type `1` (Native
+encoding with a trailing Join Attribute TLV chain, used only for a
+handful of BIDIR-PIM/MoFRR extensions) is still not supported, for either
+address family, and stops decoding at that point in the message --
+whatever was already decoded is still returned, with a note -- rather
+than guessing at a length. An Encoded-Group's/Encoded-Source's own Mask
+Length byte is rendered as-is with no range validation (0-128 is a legal
+IPv6 prefix length, vs. IPv4's 0-32).
 
 **Security context:** PIM has no authentication in the versions this
 decoder recognizes -- any host on a PIM-enabled segment can send Join/
@@ -6544,10 +6557,14 @@ sharply, and every summary/note says so honestly:
   stripped off" framing at essentially zero additional cost.
 - **6in4** (IP protocol 41, RFC 4213) is checked the same way as IP-in-IP
   -- IP protocol number plus a real structural signature (first nibble
-  must be 6, IPv6 version) -- but its own inner addresses are **not**
-  surfaced: this codebase has no IPv6 address parser at all, and writing
-  one solely to format two 128-bit addresses for this one case would be
-  real scope creep for a name-only recognition tier.
+  must be 6, IPv6 version) -- and, like IP-in-IP's own inner IPv4 src/dst
+  extraction, its inner addresses ARE surfaced: the inner IPv6 base
+  header's fixed-offset Source (bytes 8-23) and Destination (bytes 24-39)
+  are read and rendered via `ipv6.hpp`'s `format_ipv6` whenever at least
+  40 bytes of inner header are present (ROADMAP item 154/155,
+  docs/DEVELOPMENT.md). The inner payload past that header is still not
+  decoded further, matching this tier's own "name the tunnel, don't
+  unwrap it" posture otherwise.
 - **L2TP/L2TPv3** (UDP port 1701, RFC 2661 v2 / RFC 3931 v3-over-UDP; and
   IP protocol 115, RFC 3931 section 4.1, L2TPv3's own direct-IP
   encapsulation -- an extension beyond this item's own literal text,
@@ -6663,10 +6680,21 @@ user-facing version:
   separate SSTP branch dead code regardless -- the same reasoning that
   also rules out a generic TCP-side "tls-tunnel" catch-all (redundant
   with HTTPS's own port-only fallback for the identical reason).
-- **4in6** and **DS-Lite/MAP-E** (all IPv6-outer encapsulations) are not
-  reachable at all in this codebase: `decoder.cpp` only ever parses an
-  IPv4 outer header -- there is no call site these could ever be
-  dispatched from.
+- **4in6** (a plain IPv4-in-IPv6 tunnel, IP protocol 4 carried under an
+  IPv6 outer header) is reachable through the same shared IP-protocol
+  dispatch that already carries any IP-protocol-keyed decoder under
+  either outer IP family (ROADMAP item 24/143, docs/DEVELOPMENT.md) --
+  so it already matches the existing `try_recognize_ip_in_ip` check
+  regardless of outer IP version; it just has no dedicated 4in6 fixture
+  of its own, since the existing IP-in-IP test only exercises an IPv4
+  outer header. **DS-Lite** and **MAP-E** remain genuinely unreachable,
+  not because of the outer IP family but because both add encapsulation
+  layers beyond a plain IP-in-IP/6in4 wrapper (DS-Lite tunnels IPv4
+  packets inside IPv6 the same shape as 4in6 but is defined around a
+  specific AFTR/B4 softwire deployment; MAP-E layers a port-mapping
+  scheme derived out-of-band from DHCPv6 options on top) -- there is no
+  additional wire-visible signature this decoder could check for either
+  one beyond what plain IP-in-IP/4in6 already recognizes.
 - **MPLS's own L2VPN/VPLS/pseudowire** use case is not a separate
   `protocol` value -- see MPLS's own paragraph above for why it's folded
   into a note instead.

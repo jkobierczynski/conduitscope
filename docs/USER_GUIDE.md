@@ -8337,16 +8337,15 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   bytes show up as a generic "trailing byte(s) do not form a full 20-byte
   RTE" note rather than a dedicated digest field. See docs/PROTOCOL_COVERAGE.md's
   RIP section.
-- **VRRP-for-IPv6 and HSRPv2-for-IPv6 cannot be decoded.** Neither VRRP nor
-  HSRP is IP-version-gated at the transport level, but this project has no
-  IPv6 address formatting anywhere in the codebase (see `ipv4.hpp`) -- a
-  VRRPv3 message never distinguishes IP version at all on the wire (RFC
-  5798 relies entirely on the address list's own byte count, 4 vs. 16 bytes
-  per entry, which this decoder does not attempt to disambiguate) and is
-  effectively only exercised against IPv4 addresses; an HSRPv2 Group State
-  TLV DOES declare its own IP Version field, so that case is at least
-  detected and explicitly noted as "not decoded" rather than silently
-  misread, per docs/PROTOCOL_COVERAGE.md's HSRP section.
+- **VRRP-for-IPv6 and HSRPv2-for-IPv6 are now both decoded** (ROADMAP item
+  154/155, docs/DEVELOPMENT.md). VRRPv3's own wire format never
+  distinguishes IP version on the wire, so this decoder threads the outer
+  IP packet's own version down into it (`DecodeContext::is_ipv6`) to tell
+  a 16-byte IPv6 address list apart from a 4-byte IPv4 one; VRRPv2 always
+  ignores the flag, since no VRRPv2-over-IPv6 exists. HSRPv2's Group State
+  TLV already declared its own IP Version field, so it needed no outer
+  context -- its Virtual IP Address is now fully rendered for IPv6 too.
+  See docs/PROTOCOL_COVERAGE.md's VRRP and HSRP sections.
 - **None of RIP/IGMP/VRRP/HSRP are wired into the `policy validate` conduit
   `protocols` classification**, for the same reason and with the same
   docs/DEVELOPMENT.md's ROADMAP tracking as the DNS-family bullet above -- a conduit restricted to
@@ -8368,11 +8367,14 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   Sequence Number) fully decoded, but the actual digest bytes -- appended
   after the packet's own declared length in OSPF's case -- are not computed
   or checked. See docs/PROTOCOL_COVERAGE.md's EIGRP and OSPFv2 sections.
-- **PIM has no IPv6 support at all** -- an Encoded Address with Address
-  Family `2` (IPv6), or Encoding Type `1` (Native + Join Attribute TLV,
-  used by a handful of BIDIR-PIM/MoFRR extensions), stops decoding of that
-  message at that point, with a note, rather than being guessed at. See
-  docs/PROTOCOL_COVERAGE.md's PIM section.
+- **PIM's Encoded Addresses now support IPv6** (Address Family `2`,
+  ROADMAP item 154/155, docs/DEVELOPMENT.md), since the Address Family
+  byte itself self-describes which address size follows -- the same
+  posture as HSRPv2's own Group State TLV. Encoding Type `1` (Native +
+  Join Attribute TLV, used by a handful of BIDIR-PIM/MoFRR extensions) is
+  still not supported, for either address family, and stops decoding of
+  that message at that point, with a note, rather than being guessed at.
+  See docs/PROTOCOL_COVERAGE.md's PIM section.
 - **None of IGRP/PIM/EIGRP/OSPF are wired into the `policy validate` conduit
   `protocols` classification**, for the same reason and with the same
   docs/DEVELOPMENT.md's ROADMAP tracking as the DNS-family and RIP/IGMP/VRRP/HSRP bullets above --
@@ -8570,11 +8572,12 @@ These are current, not aspirational -- each has a corresponding docs/DEVELOPMENT
   Type (`0x6558`) and Key-flag shape; this decoder reports `nvgre` and
   says so honestly rather than guessing further by interpreting the Key
   field's own VSID/FlowID split. See docs/PROTOCOL_COVERAGE.md's Tier 5 section.
-- **6in4's inner IPv6 header is recognized but its addresses are never
-  surfaced** -- unlike IP-in-IP's own inner IPv4 src/dst extraction, this
-  codebase has no IPv6 address parser at all, and adding one solely to
-  format two 128-bit addresses for this one case was judged out of scope
-  for a name-only recognition tier. See docs/PROTOCOL_COVERAGE.md's Tier 5
+- **6in4's inner IPv6 addresses are now surfaced** (ROADMAP item
+  154/155, docs/DEVELOPMENT.md), the same as IP-in-IP's own inner IPv4
+  src/dst extraction -- the inner header's fixed-offset Source and
+  Destination are read and rendered whenever at least 40 bytes of inner
+  IPv6 base header are present. The inner payload past that header is
+  still not decoded further. See docs/PROTOCOL_COVERAGE.md's Tier 5
   section.
 - **The generic dtls-tunnel check cannot tell CAPWAP's own DTLS data
   plane, a vendor AP's DTLS control channel, an LTE offload client, or a

@@ -15860,6 +15860,16 @@ def ip_eth_frame(payload: bytes, protocol: int, src_ip: str, dst_ip: str, src_ma
     return eth_header(dst_mac, src_mac, 0x0800) + ip + payload
 
 
+def ip6_eth_frame(payload: bytes, protocol: int, src_ip: str, dst_ip: str, src_mac: bytes,
+                   dst_mac: bytes) -> bytes:
+    """IPv6 analogue of ip_eth_frame above, for the same IP-protocol-keyed decoders (VRRP/PIM/
+    IGMP/ICMP) riding directly on an IPv6 outer header instead of IPv4 -- see ROADMAP item
+    154/155 (docs/DEVELOPMENT.md), which added VRRPv3-for-IPv6 and PIM's IPv6 Encoded Address
+    support. Reuses ipv6_packet() for the base header (no extension headers needed here)."""
+    ip6 = ipv6_packet(src_ip, dst_ip, protocol, payload)
+    return eth_header(dst_mac, src_mac, ETHERTYPE_IPV6) + ip6
+
+
 def rfc1071_checksum(data: bytes) -> int:
     """The classic 16-bit one's-complement Internet checksum (RFC 1071) -- the same algorithm
     IPv4/TCP/UDP/ICMP all use. Sums 16-bit big-endian words (an odd trailing byte is padded with a
@@ -16172,11 +16182,12 @@ def vrrp_message_v2(vrid: int, priority: int, addrs: list, auth_type: int = 0,
     return body
 
 
-def vrrp_message_v3(vrid: int, priority: int, addrs: list, interval_centisec: int = 100) -> bytes:
+def vrrp_message_v3(vrid: int, priority: int, addrs: list, interval_centisec: int = 100,
+                     ipv6: bool = False) -> bytes:
     body = struct.pack("!BBBB", (3 << 4) | 1, vrid, priority, len(addrs))
     body += struct.pack("!HH", interval_centisec & 0x0FFF, 0)  # checksum left as 0
     for a in addrs:
-        body += ip_bytes4(a)
+        body += socket.inet_pton(socket.AF_INET6, a) if ipv6 else ip_bytes4(a)
     return body
 
 
@@ -16184,16 +16195,29 @@ def build_vrrp_sample():
     """VRRP v2 (RFC 3768) and v3 (RFC 5798) -- rides directly on IP protocol 112, no UDP/TCP
     header at all (see vrrp.hpp). Covers ordinary v2/v3 Advertisements, v2 Simple Text Password
     authentication (sent in cleartext -- see vrrp.hpp's Security context note), a Priority-0
-    'master is stepping down' Advertisement, and a deliberately non-VRRP-shaped payload on IP
-    protocol 112 to exercise the structural detection gate."""
+    'master is stepping down' Advertisement, a VRRPv3 Advertisement over an IPv6 outer header with
+    two 16-byte virtual IPv6 addresses (ROADMAP item 154/155, docs/DEVELOPMENT.md -- exercises
+    DecodeContext::is_ipv6 threading from decoder.cpp's own ip_version into try_parse_vrrp;
+    VRRPv2-over-IPv6 is deliberately not covered here since it does not exist on the wire -- RFC
+    3768 predates IPv6 VRRP, and vrrp.hpp's own try_parse_vrrp unconditionally ignores is_ipv6 for
+    v2), and a deliberately non-VRRP-shaped payload on IP protocol 112 to exercise the structural
+    detection gate."""
     packets = []
     VRRP_GROUP = "224.0.0.18"
+    VRRP6_GROUP = "ff02::12"  # RFC 5798's own IPv6 VRRP multicast group
+    HMI6, PLC6 = "2001:db8::50", "2001:db8::10"
 
     def add(payload: bytes, from_a: bool = True):
         if from_a:
             packets.append(ip_eth_frame(payload, VRRP_IP_PROTOCOL, HMI_IP, VRRP_GROUP, HMI_MAC, PLC_MAC))
         else:
             packets.append(ip_eth_frame(payload, VRRP_IP_PROTOCOL, PLC_IP, VRRP_GROUP, PLC_MAC, HMI_MAC))
+
+    def add6(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip6_eth_frame(payload, VRRP_IP_PROTOCOL, HMI6, VRRP6_GROUP, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip6_eth_frame(payload, VRRP_IP_PROTOCOL, PLC6, VRRP6_GROUP, PLC_MAC, HMI_MAC))
 
     # 1) VRRPv2 Advertisement, priority 100 (ordinary backup), no authentication, one virtual IP.
     add(vrrp_message_v2(1, 100, ["192.168.1.1"]))
@@ -16210,7 +16234,10 @@ def build_vrrp_sample():
     # 5) VRRPv3 Advertisement, centisecond interval.
     add(vrrp_message_v3(3, 100, ["192.168.3.1"], interval_centisec=100))
 
-    # 6) Deliberately NOT VRRP: Type nibble is 2 (undefined; only 1 is ever used) -- structural
+    # 6) VRRPv3 Advertisement over an IPv6 outer header, two 16-byte virtual IPv6 addresses.
+    add6(vrrp_message_v3(4, 100, ["2001:db8::1", "2001:db8::2"], interval_centisec=150, ipv6=True))
+
+    # 7) Deliberately NOT VRRP: Type nibble is 2 (undefined; only 1 is ever used) -- structural
     #    gate must reject it, falling back to generic "non-tcp".
     add(struct.pack("!BBBB", (2 << 4) | 2, 1, 100, 0) + struct.pack("!BBH", 0, 1, 0))
 
@@ -16237,9 +16264,16 @@ def hsrp_v2_group_state(version: int, opcode: int, state: int, ip_version: int, 
     value = struct.pack("!BBBBH", version, opcode, state, ip_version, group_number)
     value += identifier  # 6 bytes
     value += struct.pack("!III", priority, hello_time_ms, hold_time_ms)
-    value += ip_bytes4(virtual_ip)
-    value += bytes(40 - len(value))  # pad to the TLV's declared 40-byte length -- see hsrp.hpp's
-                                       # own file header comment on this gap for IPv4
+    if ip_version == 6:
+        value += socket.inet_pton(socket.AF_INET6, virtual_ip)  # 16 bytes -- already totals the
+                                                                    # TLV's declared 40-byte length
+                                                                    # exactly (24 + 16), no padding
+                                                                    # needed (ROADMAP item 154/155,
+                                                                    # docs/DEVELOPMENT.md)
+    else:
+        value += ip_bytes4(virtual_ip)
+        value += bytes(40 - len(value))  # pad to the TLV's declared 40-byte length -- see
+                                           # hsrp.hpp's own file header comment on this gap for IPv4
     return hsrp_tlv(1, value)
 
 
@@ -16247,8 +16281,15 @@ def build_hsrp_sample():
     """HSRP v1 (RFC 2281, a fixed 20-byte message) and v2 (Cisco-proprietary TLV framing) -- see
     hsrp.hpp for the exact wire layout and how this decoder tells the two apart. Covers v1's
     Hello/Coup/Resign opcodes and its cleartext authentication field (see hsrp.hpp's Security
-    context note), a v2 Group State TLV, and a deliberately non-HSRP-shaped payload on HSRP's own
-    port 1985."""
+    context note), a v2 Group State TLV with IP Version 4, a v2 Group State TLV with IP Version 6
+    (ROADMAP item 154/155, docs/DEVELOPMENT.md -- the TLV's own IP Version field self-describes
+    its address size, so unlike VRRP this needs no outer-packet IP-version context; the fixture
+    rides over the same IPv4-outer UDP/1985 transport as the other HSRP packets here for
+    simplicity, since decoder.cpp's port-based dispatch gate is transport-independent of the TLV's
+    own declared IP Version -- a real HSRPv2-for-IPv6 deployment would instead run over an IPv6
+    outer header and UDP port 2029, which this decoder's Auto-mode port gate does not listen on;
+    see hsrp.hpp's own HSRP_PORT comment), and a deliberately non-HSRP-shaped payload on HSRP's
+    own port 1985."""
     packets = []
     HSRP_GROUP = "224.0.0.102"
 
@@ -16267,11 +16308,16 @@ def build_hsrp_sample():
     # 3) HSRPv1 Resign -- the Active router giving up the role.
     add(hsrp_v1_message(2, 8, 3, 10, 100, 1, b"cisco", "192.168.1.1"))
 
-    # 4) HSRPv2: a single Group State TLV, Active state.
+    # 4) HSRPv2: a single Group State TLV, Active state, IP Version 4.
     add(hsrp_v2_group_state(2, 0, 16, 4, 1, bytes.fromhex("000c29aabbcc"), 100, 3000, 10000,
                              "192.168.2.1"))
 
-    # 5) Deliberately NOT HSRP: a payload that is neither a valid 20-byte v1 message nor a
+    # 5) HSRPv2: a single Group State TLV, Active state, IP Version 6 -- 16-byte virtual IPv6
+    #    address, fully decoded (see build_hsrp_sample's own docstring).
+    add(hsrp_v2_group_state(2, 0, 16, 6, 2, bytes.fromhex("000c29ddeeff"), 100, 3000, 10000,
+                             "2001:db8::2:1"), from_a=False)
+
+    # 6) Deliberately NOT HSRP: a payload that is neither a valid 20-byte v1 message nor a
     #    self-consistent TLV chain -- structural gate must reject it, falling back to generic
     #    "udp".
     add(bytes([0x05, 0x00, 0x01, 0x02, 0x03]))
@@ -16346,16 +16392,21 @@ def pim_header(msg_type: int, version: int = 2) -> bytes:
     return struct.pack("!BBH", (version << 4) | msg_type, 0, 0)
 
 
-def pim_encoded_unicast(addr: str) -> bytes:
-    return struct.pack("!BB", 1, 0) + ip_bytes4(addr)
+def pim_address_bytes(addr: str, af: int) -> bytes:
+    """af 1 = IPv4 (4 bytes), af 2 = IPv6 (16 bytes, ROADMAP item 154/155, docs/DEVELOPMENT.md)."""
+    return ip_bytes4(addr) if af == 1 else socket.inet_pton(socket.AF_INET6, addr)
 
 
-def pim_encoded_group(addr: str, mask_len: int = 32) -> bytes:
-    return struct.pack("!BBBB", 1, 0, 0, mask_len) + ip_bytes4(addr)
+def pim_encoded_unicast(addr: str, af: int = 1) -> bytes:
+    return struct.pack("!BB", af, 0) + pim_address_bytes(addr, af)
 
 
-def pim_encoded_source(addr: str, mask_len: int = 32, flags: int = 0) -> bytes:
-    return struct.pack("!BBBB", 1, 0, flags, mask_len) + ip_bytes4(addr)
+def pim_encoded_group(addr: str, mask_len: int = 32, af: int = 1) -> bytes:
+    return struct.pack("!BBBB", af, 0, 0, mask_len) + pim_address_bytes(addr, af)
+
+
+def pim_encoded_source(addr: str, mask_len: int = 32, flags: int = 0, af: int = 1) -> bytes:
+    return struct.pack("!BBBB", af, 0, flags, mask_len) + pim_address_bytes(addr, af)
 
 
 def pim_hello_option(option_type: int, value: bytes) -> bytes:
@@ -16379,15 +16430,16 @@ def pim_register_stop_message(group: str, source_addr: str) -> bytes:
     return pim_header(2) + pim_encoded_group(group) + pim_encoded_unicast(source_addr)
 
 
-def pim_join_prune_message(msg_type: int, upstream: str, holdtime: int, groups: list) -> bytes:
-    body = pim_encoded_unicast(upstream) + struct.pack("!BBH", 0, len(groups), holdtime)
+def pim_join_prune_message(msg_type: int, upstream: str, holdtime: int, groups: list, af: int = 1,
+                            mask_len: int = 32) -> bytes:
+    body = pim_encoded_unicast(upstream, af=af) + struct.pack("!BBH", 0, len(groups), holdtime)
     for group_addr, joins, prunes in groups:
-        body += pim_encoded_group(group_addr)
+        body += pim_encoded_group(group_addr, mask_len=mask_len, af=af)
         body += struct.pack("!HH", len(joins), len(prunes))
         for src in joins:
-            body += pim_encoded_source(src)
+            body += pim_encoded_source(src, mask_len=mask_len, af=af)
         for src in prunes:
-            body += pim_encoded_source(src)
+            body += pim_encoded_source(src, mask_len=mask_len, af=af)
     return pim_header(msg_type) + body
 
 
@@ -16421,18 +16473,30 @@ def build_pim_sample():
     """PIMv2 (RFC 7761/3973) -- rides directly on IP protocol 103, no UDP/TCP header at all (see
     pim.hpp). Covers Hello (HoldTime/DR Priority/Generation ID/Address List options), Register
     (encapsulating a real IPv4-shaped inner packet), Register-Stop, Join/Prune (one group with a
-    join and a prune source), Bootstrap (one candidate-RP), Assert, Candidate-RP-Advertisement, and
-    a deliberately non-PIM-shaped payload (Type nibble above the highest defined value) to exercise
-    the structural detection gate."""
+    join and a prune source), Bootstrap (one candidate-RP), Assert, Candidate-RP-Advertisement, a
+    second Join/Prune sent over an IPv6 outer header using Address Family 2 (IPv6) Encoded
+    Addresses throughout -- Encoded-Unicast (upstream neighbor), Encoded-Group, and Encoded-Source
+    all in one message (ROADMAP item 154/155, docs/DEVELOPMENT.md -- the Address Family byte
+    itself self-describes the address size, so no outer-packet context is needed, unlike VRRP),
+    and a deliberately non-PIM-shaped payload (Type nibble above the highest defined value) to
+    exercise the structural detection gate."""
     packets = []
     ALL_PIM_ROUTERS = "224.0.0.13"
+    ALL_PIM_ROUTERS6 = "ff02::d"  # RFC 7761's own IPv6 All-PIM-Routers group
     GROUP_A = "239.1.1.1"
+    HMI6, PLC6 = "2001:db8::50", "2001:db8::10"
 
     def add(payload: bytes, from_a: bool = True):
         if from_a:
             packets.append(ip_eth_frame(payload, PIM_IP_PROTOCOL, HMI_IP, ALL_PIM_ROUTERS, HMI_MAC, PLC_MAC))
         else:
             packets.append(ip_eth_frame(payload, PIM_IP_PROTOCOL, PLC_IP, ALL_PIM_ROUTERS, PLC_MAC, HMI_MAC))
+
+    def add6(payload: bytes, from_a: bool = True):
+        if from_a:
+            packets.append(ip6_eth_frame(payload, PIM_IP_PROTOCOL, HMI6, ALL_PIM_ROUTERS6, HMI_MAC, PLC_MAC))
+        else:
+            packets.append(ip6_eth_frame(payload, PIM_IP_PROTOCOL, PLC6, ALL_PIM_ROUTERS6, PLC_MAC, HMI_MAC))
 
     # 1) Hello: HoldTime, DR Priority, Generation ID, and an Address List option.
     add(pim_hello_message([
@@ -16461,7 +16525,14 @@ def build_pim_sample():
     # 7) Candidate-RP-Advertisement.
     add(pim_cand_rp_adv_message(192, 150, HMI_IP, [GROUP_A]))
 
-    # 8) Deliberately NOT PIM: Type nibble 15, above the highest type this decoder recognizes (13)
+    # 8) Join/Prune over an IPv6 outer header, using Address Family 2 (IPv6) Encoded Addresses
+    #    throughout: upstream neighbor, one group with one join source and one prune source, all
+    #    128-bit addresses.
+    GROUP_A6 = "ff3e::1:1"
+    add6(pim_join_prune_message(3, PLC6, 210, [(GROUP_A6, ["2001:db8::1:5"], ["2001:db8::1:9"])],
+                                 af=2, mask_len=128), from_a=False)
+
+    # 9) Deliberately NOT PIM: Type nibble 15, above the highest type this decoder recognizes (13)
     #    -- structural gate must reject it, falling back to generic "non-tcp".
     add(struct.pack("!BBH", (2 << 4) | 15, 0, 0))
 

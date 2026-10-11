@@ -24,9 +24,11 @@
 // Timer(4, milliseconds) + Standby/Hold Timer(4, milliseconds) + Virtual IP Address(4 for IPv4,
 // 16 for IPv6). For an IPv6 Group State TLV that totals exactly the TLV's declared 40-byte
 // length (24 + 16); for IPv4 it only accounts for 28 of the declared 40 bytes, leaving 12 bytes
-// of reserved/padding this decoder does not attempt to interpret. This project has no IPv6
-// address formatting anywhere (see decoder.hpp/ipv4.hpp), so an IPv6 Group State TLV's Virtual IP
-// Address is left undecoded (noted, not guessed at) -- everything else in it still decodes fully.
+// of reserved/padding this decoder does not attempt to interpret. The TLV's own IP Version field
+// says which size to expect -- unlike VRRP (see vrrp.hpp's own header comment), this TLV never
+// needs outer-packet context to tell IPv4 and IPv6 apart. An IPv6 Group State TLV's Virtual IP
+// Address is fully decoded (ROADMAP item 154, docs/DEVELOPMENT.md, via ipv6.hpp's format_ipv6) --
+// everything else in the TLV was already decoded regardless of IP Version.
 //
 // Cross-checked against Wireshark's own packet-hsrp.c directly (Cisco has never published an
 // official HSRPv2 specification).
@@ -48,9 +50,16 @@
 
 namespace conduitscope {
 
-constexpr uint16_t HSRP_PORT = 1985;  // v1, and v2 over IPv4 (224.0.0.102); v2 over IPv6 uses UDP
-                                        // 2029 instead, not handled by this decoder (see this
-                                        // file's header comment on the lack of IPv6 support).
+constexpr uint16_t HSRP_PORT = 1985;  // v1, and v2 over IPv4 (224.0.0.102). A real HSRPv2-for-IPv6
+                                        // deployment instead runs over UDP port 2029 -- this
+                                        // decoder's TLV parsing fully supports an IPv6 Group State
+                                        // TLV regardless of transport (ROADMAP item 154/155,
+                                        // docs/DEVELOPMENT.md), but decoder.cpp's Auto-mode port
+                                        // gate only ever dispatches to this decoder on port 1985,
+                                        // so real port-2029 traffic needs an explicit --protocol
+                                        // hsrp to be recognized (see DecodeOptions::extra_hsrp_ports
+                                        // for the general mechanism, not yet extended to add 2029
+                                        // by default).
 
 struct HsrpTlv {
     uint8_t type = 0;
@@ -73,8 +82,8 @@ struct HsrpTlv {
     uint32_t priority = 0;
     uint32_t hello_time_ms = 0;
     uint32_t hold_time_ms = 0;
-    std::string virtual_ip;  // decoded only when ip_version == 4; empty (with a note) for IPv6 or
-                               // a truncated field
+    std::string virtual_ip;  // decoded for ip_version 4 (dotted-quad) or 6 (RFC 5952 canonical, via
+                               // format_ipv6); empty (with a note) only for a truncated field
 
     // Populated whenever group_state_decoded is false (any non-Group-State TLV, or a Group State
     // TLV too short to decode): the TLV's Value bytes, verbatim, as hex.

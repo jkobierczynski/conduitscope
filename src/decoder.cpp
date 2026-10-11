@@ -3019,6 +3019,11 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                 DecodeContext ctx;
                 ctx.protocol_id = "vrrp";
                 ctx.redact_secrets = options_.redact_secrets;
+                // ROADMAP item 154: VRRPv3's own wire format doesn't self-describe its address
+                // family (see protocol_decoder.hpp's DecodeContext::is_ipv6 own comment) -- this
+                // function's own `ip_version` parameter (already in scope at every IP-protocol-keyed
+                // dispatch site in this cascade) is VRRP's only source of that information.
+                ctx.is_ipv6 = (ip_version == 6);
                 if (auto result = vrrp_decoder().decode(payload, ctx)) {
                     const VrrpMessage& msg = result->as<VrrpMessage>();
                     out.protocol = "vrrp";

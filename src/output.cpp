@@ -2857,6 +2857,19 @@ void write_hsrp_json_fields(std::ostream& out, const HsrpMessage& msg) {
             }
             out << "],\n";
         }
+        // The first decoded Group State TLV's own IP Version and Virtual IP Address -- same
+        // "first one wins" convention the summary string above already uses. Previously this
+        // field was decoded (for IPv4, and now also for IPv6 -- ROADMAP item 154/155,
+        // docs/DEVELOPMENT.md) but never actually surfaced in JSON for either address family.
+        for (const auto& tlv : msg.tlvs) {
+            if (tlv.type == 1 && tlv.group_state_decoded && !tlv.virtual_ip.empty()) {
+                out << "    \"hsrp_group_state_ip_version\": " << static_cast<unsigned>(tlv.ip_version)
+                    << ",\n";
+                out << "    \"hsrp_group_state_virtual_ip\": \"" << json_escape(tlv.virtual_ip)
+                    << "\",\n";
+                break;
+            }
+        }
         out << "    \"hsrp_tlvs_truncated\": " << (msg.tlvs_truncated ? "true" : "false") << ",\n";
     }
 }

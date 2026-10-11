@@ -20379,6 +20379,153 @@ it done as its own patch.
     that changes. **Nothing in this item is scheduled against a version yet** -- Jurgen asked for
     this to be recorded on the backlog, not implemented this round.
 
+155. **VRRP/HSRPv2 address rendering for IPv6, PIM's IPv6 Encoded Address support, and 6in4
+    inner-address extraction.** Jurgen asked for these three specific IPv6 gaps, previously
+    identified while auditing item 154's own "next things on the priority list" question -- each
+    one a decoder that already parses the rest of its own protocol correctly but stops short of
+    IPv6 purely because this codebase had no IPv6 address formatting until item 24/143 added
+    `ipv6.hpp` (`Ipv6Address`, `format_ipv6`, `parse_ipv6_string`). All four fixes plug directly
+    into that existing infrastructure; none needed new parsing primitives.
+
+    **What was done.**
+    - **VRRP (`vrrp.hpp`/`.cpp`).** VRRPv3's own wire format never distinguishes IP version on the
+      wire (RFC 5798 relies entirely on the address list's own byte count, 4 vs. 16 bytes per
+      entry) -- unlike HSRPv2's Group State TLV or PIM's Encoded Addresses (both self-describing,
+      see below), VRRP alone needed outer-packet context threaded in. Added
+      `DecodeContext::is_ipv6` (`protocol_decoder.hpp`), set by `decoder.cpp`'s VRRP dispatch site
+      from the `ip_version` local every IP-protocol-keyed dispatch site already carries
+      (`ctx.is_ipv6 = (ip_version == 6);`). `try_parse_vrrp` gained an `is_ipv6` parameter
+      (defaulted to `false`, so `fuzz/fuzz_vrrp.cpp`'s existing single-argument call stays source-
+      compatible); internally, `bool addrs_are_ipv6 = is_ipv6 && version == 3` -- VRRPv2
+      unconditionally reads 4-byte addresses regardless of outer context, since no VRRPv2-over-
+      IPv6 exists (RFC 3768 predates IPv6 VRRP entirely). The address-list loop now branches on
+      `addrs_are_ipv6`: 16-byte reads via `format_ipv6` instead of `format_ipv4`. `VrrpMessage`
+      gained a `bool is_ipv6` field recording which branch actually fired.
+    - **HSRPv2 (`hsrp.hpp`/`.cpp`).** The Group State TLV's own `IP Version` byte already
+      self-describes which address size follows (4 vs. 16 bytes against the TLV's own fixed
+      40-byte declared length), so this needed no outer-packet context at all, unlike VRRP.
+      Extended the existing `ip_version == 6` branch (previously always "not decoded") to actually
+      read the 16 bytes and render via `format_ipv6` whenever `vc.remaining() >= 16`, else push a
+      "too short" note -- mirroring the pre-existing IPv4 branch's own shape exactly. Separately
+      noticed, while wiring this up, that `HsrpTlv::virtual_ip` was being decoded (for IPv4
+      already, before this round) but never actually surfaced in ANY output format -- the Group
+      State TLV's own summary line only ever showed opcode/group/state, and `write_hsrp_json_
+      fields` (`output.cpp`) emitted only `hsrp_tlv_types`/`hsrp_tlvs_truncated` for v2, nothing
+      per-TLV. An address that's parsed but never rendered doesn't satisfy "address rendering" for
+      either IP version, so fixed both: the summary now folds in `", virtual IP <addr>"` when the
+      first decoded Group State TLV has one (same style as HSRPv1's own summary line), and
+      `write_hsrp_json_fields` gained `hsrp_group_state_ip_version`/`hsrp_group_state_virtual_ip`
+      fields from that same first TLV. This closes a pre-existing IPv4 gap as a side effect of
+      completing the IPv6 feature, rather than leaving IPv6 addresses decoded into a struct field
+      with no way to ever reach a user.
+    - **PIM (`pim.hpp`/`.cpp`).** The Encoded Address formats' own Address Family byte (RFC 7761
+      4.9) already self-describes IPv4 (1) vs. IPv6 (2), the same self-describing shape as HSRPv2's
+      TLV -- no outer-packet context needed here either. Added `kAfIpv6 = 2` alongside the
+      existing `kAfIpv4`, a shared `read_address(Cursor&, uint8_t af)` helper (`format_ipv6` for
+      AF 2, `format_ipv4` otherwise) and `address_size(uint8_t af)`, and rewrote `decode_encoded_
+      unicast`/`_group`/`_source` to accept either family through these helpers with short-circuit-
+      safe condition ordering (`(af != kAfIpv4 && af != kAfIpv6) || et != kEtNative || c.remaining()
+      < address_size(af)`). Encoding Type 1 (Native + Join Attribute TLV) is still a hard stop for
+      both families, unchanged. An Encoded-Group's/Encoded-Source's Mask Length byte is rendered
+      as-is with no range validation, the same "trust the wire value" posture IPv4 already has (now
+      explicitly covering 0-128, not just 0-32).
+    - **6in4 (`tunnel_vpn.hpp`/`.cpp`).** Unlike the three protocols above, this is a Tier 5
+      "name the tunnel, don't unwrap it" recognizer, not a full decoder -- but IP-in-IP (its IPv4
+      sibling, same tier) already makes one deliberate exception and surfaces its inner src/dst,
+      so 6in4 staying silent about its own inner addresses was an inconsistency, not a
+      considered scope choice. `try_recognize_6in4` now reads the inner IPv6 base header's fixed-
+      offset Source (bytes 8-23) and Destination (bytes 24-39) whenever at least 40 bytes of inner
+      header are present, rendering both via `format_ipv6` and folding them into the summary
+      (`", inner <src> -> <dst>"`) exactly mirroring IP-in-IP's own `", inner <src> -> <dst>"`
+      phrasing. The inner payload past that header is still not decoded further, unchanged.
+      Separately corrected two now-stale claims found in `tunnel_vpn.hpp`'s own header comment
+      while working this item: "4in6/DS-Lite/MAP-E are IPv6-outer encapsulations this codebase has
+      no call site for at all, since decoder.cpp only ever parses an IPv4 outer header" was false
+      since item 24/143 added the shared IP-protocol dispatch that already reaches both outer IP
+      families -- plain 4in6 (IP protocol 4 under an IPv6 outer header) already matches the
+      existing `try_recognize_ip_in_ip` check today, it simply has no dedicated fixture proving it;
+      DS-Lite/MAP-E remain genuinely unreachable, but because both layer additional encapsulation
+      beyond a plain wrapper, not because of the outer IP family. `docs/PROTOCOL_COVERAGE.md`'s
+      matching Tier 5 bullet was rewritten to match.
+
+    **A pre-existing gap worked around, not fixed.** `tools/make_sample_pcap.py` has no generator
+    function for `tests/sample_tunnel_vpn.pcap` at all (confirmed by exhaustive grep) -- that
+    28-packet fixture and its ~30 CTest entries exist with no way to regenerate or extend them
+    through this project's normal fixture-generation path, a pre-existing hole unrelated to this
+    item. Rather than attempting a risky full reconstruction of all 28 packets from scratch (out of
+    scope for this item, and a good way to silently change packets 1-7/10-28 that already pass),
+    packet 9 (the existing 6in4 fixture) was binary-patched directly: its previously-all-zero-past-
+    the-version-nibble inner IPv6 header now carries real, distinct, canonical-form addresses
+    (`2001:db8:ffff::5` -> `2001:db8:ffff::99`, bytes 8-23/24-39 of the inner header, Next Header=
+    TCP, Hop Limit=64), verified by re-parsing the patched bytes back out before use. Reconstructing
+    this fixture's own generator function is a separate, larger task, not attempted here.
+
+    **New tests.** 7 new CTest entries, all confirmed individually passing against the real built
+    binary:
+    - `vrrp_v3_ipv6_advertisement_decoded`/`vrrp_v3_ipv6_addresses_json_fields` -- a new VRRPv3
+      Advertisement packet in `tests/sample_vrrp.pcap` (via a new `ip6_eth_frame` fixture helper
+      and a new `ipv6` parameter on `vrrp_message_v3`), two 16-byte virtual IPv6 addresses, over a
+      real IPv6 outer header (`ff02::12`, RFC 5798's own IPv6 VRRP multicast group). VRRPv2-over-
+      IPv6 deliberately has no fixture, since it isn't a real protocol (see "What was done" above).
+    - `hsrp_v2_group_state_virtual_ip_rendered`/`hsrp_v2_ipv6_group_state_decoded`/`hsrp_v2_ipv6_
+      group_state_json_fields` -- a new HSRPv2 Group State TLV in `tests/sample_hsrp.pcap` with
+      `IP Version` 6 and a 16-byte virtual address (`hsrp_v2_group_state` extended to branch on
+      `ip_version`), plus a regression test proving the pre-existing IPv4 case's virtual IP is now
+      also rendered (it wasn't, before this round -- see "What was done" above). Rides over the
+      same IPv4-outer UDP/1985 transport as every other HSRP fixture packet, deliberately, for
+      simplicity -- the TLV's own IP Version field is what's under test, independent of outer
+      transport; see `build_hsrp_sample`'s own updated docstring and `hsrp.hpp`'s `HSRP_PORT`
+      comment for why a REAL HSRPv2-for-IPv6 deployment would instead use UDP port 2029 (which this
+      decoder's Auto-mode port gate does not listen on by default) over an IPv6 outer header.
+    - `pim_ipv6_join_prune_decoded`/`pim_ipv6_join_prune_groups_json_fields` -- a new Join/Prune
+      message in `tests/sample_pim.pcap`, Address Family 2 throughout (upstream Encoded-Unicast,
+      one group's Encoded-Group, one join and one prune Encoded-Source, all /128), sent over a real
+      IPv6 outer header (`ff02::d`, RFC 7761's own IPv6 All-PIM-Routers group) via a new `ip6_eth_
+      frame` fixture helper mirroring the existing `ip_eth_frame`.
+    - `tunnel_vpn_6in4_recognized` (pre-existing test, regex updated rather than counted as new) --
+      now asserts the inner `2001:db8:ffff::5 -> 2001:db8:ffff::99` addresses appear in the 6in4
+      summary line instead of the old "inner IPv6 header present but not decoded" text.
+    Pre-existing `stats_mode_vrrp`/`stats_mode_hsrp` version-count assertions updated (VRRPv3 1->2,
+    HSRPv2 1->2) to match the new fixture packets; `tunnel_vpn_stats_counted`'s own `6in4 +1` count
+    is unaffected (packet 9 was patched in place, not added).
+
+    **Left open.** OSPFv3 (which already carries native IPv6 semantics and is self-describing via
+    its own Version byte) was explicitly out of scope for this item -- Jurgen asked for VRRP/HSRPv2/
+    PIM/6in4 specifically, and OSPFv3 was already a separate, pre-existing ROADMAP gap. PIM's
+    Register message still only recognizes an IPv4-shaped (or Null-Register) encapsulated inner
+    packet for its own (Source, Group) extraction -- a true PIM-SM-for-IPv6 deployment's Register
+    message encapsulates an IPv6-shaped inner packet instead, which this round did not add (it's a
+    distinct code path from the Encoded Address formats this item targeted, and wasn't named in
+    Jurgen's own three-item request). `tests/sample_tunnel_vpn.pcap`'s missing generator function
+    (see above) remains unfixed. HSRPv2-for-IPv6's real-world UDP port 2029 is still not in
+    `DecodeContext`'s/Auto-mode's default port set (also left open, noted in `hsrp.hpp`).
+
+    **Docs.** `docs/USER_GUIDE.md`'s three stale LIMITATIONS bullets ("VRRP-for-IPv6 and HSRPv2-
+    for-IPv6 cannot be decoded", "PIM has no IPv6 support at all", "6in4's inner IPv6 header is
+    recognized but its addresses are never surfaced") rewritten to describe what's now implemented.
+    `docs/PROTOCOL_COVERAGE.md`'s VRRP, HSRP, PIM, and Tier 5 (6in4 and the adjacent 4in6/DS-Lite/
+    MAP-E bullet) sections all updated to match. Each touched header's own file-level comment
+    (`vrrp.hpp`, `hsrp.hpp`, `pim.hpp`, `tunnel_vpn.hpp`) rewritten in place rather than left
+    describing the pre-fix behavior. `docs/MANUAL.md` was NOT touched, per Jurgen's standing
+    instruction.
+
+    **Verification.** All 7 new CTest entries confirmed individually passing, plus the pre-existing
+    `vrrp_v3_advertisement_decoded`/`tunnel_vpn_6in4_recognized`/`stats_mode_vrrp`/`stats_mode_hsrp`
+    regressions they touch. Full default-build CTest suite: 2586/2586 passing (2579 + 7 new), zero
+    regressions. Clang ASan/UBSan `build-fuzz`: 2664/2664 passing, including all 78
+    `*_corpus_regression` tests (`fuzz_vrrp`/`fuzz_hsrp`/`fuzz_pim` specifically re-verified, since
+    those three decoders' own parsing functions changed signature/behavior this round), zero
+    regressions. `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2568/2568 passing, zero
+    regressions. MinGW cross-compile `build-mingw`: rebuilt clean, build-only as usual (none of
+    this item's code depends on `CONDUITSCOPE_ENABLE_TLS_DECRYPT`/OpenSSL or live-capture support).
+    Grammar-plus-synthetic-fixture validation only for all four fixes, documented honestly as such
+    here: this project holds no real capture exercising VRRP, HSRP, PIM, or 6in4 at all (see item
+    154's -- actually PROTOCOL COVERAGE's own "RIP / IGMP / VRRP / HSRP" and "IGRP / PIM / EIGRP /
+    OSPF" Validation subsections), so every new fixture above is hand-built from each protocol's
+    own RFC rather than cross-checked against a real IPv6 VRRP/HSRP/PIM deployment or a real 6in4
+    tunnel. Delivered as a zip of touched/new files via `SendUserFile`, per this project's own
+    no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

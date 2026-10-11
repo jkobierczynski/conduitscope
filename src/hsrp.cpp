@@ -3,9 +3,11 @@
 
 #include "conduitscope/resource_limits.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 #include "conduitscope/ipv4.hpp"
+#include "conduitscope/ipv6.hpp"
 
 namespace conduitscope {
 
@@ -151,14 +153,22 @@ bool try_parse_hsrp_v2(ByteSpan payload, HsrpMessage& msg) {
             if (tlv.ip_version == 4 && vc.remaining() >= 4) {
                 tlv.virtual_ip = format_ipv4(vc.u32be());
                 tlv.group_state_decoded = true;
+            } else if (tlv.ip_version == 6 && vc.remaining() >= 16) {
+                // ROADMAP item 154 (docs/DEVELOPMENT.md): the Group State TLV's own IP Version
+                // field (read above, before this branch) already says whether the Virtual IP
+                // Address that follows is 4 or 16 bytes -- unlike VRRP (see vrrp.hpp's own header
+                // comment), this TLV is fully self-describing, so no outer-packet context is
+                // needed here at all.
+                ByteSpan raw = vc.bytes(16);
+                Ipv6Address addr{};
+                std::copy(raw.data(), raw.data() + 16, addr.begin());
+                tlv.virtual_ip = format_ipv6(addr);
+                tlv.group_state_decoded = true;
             } else if (tlv.ip_version == 6) {
-                // No IPv6 address formatting exists anywhere in this project -- see hsrp.hpp's
-                // header comment. Everything else in the TLV is still fully decoded above.
                 tlv.group_state_decoded = true;
                 msg.notes.push_back(
                     "Group State TLV for group " + std::to_string(tlv.group_number) +
-                    " declares an IPv6 virtual address, which this decoder does not format -- "
-                    "not decoded");
+                    " is too short to contain its declared IPv6 virtual address");
             } else {
                 msg.notes.push_back("Group State TLV for group " + std::to_string(tlv.group_number) +
                                      " is too short to contain its declared IPv4 virtual address");
@@ -194,6 +204,15 @@ bool try_parse_hsrp_v2(ByteSpan payload, HsrpMessage& msg) {
         if (tlv.type == 1 && tlv.group_state_decoded) {
             out << " -- " << tlv.opcode_name << " group " << tlv.group_number << " state "
                 << tlv.state_name;
+            // Fold the Group State TLV's own Virtual IP Address into the summary, the same style
+            // already used for HSRPv1's own virtual_ip above -- previously this field was decoded
+            // into HsrpTlv::virtual_ip but never actually surfaced in any output format, for
+            // either address family. Fixed alongside the IPv6 Group State decode itself (ROADMAP
+            // item 154/155, docs/DEVELOPMENT.md), since an address that's parsed but never
+            // rendered doesn't satisfy "address rendering" for either IP version.
+            if (!tlv.virtual_ip.empty()) {
+                out << ", virtual IP " << tlv.virtual_ip;
+            }
             break;
         }
     }

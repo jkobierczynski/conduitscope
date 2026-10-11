@@ -8824,6 +8824,16 @@ add_test(NAME vrrp_v3_advertisement_decoded
 set_tests_properties(vrrp_v3_advertisement_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[vrrp\\]  VRRPv3 Advertisement: VRID 3, priority 100 \\(backup\\), 1 virtual IP\\(s\\) \\(192.168.3.1\\)")
 
+add_test(NAME vrrp_v3_ipv6_advertisement_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vrrp.pcap" --format text)
+set_tests_properties(vrrp_v3_ipv6_advertisement_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[vrrp\\]  VRRPv3 Advertisement: VRID 4, priority 100 \\(backup\\), 2 virtual IP\\(s\\) \\(2001:db8::1, \\.\\.\\.\\)")
+
+add_test(NAME vrrp_v3_ipv6_addresses_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vrrp.pcap" --format json)
+set_tests_properties(vrrp_v3_ipv6_addresses_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"vrrp_virtual_router_id\": 4,.*\"vrrp_ip_addresses\": \\[\"2001:db8::1\", \"2001:db8::2\"\\]")
+
 add_test(NAME vrrp_invalid_type_falls_back_to_non_tcp
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vrrp.pcap" --format text)
 set_tests_properties(vrrp_invalid_type_falls_back_to_non_tcp PROPERTIES
@@ -8837,7 +8847,7 @@ set_tests_properties(protocol_filter_vrrp_only PROPERTIES
 add_test(NAME stats_mode_vrrp
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_vrrp.pcap")
 set_tests_properties(stats_mode_vrrp PROPERTIES
-  PASS_REGULAR_EXPRESSION "vrrp versions:.*VRRPv2 .*4\n.*VRRPv3 .*1")
+  PASS_REGULAR_EXPRESSION "vrrp versions:.*VRRPv2 .*4\n.*VRRPv3 .*2")
 
 add_test(NAME hsrp_v1_hello_coup_resign_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap" --format text)
@@ -8852,7 +8862,22 @@ set_tests_properties(hsrp_v1_cleartext_auth_noted PROPERTIES
 add_test(NAME hsrp_v2_group_state_tlv_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap" --format json)
 set_tests_properties(hsrp_v2_group_state_tlv_decoded PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"protocol\": \"hsrp\",.*\"hsrp_version\": 2,.*\"hsrp_tlv_types\": \\[\"Group State\"\\],.*\"hsrp_tlvs_truncated\": false")
+  PASS_REGULAR_EXPRESSION "\"protocol\": \"hsrp\",.*\"hsrp_version\": 2,.*\"hsrp_tlv_types\": \\[\"Group State\"\\],.*\"hsrp_group_state_ip_version\": 4,.*\"hsrp_group_state_virtual_ip\": \"192.168.2.1\",.*\"hsrp_tlvs_truncated\": false")
+
+add_test(NAME hsrp_v2_group_state_virtual_ip_rendered
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap" --format text)
+set_tests_properties(hsrp_v2_group_state_virtual_ip_rendered PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hsrp\\]  HSRPv2: 1 TLV\\(s\\) -- Hello group 1 state Active, virtual IP 192.168.2.1")
+
+add_test(NAME hsrp_v2_ipv6_group_state_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap" --format text)
+set_tests_properties(hsrp_v2_ipv6_group_state_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[hsrp\\]  HSRPv2: 1 TLV\\(s\\) -- Hello group 2 state Active, virtual IP 2001:db8::2:1")
+
+add_test(NAME hsrp_v2_ipv6_group_state_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap" --format json)
+set_tests_properties(hsrp_v2_ipv6_group_state_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"hsrp_group_state_ip_version\": 6,.*\"hsrp_group_state_virtual_ip\": \"2001:db8::2:1\"")
 
 # Regression test for a real collision found while adding this decoder: FF-HSE's own opportunistic,
 # any-port structural gate is weak enough that it was accepting a synthetic HSRPv1 message on port
@@ -8876,7 +8901,7 @@ set_tests_properties(protocol_filter_hsrp_only PROPERTIES
 add_test(NAME stats_mode_hsrp
   COMMAND conduitscope info --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_hsrp.pcap")
 set_tests_properties(stats_mode_hsrp PROPERTIES
-  PASS_REGULAR_EXPRESSION "hsrp versions:.*HSRPv1 .*3\n.*HSRPv2 .*1")
+  PASS_REGULAR_EXPRESSION "hsrp versions:.*HSRPv1 .*3\n.*HSRPv2 .*2")
 
 # ---------------------------------------------------------------------------------------------
 # IGRP / PIM / EIGRP / OSPF decoding -- see igrp.hpp/pim.hpp/eigrp.hpp/ospf.hpp's own file header
@@ -8949,6 +8974,16 @@ add_test(NAME pim_candidate_rp_advertisement_decoded
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pim.pcap" --format text)
 set_tests_properties(pim_candidate_rp_advertisement_decoded PROPERTIES
   PASS_REGULAR_EXPRESSION "\\[pim\\]  PIMv2 Candidate-RP-Advertisement: RP 192.168.1.50, 1 group\\(s\\)")
+
+add_test(NAME pim_ipv6_join_prune_decoded
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pim.pcap" --format text)
+set_tests_properties(pim_ipv6_join_prune_decoded PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[pim\\]  PIMv2 Join/Prune: neighbor 2001:db8::10, 1 group\\(s\\)")
+
+add_test(NAME pim_ipv6_join_prune_groups_json_fields
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pim.pcap" --format json)
+set_tests_properties(pim_ipv6_join_prune_groups_json_fields PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"pim_jp_upstream_neighbor\": \"2001:db8::10\",.*\"pim_jp_holdtime_sec\": 210,.*\"pim_jp_groups\": \\[\"ff3e::1:1/128: 1 join\\(s\\), 1 prune\\(s\\)\"\\]")
 
 add_test(NAME pim_invalid_type_falls_back_to_non_tcp
   COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_pim.pcap" --format text)
@@ -12065,7 +12100,8 @@ set_tests_properties(wireless_backhaul_pppoe_protocol_filter_isolates_pppoe_only
 #    6  IP proto 51   AH, Next Header=6 (TCP), SPI=0x87654321             -> ah
 #    7  IP proto 4    IP-in-IP, valid inner IPv4 header                   -> ip-in-ip (inner addrs)
 #    8  IP proto 4    IP-in-IP, first nibble != 4                         -> non-tcp (fallback)
-#    9  IP proto 41   6in4, first nibble == 6                             -> 6in4
+#    9  IP proto 41   6in4, first nibble == 6, inner IPv6 header present  -> 6in4 (inner addrs,
+#                                                                              ROADMAP item 154/155)
 #   10  IP proto 115  L2TPv3 direct-IP, Session ID=0xAABBCCDD             -> l2tp
 #   11  UDP 52700->500    IKEv2 IKE_SA_INIT                               -> ike
 #   12  UDP 52701->4500   IKEv2 NAT-T (zero marker) INFORMATIONAL         -> ike
@@ -12128,7 +12164,7 @@ set_tests_properties(tunnel_vpn_ip_in_ip_malformed_falls_to_non_tcp PROPERTIES
 add_test(NAME tunnel_vpn_6in4_recognized
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")
 set_tests_properties(tunnel_vpn_6in4_recognized PROPERTIES
-  PASS_REGULAR_EXPRESSION "\\[6in4\\]  6in4 \\(IPv6-in-IPv4\\) tunnel \\(RFC 4213\\) -- inner IPv6 header present but not decoded")
+  PASS_REGULAR_EXPRESSION "\\[6in4\\]  6in4 \\(IPv6-in-IPv4\\) tunnel \\(RFC 4213\\), inner 2001:db8:ffff::5 -> 2001:db8:ffff::99 -- inner payload not decoded past its own header")
 
 add_test(NAME tunnel_vpn_l2tpv3_direct_ip_recognized
   COMMAND conduitscope decode --format text --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tunnel_vpn.pcap")

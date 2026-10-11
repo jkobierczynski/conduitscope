@@ -20,8 +20,17 @@
 //   v3 bytes 4-7: Reserved(4 bits) + Max Advertisement Interval in centiseconds(12 bits), packed
 //                 into 2 bytes, + Checksum(2). v3 has no authentication fields at all -- RFC 5798
 //                 removed them.
-// Then Count * 4 bytes of virtual IPv4 addresses (this decoder does not handle VRRP-for-IPv6,
-// which uses 16-byte addresses and a different multicast group).
+// Then Count * N bytes of virtual IP addresses, N being 4 (IPv4) or 16 (IPv6) -- VRRPv3 (RFC 5798)
+// supports both address families with this IDENTICAL wire format; nothing in the VRRP message
+// itself says which, since the Version/Type byte and every other field are unchanged either way
+// (unlike OSPFv3, whose own Version byte differs -- see ospf.hpp's own file header -- or HSRPv2's
+// Group State TLV, which carries an explicit IP Version field -- see hsrp.hpp). VRRP-for-IPv6 also
+// uses a different multicast group (ff02::12, vs. IPv4's 224.0.0.18) and VRRPv2 (RFC 3768) has no
+// IPv6 form at all (RFC 3768 predates it; only VRRPv3 added IPv6 support) -- neither of those is
+// something this decoder can see from the VRRP payload alone either. So the caller must say which
+// family applies: see try_parse_vrrp's own `is_ipv6` parameter below, threaded from decoder.cpp's
+// own outer-IP-version context (ROADMAP item 154, docs/DEVELOPMENT.md) via
+// DecodeContext::is_ipv6 (protocol_decoder.hpp).
 // v2 only: an 8-byte Authentication Data field follows the address list. It is only meaningful
 // when Auth Type is 1 (Simple Text Password, decoded as cleartext here); Auth Type 2 (IP
 // Authentication Header) was already deprecated by RFC 3768 itself and is not decoded further,
@@ -75,8 +84,14 @@ struct VrrpMessage {
     // v3 only.
     uint16_t advertisement_interval_centisec = 0;  // v3: centiseconds (12-bit field)
 
-    std::vector<std::string> ip_addresses;  // virtual IPv4 address(es); capped at 50 entries
+    std::vector<std::string> ip_addresses;  // virtual IPv4 (dotted-quad) or IPv6 (RFC 5952 canonical,
+                                              // via format_ipv6) address(es), per `is_ipv6` below;
+                                              // capped at 50 entries
     bool ip_addresses_truncated = false;    // true if more than 50 addresses were declared
+    bool is_ipv6 = false;                   // whether ip_addresses above are IPv6 (16-byte) rather
+                                              // than IPv4 (4-byte) addresses -- echoes try_parse_vrrp's
+                                              // own `is_ipv6` parameter, for any caller that needs to
+                                              // know without re-parsing an address string itself
 
     std::string summary;
     std::vector<std::string> notes;
@@ -87,8 +102,12 @@ struct VrrpMessage {
 // fixed header, the high nibble of the first byte isn't 2 or 3 (Version), or the low nibble isn't
 // 1 (Type -- the only value either RFC defines; this is a weak gate on its own, four bits, but
 // dispatch in decoder.cpp only ever calls this for IP protocol number 112 in the first place,
-// which is IANA-exclusive to VRRP -- see this file's own VRRP_IP_PROTOCOL).
-std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload);
+// which is IANA-exclusive to VRRP -- see this file's own VRRP_IP_PROTOCOL). `is_ipv6` (default
+// false) selects 16-byte vs. 4-byte addresses in the virtual-IP-address list -- see this file's own
+// header comment for why the VRRP payload itself can't say. A version-2 payload ignores `is_ipv6`
+// (VRRPv2 has no IPv6 form at all -- RFC 3768 predates it) and always reads 4-byte addresses,
+// matching every VRRPv2 packet this decoder has ever accepted.
+std::optional<VrrpMessage> try_parse_vrrp(ByteSpan ip_payload, bool is_ipv6 = false);
 
 // Migration batch 5 (see protocol_decoder.hpp/protocol_registry.hpp): thin ProtocolDecoder wrapper
 // around try_parse_vrrp above, unchanged -- same shape as EigrpDecoder (eigrp.hpp), the original

@@ -32,13 +32,16 @@
 // already takes for HSRPv2's non-Group-State TLVs and EIGRP's non-route TLVs.
 //
 // PIM's three "Encoded Address" formats (Unicast, Group, Source -- RFC 7761 section 4.9) all
-// begin with an Address Family byte and an Encoding Type byte; this decoder only supports Address
-// Family 1 (IPv4, matching this codebase's IPv4-only posture everywhere else) and Encoding Type 0
-// (the plain "native" encoding). Encoding Type 1 (Native encoding with a trailing Join Attribute
-// TLV chain, used only for a handful of BIDIR-PIM/MoFRR extensions) and Address Family 2 (IPv6)
-// are both real, standards-defined possibilities this decoder does NOT support -- encountering
-// either stops decoding at that point in the message (whatever was already decoded is still
-// returned, with a note explaining why the rest is missing), rather than guessing at a length.
+// begin with an Address Family byte and an Encoding Type byte; this decoder supports Address
+// Family 1 (IPv4) and Address Family 2 (IPv6, ROADMAP item 154, docs/DEVELOPMENT.md), both only
+// with Encoding Type 0 (the plain "native" encoding). Encoding Type 1 (Native encoding with a
+// trailing Join Attribute TLV chain, used only for a handful of BIDIR-PIM/MoFRR extensions) is a
+// real, standards-defined possibility this decoder does NOT support, for either address family --
+// encountering it stops decoding at that point in the message (whatever was already decoded is
+// still returned, with a note explaining why the rest is missing), rather than guessing at a
+// length. An Encoded-Group's/Encoded-Source's own Mask Length byte is read and rendered as-is
+// (0-128 is a legal IPv6 prefix length, vs. IPv4's 0-32) with no range validation -- the same
+// "trust the wire value, don't second-guess it" posture this decoder already has for IPv4.
 //
 // Cross-checked against Wireshark's own packet-pim.c and RFC 7761/RFC 3973 directly.
 //
