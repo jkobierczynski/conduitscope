@@ -20769,6 +20769,96 @@ it done as its own patch.
     `TlsSessionState` already has). Delivered as a zip of touched/new files via `SendUserFile`, per
     this project's own no-git-commit convention.
 
+158. **The TLS DSB ingestion path copies capture-embedded secrets more times than it needs to
+    (docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F4, Low severity, code
+    quality + security hygiene).** Jurgen asked for findings F2-F4 from the same patch315 review
+    (F2 is item 156, F3 is item 157 above) as separate patches. The review's own words: ingesting
+    a pcapng Decryption Secrets Block creates a "second sensitive-data lifetime" -- the same secret
+    bytes exist simultaneously in several independent allocations during ingestion (the DSB's own
+    bytes inside `PendingDecryptionSecret::data`, a further `std::string` copy made just to call
+    `TlsKeyLog::ingest(std::string_view)`, the normalized-newline copy `ingest()` itself used to
+    make internally, and finally the parsed `TlsKeyLogEntry`'s own several `std::vector<uint8_t>`
+    fields) plus intermediate strings created while normalizing/parsing. The review is explicit
+    that it is "not recommend[ing] prematurely implementing elaborate secure-memory handling" for
+    this -- no new scrubbing/zero-on-free/mlock machinery is being asked for -- but says eliminating
+    the genuinely redundant copies "strengthens the case for bounded DSB/key-log ingestion" (already
+    closed by item 153/finding F1's `--max-tls-keylog-entries`/`--max-tls-keylog-bytes` ceilings,
+    and item 156/finding F2's `--max-tls-keylog-file-bytes`): fewer simultaneous copies of the same
+    secret material means those existing ceilings bound a smaller total footprint per admitted
+    entry, not a larger one inflated by copies that were never actually necessary.
+
+    **The fix.** Two genuinely redundant copies identified in the capture-embedded-DSB path, and
+    only those two removed:
+    - `src/cli_main.cpp`'s `drain_tls_decryption_secrets<Source>()` used to call
+      `key_log.ingest(std::string(secret.data.begin(), secret.data.end()))` -- a whole new
+      `std::string` copy of every capture-embedded TLS secret, made for no reason other than
+      `TlsKeyLog::ingest()` only accepting a `std::string_view`/`std::string`. A new inline
+      `TlsKeyLog::ingest(ByteSpan bytes)` overload (`include/conduitscope/tls_keylog.hpp`, right
+      after the existing `ingest(std::string_view text)` declaration) takes this codebase's own
+      established non-owning, bounds-checked byte view (`byteio.hpp`'s `ByteSpan`, already used
+      throughout the pcap/pcapng readers) and reinterprets it as a `std::string_view` directly over
+      `secret.data`'s own already-allocated bytes -- zero-copy, since `secret` (and so
+      `secret.data`) stays alive for the whole loop body that calls it (owned by the
+      `std::vector<PendingDecryptionSecret>` the range-for loop is iterating, not by anything that
+      could be destroyed mid-iteration). The call site now reads
+      `key_log.ingest(ByteSpan(secret.data.data(), secret.data.size()))`.
+    - `src/tls_keylog.cpp`'s `TlsKeyLog::ingest(std::string_view text)` used to begin with
+      `std::string remaining(text);` -- an entire second copy of whatever was just passed in
+      (whether that came from a file's full contents or, before the fix above, the DSB copy),
+      made solely so the rest of the function could index into a `std::string` instead of the
+      `std::string_view` it was already holding. Since `std::string_view` already supports the
+      exact same indexed access (`text[i]`, `text.size()`) the function's own newline-normalization
+      loop needs, `remaining` was removed entirely and the loop now indexes `text` directly,
+      writing into the same `normalized` output buffer as before.
+
+    Deliberately NOT touched, per the review's own explicit caution against "elaborate
+    secure-memory handling": `TlsKeyLogEntry`'s five separate `std::vector<uint8_t>` fields
+    (`include/conduitscope/tls_keylog.hpp`) are left exactly as they are -- consolidating them into
+    one buffer or adding secure-wipe/zero-on-free semantics is a materially bigger change or a
+    safety-vs-complexity tradeoff the review itself says not to take on speculatively; and
+    `TlsKeyLog::load_file()`'s own `std::ostringstream buf; buf << in.rdbuf();` copy (used for the
+    operator-supplied `--tls-keylog FILE` path, not the DSB path this finding names) is untouched --
+    it is not part of the specific DSB ingestion chain F4 describes, and is already bounded on the
+    read-size side by item 156/finding F2's `--max-tls-keylog-file-bytes` ceiling.
+
+    **New tests.** None added. This is a pure internal copy-reduction change with no new or
+    changed observable behavior at any CLI surface -- the exact same bytes end up admitted into the
+    exact same `TlsKeyLogEntry` structures as before, just via fewer intermediate copies along the
+    way, so the correct regression protection is the EXISTING test suite exercising these same code
+    paths rather than a manufactured new assertion. `tls_decrypt_dsb_sourced_secrets_no_keylog_flag`
+    (item 150) specifically exercises the modified `drain_tls_decryption_secrets()`/new
+    `ingest(ByteSpan)` path end to end (a capture-embedded DSB with no `--tls-keylog` flag at all)
+    and was confirmed passing, along with every other `tls_decrypt`/`tls_keylog`-prefixed test
+    (31 total).
+
+    **Left open.** F2 and F3 are each their own separate patch (items 156/157 above), per Jurgen's
+    own "split them over separate patches" instruction -- not addressed here. `TlsKeyLogEntry`'s
+    multiple allocations and `load_file()`'s own whole-file copy remain as described above,
+    unaddressed by design, matching the review's own stated recommendation rather than going beyond
+    it.
+
+    **Docs.** No `docs/USER_GUIDE.md` change -- its "TLS decryption" subsection and the
+    `--tls-keylog`/resource-limit option rows describe observable behavior and CLI surface only,
+    none of which this fix changes; confirmed by rereading that subsection and the
+    `--tls-keylog`/`--max-tls-keylog-*` rows before concluding no update was needed.
+    `docs/PROTOCOL_COVERAGE.md` deliberately NOT touched, same reasoning as items 153/156/157: an
+    internal hygiene fix, not a protocol-decode-coverage change. `docs/MANUAL.md` was NOT touched,
+    per Jurgen's standing instruction.
+
+    **Verification.** `tls_decrypt`/`tls_keylog`-prefixed CTest entries (31 total) confirmed
+    individually passing against the real built binary. Full default-build CTest suite: 2592/2592
+    passing (unchanged from item 157 -- F4 adds no new tests), zero regressions. Clang ASan/UBSan
+    `build-fuzz`: 2670/2670 passing, including all 78 `*_corpus_regression` tests, zero
+    regressions -- notable for this specific fix, since ASan is exactly the tool that would catch a
+    use-after-free or out-of-bounds read if the new `ByteSpan`-based zero-copy `ingest()` overload
+    had gotten `secret.data`'s lifetime wrong, and it found nothing.
+    `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF` `build_nolive`: 2574/2574 passing, zero regressions.
+    MinGW cross-compile `build-mingw`: rebuilt clean, build-only as usual (`TlsKeyLog` itself, like
+    item 156's own fix, compiles and is exercised regardless of
+    `CONDUITSCOPE_ENABLE_TLS_DECRYPT`/OpenSSL availability, including this config -- unaffected by
+    this fix). Delivered as a zip of touched/new files via `SendUserFile`, per this project's own
+    no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

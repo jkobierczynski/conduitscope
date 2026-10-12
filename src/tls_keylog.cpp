@@ -159,17 +159,25 @@ void TlsKeyLog::load_file(const std::string& path) {
 
 size_t TlsKeyLog::ingest(std::string_view text) {
     size_t merged = 0;
-    std::string remaining(text);
     std::string raw_line;
     // getline on '\n' already handles LF and CRLF (the trailing '\r' is stripped by trim() below);
     // a lone-CR line-ending file (RFC 9850 also allows bare CR) is the one shape getline('\n') alone
     // wouldn't split -- rewrite any bare CR to LF first so every one of the three endings RFC 9850
     // section 2 permits is handled uniformly.
+    //
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F4 (ROADMAP item 158): this
+    // reads directly from `text` (already a non-owning std::string_view -- operator[]/size() work
+    // on it exactly as they would on a std::string) rather than first copying it into a same-size
+    // `std::string remaining` purely so this loop could index into it. That copy existed for no
+    // reason -- a std::string_view already supports everything this loop does with it -- and was
+    // exactly the kind of "intermediate string created while normalizing and parsing the input"
+    // the review's own F4 named: for a large key-log file or a capture carrying many/large DSBs,
+    // it meant the WHOLE secrets blob existed in memory twice simultaneously for no benefit.
     std::string normalized;
-    normalized.reserve(remaining.size());
-    for (size_t i = 0; i < remaining.size(); ++i) {
-        char c = remaining[i];
-        if (c == '\r' && (i + 1 >= remaining.size() || remaining[i + 1] != '\n')) {
+    normalized.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        char c = text[i];
+        if (c == '\r' && (i + 1 >= text.size() || text[i + 1] != '\n')) {
             normalized.push_back('\n');
         } else {
             normalized.push_back(c);

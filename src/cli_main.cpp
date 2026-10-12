@@ -477,7 +477,15 @@ template <typename Source>
 void drain_tls_decryption_secrets(Source& source, TlsKeyLog& key_log) {
     for (const PendingDecryptionSecret& secret : source.take_pending_decryption_secrets()) {
         if (secret.secrets_type == kPcapngSecretsTypeTls) {
-            key_log.ingest(std::string(secret.data.begin(), secret.data.end()));
+            // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F4 (ROADMAP item
+            // 158): ingest(ByteSpan) is a zero-copy view over secret.data's own already-allocated
+            // bytes -- this used to be `key_log.ingest(std::string(secret.data.begin(),
+            // secret.data.end()))`, one entire extra copy of every capture-embedded TLS secret
+            // beyond the copy pcap_reader.cpp's own DSB parser already made. `secret` (and so
+            // secret.data) stays alive for this whole loop body -- it's owned by the
+            // std::vector<PendingDecryptionSecret> this range-for loop is iterating, not by
+            // anything that could be destroyed mid-iteration.
+            key_log.ingest(ByteSpan(secret.data.data(), secret.data.size()));
         }
     }
 }

@@ -78,6 +78,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "conduitscope/byteio.hpp"
+
 namespace conduitscope {
 
 // Thrown only for a hard, environment-level failure -- a --tls-keylog path that passed CLI11's
@@ -174,6 +176,28 @@ public:
     // loaded"/"N more entries ingested from this capture's own embedded secrets" note -- never
     // required for correctness).
     size_t ingest(std::string_view text);
+
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F4 (ROADMAP item 158): a
+    // zero-copy overload for a pcapng Decryption Secrets Block's own raw Secrets Data bytes
+    // (PendingDecryptionSecret::data, pcap_reader.hpp) -- a non-owning reinterpret of `bytes` as
+    // text (RFC 9850 SSLKEYLOGFILE-format content is always ASCII, so this reinterpret carries no
+    // encoding risk), forwarded straight into the std::string_view overload above with no
+    // intermediate std::string copy of the secret bytes at all. Before this overload existed, the
+    // one real caller (cli_main.cpp's drain_tls_decryption_secrets) had to materialize
+    // `std::string(bytes.begin(), bytes.end())` just to call ingest() -- one whole extra copy of
+    // every capture-embedded TLS secret, on top of the copy pcap_reader.cpp's own DSB parser
+    // already made from the file's own read buffer into PendingDecryptionSecret::data in the first
+    // place (a copy that one genuinely can't avoid, since that source buffer is reused for the
+    // next block read) -- exactly the redundant "second sensitive-data lifetime" the review's own
+    // diagram named (PCAPNG DSB -> PendingDecryptionSecret -> std::string copies -> TlsKeyLogEntry
+    // -> multiple std::vector allocations). `bytes` must outlive this call (true of every existing
+    // call site: PendingDecryptionSecret::data is owned by the caller's own loop for its whole
+    // duration) -- see the review's own F5 "I wouldn't recommend prematurely implementing
+    // elaborate secure-memory handling" for why this stops at removing a genuinely redundant copy,
+    // rather than adding any secure-wipe-on-free machinery on top.
+    size_t ingest(ByteSpan bytes) {
+        return ingest(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+    }
 
     // client_random: the exact 32-byte ClientHello.random this session's ClientHello carried (see
     // tls_sni.hpp's own extended TlsClientHello::random field). Returns nullptr when no entry has
