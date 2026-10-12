@@ -148,10 +148,18 @@ public:
 
     // Reads `path` in full and calls ingest() on its contents. path must already exist and be
     // readable (CLI11's ->check(CLI::ExistingFile) enforces existence before this is ever called
-    // from cli_main.cpp) -- TlsKeyLogError is thrown only if it still can't be opened anyway (see
-    // TlsKeyLogError's own comment above). Safe to call more than once (e.g. were a future CLI
-    // revision to accept --tls-keylog repeatably) -- entries simply accumulate, last-line-wins per
-    // (client_random, label) pair, matching parse_symbol_table_file's own override convention.
+    // from cli_main.cpp) -- TlsKeyLogError is thrown if it still can't be opened anyway (see
+    // TlsKeyLogError's own comment above), OR if its size exceeds --max-tls-keylog-file-bytes
+    // (checked via seekg/tellg BEFORE anything is read into memory, the same "size ceiling before
+    // allocation" shape load_baseline_store already establishes for --baseline-file -- see
+    // resource_limits.hpp's own max_tls_keylog_file_bytes/kDefaultMaxTlsKeyLogFileBytes comments,
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F2, ROADMAP item 156). This
+    // is a hard, fail-fast rejection of the whole file, NOT the same kind of thing as
+    // --max-tls-keylog-entries/--max-tls-keylog-bytes refusing one line at a time during ingest()
+    // below -- an oversized file is never partially read. Safe to call more than once (e.g. were a
+    // future CLI revision to accept --tls-keylog repeatably) -- entries simply accumulate,
+    // last-line-wins per (client_random, label) pair, matching parse_symbol_table_file's own
+    // override convention.
     void load_file(const std::string& path);
 
     // Parses `text` as RFC 9850 SSLKEYLOGFILE-format lines (one or more, newline-separated; '#'

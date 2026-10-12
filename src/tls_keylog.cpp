@@ -130,8 +130,30 @@ void TlsKeyLog::load_file(const std::string& path) {
     if (!in) {
         throw TlsKeyLogError("could not open --tls-keylog file: " + path);
     }
+    // patch315 security review finding F2 (ROADMAP item 156): size ceiling BEFORE reading anything
+    // into memory -- seek-to-end/tellg, exactly load_baseline_store's own pattern (baseline.cpp)
+    // for --baseline-file, since `in` is already open here too. A file this large is rejected
+    // outright rather than truncated-and-parsed: see resource_limits.hpp's own
+    // max_tls_keylog_file_bytes comment for why this is a hard failure, not a partial-ingest
+    // degradation like --max-tls-keylog-entries/--max-tls-keylog-bytes below.
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    if (size < 0) {
+        throw TlsKeyLogError("--tls-keylog file '" + path + "': read error (could not determine size)");
+    }
+    const size_t max_file_bytes =
+        resource_limits().max_tls_keylog_file_bytes.value_or(kDefaultMaxTlsKeyLogFileBytes);
+    if (static_cast<size_t>(size) > max_file_bytes) {
+        throw TlsKeyLogError("--tls-keylog file '" + path + "': " + std::to_string(size) +
+                             " byte(s) exceeds the " + std::to_string(max_file_bytes) +
+                             " byte limit (--max-tls-keylog-file-bytes to override)");
+    }
+    in.seekg(0, std::ios::beg);
     std::ostringstream buf;
     buf << in.rdbuf();
+    if (!in.good() && !in.eof()) {
+        throw TlsKeyLogError("--tls-keylog file '" + path + "': read error");
+    }
     ingest(buf.str());
 }
 

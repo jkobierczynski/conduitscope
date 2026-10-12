@@ -13451,6 +13451,52 @@ set_tests_properties(tls_keylog_bytes_limit_boundary_admits_real_entry_decrypts 
   PASS_REGULAR_EXPRESSION "CONNECT \\(MQTT 3\\.1\\.1\\)")
 
 # ============================================================================================
+# --max-tls-keylog-file-bytes (docs/reviews/2026-10-chatgpt-security-review-patch315.md finding
+# F2, "--tls-keylog FILE itself is read completely without a size limit"; ROADMAP item 156). A
+# different enforcement shape from --max-tls-keylog-entries/--max-tls-keylog-bytes just above --
+# this one is TlsKeyLog::load_file()'s own whole-file size ceiling, checked via seekg/tellg BEFORE
+# any of the file is read into memory (the same pattern load_baseline_store already uses for
+# --baseline-file), a hard TlsKeyLogError on the whole file rather than a per-line refusal. So,
+# unlike F1's own tests above, this does NOT participate in observation-incomplete semantics --
+# it's a plain CLI usage error (exit 1), caught at every one of TlsKeyLogError's existing
+# cli_main.cpp call sites identically to "file not found," so one representative subcommand
+# (decode) plus one cross-check (detect, which calls load_file() from an entirely separate call
+# site -- see cli_main.cpp's own repeated "creation/load_file() below -- see run_decode's own
+# matching set_resource_limits() comment" note at each one) is enough to prove the wiring reaches
+# every subcommand, the same "one engine is enough once the shared mechanism is proven" posture
+# used throughout this file.
+#
+# Reuses tests/sample_tls_keylog_many_entries.txt (already built above for F1's own tests) rather
+# than a new fixture -- its exact on-disk size (confirmed via `wc -c`, not assumed) is 880 bytes,
+# which is all three tests below need: a file whose exact byte count is known precisely enough to
+# test the ceiling's boundary.
+# ============================================================================================
+
+add_test(NAME tls_keylog_file_bytes_limit_refuses_oversized_file
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' decode --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --tls-keylog '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_keylog_many_entries.txt' --max-tls-keylog-file-bytes 879; echo EXITCODE=$?")
+set_tests_properties(tls_keylog_file_bytes_limit_refuses_oversized_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: --tls-keylog file '.*sample_tls_keylog_many_entries\\.txt': 880 byte\\(s\\) exceeds the 879 byte limit \\(--max-tls-keylog-file-bytes to override\\).*EXITCODE=1")
+
+add_test(NAME tls_keylog_file_bytes_limit_boundary_admits_exact_size
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_keylog_many_entries.txt" --max-tls-keylog-file-bytes 880 --format text)
+set_tests_properties(tls_keylog_file_bytes_limit_boundary_admits_exact_size PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[modbus\\]"
+  FAIL_REGULAR_EXPRESSION "exceeds the")
+
+add_test(NAME detect_tls_keylog_file_bytes_limit_refuses_oversized_file_too
+  COMMAND bash -c "'$<TARGET_FILE:conduitscope>' detect --read '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap' --tls-keylog '${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_keylog_many_entries.txt' --max-tls-keylog-file-bytes 879; echo EXITCODE=$?")
+set_tests_properties(detect_tls_keylog_file_bytes_limit_refuses_oversized_file_too PROPERTIES
+  PASS_REGULAR_EXPRESSION "error: --tls-keylog file '.*sample_tls_keylog_many_entries\\.txt': 880 byte\\(s\\) exceeds the 879 byte limit.*EXITCODE=1")
+
+# Unset (the default, 128 MiB): this tiny 880-byte fixture is never rejected, the same
+# byte-identical-to-this-feature's-absence bar every other resource_limits() field is held to.
+add_test(NAME tls_keylog_file_bytes_limit_unset_no_rejection
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_modbus.pcap" --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_keylog_many_entries.txt" --format text)
+set_tests_properties(tls_keylog_file_bytes_limit_unset_no_rejection PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\[modbus\\]"
+  FAIL_REGULAR_EXPRESSION "exceeds the")
+
+# ============================================================================================
 # IPv4/IPv6 fragment reassembly (Decoder::reassemble_ip_fragment, decoder.cpp; ROADMAP item 102).
 # tests/sample_ip_fragment_reassembly.pcap (tools/make_sample_pcap.py's own
 # build_ip_fragment_reassembly_sample) covers in-order/out-of-order/overlapping IPv4 fragments,

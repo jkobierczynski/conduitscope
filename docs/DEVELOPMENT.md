@@ -20526,6 +20526,105 @@ it done as its own patch.
     tunnel. Delivered as a zip of touched/new files via `SendUserFile`, per this project's own
     no-git-commit convention.
 
+156. **`--tls-keylog FILE` itself is read without a size limit (docs/reviews/2026-10-chatgpt-
+    security-review-patch315.md finding F2, Low/Medium severity).** Jurgen asked for findings
+    F2-F4 from the same patch315 review (already used for item 153/finding F1 above), each as its
+    own separate patch. The review's own words: `TlsKeyLog::load_file()` (`src/tls_keylog.cpp`)
+    reads the entire operator-supplied `--tls-keylog FILE` into memory with no size ceiling at all
+    (`std::ostringstream buf; buf << in.rdbuf();`) before a single line of it is ever parsed or
+    checked against item 153's own per-line `max_tls_keylog_entries`/`max_tls_keylog_bytes`
+    ceilings -- those bound how much of a well-formed file's content gets ADMITTED, not how large
+    the file on disk is allowed to be in the first place, so a key-log file engineered or corrupted
+    to be enormous is read into a single `std::ostringstream` buffer in full regardless. The
+    review's own recommendation: add a `--max-tls-keylog-file-bytes`-style flag, or reuse the
+    bounded-file-reader pattern this codebase already established for `--baseline-file`
+    (`load_baseline_store`, `baseline.cpp`).
+
+    **The fix.** A new `ResourceLimits` field, `max_tls_keylog_file_bytes`
+    (`include/conduitscope/resource_limits.hpp`, default `kDefaultMaxTlsKeyLogFileBytes` = 128
+    MiB), and a rewritten `TlsKeyLog::load_file()` (`src/tls_keylog.cpp`) that opens the file,
+    `seekg(0, std::ios::end)` + `tellg()` to get its size, and compares that against the ceiling
+    BEFORE any `buf << in.rdbuf()` read -- `load_baseline_store`'s own exact pattern for
+    `--baseline-file`, chosen over `std::filesystem::file_size` for the same reason that function's
+    own comment already gives (avoiding a `<filesystem>` dependency). Oversized throws the existing
+    `TlsKeyLogError` type (already caught at all 7 `load_file()` call sites in `cli_main.cpp`,
+    each printing `"error: " << e.what() << "\n"` and exiting 1) with a message naming the path,
+    the actual size, the limit, and the override flag. A new `--max-tls-keylog-file-bytes` CLI
+    flag follows the same "0 means leave this at its own compiled default" convention as every
+    other `--max-*` flag, wired into `add_resource_limit_options()`/`build_resource_limits()`
+    alongside item 153's own `--max-tls-keylog-entries`/`--max-tls-keylog-bytes` pair (same 6
+    subcommands; `evidence` still has no resource-limit CLI surface at all, unchanged).
+
+    This is deliberately a different shape of fix from item 153's, not a mechanical copy: F1's
+    ceilings are a SOFT, per-line degradation checked during `ingest()` -- a refused line just
+    leaves one session undecrypted, folded into `*** OBSERVATION INCOMPLETE ***`/
+    `observation_truncated`, because the file as a whole is still successfully read and parsed.
+    F2's new ceiling is a HARD, whole-file rejection checked before `ingest()` ever runs, with no
+    `observation_truncated` fold-in at all and no softer alternative possible -- there is no way to
+    admit "part" of an oversized file without first reading the whole thing into memory, which is
+    exactly the allocation this check exists to prevent. This mirrors `load_baseline_store`'s own
+    posture for the structurally identical `--baseline-file` case (also a hard, non-folded error),
+    not item 153's. The new ceiling also does not apply to capture-embedded Decryption Secrets
+    Blocks at all -- a different trust boundary (an operator-supplied path vs. untrusted capture
+    content) that was already bounded individually (pcapng's own 16 MiB per-block ceiling) and
+    cumulatively (item 153's `max_tls_keylog_entries`/`max_tls_keylog_bytes`) before this fix.
+
+    **Default sizing.** 128 MiB, chosen as exactly 2x `kDefaultMaxTlsKeyLogBytes` (64 MiB) rather
+    than reusing that same figure: a raw SSLKEYLOGFILE-format file is hex-encoded ASCII text
+    (roughly 2 bytes on disk per secret byte, plus each line's own label/client_random/whitespace/
+    newline overhead) rather than the compact binary storage `max_tls_keylog_bytes` bounds post-
+    parse, so a legitimate key-log file at that byte ceiling's own worst case stays comfortably
+    under the new file-size ceiling, while a file engineered or corrupted to be far larger than any
+    real TLS debugging session should ever produce is still rejected outright, before any of it is
+    read into memory.
+
+    **New tests.** 4 new CTest entries, reusing item 153's own existing `tests/sample_tls_keylog_
+    many_entries.txt` fixture (confirmed via `wc -c` to be exactly 880 bytes) rather than adding a
+    new one: `tls_keylog_file_bytes_limit_refuses_oversized_file` (`--max-tls-keylog-file-bytes
+    879` against the 880-byte fixture, confirmed refused with the exact byte counts named in the
+    error text and exit code 1), `tls_keylog_file_bytes_limit_boundary_admits_exact_size` (880,
+    the exact boundary, confirmed to decode normally), `detect_tls_keylog_file_bytes_limit_
+    refuses_oversized_file_too` (same 879-byte refusal against `detect` instead of `decode`, proving
+    the override reaches every wired subcommand, not just `decode`), and `tls_keylog_file_bytes_
+    limit_unset_no_rejection` (no override at all, confirming this tiny fixture is never rejected by
+    the 128 MiB default). Two of these needed a CTest convention fix along the way: an initial
+    `WILL_FAIL true` + `PASS_REGULAR_EXPRESSION` combination on the same test was caught, before
+    ever running it, against this file's own pre-existing documented warning that the two
+    properties invert each other's contribution to pass/fail when combined on one test -- both
+    tests were rewritten to the established `bash -c "...; echo EXITCODE=$?"` wrapper idiom instead
+    (matching e.g. `decode_as_rejects_malformed_selector_syntax`'s own precedent), asserting the
+    error text and the echoed exit code together in one `PASS_REGULAR_EXPRESSION`, with no
+    `WILL_FAIL` property at all.
+
+    **Left open.** F3 (TLS session state keyed only by the TCP 4-tuple, with no connection-
+    generation/epoch component) and F4 (the TLS DSB ingestion copy chain's "second sensitive-data
+    lifetime") are each their own separate patch, per Jurgen's own "split them over separate
+    patches" instruction -- not addressed here. This fix does not change how `TlsKeyLog::ingest()`
+    handles capture-embedded DSBs at all (unaffected by this finding, see "The fix" above).
+
+    **Docs.** `docs/USER_GUIDE.md` gained a new `--max-tls-keylog-file-bytes` option row in
+    `decode`'s own OPTIONS table (immediately after `--max-tls-keylog-bytes`), and the `detect`/
+    `inventory`/`policy validate` resource-limit summary row and flag-name list both widened from
+    ten flags to eleven (the latter also silently corrected a stale "eight flags" count left over
+    from item 153's own Docs section, which had updated the flag list itself but not every prose
+    reference to its count). This finding is NOT folded into the "Resource bounds and OBSERVATION
+    INCOMPLETE" paragraphs or the closed-enum `resource_limit` token description the way item 153's
+    F1 fix was -- consistent with "The fix" above, a whole-file rejection exits before any report
+    is ever built, so there is no partial observation to mark incomplete. `docs/PROTOCOL_COVERAGE.md`
+    deliberately NOT touched, same reasoning as item 153 (a resource-limit/DoS-protection fix, not
+    a protocol-decode-coverage change). `docs/MANUAL.md` was NOT touched, per Jurgen's standing
+    instruction.
+
+    **Verification.** All 4 new CTest entries confirmed individually passing against the real
+    built binary before being finalized. Full default-build CTest suite: 2590/2590 passing (2586 +
+    4 new), zero regressions. Clang ASan/UBSan `build-fuzz`: 2668/2668 passing, including all 78
+    `*_corpus_regression` tests, zero regressions. `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`: 2572/2572 passing, zero regressions. MinGW cross-compile `build-mingw`: rebuilt
+    clean, build-only as usual (`TlsKeyLog` itself, unlike `tls_decrypt.cpp`'s actual decryption
+    engine, has always compiled and been exercised regardless of `CONDUITSCOPE_ENABLE_TLS_DECRYPT`/
+    OpenSSL availability, including this config -- unaffected by this fix). Delivered as a zip of
+    touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

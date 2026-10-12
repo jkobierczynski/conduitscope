@@ -791,6 +791,12 @@ struct ResourceLimitCliVars {
     // ceilings (resource_limits.hpp's max_tls_keylog_entries/max_tls_keylog_bytes).
     size_t max_tls_keylog_entries = 0;
     size_t max_tls_keylog_bytes = 0;
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F2 (ROADMAP item 156): same
+    // sentinel, for TlsKeyLog::load_file()'s own whole-file size ceiling (resource_limits.hpp's
+    // max_tls_keylog_file_bytes) -- a different enforcement shape from the two fields above (see
+    // that field's own comment), but still "0 = leave at its own compiled default" like every
+    // other field in this struct.
+    size_t max_tls_keylog_file_bytes = 0;
 };
 
 void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
@@ -876,6 +882,17 @@ void add_resource_limit_options(CLI::App* cmd, ResourceLimitCliVars& vars) {
            "that keeps refining the same small set of sessions rather than growing their count). "
            "0 (the default) applies the built-in default of 64 MiB")->group("Resource limits (advanced)")
         ->capture_default_str();
+    cmd->add_option(
+           "--max-tls-keylog-file-bytes", vars.max_tls_keylog_file_bytes,
+           "Cap the size of the --tls-keylog FILE itself, checked before any of it is read into "
+           "memory -- a hard rejection of the whole file if it's too large, NOT the same kind of "
+           "thing as --max-tls-keylog-entries/--max-tls-keylog-bytes above refusing one line at a "
+           "time during parsing (patch315 security review finding F2). Does not bound "
+           "capture-embedded Decryption Secrets Blocks at all -- those are already bounded "
+           "individually (pcapng's own 16 MiB per-block ceiling) and cumulatively "
+           "(--max-tls-keylog-entries/--max-tls-keylog-bytes above). 0 (the default) applies the "
+           "built-in default of 128 MiB")->group("Resource limits (advanced)")
+        ->capture_default_str();
 }
 
 ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
@@ -890,6 +907,7 @@ ResourceLimits build_resource_limits(const ResourceLimitCliVars& vars) {
     if (vars.max_active_fragment_groups != 0) limits.max_active_fragment_groups = vars.max_active_fragment_groups;
     if (vars.max_tls_keylog_entries != 0) limits.max_tls_keylog_entries = vars.max_tls_keylog_entries;
     if (vars.max_tls_keylog_bytes != 0) limits.max_tls_keylog_bytes = vars.max_tls_keylog_bytes;
+    if (vars.max_tls_keylog_file_bytes != 0) limits.max_tls_keylog_file_bytes = vars.max_tls_keylog_file_bytes;
     return limits;
 }
 

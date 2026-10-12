@@ -186,6 +186,35 @@ struct ResourceLimits {
     // memory without bound). std::nullopt (the default) does NOT mean unbounded -- see
     // kDefaultMaxTlsKeyLogBytes below.
     std::optional<size_t> max_tls_keylog_bytes;
+
+    // docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F2 ("--tls-keylog FILE
+    // itself is read completely without a size limit", ROADMAP item 156) -- the companion to F1
+    // above, but a different trust boundary and a different enforcement shape. F1/max_tls_keylog_
+    // entries/max_tls_keylog_bytes bound what TlsKeyLog ever ADMITS from either source (an
+    // operator's own file OR capture-embedded DSBs) one line at a time, during parsing; refusing a
+    // line past either ceiling degrades gracefully (that one session just isn't decrypted) and
+    // participates in `*** OBSERVATION INCOMPLETE ***`/`observation_truncated`, the same shape
+    // every other per-run growth ceiling in this file already has. This field is checked BEFORE
+    // any of that -- at TlsKeyLog::load_file()'s very first line (tls_keylog.cpp), via seekg/
+    // tellg on the already-open file handle BEFORE `buf << in.rdbuf()` ever runs -- bounding the
+    // ENTIRE FILE'S OWN byte count, the same "size ceiling before reading anything into memory"
+    // shape load_baseline_store (baseline.hpp/.cpp) already established for --baseline-file
+    // (docs/reviews/2026-09-chatgpt-security-review-patch209.md finding 5, item 68). An oversized
+    // file is a hard TlsKeyLogError (already caught at every one of this error type's existing
+    // call sites in cli_main.cpp, the same as "file not found"), NOT a soft, partial-ingest
+    // degradation -- unlike max_tls_keylog_entries/max_tls_keylog_bytes above, this ceiling has no
+    // way to admit SOME of an oversized file's lines and refuse the rest without first reading the
+    // whole thing into memory, which is exactly the allocation this check exists to prevent; it
+    // therefore does not participate in observation-incomplete semantics either (same as
+    // load_baseline_store's own oversized-file case, a fail-fast CLI usage error, not a degraded-
+    // but-still-useful run). Capture-embedded DSBs are NOT bounded by this field at all -- each
+    // individual DSB already has its own 16 MiB pcapng-block-size ceiling (pcap_reader.hpp), and
+    // the cumulative-across-every-DSB concern is exactly what max_tls_keylog_entries/
+    // max_tls_keylog_bytes above already bound from the ingested-content side; this field is
+    // purely about the one-time cost of reading an operator-supplied --tls-keylog FILE whole.
+    // std::nullopt (the default) does NOT mean unbounded -- see kDefaultMaxTlsKeyLogFileBytes
+    // below.
+    std::optional<size_t> max_tls_keylog_file_bytes;
 };
 
 // Compiled-in defaults applied via .value_or() at max_active_flows's/max_flow_state_entries's/
@@ -222,6 +251,19 @@ inline constexpr size_t kDefaultMaxActiveFragmentGroups = 5000;
 // manufacture unlimited TLS secret material via an unbounded number of DSBs.
 inline constexpr size_t kDefaultMaxTlsKeyLogEntries = 100000;
 inline constexpr size_t kDefaultMaxTlsKeyLogBytes = 64 * 1024 * 1024;  // 64 MiB.
+
+// max_tls_keylog_file_bytes' own default (docs/reviews/2026-10-chatgpt-security-review-
+// patch315.md finding F2, ROADMAP item 156) -- applied via .value_or() at TlsKeyLog::load_file()'s
+// own enforcement site (tls_keylog.cpp), the same shape kDefaultMaxBaselineFileBytes
+// (baseline.hpp) already establishes for --baseline-file. Deliberately set to exactly 2x
+// kDefaultMaxTlsKeyLogBytes above rather than reusing that same figure: a raw SSLKEYLOGFILE-format
+// file is hex-encoded ASCII text (roughly 2 bytes on disk per secret byte, plus the label/
+// client_random/whitespace/newline overhead every line also carries), not the compact binary
+// std::vector<uint8_t> storage max_tls_keylog_bytes bounds -- so a legitimate key-log file at the
+// post-parse byte ceiling's own worst case is comfortably under this file-size ceiling, while a
+// file engineered or corrupted to be far larger than any real TLS debugging session should ever
+// produce is still rejected outright, before any of it is read into memory.
+inline constexpr size_t kDefaultMaxTlsKeyLogFileBytes = 128 * 1024 * 1024;  // 128 MiB.
 
 // The true IPv4/IPv6 non-jumbogram datagram size ceiling (RFC 791/RFC 8200 -- a 13-bit
 // fragment-offset field, in 8-byte units, plus a fragment's own payload, cannot legitimately
