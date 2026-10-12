@@ -39,12 +39,40 @@ Produces:
                                            WITH a matching keylog entry -- proves the "negotiated a
                                            cipher suite this build does not decrypt" give-up path,
                                            not just the simpler "no matching key" one.
+  tests/sample_tls_4tuple_reuse.pcap   -- ROADMAP item 157 (docs/DEVELOPMENT.md), patch315 security
+                                           review finding F3: TWO independent, genuinely fresh TLS
+                                           1.3 MQTTS sessions (each its own client_random/server_
+                                           random/derived keys, each its own real MQTT v3.1.1
+                                           CONNECT/CONNACK) on the EXACT SAME TCP 4-tuple, with a
+                                           bare SYN (no ACK) in between positively marking the
+                                           second one as a brand-new connection -- proves the second
+                                           session's own ClientHello is recognized and decrypted on
+                                           its own terms rather than silently inheriting the first
+                                           session's now-stale TlsSessionState (handshake_resolved/
+                                           keys_derived/epoch/sequence numbers all already set).
+  tests/sample_tls_4tuple_reuse_keylog.txt -- the matching --tls-keylog file (both sessions' own
+                                           4 TLS 1.3 secrets each, 8 lines total).
 
 Every produced ciphertext round-trips through this same script's own independent HKDF/PRF+AEAD
 implementation (via the `cryptography` package) -- not through conduitscope's own tls_decrypt.cpp
 -- exactly the "verified against an independent implementation, not just the engine's own code"
 discipline tls_decrypt.cpp's own development already followed (see the TLS decrypt ROADMAP item's
-own verification notes)."""
+own verification notes).
+
+CAUTION, learned the hard way while adding this script's own 6th fixture (ROADMAP item 157): every
+builder here uses `secrets.token_bytes()` with no fixed seed, so re-running `__main__` regenerates
+EVERY fixture's random/key material from scratch, not just the one you actually meant to change --
+and tests/sample_tls_keylog_many_entries_then_mqtts.txt (built by hand for ROADMAP item 153, NOT by
+this script) hand-embeds sample_tls_mqtts.pcap's own exact client_random/secrets as its own last 4
+lines, so blindly re-running this whole script silently desyncs that hand-built file from a freshly
+regenerated sample_tls_mqtts.pcap/sample_tls_mqtts_keylog.txt (loudly, not silently, in the sense
+that item 153's own CTest entries that depend on it would then fail -- but still a real, easy-to-
+trip footgun). If you only need to add or change ONE fixture, call that one builder function
+directly (e.g. `python3 -c "import tools.gen_tls_decrypt_fixtures as g; g.build_4tuple_reuse_
+fixture()"` from the repo root) rather than running this file's own `__main__`, and if you must
+regenerate sample_tls_mqtts.pcap/sample_tls_mqtts_keylog.txt specifically, regenerate
+sample_tls_keylog_many_entries_then_mqtts.txt's own last 4 lines from the new keylog file's content
+in the same pass."""
 import importlib.util
 import pathlib
 import secrets
@@ -525,10 +553,132 @@ def build_unsupported_cipher_fixture():
     print("wrote", TESTS_DIR / "sample_tls_unsupported_cipher_keylog.txt")
 
 
+# ==================================================================================================
+# 6) ROADMAP item 157 (docs/DEVELOPMENT.md), patch315 security review finding F3: two independent,
+#    genuinely fresh TLS 1.3 MQTTS sessions reusing the EXACT SAME TCP 4-tuple, with a bare SYN (no
+#    ACK) marking the second one as a brand-new connection -- see this script's own module-level
+#    docstring above for the full rationale. Each session is byte-for-byte the same shape
+#    build_mqtts_fixture() above already produces and already proves decrypts correctly on its
+#    own -- the only things genuinely new here are (a) a SECOND, completely independent set of
+#    random/secret material for session B, (b) both sessions sharing one port pair instead of each
+#    getting its own, and (c) the bare SYN packet positively marking the handoff between them.
+# ==================================================================================================
+
+def _mqtts_tls13_session(client_random, server_random, client_id: str):
+    """Returns (ch_record, sh_record, server_ee_fin_record, client_fin_record, client_app_record,
+    server_app_record, keylog_text) for one complete, genuinely fresh TLS 1.3
+    TLS_AES_128_GCM_SHA256 MQTTS session -- byte-for-byte build_mqtts_fixture()'s own derivation
+    and record construction, factored out so this section can build two independent instances of
+    it without duplicating that logic."""
+    client_hs_secret = secrets.token_bytes(32)
+    server_hs_secret = secrets.token_bytes(32)
+    client_app_secret = secrets.token_bytes(32)
+    server_app_secret = secrets.token_bytes(32)
+
+    def derive_key_iv(secret):
+        return hkdf_expand_label(secret, b"key", b"", 16), hkdf_expand_label(secret, b"iv", b"", 12)
+
+    client_hs_key, client_hs_iv = derive_key_iv(client_hs_secret)
+    server_hs_key, server_hs_iv = derive_key_iv(server_hs_secret)
+    client_app_key, client_app_iv = derive_key_iv(client_app_secret)
+    server_app_key, server_app_iv = derive_key_iv(server_app_secret)
+
+    ch_body = (struct.pack(">H", 0x0303) + client_random + bytes([0]) +
+               struct.pack(">H", 2) + bytes([0x13, 0x01]) + bytes([1, 0]) + struct.pack(">H", 0))
+    ch_record = cleartext_record(0x16, handshake_msg(1, ch_body))
+
+    ext_supported_versions = struct.pack(">HH", 0x002b, 2) + struct.pack(">H", 0x0304)
+    sh_body = (struct.pack(">H", 0x0303) + server_random + bytes([0]) + bytes([0x13, 0x01]) +
+               bytes([0]) + struct.pack(">H", len(ext_supported_versions)) + ext_supported_versions)
+    sh_record = cleartext_record(0x16, handshake_msg(2, sh_body))
+
+    ee_msg = handshake_msg(8, b"\x00\x00")
+    fin_msg_server = handshake_msg(20, secrets.token_bytes(32))
+    server_ee_fin_record = tls13_record(AESGCM, 0x17, server_hs_key, server_hs_iv, 0,
+                                         ee_msg + fin_msg_server, 0x16)
+
+    fin_msg_client = handshake_msg(20, secrets.token_bytes(32))
+    client_fin_record = tls13_record(AESGCM, 0x17, client_hs_key, client_hs_iv, 0, fin_msg_client, 0x16)
+
+    connect_body = (msp.mqtt_str("MQTT") + bytes([4]) + bytes([0x02]) + struct.pack(">H", 60) +
+                    msp.mqtt_str(client_id))
+    connect_plain = msp.mqtt_packet(1, 0, connect_body)
+    connack_plain = msp.mqtt_packet(2, 0, bytes([0x00, 0x00]))
+    client_app_record = tls13_record(AESGCM, 0x17, client_app_key, client_app_iv, 0, connect_plain, 0x17)
+    server_app_record = tls13_record(AESGCM, 0x17, server_app_key, server_app_iv, 0, connack_plain, 0x17)
+
+    keylog_text = (
+        f"CLIENT_HANDSHAKE_TRAFFIC_SECRET {client_random.hex()} {client_hs_secret.hex()}\n"
+        f"SERVER_HANDSHAKE_TRAFFIC_SECRET {client_random.hex()} {server_hs_secret.hex()}\n"
+        f"CLIENT_TRAFFIC_SECRET_0 {client_random.hex()} {client_app_secret.hex()}\n"
+        f"SERVER_TRAFFIC_SECRET_0 {client_random.hex()} {server_app_secret.hex()}\n"
+    )
+    return (ch_record, sh_record, server_ee_fin_record, client_fin_record, client_app_record,
+            server_app_record, keylog_text)
+
+
+def build_4tuple_reuse_fixture():
+    reuse_port = 57000  # distinct from every other fixture's own client port in this script.
+
+    client_random_a = secrets.token_bytes(32)
+    server_random_a = secrets.token_bytes(32)
+    (ch_a, sh_a, ee_fin_a, fin_a, app_a, connack_a, keylog_a) = _mqtts_tls13_session(
+        client_random_a, server_random_a, "plc1-hmi-tls-reused-a")
+
+    client_random_b = secrets.token_bytes(32)
+    server_random_b = secrets.token_bytes(32)
+    (ch_b, sh_b, ee_fin_b, fin_b, app_b, connack_b, keylog_b) = _mqtts_tls13_session(
+        client_random_b, server_random_b, "plc1-hmi-tls-reused-b")
+
+    packets, ident_box = [], [0xF600]
+
+    # --- Session A: a complete, ordinary TLS 1.3 MQTTS session (own client/server randoms) -------
+    client_a, server_a = tcp_session(packets, ident_box, reuse_port, MQTT_TLS_PORT)
+    client_a(ch_a)
+    server_a(sh_a)
+    server_a(ee_fin_a)
+    client_a(fin_a)
+    client_a(app_a)
+    server_a(connack_a)
+
+    # --- The handoff: a bare SYN (SYN set, ACK clear) on the EXACT SAME 4-tuple -- decoder.cpp's
+    # own TCP-segment entry point reads this as "a brand-new TCP connection has positively been
+    # observed on this 4-tuple" and bumps that 4-tuple's own TcpConnectionGenerationState, which is
+    # what this whole fixture exists to exercise (see tls_session_state_for(), decoder.cpp). Built
+    # directly with msp.tcp_header/ipv4_header/eth_header rather than through tcp_session()'s own
+    # closures, since those only ever build PSH+ACK data segments -- a bare SYN needs its own
+    # one-off construction. The client's new ISN (9000) is deliberately unrelated to session A's
+    # own final sequence number -- a real new connection's ISN has no relationship to whatever a
+    # prior connection on the same 4-tuple last used, and (see this fixture's own module-level
+    # comment) the generic byte-level TCP reassembler never buffers MQTTS traffic across packets
+    # for either session here, so this discontinuity is harmless to that unrelated layer.
+    syn_tcp = msp.tcp_header(reuse_port, MQTT_TLS_PORT, 9000, 0, msp.TCP_SYN, 0)
+    syn_ip = msp.ipv4_header(HMI_IP, PLC_IP, 6, len(syn_tcp), ident_box[0] & 0xFFFF)
+    ident_box[0] += 1
+    packets.append(msp.eth_header(PLC_MAC, HMI_MAC, 0x0800) + syn_ip + syn_tcp)
+
+    # --- Session B: a SECOND, completely independent TLS 1.3 MQTTS session (fresh client/server
+    # randoms, fresh derived keys) reusing the exact same (reuse_port, MQTT_TLS_PORT) 4-tuple. Its
+    # own tcp_session() call starts a fresh local seq-number counter (4000/8000, the same starting
+    # values session A itself used) -- again harmless, per the same reassembly note above.
+    client_b, server_b = tcp_session(packets, ident_box, reuse_port, MQTT_TLS_PORT)
+    client_b(ch_b)
+    server_b(sh_b)
+    server_b(ee_fin_b)
+    client_b(fin_b)
+    client_b(app_b)
+    server_b(connack_b)
+
+    write_pcap(packets, TESTS_DIR / "sample_tls_4tuple_reuse.pcap")
+    (TESTS_DIR / "sample_tls_4tuple_reuse_keylog.txt").write_text(keylog_a + keylog_b)
+    print("wrote", TESTS_DIR / "sample_tls_4tuple_reuse_keylog.txt")
+
+
 if __name__ == "__main__":
     build_mqtts_fixture()
     build_winrms_fixture()
     build_foxs_fixture()
     build_dsb_fixture()
     build_unsupported_cipher_fixture()
+    build_4tuple_reuse_fixture()
     print("done")

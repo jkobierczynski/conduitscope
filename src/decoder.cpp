@@ -133,6 +133,43 @@ std::string tcp_session_key(const std::string& ip_a, uint16_t port_a, const std:
     return (ea < eb) ? (ea + "<->" + eb) : (eb + "<->" + ea);
 }
 
+// ROADMAP item 157 (docs/DEVELOPMENT.md), docs/reviews/2026-10-chatgpt-security-review-patch315.md
+// finding F3: returns `ctx`'s own TlsSessionState (session-keyed on the TCP 4-tuple, same as
+// before this item), but first checks whether this 4-tuple's own TcpConnectionGenerationState
+// (protocol_decoder.hpp, bumped by this function's own caller's caller -- see decode()'s TCP-
+// segment entry point, where every bare SYN is observed) has moved on since this TlsSessionState
+// was last touched. A mismatch means a brand-new TCP connection has positively been observed
+// reusing this exact 4-tuple since this state was last associated with one -- so every field is
+// reset back to default (ClientHello.random, derived keys, sequence numbers, epoch, handshake
+// buffers, gave_up -- the exact list the review's own F3 names) rather than silently reused by a
+// connection that has nothing to do with whichever one originally populated them. The reset
+// happens IN PLACE (plain assignment over the existing map entry, not erase-and-reinsert) so the
+// reference this function returns stays valid for the rest of its caller's own use of it, exactly
+// like every other `ctx.flow_state<T>()` call site in this codebase already assumes.
+//
+// Uses a second, distinct `protocol_id` ("tcp_conn_gen") for its own internal
+// TcpConnectionGenerationState lookup -- flow_state<T>()'s own map is keyed by (protocol_id,
+// session_key), and TlsSessionState's own established protocol_id for this session_key is "" (see
+// every TlsSessionState call site below); reusing the SAME protocol_id for a different T at the
+// same session_key would hand a later flow_state<TlsSessionState>() call back a
+// TcpConnectionGenerationState wearing a TlsSessionState-shaped hat, exactly the unchecked
+// static_cast<T&> mismatch ProtocolResultTypeMismatch exists to catch elsewhere in this codebase
+// (but flow_state<T>() itself has no such runtime check at all) -- so this must never collide.
+TlsSessionState& tls_session_state_for(DecodeContext& ctx) {
+    DecodeContext gen_ctx;
+    gen_ctx.session_key = ctx.session_key;
+    gen_ctx.flow_states = ctx.flow_states;
+    gen_ctx.protocol_id = "tcp_conn_gen";
+    uint32_t current_generation = gen_ctx.flow_state<TcpConnectionGenerationState>().generation;
+
+    TlsSessionState& state = ctx.flow_state<TlsSessionState>();
+    if (state.connection_generation != current_generation) {
+        state = TlsSessionState{};
+        state.connection_generation = current_generation;
+    }
+    return state;
+}
+
 // Attempts TLS decryption for one TLS-wrapped protocol's reassembled TCP payload (MQTTS/8883,
 // FOXS/4911, WinRM-over-HTTPS/5986 -- see tls_decrypt.hpp's own file header comment for the full
 // design, and ROADMAP item 150, docs/DEVELOPMENT.md). Shared by all three real-decode call sites
@@ -178,7 +215,7 @@ std::optional<std::vector<uint8_t>> try_tls_wrapped_decode(ByteSpan tcp_payload,
     }
     if (!key_log || !key_log->active()) return std::nullopt;
 
-    TlsSessionState& state = ctx.flow_state<TlsSessionState>();
+    TlsSessionState& state = tls_session_state_for(ctx);
     auto plaintext = tls_try_decrypt(tcp_payload, from_client, state, *key_log, out.notes);
     if (plaintext) return plaintext;
 
@@ -3195,6 +3232,27 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
         out.src_port = tcp.src_port;
         out.dst_port = tcp.dst_port;
         out.tcp_flags = format_tcp_flags(tcp.flags);
+        // ROADMAP item 157 (docs/DEVELOPMENT.md), docs/reviews/2026-10-chatgpt-security-review-
+        // patch315.md finding F3: a positively observed bare SYN (SYN set, ACK clear -- reusing
+        // attack_detect.cpp's own already-established "is_syn_only" definition for consistency,
+        // since a SYN-ACK also sets the SYN bit) marks a conceptually NEW TCP connection attempt
+        // on this 4-tuple. Bump this 4-tuple's own TcpConnectionGenerationState counter
+        // (protocol_decoder.hpp) now, unconditionally and regardless of which (if any) protocol
+        // this packet turns out to be, so any later per-4-tuple state (today: just
+        // TlsSessionState -- see decoder.cpp's own tls_session_state_for(), further down) can tell
+        // a brand-new connection sharing this 4-tuple apart from this same connection's own
+        // continued traffic the next time it's consulted, rather than silently inheriting it.
+        // Deliberately placed here, immediately once tcp.flags/out.src_ip/out.dst_ip are all known
+        // and before any protocol-specific dispatch -- see TcpConnectionGenerationState's own
+        // comment for why this is routed through the same bounded registry_flow_state_ mechanism
+        // every other cross-packet state in this codebase already uses.
+        if ((tcp.flags & TCP_FLAG_SYN) && !(tcp.flags & TCP_FLAG_ACK)) {
+            DecodeContext gen_ctx;
+            gen_ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
+            gen_ctx.flow_states = &registry_flow_state_;
+            gen_ctx.protocol_id = "tcp_conn_gen";
+            ++gen_ctx.flow_state<TcpConnectionGenerationState>().generation;
+        }
         // ROADMAP item 108 (follow-stream) -- see DecodeOptions::capture_transport_payload's own
         // comment for why this is opt-in. Deliberately BEFORE the empty-payload early return
         // directly below, same reasoning as the attack-detection block right after it: tcp_seq is
@@ -3353,7 +3411,7 @@ DecodedPacket Decoder::decode_ip_payload(DecodedPacket out, uint8_t protocol, By
                     tls_ctx.session_key = tcp_session_key(out.src_ip, tcp.src_port, out.dst_ip, tcp.dst_port);
                     tls_ctx.flow_states = &registry_flow_state_;
                     bool from_client = tcp.dst_port == tls_port;
-                    tls_try_decrypt(tcp.payload, from_client, tls_ctx.flow_state<TlsSessionState>(),
+                    tls_try_decrypt(tcp.payload, from_client, tls_session_state_for(tls_ctx),
                                      *options_.tls_key_log, out.notes);
                 };
 

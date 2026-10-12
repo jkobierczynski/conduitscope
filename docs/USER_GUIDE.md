@@ -359,6 +359,16 @@ exactly as opaque as it always was. See docs/PROTOCOL_COVERAGE.md's MQTT,
 Fox, and WinRM sections, and `include/conduitscope/tls_decrypt.hpp`'s own
 file header, for the full design and scope.
 
+A TCP 4-tuple reused by a brand-new, unrelated connection later in the same
+capture (busy clients, ephemeral-port reuse over a long-running capture) is
+handled correctly: the moment a new SYN is positively observed on that same
+4-tuple, this tool discards any TLS state a prior connection on it left
+behind and decrypts the new connection's own session from its own, genuinely
+fresh ClientHello -- it is never silently decoded using a previous, unrelated
+connection's stale keys/sequence numbers/epoch (ROADMAP item 157,
+docs/DEVELOPMENT.md; docs/reviews/2026-10-chatgpt-security-review-patch315.md
+finding F3).
+
 ### Display filters (`-Y`)
 
 `-Y/--display-filter` filters `decode`'s output by the VALUE of already-decoded

@@ -20625,6 +20625,150 @@ it done as its own patch.
     OpenSSL availability, including this config -- unaffected by this fix). Delivered as a zip of
     touched/new files via `SendUserFile`, per this project's own no-git-commit convention.
 
+157. **`TlsSessionState` is keyed only by the TCP 4-tuple, with no connection-generation/epoch
+    component (docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F3, Low/Medium
+    severity, analytical correctness).** Jurgen asked for findings F2-F4 from the same patch315
+    review (F2 is item 156 above) as separate patches. The review's own words: `TlsSessionState`
+    (item 150, `tls_decrypt.hpp`) is session-keyed (`FlowStateKeying::Session`) purely on the TCP
+    4-tuple (src ip:port <-> dst ip:port) -- there is no TCP connection generation or epoch folded
+    into that key at all. So a TCP connection A on 4-tuple `10.0.0.10:50000 <-> 10.0.0.20:8883`
+    that closes, followed by a brand-new, unrelated connection B reusing that exact same 4-tuple
+    later in the same capture (the review's own example: "long-running captures with busy clients
+    and ephemeral-port reuse"), would silently inherit connection A's own already-stale
+    `TlsSessionState` -- `ClientHello.random`/`ServerHello.random`, negotiated cipher, derived
+    keys, sequence numbers, TLS epoch, handshake buffers, and `gave_up` all carried over from a
+    connection that has nothing to do with B. The review's own assessed impact: "mostly false
+    negatives / lost decryption rather than false positives" (connection B's own new ClientHello
+    arriving on top of connection A's already-`keys_derived`/`handshake_resolved` state means "the
+    new session isn't cleanly recognized," not that it gets decrypted as if it were connection A).
+    The review's own recommendation, quoted directly: "Instead, eventually introduce a TCP
+    connection generation or reset state when a new SYN/connection establishment is positively
+    observed" -- explicitly lower-urgency ("I would not interrupt the current security-hardening
+    work for it"), but Jurgen asked for it directly this round.
+
+    **The fix.** A new, generic, protocol-agnostic `TcpConnectionGenerationState`
+    (`include/conduitscope/protocol_decoder.hpp`) -- a session-keyed (same 4-tuple keying
+    `TlsSessionState` itself already uses) counter of how many times a bare SYN (SYN set, ACK
+    clear -- reusing `attack_detect.cpp`'s own already-established `is_syn_only` definition for
+    consistency, since a SYN-ACK also sets the SYN bit) has been positively observed on that exact
+    4-tuple within this capture. `decoder.cpp`'s own TCP-segment entry point (immediately after
+    `TcpSegment tcp = parse_tcp(payload)`, before any protocol-specific dispatch) bumps this
+    counter unconditionally, for every TCP packet, regardless of which protocol (if any) it turns
+    out to be -- the generic half of the fix, with no TLS-specific knowledge at all. A new
+    `TlsSessionState::connection_generation` field (`tls_decrypt.hpp`, default 0) records which
+    generation this session's own state was last associated with on this 4-tuple. A new
+    `decoder.cpp` helper, `tls_session_state_for(DecodeContext&)`, replaces every one of the four
+    call sites that used to call `ctx.flow_state<TlsSessionState>()` directly (the three real
+    MQTTS/FOXS/WinRM-over-HTTPS decode sites inside the shared `try_tls_wrapped_decode()`, plus the
+    separate `capture_tls_client_hello` side-effect-only ClientHello capture) -- it looks up the
+    4-tuple's current generation, and the moment that disagrees with the TlsSessionState's own
+    stored `connection_generation`, resets every field back to default IN PLACE (plain assignment
+    over the existing map entry, not erase-and-reinsert, so the reference every caller already
+    holds stays valid) before handing back the (now either freshly reset, or unchanged) state.
+    `TcpConnectionGenerationState` is looked up under its own distinct `protocol_id`
+    ("tcp_conn_gen"), never sharing `TlsSessionState`'s own established `protocol_id` ("", left
+    unset at every one of its four call sites) for the same session_key -- `flow_state<T>()` has
+    no runtime type check at all (unlike the separate, already-existing `ProtocolResultTypeMismatch`
+    machinery), so two different `DecoderFlowState` subclasses sharing one map bucket for the same
+    key would be silent undefined behavior the next time either was read back.
+
+    Routed through the SAME bounded `registry_flow_state_` mechanism (and its own existing
+    `max_flow_state_entries` ceiling, patch160/patch282 findings) every other cross-packet state in
+    this codebase already uses, deliberately, rather than a brand-new unbounded
+    `std::unordered_map` that would reopen exactly the unbounded-growth concern that ceiling exists
+    to close -- a capture with a very large number of distinct TCP flows, each contributing one
+    `TcpConnectionGenerationState` entry alongside whatever other per-flow state it already has,
+    is bounded the same way every other such map already is, with no separate CLI flag needed.
+
+    A capture that starts mid-connection (this 4-tuple's own true first SYN was never captured)
+    never trips a spurious reset: `TcpConnectionGenerationState::generation` and
+    `TlsSessionState::connection_generation` both default to 0, so a 4-tuple whose SYN is never
+    observed at all stays at generation 0 on both sides, matching exactly as it did before this
+    fix. None of this codebase's existing TLS-decrypt CTest fixtures (item 150's own
+    `tests/sample_tls_*.pcap(ng)` set, and item 153's own key-log-limit fixtures) contain a captured
+    TCP handshake at all -- every one of their own TLS records rides a single, already-"established"
+    synthetic TCP session with no SYN packet anywhere in the file -- which is exactly why all of
+    them kept passing unchanged throughout this fix's own development with zero edits needed:
+    generation never bumps for any of them, so their behavior is provably byte-for-byte unchanged.
+
+    **New tests.** 2 new CTest entries, built against a new, dedicated fixture,
+    `tests/sample_tls_4tuple_reuse.pcap` (+ `tests/sample_tls_4tuple_reuse_keylog.txt`), generated
+    by a new `build_4tuple_reuse_fixture()` function added to `tools/gen_tls_decrypt_fixtures.py`
+    (item 150's own dedicated, `cryptography`-package-based TLS fixture generator, not
+    `make_sample_pcap.py`): TWO independent, genuinely fresh TLS 1.3 `TLS_AES_128_GCM_SHA256` MQTTS
+    sessions (each its own `client_random`/`server_random`/derived keys, each its own real MQTT
+    v3.1.1 CONNECT naming a distinct client id, `"plc1-hmi-tls-reused-a"` and
+    `"plc1-hmi-tls-reused-b"`) on the EXACT SAME `(src ip, src port, dst ip, dst port)` 4-tuple,
+    with a bare SYN (packet #7) positively marking the handoff between them.
+    `tls_decrypt_4tuple_reuse_both_sessions_decrypted_distinctly` confirms both sessions' own
+    distinct `ClientId` values appear in `decode --details` output (proving session B's own real
+    handshake was recognized and decrypted on its own terms) and that neither
+    `"decryption unavailable for this session"` nor `"AEAD authentication"` (the two symptoms a
+    stale-state collision actually produces, see below) appear anywhere in the output.
+    `tls_decrypt_4tuple_reuse_syn_packet_is_bare_syn` is a sanity check on the fixture's own
+    mechanism (not the fix itself): confirms packet #7 is genuinely a bare SYN (`tcp_flags` exactly
+    `"SYN"`, no `ACK`).
+
+    Both tests were deliberately proven to actually exercise the bug, not just pass trivially:
+    before finalizing either test's regex, `tls_session_state_for()`'s own two call-site edits were
+    temporarily reverted back to plain `ctx.flow_state<TlsSessionState>()|tls_ctx.flow_state<
+    TlsSessionState>()` calls and the binary rebuilt -- confirming that, pre-fix, session B's own
+    ClientHello is swallowed into session A's already-`handshake_resolved` `TlsSessionState`, its
+    first application-data record fails AEAD authentication (TlsSessionState's own stale TLS 1.3
+    application keys/sequence-number-0 can never be valid for session B's genuinely different
+    ciphertext), and the rest of session B's own traffic permanently gives up with "decryption
+    unavailable for this session" -- `"plc1-hmi-tls-reused-b"` never appears at all pre-fix, exactly
+    the failure `tls_decrypt_4tuple_reuse_both_sessions_decrypted_distinctly`'s own
+    `FAIL_REGULAR_EXPRESSION` now catches -- before being reverted back to the real fix.
+
+    A real, if minor, mistake caught and corrected during this same fixture work, worth recording
+    honestly: an early draft ran `tools/gen_tls_decrypt_fixtures.py`'s own `__main__` wholesale to
+    regenerate the new fixture, not realizing every one of its builder functions uses
+    `secrets.token_bytes()` with no fixed seed -- silently regenerating ALL FIVE of item 150's own
+    pre-existing fixtures' random secret material in the same run, which in turn desynchronized
+    `tests/sample_tls_keylog_many_entries_then_mqtts.txt` (a hand-built fixture from item 153 that
+    hand-embeds `sample_tls_mqtts.pcap`'s own exact `client_random`/secrets as its own last 4 lines)
+    from the freshly-regenerated `sample_tls_mqtts.pcap`/`sample_tls_mqtts_keylog.txt`. Caught
+    before this round's own tests were ever run, by diffing against the untouched copies already
+    sitting in this project's own previously-delivered `conduitscope-item150-tls-decrypt.zip` (which
+    this round still had on hand) -- all 9 of item 150's own original files were restored from that
+    zip byte-for-byte (confirmed via `md5sum`) before any new work continued, and a new CAUTION
+    paragraph was added to `gen_tls_decrypt_fixtures.py`'s own module docstring so a future session
+    doesn't repeat it.
+
+    **Left open.** F4 (the TLS DSB ingestion copy chain's own "second sensitive-data lifetime") is
+    its own separate patch, per Jurgen's "split them over separate patches" instruction -- not
+    addressed here. OPC UA's own Sign/Encrypt security mode remains entirely outside this fix's
+    scope (unaffected -- it was never TLS in the first place, see item 150's own Left Open). This
+    fix does not and cannot help a capture that starts mid-connection decrypt that connection (no
+    `ClientHello.random` was ever captured to match against) -- a structural limitation of the
+    key-log/DSB mechanism itself, unrelated to connection generations, already documented by item
+    150. `TcpConnectionGenerationState` is deliberately NOT reused by any other existing per-4-tuple
+    state in this codebase (Modbus/TwinCAT/MQTT's own `FlowStateKeying::Session` state) -- every one
+    of those already keys on a request/response transaction or protocol-learned identity that
+    self-corrects on a genuinely new connection's first real exchange, a property `TlsSessionState`
+    itself lacked (see `TcpConnectionGenerationState`'s own comment, `protocol_decoder.hpp`, for the
+    full reasoning); if a future protocol's own per-4-tuple state turns out to have the same gap,
+    this same generic counter is already there to reuse.
+
+    **Docs.** `docs/USER_GUIDE.md`'s "TLS decryption" subsection gained a new paragraph describing
+    the fix (right after the existing "Scope" paragraph), naming this ROADMAP item and finding F3.
+    `docs/PROTOCOL_COVERAGE.md` deliberately NOT touched -- same reasoning as items 153/156: a
+    correctness/resource-state fix, not a protocol-decode-coverage change. `docs/MANUAL.md` was NOT
+    touched, per Jurgen's standing instruction.
+
+    **Verification.** Both new CTest entries confirmed individually passing against the real built
+    binary, AND confirmed individually FAILING against a deliberately-reverted build (see "New
+    tests" above) before being finalized. Full default-build CTest suite: 2592/2592 passing (2590 +
+    2 new), zero regressions. Clang ASan/UBSan `build-fuzz`: 2670/2670 passing, including all 78
+    `*_corpus_regression` tests, zero regressions. `-DCONDUITSCOPE_ENABLE_LIVE_CAPTURE=OFF`
+    `build_nolive`: 2574/2574 passing, zero regressions. MinGW cross-compile `build-mingw`: rebuilt
+    clean, build-only as usual (this fix's own code -- `TcpConnectionGenerationState`,
+    `tls_session_state_for()` -- compiles and is exercised regardless of
+    `CONDUITSCOPE_ENABLE_TLS_DECRYPT`/OpenSSL availability, the same posture item 150's own
+    `TlsSessionState` already has). Delivered as a zip of touched/new files via `SendUserFile`, per
+    this project's own no-git-commit convention.
+
 ### Protocols not covered at all
 
 An honest orientation for "does it do X" -- well-known OT/ICS protocols

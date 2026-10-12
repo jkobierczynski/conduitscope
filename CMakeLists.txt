@@ -13497,6 +13497,32 @@ set_tests_properties(tls_keylog_file_bytes_limit_unset_no_rejection PROPERTIES
   FAIL_REGULAR_EXPRESSION "exceeds the")
 
 # ============================================================================================
+# TCP 4-tuple reuse must not inherit a prior connection's stale TlsSessionState (ROADMAP item 157,
+# docs/DEVELOPMENT.md; docs/reviews/2026-10-chatgpt-security-review-patch315.md finding F3).
+# tests/sample_tls_4tuple_reuse.pcap (tools/gen_tls_decrypt_fixtures.py's own
+# build_4tuple_reuse_fixture()): two independent, genuinely fresh TLS 1.3 MQTTS sessions on the
+# EXACT SAME (src ip, src port, dst ip, dst port) 4-tuple, with a bare SYN (no ACK, packet #7)
+# positively marking the handoff between them. Confirmed by temporarily reverting
+# tls_session_state_for()'s own generation check before writing these assertions: without the fix,
+# session B's ClientHello is swallowed into session A's already-`handshake_resolved`/
+# `keys_derived` TlsSessionState, its first application-data record fails AEAD authentication
+# ("stale/incorrect keys, an epoch mismatch, or an unsupported record shape"), and the rest of
+# session B's own traffic permanently gives up -- "plc1-hmi-tls-reused-b" never decrypts at all.
+add_test(NAME tls_decrypt_4tuple_reuse_both_sessions_decrypted_distinctly
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_4tuple_reuse.pcap" --tls-keylog "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_4tuple_reuse_keylog.txt" --format text --details)
+set_tests_properties(tls_decrypt_4tuple_reuse_both_sessions_decrypted_distinctly PROPERTIES
+  PASS_REGULAR_EXPRESSION "ClientId=\"plc1-hmi-tls-reused-a\".*ClientId=\"plc1-hmi-tls-reused-b\""
+  FAIL_REGULAR_EXPRESSION "decryption unavailable for this session|AEAD authentication")
+
+# Sanity check on the fixture's own handoff mechanism, not the TlsSessionState fix itself: packet
+# #7 is a bare SYN (SYN set, ACK clear) on this same 4-tuple -- the exact signal decoder.cpp's own
+# TCP-segment entry point reads as "a brand-new TCP connection has positively been observed here".
+add_test(NAME tls_decrypt_4tuple_reuse_syn_packet_is_bare_syn
+  COMMAND conduitscope decode --read "${CMAKE_CURRENT_SOURCE_DIR}/tests/sample_tls_4tuple_reuse.pcap" --format json)
+set_tests_properties(tls_decrypt_4tuple_reuse_syn_packet_is_bare_syn PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"index\": 7,[^}]*\"tcp_flags\": \"SYN\"")
+
+# ============================================================================================
 # IPv4/IPv6 fragment reassembly (Decoder::reassemble_ip_fragment, decoder.cpp; ROADMAP item 102).
 # tests/sample_ip_fragment_reassembly.pcap (tools/make_sample_pcap.py's own
 # build_ip_fragment_reassembly_sample) covers in-order/out-of-order/overlapping IPv4 fragments,

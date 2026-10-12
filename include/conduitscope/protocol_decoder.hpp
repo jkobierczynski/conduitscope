@@ -161,6 +161,40 @@ inline std::string redact_secret_occurrences(std::string text, const std::string
 // client->server and server->client fragments in flight simultaneously).
 enum class FlowStateKeying { Session, DirectionalFlow };
 
+// ROADMAP item 157 (docs/DEVELOPMENT.md), docs/reviews/2026-10-chatgpt-security-review-patch315.md
+// finding F3: a session-keyed (FlowStateKeying::Session -- a TCP 4-tuple, direction-independent,
+// the same keying TlsSessionState itself uses) counter of how many times decoder.cpp has
+// positively observed a brand-new TCP connection attempt (a bare SYN: SYN set, ACK clear --
+// attack_detect.cpp's own already-established "is_syn_only" definition, reused here for
+// consistency, since a SYN-ACK also sets the SYN bit) on this exact 4-tuple within this capture.
+// Bumped unconditionally by decoder.cpp's own TCP-segment entry point, for EVERY TCP packet in the
+// capture, regardless of protocol -- a TCP 4-tuple is only ever 16 bits + 16 bits + 2 IP addresses
+// wide, so across a long-lived capture (or an attacker's own deliberate port-reuse) the exact same
+// 4-tuple can legitimately belong to a brand-new, unrelated connection later in the same capture.
+// Before this item, TlsSessionState (tls_decrypt.hpp) was the one piece of state in this codebase
+// keyed ONLY by this 4-tuple with no notion of connection identity at all -- a second connection
+// reusing the same 4-tuple would silently inherit the first connection's own already-stale
+// ClientHello.random/derived keys/sequence numbers/epoch, mostly producing false negatives (lost
+// decryption) rather than decrypting the wrong bytes, but still a real correctness bug the review
+// asked to be fixed "eventually" (lower urgency than this round's other findings, but Jurgen asked
+// for it directly this round). This counter is the generic, protocol-agnostic half of that fix;
+// see TlsSessionState::connection_generation (tls_decrypt.hpp) and decoder.cpp's own
+// tls_session_state_for() for the half that actually acts on a mismatch. Deliberately NOT reused
+// by any OTHER existing per-4-tuple state in this codebase (Modbus/TwinCAT/MQTT's own
+// FlowStateKeying::Session state, say) -- every one of those already keys on a request/response
+// transaction or protocol-learned identity that would simply fail to match (and self-correct) on
+// a genuinely new connection's first real exchange, the same property TlsSessionState itself
+// lacked (its own "identity" -- client_random/server_random -- isn't learned until well after this
+// 4-tuple's new connection has already begun being used, unlike a Modbus transaction ID). Routed
+// through the same bounded registry_flow_state_ mechanism (and its own max_flow_state_entries
+// ceiling) every other cross-packet state in this codebase already uses, deliberately, rather than
+// a brand new unbounded map that would reopen exactly the unbounded-growth concern
+// max_flow_state_entries was added to close.
+class TcpConnectionGenerationState : public DecoderFlowState {
+public:
+    uint32_t generation = 0;
+};
+
 // Owned by Decoder (see decoder.hpp's Decoder::registry_flow_state_); one generic map replacing
 // what used to require a bespoke `unordered_map<...> x_pending_` member on Decoder for every
 // stateful protocol (Decoder::modbus_pending_ is the pre-existing example this generalizes).

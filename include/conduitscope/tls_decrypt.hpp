@@ -121,6 +121,21 @@ enum class TlsEpoch { Handshake, Application };
 // processing and just reads/writes that direction's own fields).
 class TlsSessionState : public DecoderFlowState {
 public:
+    // ROADMAP item 157 (docs/DEVELOPMENT.md), docs/reviews/2026-10-chatgpt-security-review-
+    // patch315.md finding F3: which TCP-connection "generation" (TcpConnectionGenerationState,
+    // protocol_decoder.hpp) this session's own state was last associated with, on this same TCP
+    // 4-tuple. decoder.cpp's tls_session_state_for() compares this against the 4-tuple's CURRENT
+    // generation every time this state is about to be used, and resets every field below back to
+    // its default the moment they disagree -- the signal that a brand-new TCP connection (a
+    // positively observed bare SYN) has reused this 4-tuple since this TlsSessionState was last
+    // touched, so every field below (ClientHello.random, derived keys, sequence numbers, epoch,
+    // handshake buffers, gave_up) would otherwise be silently and incorrectly inherited from a
+    // prior, already-closed connection. Defaults to 0, matching TcpConnectionGenerationState's own
+    // default -- a capture that starts mid-connection (missing this 4-tuple's own first SYN) never
+    // sees its generation counter bump at all, so this default deliberately never triggers a
+    // spurious reset on its own.
+    uint32_t connection_generation = 0;
+
     // ----- Handshake identity, filled in as ClientHello/ServerHello are observed -----
     bool have_client_random = false;
     std::array<uint8_t, 32> client_random{};
